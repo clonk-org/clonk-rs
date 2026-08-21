@@ -695,6 +695,39 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/find_mat_slide.inc"
 
+# 3q3d. Lift C4Landscape::InsertMaterial and the two path helpers it walks.
+#       This is the landscape-mutation half of a material reaction: where the
+#       inserted pixel actually comes to rest, and whether it lands as a
+#       landscape pixel or as a PXS.
+#
+#       Its decisions are all order-sensitive and several read as typos until
+#       you check them against the source. A density-0 material returns **true**
+#       having done nothing. The bounds test accepts `ty == Height` but stops
+#       `tx` at `Width - 1`. And the non-push-pull climb applies its primitive
+#       slide as two INDEPENDENT `if`s, so a pixel with both neighbours free
+#       steps left and then right and ends where it started -- a port that wrote
+#       `else if` would drift one pixel per iteration.
+awk '
+  /^bool C4Landscape::InsertMaterial\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/insert_material.inc"
+
+awk '
+  /^bool C4Landscape::FindMatPath\(int32_t &fx, int32_t &fy, int32_t ydir, int32_t mdens, int32_t mslide\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/find_mat_path.inc"
+
+awk '
+  /^bool C4Landscape::FindMatPathPush\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/find_mat_path_push.inc"
+
 # 3q3b. Lift mrfIncinerate. It is the one reaction whose arms are asymmetric in
 #       a way a port is likely to flatten: `meeMassMove` and `meePXSPos` try to
 #       incinerate and report **unhandled** when they cannot, while `meePXSMove`
