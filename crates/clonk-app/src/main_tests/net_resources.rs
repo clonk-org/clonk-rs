@@ -2325,6 +2325,38 @@ fn client_retains_exact_join_data_until_resource_bootstrap_can_apply_it() {
 }
 
 #[test]
+fn runtime_join_data_arms_the_client_start_barrier_without_a_status_request() {
+    // A client joining an already-running game never receives an ordinary
+    // PID_Status: the host broadcasts one only from ChangeGameStatus, which a
+    // running host has no reason to call. HandleJoinData hands the JoinData
+    // status to HandleStatus itself, so the joiner owes an acknowledgement
+    // from that packet alone, and FinalInit's CheckStatusReached(true) reaches
+    // that barrier while Game.IsRunning is still false
+    // (7d43b47b src/C4Network2.cpp:558-561,1574-1592,2017-2057).
+    let mut app = new_state_only_menu_app(320, 200);
+    let (manager, event_tx) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    let host_config = clonk_network::HostConfig::default();
+    let snapshot = host_config.initial_join_snapshot.test_value();
+    // The reference form omits TargetTick, so a running host's JoinData status
+    // arrives with the -1 default rather than a usable control target.
+    let running = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, -1);
+    event_tx
+        .send(NetworkEvent::JoinData(netresources_fixture!(join_envelope: 3, running, snapshot.dynamic, snapshot.parameters)))
+        .test_value();
+
+    app.test_network_events();
+
+    // CheckStatusReached retargets to the tick the client actually reached
+    // before sending PID_StatusAck (src/C4Network2.cpp:2050-2052).
+    main_assert_eq!(
+        app.client_start_barrier.local_initialized_at(23) =>
+            Some(clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 23)),
+        "the JoinData status is the only barrier a runtime joiner ever gets"
+    );
+}
+
+#[test]
 fn catalog_host_selection_change_discards_and_rearms_preload_state() {
     let mut app = new_state_only_menu_app(320, 200);
     app.network_mode = Some(NetworkMode::Host(HostSettings {

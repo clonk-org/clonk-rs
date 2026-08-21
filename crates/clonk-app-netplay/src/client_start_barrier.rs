@@ -17,10 +17,28 @@ fn same_barrier(left: NetworkStatus, right: NetworkStatus) -> bool {
 }
 
 impl ClientStartBarrier {
-    /// Starts empty because JoinData carries only the reference-form status:
-    /// its target tick is deliberately absent and cannot identify a barrier.
-    pub fn from_join_data_status(_status: NetworkStatus) -> Self {
-        Self::default()
+    /// Installs the JoinData status exactly as `HandleJoinData` does: it hands
+    /// the status to `HandleStatus`, which clears both flags and leaves the
+    /// client owing an acknowledgement. A client joining a running or paused
+    /// game receives no later ordinary `PID_Status` — the host only broadcasts
+    /// one from `ChangeGameStatus` — so this is the only barrier it ever gets.
+    /// The reference form omits TargetTick, leaving the -1 default that makes
+    /// `CtrlTickReached` trivially true, which is precisely what lets
+    /// `FinalInit`'s `CheckStatusReached(true)` reach the barrier while
+    /// `Game.IsRunning` is still false (src/C4Network2.cpp:558-561,
+    /// 1501-1510, 1574-1592, 2017-2057).
+    ///
+    /// A lobby status opens nothing: `CheckStatusReached` gates GS_Lobby on
+    /// `fLobbyRunning`, and the host's later Go request is the real barrier.
+    pub fn from_join_data_status(status: NetworkStatus) -> Self {
+        Self {
+            pending: matches!(status.state, NETWORK_STATE_GO | NETWORK_STATE_PAUSE).then(|| {
+                PendingClientStart {
+                    status,
+                    local_initialized: false,
+                }
+            }),
+        }
     }
 
     /// Opens preparation for a complete ordinary status request once.
@@ -86,26 +104,54 @@ mod tests {
     }
 
     #[test]
-    fn join_data_reference_status_does_not_open_a_start_barrier() {
-        // JoinData compiles C4Network2Status as a reference, omitting
-        // TargetTick so it remains the constructor default -1. HandleJoinData
-        // installs that status, but a later ordinary PID_Status packet supplies
-        // the actual target (pristine 9ffa0a5d src/C4Network2.cpp:54-55,
-        // 108-123,1501-1510,1574-1592).
-        let mut barrier = super::ClientStartBarrier::from_join_data_status(NetworkStatus::new(
-            NETWORK_STATE_GO,
-            2,
-            -1,
-        ));
+    fn lobby_join_data_status_opens_no_start_barrier() {
+        // HandleJoinData installs a lobby status too, but CheckStatusReached
+        // gates GS_Lobby on fLobbyRunning rather than on a control target, so
+        // a client joining into the lobby owes no acknowledgement until the
+        // host's ChangeGameStatus requests Go (pristine 9ffa0a5d
+        // src/C4Network2.cpp:1574-1592,2017-2040).
+        let mut barrier =
+            super::ClientStartBarrier::from_join_data_status(status(NETWORK_STATE_LOBBY, 2, -1));
 
         assert_eq!(barrier.local_initialized_at(0), None);
         assert_eq!(
-            barrier.status_committed(NetworkStatus {
-                state: NETWORK_STATE_GO,
-                control_mode: 2,
-                target_tick: -1,
-            }),
+            barrier.status_committed(status(NETWORK_STATE_LOBBY, 2, -1)),
             None
+        );
+    }
+
+    #[test]
+    fn runtime_join_go_status_opens_a_start_barrier() {
+        // A client joining an already-running game never receives an ordinary
+        // PID_Status: the host only broadcasts one from ChangeGameStatus, which
+        // a running host has no reason to call. HandleJoinData therefore
+        // installs the JoinData status itself and clears both flags, and
+        // FinalInit's CheckStatusReached(true) reaches it even though
+        // Game.IsRunning is still false. The reference form's absent TargetTick
+        // decompiles to -1, which is exactly what makes CtrlTickReached(-1)
+        // trivially true there, so the joiner acks off this status alone
+        // (7d43b47b src/C4Network2.cpp:558-561,1501-1510,1574-1592,2017-2057).
+        let mut barrier =
+            super::ClientStartBarrier::from_join_data_status(status(NETWORK_STATE_GO, 2, -1));
+
+        // CheckStatusReached retargets to the tick the client actually reached
+        // before sending PID_StatusAck (src/C4Network2.cpp:2050-2052).
+        assert_eq!(
+            barrier.local_initialized_at(41),
+            Some(status(NETWORK_STATE_GO, 2, 41)),
+            "final init must reach the barrier the JoinData status opened"
+        );
+        assert_eq!(
+            barrier.local_initialized_at(41),
+            None,
+            "and fStatusReached suppresses a repeat acknowledgement"
+        );
+
+        // The host echoes the client's own retargeted status back as the ack.
+        assert_eq!(
+            barrier.status_committed(status(NETWORK_STATE_GO, 2, 41)),
+            Some(status(NETWORK_STATE_GO, 2, 41)),
+            "the host ack for that retargeted status starts the joined client"
         );
     }
 
