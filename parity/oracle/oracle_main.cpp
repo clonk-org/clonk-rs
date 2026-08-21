@@ -5542,6 +5542,24 @@ struct MaterialCore
     int32_t SplashRate;
     int32_t Incindiary;
     int32_t MaxSlide;
+    int32_t InMatConvertDepth;
+    int32_t InMatConvertTo;
+};
+
+enum MaterialInteractionEvent
+{
+    meePXSPos = 0,
+    meePXSMove = 1,
+    meeMassMove = 2,
+};
+
+struct C4MaterialReaction
+{
+    bool fUserDefined;
+    bool fInsertionCheck;
+    int32_t iExecMask;
+    int32_t iDepth;
+    int32_t iConvertMat;
 };
 
 static int32_t g_grid[GridHgt][GridWdt];
@@ -5551,11 +5569,32 @@ struct C4MaterialMap
 {
     // 0 vacuum, 1 water (splashes), 2 lava (incendiary), 3 granite (the floor).
     MaterialCore Map[4] = {
-        {0, 0, 0, 0},
-        {25, 1, 0, 4},   // Water: SplashRate 1 makes `!Random(1)` certain
-        {25, 0, 1, 4},   // Lava: incendiary, no splash
-        {50, 0, 0, 0},   // Granite floor
+        {0, 0, 0, 0, 0, -1},
+        {25, 1, 0, 4, 0, -1},  // Water: SplashRate 1 makes `!Random(1)` certain
+        {25, 0, 1, 4, 2, 3},   // Lava: incendiary; converts to Granite at depth 2
+        {50, 0, 0, 0, 0, -1},  // Granite floor
     };
+
+    bool mrfConvert(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
+                    int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
+                    int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
+                    bool *pfPosChanged);
+};
+
+// PXS creation is only reached by the MassMove arm; record it rather than
+// simulating a PXS system.
+static int32_t g_pxs_created = 0;
+static int32_t g_pxs_created_mat = -1;
+struct PxsStub
+{
+    // Record the material the mass-move arm hands to the PXS system: it is
+    // the mover's ORIGINAL material, never the convert target, because the
+    // meeMassMove case never reaches the reassignment above it.
+    void Create(int32_t mat, C4Fixed, C4Fixed)
+    {
+        g_pxs_created++;
+        g_pxs_created_mat = mat;
+    }
 };
 
 struct C4Landscape
@@ -5569,6 +5608,7 @@ struct GameStub
 {
     C4MaterialMap Material;
     C4Landscape Landscape;
+    PxsStub PXS;
 };
 
 static GameStub Game;
@@ -5594,13 +5634,99 @@ static void Smoke(int32_t, int32_t, int32_t) { g_smoke++; }
 static int32_t Sign(int32_t x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
 template <class T> static T Abs(T v) { return v < 0 ? -v : v; }
 
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
+
 #include "mrf_insert_check.inc"
+#include "mrf_user_check.inc"
+#include "mrf_convert.inc"
 
 } // namespace insert_check
 
 // Runs one mrfInsertCheck and records the rewritten position/velocity, the
 // verdict, and the RNG ledger. The draw count is the point: it varies with the
 // material's SplashRate and Incindiary and with whether a slide was found.
+// mrfConvert's two easily-lost rules: C++'s `case meePXSMove:` falls THROUGH
+// into `meePXSPos` when the reaction is user-defined, and a *successful*
+// conversion returns false ("not handled") while a conversion to an unloaded or
+// sky target returns true and kills the pixel.
+static void printConvertCases()
+{
+    printf("\"convert_check\":[");
+    struct Case
+    {
+        const char *name;
+        bool user_defined;
+        int32_t depth;        // user-defined depth; hardcoded reads the material
+        int32_t convert_mat;  // user-defined target
+        int32_t event;
+        int32_t pxs_mat;
+        int32_t ls_mat;
+        bool matching_above;  // put ls_mat at (x, y - depth)
+    };
+    const Case cases[] = {
+        // Hardcoded conversion has no collision proc, so a move event breaks
+        // out before the depth check ever runs.
+        {"hardcoded_move_breaks", false, 0, 0, 1 /*meePXSMove*/, 2, 3, true},
+        // Same reaction at the position event converts: Lava -> Granite at
+        // depth 2, with the matching material above.
+        {"hardcoded_pos_converts", false, 0, 0, 0 /*meePXSPos*/, 2, 3, true},
+        // Depth unsatisfied: nothing above matches, so no conversion.
+        {"depth_unsatisfied", false, 0, 0, 0, 2, 3, false},
+        // A user-defined reaction DOES convert on a move event — the C++
+        // fallthrough.
+        {"user_move_falls_through", true, 0, 3, 1, 1, 3, true},
+        // Converting to an invalid target kills the pixel.
+        {"invalid_target_kills", true, 0, 99, 0, 1, 3, true},
+        // MassMove transfers the mover's own material to PXS and reports
+        // handled. Hardcoded, so the convert target is never consulted.
+        {"mass_move_creates_pxs", false, 0, 0, 2 /*meeMassMove*/, 2, 3, true},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        for (int32_t gy = 0; gy < insert_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+                insert_check::g_grid[gy][gx] = 0;
+        const int32_t px = 8, py = 6;
+        const int32_t depth = c.user_defined
+            ? c.depth
+            : insert_check::Game.Material.Map[c.pxs_mat].InMatConvertDepth;
+        if (c.matching_above && depth)
+            insert_check::g_grid[py - depth][px] = c.ls_mat;
+        insert_check::g_pxs_created = 0;
+        insert_check::g_pxs_created_mat = -1;
+
+        insert_check::C4MaterialReaction reaction{};
+        reaction.fUserDefined = c.user_defined;
+        reaction.fInsertionCheck = false;
+        reaction.iExecMask = ~0;
+        reaction.iDepth = c.depth;
+        reaction.iConvertMat = c.convert_mat;
+
+        int32_t iX = px, iY = py;
+        C4Fixed xdir = itofix(1, 2), ydir = itofix(1, 2);
+        int32_t pxs_mat = c.pxs_mat;
+        bool pos_changed = false;
+        const bool handled = insert_check::Game.Material.mrfConvert(
+            &reaction, iX, iY, iX, iY, xdir, ydir, pxs_mat, c.ls_mat,
+            static_cast<insert_check::MaterialInteractionEvent>(c.event), &pos_changed);
+
+        printf("{\"name\":\"%s\",\"user_defined\":%s,\"depth\":%d,\"convert_mat\":%d,"
+               "\"event\":%d,\"pxs_mat0\":%d,\"ls_mat\":%d,\"matching_above\":%s,"
+               "\"handled\":%s,\"pxs_mat\":%d,\"xdir\":%d,\"ydir\":%d,"
+               "\"pos_changed\":%s,\"pxs_created\":%d,\"pxs_created_mat\":%d}",
+               c.name, c.user_defined ? "true" : "false", c.depth, c.convert_mat,
+               c.event, c.pxs_mat, c.ls_mat, c.matching_above ? "true" : "false",
+               handled ? "true" : "false", pxs_mat, xdir.val, ydir.val,
+               pos_changed ? "true" : "false", insert_check::g_pxs_created,
+               insert_check::g_pxs_created_mat);
+    }
+    printf("]");
+}
+
 static void printInsertCheckCases()
 {
     printf("\"insert_check\":[");
@@ -8034,6 +8160,10 @@ int main()
     // 22c. insert_check: mrfInsertCheck, the landing arm pxs_execute
     //      deliberately excludes because it needs the reaction table.
     printInsertCheckCases();
+    printf(",\n");
+
+    // 22d. convert_check: mrfConvert's fallthrough and verdict rules.
+    printConvertCases();
     printf(",\n");
 
     // 23. DFA_FLOAT's raw C4Fixed bounds. C4DefCore's Physical member is
