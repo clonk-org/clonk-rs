@@ -6273,6 +6273,56 @@ fn collection_ocf_scalar_overrides_match_materialized_state() -> Result<(), Engi
     Ok(())
 }
 
+/// A `CollectionLimit` of zero means **unlimited**, not "collect nothing"
+/// (clonk-org/clonk-rs#518).
+///
+/// The native gate is `CollectionLimit && ObjectCount() >= CollectionLimit`,
+/// so the limit is only consulted when it is non-zero. Most shipped
+/// definitions never set one, which is exactly why inverting this reads as
+/// "collection is broken everywhere" rather than as an edge case — and why the
+/// at-limit case alone, which `collection_ocf_scalar_overrides_match_materialized_state`
+/// already covers, cannot catch it.
+#[cfg(test)]
+#[test]
+fn a_zero_collection_limit_is_unlimited() -> Result<(), EngineError> {
+    assert!(
+        !collection_limit_reached(0, 0),
+        "an empty unlimited container collects"
+    );
+    assert!(
+        !collection_limit_reached(0, 9_999),
+        "a full unlimited container still collects"
+    );
+    // The limit is a `>=` on the count, so reaching it stops collection while
+    // one below it does not.
+    assert!(collection_limit_reached(2, 2));
+    assert!(collection_limit_reached(2, 3));
+    assert!(!collection_limit_reached(2, 1));
+
+    // And the same through the OCF gate a real definition goes through.
+    let mut definition = Definition::from_script("COLU", "Unlimited collector", "")?;
+    definition.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+    let state = preview_spawn_state(
+        Vector2::ZERO,
+        OWNER_NONE,
+        OWNER_NONE,
+        DEFAULT_CATEGORY,
+        FULL_CON,
+        CONTACT_DENSITY_SOLID,
+        Vec::new(),
+    );
+    assert_eq!(
+        definition.collection_limit(),
+        0,
+        "the fixture sets no limit"
+    );
+    assert!(
+        definition.collection_ocf_enabled(&state, 9_999, 0),
+        "a definition with no CollectionLimit keeps collecting however full it is"
+    );
+    Ok(())
+}
+
 struct ScenarioScript {
     name: String,
     /// C++ callback convention: no synthetic state argument, no fixture
