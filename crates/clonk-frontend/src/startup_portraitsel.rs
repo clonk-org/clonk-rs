@@ -10,6 +10,7 @@ use crate::classic_gui::{
     draw_3d_frame, draw_engine_box, draw_facet_nearest, draw_facet_stretch, with_surface_clip,
     ClassicButtonState, ClassicGuiSkin, IntRect,
 };
+use crate::clonk_fonts::expand_hotkey_markup;
 use crate::startup_main_menu::StartupTooltip;
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
@@ -515,6 +516,47 @@ impl PortraitSelController {
 
     pub const fn set_picture(&self) -> bool {
         self.set_picture
+    }
+
+    /// The caption as it is drawn, with the access-key marker expanded.
+    ///
+    /// `C4GUI::CheckBox::SetCaption` stores the *expanded* caption and keeps the
+    /// marked letter beside it (`C4GuiCheckBox.cpp:145-149`), so the `&` never
+    /// reaches the font and the letter is whatever the active translation
+    /// marked.
+    pub fn checkbox_caption(&self, control: PortraitSelControl) -> String {
+        expand_hotkey_markup(self.checkbox_label(control)).0
+    }
+
+    fn checkbox_label(&self, control: PortraitSelControl) -> &str {
+        match control {
+            PortraitSelControl::SetBigIcon => self.labels.lobby_icon.as_str(),
+            _ => self.labels.player_image.as_str(),
+        }
+    }
+
+    /// Activate whichever control the active captions mark with this letter.
+    ///
+    /// `ExpandHotkeyMarkup` uppercases the letter it registers (`C4Gui.cpp:55`),
+    /// so the comparison is case-insensitive on the caller's character. A
+    /// caption that marks nothing registers nothing, which is what every
+    /// shipped translation of these two captions does today.
+    pub fn handle_hotkey(&mut self, character: char) -> Option<Vec<PortraitSelAction>> {
+        let wanted = character.to_ascii_uppercase();
+        for control in [
+            PortraitSelControl::SetPicture,
+            PortraitSelControl::SetBigIcon,
+        ] {
+            if expand_hotkey_markup(self.checkbox_label(control)).1 != Some(wanted) {
+                continue;
+            }
+            match control {
+                PortraitSelControl::SetBigIcon => self.set_big_icon = !self.set_big_icon,
+                _ => self.set_picture = !self.set_picture,
+            }
+            return Some(Vec::new());
+        }
+        None
     }
 
     pub const fn set_big_icon(&self) -> bool {
@@ -1723,11 +1765,14 @@ impl PortraitSelController {
                 self.labels.lobby_icon.as_str(),
             ),
         ] {
+            // The marker is presentation only: C++ expands it into the stored
+            // caption, so the `&` never reaches the font.
+            let label = expand_hotkey_markup(label).0;
             draw_checkbox(
                 surface,
                 rect,
                 selected,
-                label,
+                &label,
                 (!self.combo_open && self.focus == control)
                     || self
                         .pointer
@@ -4825,6 +4870,91 @@ mod tests {
             Some("Kein Portrait"),
             "the No Portrait tile is localized"
         );
+    }
+
+    /// Access keys come from the caption, so they come from the *translation*
+    /// (clonk-org/clonk-rs#884).
+    ///
+    /// `C4GUI::CheckBox::SetCaption` runs `ExpandHotkeyMarkup` on every caption
+    /// it is given (`C4GuiCheckBox.cpp:145-149`), and that helper strips the
+    /// `&`, wraps the marked letter in `<c ffffff7f>…</c>` and stores the
+    /// UPPERCASED letter as the control's hotkey (`C4Gui.cpp:38-68`). Both
+    /// halves are part of the resource string, so a translation chooses its own
+    /// letter — `IDS_DLG_YES` is `&Yes` in English and `&Ja` in German.
+    ///
+    /// Two properties therefore have to hold for any caption, whether or not
+    /// today's tables happen to mark one:
+    ///
+    /// * the `&` never reaches the screen — drawing it literally is the
+    ///   visible half of the bug;
+    /// * the bound letter is the one the active caption marks, so a letter
+    ///   taken from the English string activates nothing once the caption is
+    ///   German.
+    #[test]
+    fn checkbox_access_keys_follow_the_captions_own_marked_letter() {
+        let english = PortraitSelLabels {
+            player_image: "&Player image".to_string(),
+            lobby_icon: "&Lobby-Icon".to_string(),
+            ..Default::default()
+        };
+        let german = PortraitSelLabels {
+            player_image: "&Spielerbild".to_string(),
+            lobby_icon: "Lobby-&Icon".to_string(),
+            ..Default::default()
+        };
+
+        for (labels, own, other) in [(english, 'P', 'S'), (german, 'S', 'P')] {
+            let mut dialog = PortraitSelController::with_labels(
+                vec![PortraitLocation::new("User", "/u")],
+                0,
+                Vec::new(),
+                false,
+                false,
+                labels,
+            );
+
+            // The marker is presentation only; it must not survive to the font.
+            assert!(
+                !dialog
+                    .checkbox_caption(PortraitSelControl::SetPicture)
+                    .contains('&'),
+                "the access-key marker is stripped before drawing"
+            );
+
+            assert!(
+                dialog.handle_hotkey(own).is_some(),
+                "the caption's own letter toggles"
+            );
+            assert!(dialog.set_picture(), "and the toggle actually took");
+            assert!(
+                dialog.handle_hotkey(other).is_none(),
+                "a letter from the other language's caption binds nothing"
+            );
+            assert!(dialog.set_picture(), "so the checkbox is left alone");
+        }
+    }
+
+    /// A caption that marks no letter registers no hotkey, which is the case
+    /// every shipped translation is actually in today: neither
+    /// `IDS_TEXT_PLAYERIMAGE` nor `IDS_TEXT_LOBBYICON` carries a `&` in
+    /// `LanguageUS.txt` or `LanguageDE.txt`. C++ still runs the same parse and
+    /// simply leaves `cHotkey` at 0.
+    #[test]
+    fn an_unmarked_caption_registers_no_access_key() {
+        let mut dialog = PortraitSelController::with_labels(
+            vec![PortraitLocation::new("User", "/u")],
+            0,
+            Vec::new(),
+            false,
+            false,
+            PortraitSelLabels::default(),
+        );
+        assert_eq!(
+            dialog.checkbox_caption(PortraitSelControl::SetPicture),
+            "Player image"
+        );
+        assert!(dialog.handle_hotkey('P').is_none());
+        assert!(!dialog.set_picture());
     }
 
     /// The selector moves when its wooden title is dragged
