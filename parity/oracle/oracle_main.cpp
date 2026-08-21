@@ -5850,6 +5850,312 @@ static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
 
 } // namespace insert_check
 
+// C4Landscape::InsertMaterial (src/C4Landscape.cpp:1201-1269) -- the landscape
+// mutation half of a material reaction, and the destination of every `Insert`
+// arm the sections above only recorded a call to.
+//
+// It answers two questions the reaction arms never do: where the inserted pixel
+// comes to rest, and whether it lands as a landscape pixel or is handed to the
+// PXS system instead. Several of its decisions read as typos until you check
+// them against the source, and each is one a port can plausibly "clean up":
+//
+//   * a density-0 material returns **true** having done nothing at all, so a
+//     port that returned false would report a failure C++ calls success;
+//   * the bounds test accepts `ty == Height` -- one past the last row -- while
+//     stopping `tx` at `Width - 1`;
+//   * the non-push-pull climb applies its primitive slide as two INDEPENDENT
+//     `if`s. A pixel with both neighbours free steps left and then right and
+//     ends where it started; written as `else if` it would drift one pixel per
+//     iteration, which is invisible until a landscape diverges;
+//   * insert-thrust re-inserts the displaced material RECURSIVELY at `ty - 1`,
+//     after the new pixel has already been written.
+//
+// The fixture's materials are chosen to produce no cross-map reaction, so
+// `GetReactionUnsafe` answers nullptr and this section isolates InsertMaterial's
+// own decisions from the reaction arms that have sections of their own.
+namespace insert_material_check
+{
+
+constexpr int32_t GridWdt = 16, GridHgt = 12;
+static int32_t g_grid[GridHgt][GridWdt];
+
+struct MaterialCore
+{
+    int32_t Density;
+    int32_t MaxSlide;
+    int32_t Instable;
+};
+// Slot 0 is the sky. Granite shares its density with the closed border below,
+// so inserting Granite enters the climb loop; Sand sits between the two so it
+// can be refused by the floor while still displacing Water.
+static MaterialCore Map[5] = {
+    {0, 0, 0},    // Vacuum
+    {25, 4, 0},   // Water
+    {50, 2, 0},   // Sand
+    {100, 0, 0},  // Granite floor
+    // MCVehic. `GetPix` answers this past a closed border, and its density is
+    // C4M_Vehicle = 100 (C4Landscape.h:163-175, C4Material.h:200) -- the border
+    // is NOT the floor material, which is what makes `ty == Height` interesting.
+    {100, 0, 0},
+};
+constexpr int32_t MVehic = 4;
+
+constexpr int32_t MNone = -1;
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 5; }
+#define MatDensity(mat) (Map[mat].Density)
+
+enum MaterialInteractionEvent
+{
+    meePXSPos = 0,
+    meePXSMove = 1,
+    meeMassMove = 2,
+};
+
+struct RealismStub
+{
+    bool LandscapePushPull = false;
+    bool LandscapeInsertThrust = false;
+};
+struct C4SGameStub
+{
+    RealismStub Realism;
+};
+struct C4SStub
+{
+    C4SGameStub Game;
+};
+
+// Recorders. The pixel writes are the section's headline: how many, where, and
+// with which material.
+static int32_t g_setpix = 0;
+static int32_t g_setpix_x = -1, g_setpix_y = -1, g_setpix_mat = -1;
+static int32_t g_pxs_created = 0;
+static int32_t g_pxs_x = -1, g_pxs_y = -1;
+
+struct PxsStub
+{
+    void Create(int32_t, C4Fixed x, C4Fixed y, C4Fixed, C4Fixed)
+    {
+        g_pxs_created++;
+        g_pxs_x = fixtoi(x);
+        g_pxs_y = fixtoi(y);
+    }
+};
+
+// The fixture defines no reactions, so the "try reaction with material below"
+// step never fires here; the arms it would reach are pinned by the mrfInsert,
+// mrfPoof, mrfCorrode and mrfIncinerate sections above. The type still has to
+// be complete, because InsertMaterial calls through `pReact->pFunc`.
+struct C4MaterialReaction;
+typedef bool (*C4MaterialReactionFunc)(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
+                                       int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir,
+                                       C4Fixed &fYDir, int32_t &iPxsMat, int32_t iLsMat,
+                                       MaterialInteractionEvent evEvent, bool *pfPosChanged);
+struct C4MaterialReaction
+{
+    C4MaterialReactionFunc pFunc;
+};
+struct C4MaterialMapStub
+{
+    MaterialCore *Map = insert_material_check::Map;
+    C4MaterialReaction *GetReactionUnsafe(int32_t, int32_t) { return nullptr; }
+};
+
+struct C4Landscape
+{
+    int32_t Width = GridWdt, Height = GridHgt;
+    C4Fixed Gravity{itofix(20, 100)};
+    int32_t GetDensity(int32_t x, int32_t y);
+    int32_t GetMat(int32_t x, int32_t y);
+    bool FindMatPath(int32_t &fx, int32_t &fy, int32_t ydir, int32_t mdens, int32_t mslide);
+    bool FindMatSlide(int32_t &fx, int32_t &fy, int32_t ydir, int32_t mdens, int32_t mslide);
+    bool FindMatPathPush(int32_t &fx, int32_t &fy, int32_t mdens, int32_t mslide, bool liquid);
+    bool InsertMaterial(int32_t mat, int32_t tx, int32_t ty, int32_t vx = 0, int32_t vy = 0);
+};
+
+struct GameStub
+{
+    C4MaterialMapStub Material;
+    C4Landscape Landscape;
+    PxsStub PXS;
+    C4SStub C4S;
+    int32_t FrameCounter = 0;
+};
+
+static GameStub Game;
+
+#define GravAccel (Game.Landscape.Gravity)
+
+// The fixture takes the default border configuration: sides and bottom closed,
+// top open. A closed side answers MCVehic, an open one answers sky
+// (C4Landscape.h:163-175). None of the cases below reads above the top row, but
+// the fixture states the border it is using rather than leaving it implicit.
+static int32_t GBackMat(int32_t x, int32_t y)
+{
+    if (y < 0) return MNone; // TopOpen
+    if (x < 0 || x >= GridWdt || y >= GridHgt) return MVehic;
+    const int32_t mat = g_grid[y][x];
+    return mat ? mat : MNone;
+}
+
+int32_t C4Landscape::GetMat(int32_t x, int32_t y) { return GBackMat(x, y); }
+
+int32_t C4Landscape::GetDensity(int32_t x, int32_t y)
+{
+    const int32_t mat = GBackMat(x, y);
+    return mat < 0 ? 0 : Map[mat].Density;
+}
+
+// The fixture's grid stores material indices directly and carries no IFT, so
+// the pixel byte InsertMaterial computes is the material itself.
+static uint8_t Mat2PixColDefault(int32_t mat) { return static_cast<uint8_t>(mat); }
+static int32_t GBackIFT(int32_t, int32_t) { return 0; }
+static void SetPix(int32_t x, int32_t y, uint8_t pix)
+{
+    g_setpix++;
+    g_setpix_x = x;
+    g_setpix_y = y;
+    g_setpix_mat = pix;
+    if (x >= 0 && x < GridWdt && y >= 0 && y < GridHgt) g_grid[y][x] = pix;
+}
+
+static FILE *LcRngTraceFile() { return nullptr; }
+
+template <class T> static T Abs(T v) { return v < 0 ? -v : v; }
+template <class T> static T BoundBy(T v, T lo, T hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+#include "find_mat_path.inc"
+#include "find_mat_slide.inc"
+#include "find_mat_path_push.inc"
+#include "insert_material.inc"
+
+} // namespace insert_material_check
+
+// Runs one InsertMaterial against a fresh grid and records where the pixel came
+// to rest.
+//
+// The headline is `changed`: the landscape cells the call actually rewrote,
+// sorted top-to-bottom as `y,x,mat` triples. It is compared instead of a write
+// counter because it is an observable both engines produce -- the Rust port
+// exposes its landscape, not its SetPix calls -- and because it is what a desync
+// would consist of. An empty delta means the call wrote nothing: a density-0
+// material, a refusal, or a slide that handed the material to the PXS system.
+static void printInsertMaterialCases()
+{
+    printf("%s", "\"insert_material\":[");
+    struct Case
+    {
+        const char *name;
+        int32_t mat;
+        int32_t tx, ty;
+        bool insert_thrust;
+        // Column of sky punched through the floor, or -1 for a solid floor.
+        int32_t gap_x;
+        // Lay a row of Water directly above the floor. Its density differs from
+        // the floor's, so the climb stops ON it and the insertion then has a
+        // valid material to displace -- which is what insert-thrust recurses
+        // with. Without it the climb ends on sky, `MatValid(MNone)` is false,
+        // and the recursion never happens however the flag is set.
+        bool water_row;
+    };
+    constexpr int32_t GridWdt = insert_material_check::GridWdt;
+    constexpr int32_t GridHgt = insert_material_check::GridHgt;
+    const Case cases[] = {
+        // A density-0 material returns TRUE having written nothing.
+        // A density-0 material returns TRUE having written nothing.
+        {"vacuum_succeeds_without_writing", 0, 8, 5, false, -1, false},
+        // Off the left edge, and past the last column.
+        {"x_below_zero_fails", 2, -1, 5, false, -1, false},
+        {"x_at_width_fails", 2, GridWdt, 5, false, -1, false},
+        // The bounds pair. `ty == Height` is one past the last row and C++
+        // deliberately lets it through: Granite matches the border's density,
+        // climbs back into the grid and writes. `Height + 1` is rejected by the
+        // bounds test itself and writes nothing -- so the two differ in the
+        // landscape, not just in the return value.
+        {"y_at_height_is_accepted", 3, 8, GridHgt, false, -1, false},
+        {"y_above_height_fails", 3, 8, GridHgt + 1, false, -1, false},
+        // Sand into open sky: nothing to climb, and the slide hands it to the
+        // PXS system rather than writing a pixel.
+        {"lands_in_open_sky", 2, 8, 5, false, -1, false},
+        // Water (25) onto the Granite floor (100): stuck in higher density.
+        {"stuck_in_higher_density_fails", 1, 8, 11, false, -1, false},
+        // Granite into Granite: equal density, so it climbs. It stops on the
+        // row whose neighbours are BOTH sky, where the two independent `if`s
+        // move it left and then straight back -- an `else if` would leave it
+        // one column to the left.
+        {"equal_density_climbs_without_drifting", 3, 8, 11, false, -1, false},
+        // The same climb with the left neighbour carved out: only one `if`
+        // fires, so it really does drift, and then slides down the carved
+        // column.
+        {"climb_drifts_into_a_carved_column", 3, 8, 11, false, 7, false},
+        // A gap in the floor gives the slide somewhere to go, and the material
+        // is handed to the PXS system instead of being written.
+        {"slides_into_a_gap_as_pxs", 2, 8, 9, false, 9, false},
+        // The insert-thrust pair. Identical but for the flag: with it the
+        // displaced Water is re-inserted one row up, changing two cells;
+        // without it the Water is simply overwritten, changing one.
+        {"insert_thrust_recurses_one_row_up", 2, 8, 9, true, -1, true},
+        {"without_insert_thrust_nothing_recurses", 2, 8, 9, false, -1, true},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        // Sky above row 10, Granite floor on rows 10 and 11.
+        for (int32_t gy = 0; gy < insert_material_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_material_check::GridWdt; gx++)
+                insert_material_check::g_grid[gy][gx] = (gy >= 10) ? 3 : 0;
+        if (c.gap_x >= 0)
+            for (int32_t gy = 10; gy < insert_material_check::GridHgt; gy++)
+                insert_material_check::g_grid[gy][c.gap_x] = 0;
+        if (c.water_row)
+            for (int32_t gx = 0; gx < insert_material_check::GridWdt; gx++)
+                insert_material_check::g_grid[9][gx] = 1;
+
+        int32_t before[insert_material_check::GridHgt][insert_material_check::GridWdt];
+        for (int32_t gy = 0; gy < insert_material_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_material_check::GridWdt; gx++)
+                before[gy][gx] = insert_material_check::g_grid[gy][gx];
+
+        insert_material_check::g_setpix = 0;
+        insert_material_check::g_setpix_x = -1;
+        insert_material_check::g_setpix_y = -1;
+        insert_material_check::g_setpix_mat = -1;
+        insert_material_check::g_pxs_created = 0;
+        insert_material_check::g_pxs_x = -1;
+        insert_material_check::g_pxs_y = -1;
+        insert_material_check::Game.C4S.Game.Realism.LandscapeInsertThrust = c.insert_thrust;
+        insert_material_check::Game.C4S.Game.Realism.LandscapePushPull = false;
+
+        const bool ok = insert_material_check::Game.Landscape.InsertMaterial(c.mat, c.tx, c.ty, 0, 0);
+
+        char delta[512];
+        int32_t used = 0, changed = 0;
+        delta[0] = '\0';
+        for (int32_t gy = 0; gy < insert_material_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_material_check::GridWdt; gx++)
+                if (insert_material_check::g_grid[gy][gx] != before[gy][gx])
+                {
+                    changed++;
+                    used += snprintf(delta + used, sizeof(delta) - used, "%s%d,%d,%d",
+                                     used ? ";" : "", gy, gx,
+                                     insert_material_check::g_grid[gy][gx]);
+                }
+
+        printf("{\"name\":\"%s\",\"mat\":%d,\"tx\":%d,\"ty\":%d,"
+               "\"insert_thrust\":%s,\"gap_x\":%d,\"water_row\":%s,\"result\":%s,"
+               "\"changed_count\":%d,\"changed\":\"%s\","
+               "\"pxs_created\":%d,\"pxs_x\":%d,\"pxs_y\":%d}",
+               c.name, c.mat, c.tx, c.ty, c.insert_thrust ? "true" : "false", c.gap_x,
+               c.water_row ? "true" : "false", ok ? "true" : "false", changed, delta,
+               insert_material_check::g_pxs_created,
+               insert_material_check::g_pxs_x, insert_material_check::g_pxs_y);
+    }
+    printf("]");
+}
+
 // Runs one mrfInsertCheck and records the rewritten position/velocity, the
 // verdict, and the RNG ledger. The draw count is the point: it varies with the
 // material's SplashRate and Incindiary and with whether a slide was found.
@@ -9209,6 +9515,12 @@ int main()
     //       short-circuited two-roll test, the user reaction's single roll, and
     //       the smoke level drawn only when the smoke gate opens.
     printCorrodeCases();
+    printf(",\n");
+
+    // 22e5. insert_material: C4Landscape::InsertMaterial's own decisions — the
+    //       density-0 success, the asymmetric bounds test, the non-drifting
+    //       primitive slide, the PXS handoff, and the insert-thrust recursion.
+    printInsertMaterialCases();
     printf(",\n");
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.

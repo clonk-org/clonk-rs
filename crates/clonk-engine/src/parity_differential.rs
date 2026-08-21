@@ -7057,6 +7057,187 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b5. insert_material: `C4Landscape::InsertMaterial` (C4Landscape.cpp:
+    //       1201-1269) — the landscape-mutation half of a material reaction,
+    //       and the destination every `Insert` arm above only recorded a call
+    //       to.
+    //
+    //       Several of its decisions read as typos until you check them against
+    //       the source, and each is one a port can plausibly "clean up": a
+    //       density-0 material returns **true** having done nothing; the bounds
+    //       test accepts `ty == Height` while stopping `tx` at `Width - 1`; the
+    //       non-push-pull climb applies its primitive slide as two INDEPENDENT
+    //       `if`s, so a row with both neighbours free moves left and straight
+    //       back; and insert-thrust re-inserts the displaced material
+    //       RECURSIVELY one row up, after the new pixel is already written.
+    //
+    //       What is compared is the landscape delta rather than a count of
+    //       SetPix calls: it is an observable both engines produce, and it is
+    //       what a desync would actually consist of. Every case is paired with
+    //       one that differs in a single input, so a flattened branch changes
+    //       the delta rather than merely the return value.
+    for case in golden["insert_material"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("insert_material[{name}]");
+
+        // Granite matches the closed border's C4M_Vehicle density, so
+        // inserting it enters the climb loop; Sand sits between Water and the
+        // floor, so the floor refuses it while it still displaces Water.
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            MaxSlide=4
+
+            [Material Sand]
+            Name=Sand
+            Density=50
+            MaxSlide=2
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+            "#,
+        )
+        .expect("insert material oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const GRANITE: u8 = 3;
+        const WATER: u8 = 1;
+
+        let gap_x = i(case, "gap_x") as i32;
+        let water_row = case["water_row"].as_bool().unwrap_or(false);
+
+        // Sky above row 10, Granite floor on rows 10 and 11.
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        for gy in 10..HGT as usize {
+            for gx in 0..WDT as usize {
+                bytes[gy * WDT as usize + gx] = GRANITE;
+            }
+        }
+        if gap_x >= 0 {
+            for gy in 10..HGT as usize {
+                bytes[gy * WDT as usize + gap_x as usize] = 0;
+            }
+        }
+        if water_row {
+            for gx in 0..WDT as usize {
+                bytes[9 * WDT as usize + gx] = WATER;
+            }
+        }
+
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 50;
+        densities[GRANITE as usize] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Water".to_string());
+        material_names[2] = Some("Sand".to_string());
+        material_names[GRANITE as usize] = Some("Granite".to_string());
+        let grid = PixelGrid::new(
+            WDT,
+            HGT,
+            bytes.clone(),
+            densities,
+            material_names,
+            vec![None; 128],
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        engine.set_landscape_insert_thrust(case["insert_thrust"].as_bool().unwrap_or(false));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+
+        let before: Vec<Option<crate::material::MaterialId>> = (0..HGT as i32)
+            .flat_map(|gy| (0..WDT as i32).map(move |gx| (gx, gy)))
+            .map(|(gx, gy)| {
+                engine
+                    .landscape()
+                    .and_then(|landscape| landscape.border_material_at(gx, gy))
+            })
+            .collect();
+
+        let result = engine.insert_material(
+            crate::material::MaterialId::new(i(case, "mat") as usize)
+                .expect("oracle insert material"),
+            i(case, "tx") as i32,
+            i(case, "ty") as i32,
+            0,
+            0,
+        );
+
+        // The delta is emitted in row-major order as `y,x,mat` triples, which
+        // is the order this scan produces.
+        let changed: Vec<String> = (0..HGT as i32)
+            .flat_map(|gy| (0..WDT as i32).map(move |gx| (gx, gy)))
+            .enumerate()
+            .filter_map(|(index, (gx, gy))| {
+                let after = engine
+                    .landscape()
+                    .and_then(|landscape| landscape.border_material_at(gx, gy));
+                (after != before[index]).then(|| {
+                    format!(
+                        "{gy},{gx},{}",
+                        after.map(|id| id.index()).unwrap_or_default()
+                    )
+                })
+            })
+            .collect();
+
+        let pxs: Vec<&crate::pxs::Pxs> = engine.pxs_system.iter().collect();
+
+        expect_eq(
+            &label,
+            0,
+            "result",
+            i64::from(case["result"].as_bool().unwrap_or(false)),
+            i64::from(result),
+        );
+        expect_eq(
+            &label,
+            0,
+            "changed_count",
+            i(case, "changed_count"),
+            changed.len() as i64,
+        );
+        assert_eq!(
+            case["changed"].as_str().unwrap_or(""),
+            changed.join(";"),
+            "PARITY DIVERGENCE in `{label}` field `changed`",
+        );
+        expect_eq(
+            &label,
+            0,
+            "pxs_created",
+            i(case, "pxs_created"),
+            pxs.len() as i64,
+        );
+        expect_eq(
+            &label,
+            0,
+            "pxs_x",
+            i(case, "pxs_x"),
+            pxs.first().map_or(-1, |pixel| i64::from(fixtoi(pixel.x))),
+        );
+        expect_eq(
+            &label,
+            0,
+            "pxs_y",
+            i(case, "pxs_y"),
+            pxs.first().map_or(-1, |pixel| i64::from(fixtoi(pixel.y))),
+        );
+    }
+
     // 16b4. corrode_arm: `mrfCorrode`'s movement arm (C4Material.cpp:691-745),
     //       whose draw ledger is conditional in three separate places.
     //
