@@ -10,6 +10,7 @@ pub struct ClientStartBarrier {
 struct PendingClientStart {
     status: NetworkStatus,
     local_initialized: bool,
+    runtime_join_chasing: bool,
 }
 
 fn same_barrier(left: NetworkStatus, right: NetworkStatus) -> bool {
@@ -17,16 +18,25 @@ fn same_barrier(left: NetworkStatus, right: NetworkStatus) -> bool {
 }
 
 impl ClientStartBarrier {
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub fn is_runtime_join_chasing(&self, status: NetworkStatus) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            pending.runtime_join_chasing && same_barrier(pending.status, status)
+        })
+    }
+
     /// Installs the JoinData status exactly as `HandleJoinData` does: it hands
     /// the status to `HandleStatus`, which clears both flags and leaves the
-    /// client owing an acknowledgement. A client joining a running or paused
-    /// game receives no later ordinary `PID_Status` — the host only broadcasts
-    /// one from `ChangeGameStatus` — so this is the only barrier it ever gets.
-    /// The reference form omits TargetTick, leaving the -1 default that makes
-    /// `CtrlTickReached` trivially true, which is precisely what lets
-    /// `FinalInit`'s `CheckStatusReached(true)` reach the barrier while
-    /// `Game.IsRunning` is still false (src/C4Network2.cpp:558-561,
-    /// 1501-1510, 1574-1592, 2017-2057).
+    /// client owing an acknowledgement. The host may replace it with a later
+    /// chase-target `PID_Status`, but the client starts loading immediately
+    /// from JoinData instead of waiting for that five-second timer. The
+    /// reference form omits TargetTick, leaving the -1 default that lets
+    /// `FinalInit`'s `CheckStatusReached(true)` reach an otherwise unchanged
+    /// barrier while `Game.IsRunning` is still false
+    /// (src/C4Network2.cpp:558-561,1501-1510,1574-1592,2017-2057,2161-2183).
     ///
     /// A lobby status opens nothing: `CheckStatusReached` gates GS_Lobby on
     /// `fLobbyRunning`, and the host's later Go request is the real barrier.
@@ -36,6 +46,7 @@ impl ClientStartBarrier {
                 PendingClientStart {
                     status,
                     local_initialized: false,
+                    runtime_join_chasing: true,
                 }
             }),
         }
@@ -54,9 +65,14 @@ impl ClientStartBarrier {
         {
             return None;
         }
+        let runtime_join_chasing = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.runtime_join_chasing);
         self.pending = Some(PendingClientStart {
             status,
             local_initialized: false,
+            runtime_join_chasing,
         });
         Some(status)
     }
@@ -122,15 +138,13 @@ mod tests {
 
     #[test]
     fn runtime_join_go_status_opens_a_start_barrier() {
-        // A client joining an already-running game never receives an ordinary
-        // PID_Status: the host only broadcasts one from ChangeGameStatus, which
-        // a running host has no reason to call. HandleJoinData therefore
-        // installs the JoinData status itself and clears both flags, and
-        // FinalInit's CheckStatusReached(true) reaches it even though
-        // Game.IsRunning is still false. The reference form's absent TargetTick
-        // decompiles to -1, which is exactly what makes CtrlTickReached(-1)
-        // trivially true there, so the joiner acks off this status alone
-        // (7d43b47b src/C4Network2.cpp:558-561,1501-1510,1574-1592,2017-2057).
+        // HandleJoinData installs the JoinData status itself and clears both
+        // flags. If loading finishes before UpdateChaseTarget's five-second
+        // replacement, FinalInit reaches this initial barrier while
+        // Game.IsRunning is still false. The reference form's absent
+        // TargetTick decompiles to -1, making CtrlTickReached(-1) trivially
+        // true (7d43b47b src/C4Network2.cpp:558-561,1501-1510,1574-1592,
+        // 2017-2057,2161-2183).
         let mut barrier =
             super::ClientStartBarrier::from_join_data_status(status(NETWORK_STATE_GO, 2, -1));
 
