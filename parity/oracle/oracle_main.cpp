@@ -5548,6 +5548,11 @@ struct MaterialCore
     // PXS's own smoke property, Inflammable is whether the landscape material
     // catches (C4Landscape.cpp:1478-1488).
     int32_t Inflammable;
+    // The two halves of the non-user corrosion roll: the PXS material's
+    // Corrosive is tested first, the landscape material's Corrode second, and
+    // the second is only drawn if the first passed.
+    int32_t Corrosive;
+    int32_t Corrode;
 };
 
 enum MaterialInteractionEvent
@@ -5564,6 +5569,9 @@ struct C4MaterialReaction
     int32_t iExecMask;
     int32_t iDepth;
     int32_t iConvertMat;
+    // A user reaction rolls once against this instead of the two material
+    // properties (C4Material.cpp:705-706).
+    int32_t iCorrosionRate;
 };
 
 static int32_t g_grid[GridHgt][GridWdt];
@@ -5573,13 +5581,16 @@ struct C4MaterialMap
 {
     // 0 vacuum, 1 water (splashes), 2 lava (incendiary), 3 granite (the floor).
     MaterialCore Map[4] = {
-        {0, 0, 0, 0, 0, -1, 0},
-        {25, 1, 0, 4, 0, -1, 0},  // Water: SplashRate 1 makes `!Random(1)` certain
+        {0, 0, 0, 0, 0, -1, 0, 0, 0},
+        {25, 1, 0, 4, 0, -1, 0, 0, 0},  // Water: SplashRate 1 makes `!Random(1)` certain
         // Lava: incendiary (its own smoke) AND inflammable (the landscape
         // material catches), which are separate fields C4Landscape::Incinerate
         // and mrfInsertCheck read for different reasons.
-        {25, 0, 1, 4, 2, 3, 1},
-        {50, 0, 0, 0, 0, -1, 0},  // Granite floor
+        // Lava is also the corrosive: Corrosive 100 makes its half of the roll
+        // certain, so a row can isolate the second half.
+        {25, 0, 1, 4, 2, 3, 1, 100, 0},
+        // Granite floor, Corrode 100 so its half is certain too.
+        {50, 0, 0, 0, 0, -1, 0, 0, 100},
     };
 
     bool mrfConvert(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
@@ -5598,6 +5609,10 @@ struct C4MaterialMap
                  int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
                  int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
                  bool *pfPosChanged);
+    bool mrfCorrode(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
+                    int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
+                    int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
+                    bool *pfPosChanged);
 };
 
 // PXS creation is only reached by the MassMove arm; record it rather than
@@ -5638,6 +5653,12 @@ static int32_t g_extractions = 0;
 static int32_t g_extract_x = -1, g_extract_y = -1;
 static int32_t g_sounds = 0;
 
+// mrfCorrode's landscape side: an in-place clear, and — on the movement event
+// only — an instability probe at the same pixel.
+static int32_t g_cleared = 0;
+static int32_t g_clear_x = -1, g_clear_y = -1;
+static int32_t g_instability_probes = 0;
+
 struct C4Landscape
 {
     C4Fixed Gravity{itofix(20, 100)};
@@ -5658,6 +5679,7 @@ struct C4Landscape
     // has to record that mrfIncinerate reached it, and answer what the case
     // says it answered.
     bool Incinerate(int32_t x, int32_t y);
+    void CheckInstabilityRange(int32_t, int32_t) { g_instability_probes++; }
     int32_t ExtractMaterial(int32_t x, int32_t y)
     {
         g_extractions++;
@@ -5712,6 +5734,13 @@ bool C4Landscape::Incinerate(int32_t x, int32_t y)
 
 static void Smoke(int32_t, int32_t, int32_t) { g_smoke++; }
 static void StartSoundEffectAt(const char *, int32_t, int32_t) { g_sounds++; }
+static void ClearBackPix(int32_t x, int32_t y)
+{
+    g_cleared++;
+    g_clear_x = x;
+    g_clear_y = y;
+    g_grid[y][x] = 0;
+}
 static int32_t Sign(int32_t x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
 template <class T> static T Abs(T v) { return v < 0 ? -v : v; }
 
@@ -5723,6 +5752,7 @@ static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
 #include "mrf_insert.inc"
 #include "mrf_incinerate.inc"
 #include "mrf_poof.inc"
+#include "mrf_corrode.inc"
 
 } // namespace insert_check
 
@@ -5820,6 +5850,113 @@ static void printInsertCases()
                pos_changed ? "true" : "false", RandomCount - draws_before,
                insert_check::g_inserted, insert_check::g_inserted_mat,
                insert_check::g_inserted_x, insert_check::g_inserted_y);
+    }
+    printf("]");
+}
+
+// --- mrfCorrode's movement arm ----------------------------------------------
+//
+// This arm's RNG ledger is the whole point, and it is conditional in three
+// separate places:
+//
+//   * a NON-user reaction rolls `Random(100) < Corrosive` and only then
+//     `Random(100) < Corrode`. C++'s `&&` short-circuits, so a failed first
+//     roll spends ONE draw, not two.
+//   * a user reaction spends one draw against its own CorrosionRate instead.
+//   * `!Random(5)` opens the smoke, and `Random(3)` for its level is drawn
+//     ONLY when it does, before `!Random(20)` decides the sound.
+//
+// A port that evaluated both halves eagerly, or drew the smoke level
+// unconditionally, would produce the same landscape and desynchronise every
+// draw after it -- which is why the count is emitted beside the verdict.
+//
+// The arm is also the only one that probes instability: `ClearBackPix` then
+// `CheckInstabilityRange` at the same pixel, on the movement event only.
+static void printCorrodeCases()
+{
+    printf("\"corrode_arm\":[");
+    struct Case
+    {
+        const char *name;
+        bool user_defined;
+        int32_t corrosion_rate;  // user reactions only
+        int32_t event;
+        int32_t pxs_mat;
+        int32_t ydir_n, ydir_p;
+    };
+    const Case cases[] = {
+        // Lava (Corrosive 100) into Granite (Corrode 100): both halves pass, so
+        // the pixel is cleared and the instability probe follows.
+        {"move_corrodes_and_probes", false, 0, 1 /*meePXSMove*/, 2, 1, 2},
+        // Water (Corrosive 0) fails the FIRST half, so the second is never
+        // drawn -- one draw, not two, and nothing is cleared. The pixel is
+        // inserted instead, and the arm still reports handled.
+        {"move_first_roll_short_circuits", false, 0, 1, 1, 1, 2},
+        // A user reaction rolls once against its own rate. 100 always corrodes.
+        {"user_move_rate_certain", true, 100, 1, 2, 1, 2},
+        // ...and 0 never does, so it inserts.
+        {"user_move_rate_never", true, 0, 1, 2, 1, 2},
+        // The check gates everything: a rough splashing contact returns before
+        // any corrosion roll happens at all.
+        {"move_check_blocks_before_rolling", false, 0, 1, 1, 3, 1},
+        // No corrosion before movement -- "it would make acid incredibly
+        // effective" (C4Material.cpp:696-698).
+        {"pos_never_corrodes", false, 0, 0 /*meePXSPos*/, 2, 1, 2},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        for (int32_t gy = 0; gy < insert_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+                insert_check::g_grid[gy][gx] = (gx == 8) ? 0 : 3;
+        for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+            insert_check::g_grid[10][gx] = 3;
+        insert_check::g_smoke = 0;
+        insert_check::g_sounds = 0;
+        insert_check::g_cleared = 0;
+        insert_check::g_clear_x = -1;
+        insert_check::g_clear_y = -1;
+        insert_check::g_instability_probes = 0;
+        insert_check::g_inserted = 0;
+
+        const int32_t seed = 0x2222;
+        FixedRandom(seed);
+        Randomize3();
+        const int32_t draws_before = RandomCount;
+
+        insert_check::C4MaterialReaction reaction{};
+        reaction.fUserDefined = c.user_defined;
+        reaction.fInsertionCheck = true;
+        reaction.iExecMask = ~0;
+        reaction.iDepth = 0;
+        reaction.iConvertMat = 0;
+        reaction.iCorrosionRate = c.corrosion_rate;
+
+        const int32_t ls_mat = 3;
+        int32_t iX = 8, iY = 9;
+        C4Fixed xdir = itofix(0, 1), ydir = itofix(c.ydir_n, c.ydir_p);
+        int32_t pxs_mat = c.pxs_mat;
+        bool pos_changed = false;
+        const bool handled = insert_check::Game.Material.mrfCorrode(
+            &reaction, iX, iY, iX, iY, xdir, ydir, pxs_mat, ls_mat,
+            static_cast<insert_check::MaterialInteractionEvent>(c.event), &pos_changed);
+
+        printf("{\"name\":\"%s\",\"user_defined\":%s,\"corrosion_rate\":%d,"
+               "\"event\":%d,\"pxs_mat\":%d,\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,"
+               "\"xdir0\":%d,\"ydir0\":%d,\"seed\":%d,\"handled\":%s,\"x\":%d,"
+               "\"y\":%d,\"xdir\":%d,\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,"
+               "\"cleared\":%d,\"instability_probes\":%d,\"smoke\":%d,"
+               "\"sounds\":%d,\"inserted\":%d}",
+               c.name, c.user_defined ? "true" : "false", c.corrosion_rate, c.event,
+               c.pxs_mat, ls_mat, 8, 9, itofix(0, 1).val,
+               itofix(c.ydir_n, c.ydir_p).val, seed, handled ? "true" : "false",
+               iX, iY, xdir.val, ydir.val, pos_changed ? "true" : "false",
+               RandomCount - draws_before, insert_check::g_cleared,
+               insert_check::g_instability_probes, insert_check::g_smoke,
+               insert_check::g_sounds, insert_check::g_inserted);
     }
     printf("]");
 }
@@ -8893,6 +9030,12 @@ int main()
     // 22e3. poof_arm: mrfPoof's movement arm, where the unhandled outcome lives
     //       and where the insertion check gates the extraction and both draws.
     printPoofMoveCases();
+    printf(",\n");
+
+    // 22e4. corrode_arm: mrfCorrode's conditional draw ledger — the
+    //       short-circuited two-roll test, the user reaction's single roll, and
+    //       the smoke level drawn only when the smoke gate opens.
+    printCorrodeCases();
     printf(",\n");
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.

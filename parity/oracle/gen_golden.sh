@@ -710,6 +710,23 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Material.cpp" > "$gen/mrf_incinerate.inc"
 
+# 3q3c. Lift mrfCorrode. Its RNG ledger is the point: a NON-user reaction rolls
+#       `Random(100) < Corrosive` and only then `Random(100) < Corrode`, and C++'s
+#       `&&` short-circuits -- a failed first roll spends ONE draw, not two. A
+#       user reaction spends one draw against its own CorrosionRate instead.
+#       The effect gates are conditional in the same way: `!Random(5)` opens the
+#       smoke, and `Random(3)` for its level is drawn ONLY when it does, before
+#       `!Random(20)` decides the sound. Every one of those is a synchronised
+#       draw, so a port that evaluated both rolls eagerly, or drew the smoke
+#       level unconditionally, would desynchronise the stream while producing
+#       the same landscape.
+awk '
+  /^bool C4MaterialMap::mrfCorrode\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/mrf_corrode.inc"
+
 # 3q4. Lift mrfUserCheck and mrfConvert. Convert carries two rules that a port
 #      can silently lose: C++'s `case meePXSMove:` falls **through** into
 #      `meePXSPos` for user-defined reactions (Rust has no implicit
