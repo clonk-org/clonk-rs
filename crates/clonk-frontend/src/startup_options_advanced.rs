@@ -2281,6 +2281,48 @@ mod tests {
     }
 
     #[test]
+    fn alt_mnemonics_activate_on_the_translated_letter() {
+        // `handle_hotkey` resolves the letter out of the caption rather than
+        // from a constant, so a translated caption moves the binding with it.
+        // C++ reads the same `&` out of the resource string
+        // (7d43b47b src/C4Gui.cpp:47), which is why fifteen shipped keys can
+        // nominate a different letter in German than in English.
+        let mut state = AdvancedConfigController::new(vec![AdvancedConfigSection::new(
+            "General",
+            vec![AdvancedConfigRow::new(
+                "FPS",
+                AdvancedConfigValue::Bool(false),
+            )],
+        )]);
+
+        state.set_labels(AdvancedConfigLabels {
+            caption: "Advanced settings".into(),
+            save: "&Save".into(),
+            cancel: "&Cancel".into(),
+        });
+        assert_eq!(state.handle_hotkey('s'), vec![AdvancedConfigAction::Save]);
+        assert_eq!(state.handle_hotkey('c'), vec![AdvancedConfigAction::Cancel]);
+        assert!(
+            state.handle_hotkey('p').is_empty(),
+            "an unmarked letter binds nothing"
+        );
+
+        // Translated: the marked letters move, and the English ones stop
+        // working — which is exactly what a hardcoded letter would fail.
+        state.set_labels(AdvancedConfigLabels {
+            caption: "Erweiterte Einstellungen".into(),
+            save: "S&peichern".into(),
+            cancel: "Abbre&chen".into(),
+        });
+        assert_eq!(state.handle_hotkey('p'), vec![AdvancedConfigAction::Save]);
+        assert_eq!(state.handle_hotkey('c'), vec![AdvancedConfigAction::Cancel]);
+        assert!(
+            state.handle_hotkey('s').is_empty(),
+            "the English Save letter must not still activate a German caption"
+        );
+    }
+
+    #[test]
     fn advanced_config_sections_are_dynamic_and_selectable() {
         let mut state = controller();
         state.resize(800, 600);

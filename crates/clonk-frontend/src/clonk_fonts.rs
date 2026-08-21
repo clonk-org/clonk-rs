@@ -3344,6 +3344,52 @@ mod tests {
     }
 
     #[test]
+    fn the_hotkey_letter_follows_the_translated_caption() {
+        // C++ marks the access key with `&` *inside the resource string*
+        // (7d43b47b src/C4Gui.cpp:47 finds it with `SCharPos('&', ...)`), so
+        // the letter is part of the translation rather than a property of the
+        // control. Fifteen shipped keys nominate a different letter in
+        // `LanguageUS.txt` than in `LanguageDE.txt`, so a hardcoded letter is
+        // wrong for one of the two by construction.
+        //
+        // The expansion is byte-identical to C++'s `HotkeyMarkup`
+        // (`"<c ffffff7f>x</c>"`, src/C4Gui.cpp:41) — it tints the letter
+        // rather than underlining it.
+        for (key, us, us_letter, de, de_letter) in [
+            ("IDS_BTN_ENDROUND", "&End game", 'E', "Runde &beenden", 'B'),
+            ("IDS_CTL_RECORD", "&Record", 'R', "Au&fnehmen", 'F'),
+            ("IDS_DLG_ABOUT", "&About", 'A', "&Info", 'I'),
+        ] {
+            assert_eq!(
+                expand_hotkey_markup(us).1,
+                Some(us_letter),
+                "{key} US access key"
+            );
+            assert_eq!(
+                expand_hotkey_markup(de).1,
+                Some(de_letter),
+                "{key} DE access key"
+            );
+            assert_ne!(
+                expand_hotkey_markup(de).1,
+                Some(us_letter),
+                "{key} must not answer to the English letter once translated"
+            );
+        }
+
+        // The tint lands on the marked letter wherever it sits, not on the
+        // first character.
+        assert_eq!(
+            expand_hotkey_markup("Au&fnehmen").0,
+            "Au<c ffffff7f>f</c>nehmen"
+        );
+        assert_eq!(
+            expand_hotkey_markup("Runde &beenden").0,
+            "Runde <c ffffff7f>b</c>eenden"
+        );
+    }
+
+    #[test]
     fn button_font_prefers_largest_fitting_font() {
         let set = ClonkFontSet {
             title: ClonkFont::new(34),
