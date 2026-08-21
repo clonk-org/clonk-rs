@@ -7537,6 +7537,153 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16f. pxs_slots: `C4PXSSystem::Cast` and `Create` (C4PXS.cpp:207-222) —
+    //      the layer above the allocator. `pxs_allocation` already owns `New`'s
+    //      slot choice, over four slots freed out of order; this covers what
+    //      that one cannot reach:
+    //
+    //      * **`Cast` draws ydir's random first.** The C++ pulls both into
+    //        named locals under a `// force argument evaluation order` comment,
+    //        and the one drawn *first* (`r2`) is the one used for ydir. Reading
+    //        them in argument order swaps the velocities while drawing exactly
+    //        as many numbers — invisible to any draw-count check, which is why
+    //        the raw fixed values are compared per slot.
+    //      * **Per-slot state and chunk counts**, rather than only which slot a
+    //        returned pointer landed in.
+    //      * **The chunk boundary.** Chunk 0 holds 500 slots; `pxs_allocation`
+    //        never creates enough particles to spill into chunk 1.
+    //
+    //      The steps run as one sequence against one system, so a wrong slot
+    //      choice early shows up in every later step.
+    {
+        let mut system = crate::pxs::PxsSystem::default();
+        let mut rng = LcgRng::new(0x5151);
+        rng.randomize3();
+        let mut mark = rng.count;
+
+        let check =
+            |label: &str, step: &serde_json::Value, system: &crate::pxs::PxsSystem, draws: i32| {
+                expect_eq(label, 0, "draws", i(step, "draws"), i64::from(draws));
+                expect_eq(label, 0, "live", i(step, "live"), system.count() as i64);
+                for chunk in step["chunks"].as_array().unwrap() {
+                    let index = i(chunk, "i") as usize;
+                    expect_eq(
+                        label,
+                        index,
+                        "chunk_alloc",
+                        i64::from(chunk["alloc"].as_bool().unwrap_or(false)),
+                        i64::from(system.chunk_allocated(index)),
+                    );
+                    expect_eq(label, index, "chunk_count", i(chunk, "count"), {
+                        (0..crate::pxs::PXS_CHUNK_SIZE)
+                            .filter(|slot| system.peek_slot(index, *slot).is_some())
+                            .count() as i64
+                    });
+                }
+                for slot in step["slots"].as_array().unwrap() {
+                    let index = i(slot, "i") as usize;
+                    let live = system.peek_slot(0, index);
+                    let mat = live.map(|pxs| pxs.mat.index() as i64).unwrap_or(-1);
+                    expect_eq(label, index, "slot_mat", i(slot, "mat"), mat);
+                    // A dead slot is compared by material only. C++'s `Deactivate`
+                    // clears `Mat` and leaves the position and velocity bytes in
+                    // place (C4PXS.cpp:139-149), where nothing ever reads them —
+                    // `Execute` and `Load` both gate on `Mat != MNone` — while the
+                    // port drops the whole record. The difference is unreachable
+                    // from the simulation; it is visible only in a saved `PXS.c4b`,
+                    // which `Save` writes chunk-at-a-time including dead slots
+                    // (C4PXS.cpp:346-350). Noted on clonk-org/clonk-rs#510.
+                    if let Some(pxs) = live {
+                        expect_eq(label, index, "slot_x", i(slot, "x"), pxs.x.val() as i64);
+                        expect_eq(label, index, "slot_y", i(slot, "y"), pxs.y.val() as i64);
+                        expect_eq(
+                            label,
+                            index,
+                            "slot_xdir",
+                            i(slot, "xdir"),
+                            pxs.xdir.val() as i64,
+                        );
+                        expect_eq(
+                            label,
+                            index,
+                            "slot_ydir",
+                            i(slot, "ydir"),
+                            pxs.ydir.val() as i64,
+                        );
+                    }
+                }
+            };
+
+        let steps = golden["pxs_slots"].as_array().unwrap();
+        let step_named = |name: &str| {
+            steps
+                .iter()
+                .find(|step| step["step"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("pxs_slots golden is missing step `{name}`"))
+        };
+
+        system.cast(
+            &mut rng,
+            crate::material::MaterialId::new(2).unwrap(),
+            3,
+            30,
+            40,
+            20,
+        );
+        check(
+            "pxs_slots[cast_three]",
+            step_named("cast_three"),
+            &system,
+            rng.count - mark,
+        );
+        mark = rng.count;
+
+        system.clear_slot(0, 1);
+        check(
+            "pxs_slots[free_middle]",
+            step_named("free_middle"),
+            &system,
+            rng.count - mark,
+        );
+        mark = rng.count;
+
+        system.cast(
+            &mut rng,
+            crate::material::MaterialId::new(1).unwrap(),
+            1,
+            10,
+            12,
+            4,
+        );
+        check(
+            "pxs_slots[reuse_freed_slot]",
+            step_named("reuse_freed_slot"),
+            &system,
+            rng.count - mark,
+        );
+        mark = rng.count;
+
+        let granite = crate::material::MaterialId::new(3).unwrap();
+        while system.count() < crate::pxs::PXS_CHUNK_SIZE {
+            system.create(granite, itofix(1), itofix(2), C4Fixed::ZERO, C4Fixed::ZERO);
+        }
+        check(
+            "pxs_slots[fill_chunk]",
+            step_named("fill_chunk"),
+            &system,
+            rng.count - mark,
+        );
+        mark = rng.count;
+
+        system.create(granite, itofix(7), itofix(8), C4Fixed::ZERO, C4Fixed::ZERO);
+        check(
+            "pxs_slots[spill_to_chunk1]",
+            step_named("spill_to_chunk1"),
+            &system,
+            rng.count - mark,
+        );
+    }
+
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
     // including the zero default for a real resource without [Physical]
     // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance
