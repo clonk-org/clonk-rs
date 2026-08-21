@@ -11,6 +11,8 @@ use clonk_script::Value;
 ///
 /// The probe only observes; every state change comes from the shipped scripts.
 const PROBE: &str = r#"#strict
+static g_last_reason;
+
 public func Options() { return GameCall("OnGameOptionsDone"); }
 
 public func Slay(object target, int killer)
@@ -36,6 +38,18 @@ public func WaitingFor(int plr)
 public func Inactive(object target) { return GetEffect("IntInactive", target); }
 
 public func VanishOnly(object target) { return RemoveObject(target); }
+
+public func Track(object target) { return AddEffect("Reason", target, 1, 0, this()); }
+public func LastReason() { return g_last_reason; }
+public func ClearReason() { g_last_reason = -1; return 0; }
+public func SlayDirect(object target) { return Kill(target, true); }
+
+public func FxReasonStop(object pTarget, int iNr, int iReason, bool fTemp)
+{
+  if (fTemp) return 0;
+  g_last_reason = iReason;
+  return 0;
+}
 "#;
 
 fn ask(engine: &mut Engine, probe: ObjectId, function: &str, args: Vec<Value>) -> Value {
@@ -329,4 +343,66 @@ fn queron_overlapping_relaunches_each_keep_their_own_countdown() {
             "{label} advanced to its own next life instead of being stranded"
         );
     }
+}
+
+/// Queron branches its whole relaunch on the effect-removal **reason**: a
+/// `FxIntTrackClonkStop` with `iReason == 3` is treated as "deleted as a
+/// contents object" and takes the fade-skipping path, while anything else runs
+/// the ordinary death path (content Melees.c4f/Queron3.c4s/Script.c:800-808).
+///
+/// Those numbers are `C4FxCall_RemoveClear` (3) and `C4FxCall_RemoveDeath` (4)
+/// from C4Effects.h:48-49, and C++ raises them from two different places:
+/// `C4Object::AssignDeath` clears with RemoveDeath (C4Object.cpp:1176) while
+/// the removal path clears with RemoveClear (`:264`). Reporting the wrong one
+/// sends Queron down the wrong branch of its relaunch, which is the shape of
+/// the failure in clonk-org/clonk-rs#590, so pin both.
+#[test]
+fn effect_removal_reason_distinguishes_death_from_removal() {
+    let mut engine = load_installed_scenario("Melees.c4f/Queron3.c4s", 4);
+    let host = join_local_player_on_team(&mut engine, "Host", 1);
+    let _guest = join_local_player_on_team(&mut engine, "Guest", 2);
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "QPRB",
+        "Queron relaunch probe",
+        PROBE,
+    ));
+    let probe =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("QPRB")));
+    ask(&mut engine, probe, "Options", vec![]);
+    tick(&mut engine, 120);
+
+    // The death case needs a genuinely living object, so it uses a real crew
+    // clonk rather than the probe definition: `Kill` on a non-Alive object
+    // does nothing and the effect would simply never stop.
+    let dying = ask(&mut engine, probe, "CrewOf", vec![Value::Int(host)]);
+    assert!(
+        !matches!(dying, Value::Nil),
+        "the host owns a live clonk to kill"
+    );
+    ask(&mut engine, probe, "ClearReason", vec![]);
+    ask(&mut engine, probe, "Track", vec![dying.clone()]);
+    ask(&mut engine, probe, "SlayDirect", vec![dying]);
+    assert_eq!(
+        ask(&mut engine, probe, "LastReason", vec![]),
+        Value::Int(4),
+        "a death clears effects with C4FxCall_RemoveDeath"
+    );
+
+    // A plain removal clears them with RemoveClear instead.
+    let removed = Value::Object(
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("QPRB")))
+            .as_u64(),
+    );
+    ask(&mut engine, probe, "ClearReason", vec![]);
+    ask(&mut engine, probe, "Track", vec![removed.clone()]);
+    ask(&mut engine, probe, "VanishOnly", vec![removed]);
+    assert_eq!(
+        ask(&mut engine, probe, "LastReason", vec![]),
+        Value::Int(3),
+        "a removal clears effects with C4FxCall_RemoveClear"
+    );
+
+    // Let the killed crew member's relaunch chain run out rather than leaving
+    // its sounds and effects mid-flight when the process exits.
+    tick(&mut engine, 60);
 }
