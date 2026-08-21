@@ -98,6 +98,14 @@ pub fn compose_client_network_scenario(
     output_filename: &str,
     maker: &str,
 ) -> Result<Vec<u8>, ClientNetworkScenarioError> {
+    compose_client_network_scenario_with_maker_bytes(resources, output_filename, maker.as_bytes())
+}
+
+pub fn compose_client_network_scenario_with_maker_bytes(
+    resources: &ClientScenarioResources,
+    output_filename: &str,
+    maker: &[u8],
+) -> Result<Vec<u8>, ClientNetworkScenarioError> {
     let scenario = clonk_resources::Group::open(&resources.scenario.path).map_err(|source| {
         ClientNetworkScenarioError::OpenScenario {
             path: resources.scenario.path.clone(),
@@ -110,8 +118,13 @@ pub fn compose_client_network_scenario(
             source,
         }
     })?;
-    clonk_resources::combine_network_scenario(&scenario, &dynamic, output_filename, maker)
-        .map_err(Into::into)
+    clonk_resources::combine_network_scenario_with_maker_bytes(
+        &scenario,
+        &dynamic,
+        output_filename,
+        maker,
+    )
+    .map_err(Into::into)
 }
 
 fn resolve_resource<F>(
