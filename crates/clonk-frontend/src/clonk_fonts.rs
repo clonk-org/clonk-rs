@@ -245,7 +245,7 @@ impl NativeClonkFont {
             .ok()?
             .checked_mul(usize::try_from(retained_height).ok()?)?
             .checked_mul(4)?;
-        let mut retained_rgba = vec![0_u8; retained_len];
+        let mut retained_rgba = gutter_filled(retained_len);
         for row in 0..height {
             let source_start = usize::try_from(row)
                 .ok()?
@@ -1137,6 +1137,20 @@ fn blit_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
     );
 }
 
+/// The RGBA a font-atlas gutter texel carries: transparent **white**.
+///
+/// A zero-alpha texel still contributes its RGB through a linear filter, so
+/// the gutter's colour decides what a glyph edge blends toward. C++ has no
+/// gutter and samples the surrounding font surface instead, which `C4TexRef`
+/// memsets to `0xff` (`src/C4Surface.cpp:1113`) - white at zero alpha. A
+/// zero-filled gutter would be transparent black and draw a dark halo.
+const GUTTER_TEXEL: [u8; 4] = [255, 255, 255, 0];
+
+/// Allocate a gutter-filled RGBA buffer of `len` bytes.
+fn gutter_filled(len: usize) -> Vec<u8> {
+    GUTTER_TEXEL.iter().copied().cycle().take(len).collect()
+}
+
 /// Return one stable retained texture identity for immutable font/source RGBA.
 ///
 /// Several classic text paths must first build an isolated CPU source before
@@ -1162,7 +1176,7 @@ pub(crate) fn retained_padded_font_image(image: &ImageData) -> Option<ImageData>
         .ok()?
         .checked_mul(usize::try_from(retained_height).ok()?)?
         .checked_mul(4)?;
-    let mut pixels = vec![0_u8; retained_len];
+    let mut pixels = gutter_filled(retained_len);
     for row in 0..height {
         let source_start = usize::try_from(row)
             .ok()?
@@ -1666,7 +1680,10 @@ fn loaded_glyph_cell(
     let pixels = if shadow {
         compose_glyph_cell(&cov, cov_w, cov_h, cell_w, cell_height, at_x, at_y)
     } else {
-        let mut pixels = vec![Color::transparent(); cell_w.saturating_mul(cell_height)];
+        // Same transparent-white padding as the shadowed branch: shadowSize is
+        // 0 here, so C++'s copy loop covers only the bitmap and the rest of the
+        // cell keeps the surface memset (src/C4Surface.cpp:1113).
+        let mut pixels = vec![CELL_PADDING; cell_w.saturating_mul(cell_height)];
         for y in 0..cov_h {
             for x in 0..cov_w {
                 let (target_x, target_y) = (at_x + x, at_y + y);
@@ -1763,6 +1780,14 @@ fn build_font(
 /// helper in clonk-graphics, the shadow sample is offset by `round(scale)`
 /// physical pixels.
 #[allow(clippy::too_many_arguments)]
+/// A glyph cell's untouched padding: transparent **white**.
+///
+/// C++ leaves it at the font surface's initial content, and `C4TexRef` memsets
+/// its backing bits to `0xff` (`src/C4Surface.cpp:1113`), which is white at
+/// zero alpha under the engine's inverted alpha. The RGB is load-bearing
+/// because the atlas is sampled with `GL_LINEAR` at nondefault scale.
+const CELL_PADDING: Color = Color::new(255, 255, 255, 0);
+
 fn compose_scaled_glyph_cell(
     cov: &[u8],
     cov_w: usize,
@@ -1776,7 +1801,11 @@ fn compose_scaled_glyph_cell(
     let Some(len) = cell_w.checked_mul(cell_h) else {
         return Vec::new();
     };
-    let mut cell = vec![Color::transparent(); len];
+    // Transparent white, not transparent black: C++ never clears the cell, so
+    // every pixel the loop below skips keeps the font surface's `0xff` memset
+    // (src/C4Surface.cpp:1113). At nondefault scale the atlas is sampled with
+    // GL_LINEAR, so this RGB is what a glyph edge blends toward.
+    let mut cell = vec![CELL_PADDING; len];
     let coverage = |x: usize, y: usize| -> u32 {
         (x < cov_w && y < cov_h)
             .then(|| {
@@ -2352,6 +2381,69 @@ mod tests {
             clonk_graphics::Color::new(0, 0, 0, 127),
             "round(scale)=3 places the C++ shadow three physical pixels away"
         );
+    }
+
+    /// At nondefault scale the cell is far taller than the rasterized glyph,
+    /// so most of it is padding - and that padding must be transparent
+    /// **white**.
+    ///
+    /// C++ never clears a glyph cell: `AddRenderedChar`'s copy loop only
+    /// covers `bitmap.width/rows + shadowSize` (`src/StdFont.cpp:224-226`), so
+    /// the rest keeps the font surface's initial content, which `C4TexRef`
+    /// memsets to `0xff` (`src/C4Surface.cpp:1113`) - white at zero alpha
+    /// under the engine's inverted alpha.
+    ///
+    /// This is the scale-aware path, which is where it shows: `PerformBlt`
+    /// samples the atlas with `GL_LINEAR` once the scale is not 1, so a glyph
+    /// edge blends toward whatever its padding holds. Transparent black
+    /// darkens the edge; transparent white is what C++ draws.
+    #[test]
+    fn scaled_cells_pad_untouched_area_with_transparent_white() {
+        // cov 1x1 with shadowSize 3 visits only x,y < 4, so column and row 4
+        // of this 5x5 cell are never written.
+        let cell = compose_scaled_glyph_cell(&[255], 1, 1, 5, 5, 0, 0, 3);
+        let white = clonk_graphics::Color::new(255, 255, 255, 0);
+        for y in 0..5 {
+            assert_eq!(cell[y * 5 + 4], white, "column 4 of row {y} is padding");
+        }
+        for x in 0..5 {
+            assert_eq!(cell[4 * 5 + x], white, "row 4 at column {x} is padding");
+        }
+    }
+
+    /// The retained one-texel gutter is transparent **white**, matching the
+    /// atlas content C++ would have sampled there.
+    ///
+    /// The gutter exists so linear filtering does not clamp to a glyph's last
+    /// opaque texel, but a zero-filled gutter is transparent *black*, and a
+    /// zero-alpha texel still contributes its RGB through the filter - so a
+    /// black gutter draws a dark halo around glyphs and inline images at
+    /// nondefault scale. C++ has no gutter at all: it samples the surrounding
+    /// font surface, which `C4TexRef` memsets to `0xff`
+    /// (`src/C4Surface.cpp:1113`) - white at zero alpha.
+    #[test]
+    fn the_retained_font_gutter_is_transparent_white() {
+        // One opaque red texel; every one of the eight ring texels is gutter.
+        let source = ImageData::new(1, 1, vec![255, 0, 0, 255]);
+        let padded = retained_padded_font_image(&source).expect("padded image");
+        assert_eq!((padded.width(), padded.height()), (3, 3));
+
+        let texel = |index: usize| {
+            let base = index * 4;
+            padded.pixels()[base..base + 4].to_vec()
+        };
+        assert_eq!(
+            texel(4),
+            vec![255, 0, 0, 255],
+            "the source texel is centred"
+        );
+        for index in [0, 1, 2, 3, 5, 6, 7, 8] {
+            assert_eq!(
+                texel(index),
+                vec![255, 255, 255, 0],
+                "gutter texel {index} must be transparent white, not transparent black"
+            );
+        }
     }
 
     #[test]

@@ -117,6 +117,8 @@ pub fn markup_blit_color(tag_rgb: [u8; 3]) -> [u8; 3] {
 /// contributes; we use transparent black.) Writes that fall outside the cell
 /// and short/oversized `cov` slices are handled gracefully (missing coverage
 /// reads as 0).
+const PAD: Color = Color::new(255, 255, 255, 0);
+
 pub fn compose_glyph_cell(
     cov: &[u8],
     cov_w: usize,
@@ -129,7 +131,13 @@ pub fn compose_glyph_cell(
     let Some(len) = cell_w.checked_mul(cell_h) else {
         return Vec::new();
     };
-    let mut cell = vec![Color::transparent(); len];
+    // The cell starts as transparent white, not transparent black: C++ never
+    // clears it, so the pixels the copy loop below never reaches keep the font
+    // surface's initial content, and `C4TexRef` memsets its bits to `0xff`
+    // (src/C4Surface.cpp:1113) — white at zero alpha under inverted alpha.
+    // The RGB matters because the atlas is sampled with GL_LINEAR at
+    // nondefault scale, so a glyph edge blends toward its padding.
+    let mut cell = vec![PAD; len];
     // Coverage lookup; out-of-range reads as 0 (no panic on short slices).
     let g = |x: usize, y: usize| -> u32 {
         (x < cov_w && y < cov_h)
@@ -1974,12 +1982,44 @@ mod tests {
     #[test]
     fn compose_respects_placement_and_clips_to_cell() {
         // 1x1 coverage placed at (1,1) in a 2x2 cell: the shadow pixels fall
-        // outside and are dropped; untouched pixels stay transparent black.
+        // outside and are dropped. The untouched pixels keep the cell's
+        // initial transparent *white* — C++ leaves them at the font surface's
+        // `0xff` memset (src/C4Surface.cpp:1113), and this test previously
+        // pinned the port's transparent black instead.
         let cell = compose_glyph_cell(&[255], 1, 1, 2, 2, 1, 1);
-        assert_eq!(cell[0], Color::transparent());
-        assert_eq!(cell[1], Color::transparent());
-        assert_eq!(cell[2], Color::transparent());
+        assert_eq!(cell[0], Color::new(255, 255, 255, 0));
+        assert_eq!(cell[1], Color::new(255, 255, 255, 0));
+        assert_eq!(cell[2], Color::new(255, 255, 255, 0));
         assert_eq!(cell[3], Color::new(255, 255, 255, 255));
+    }
+
+    /// The cell area no glyph pixel reaches is **transparent white**, not
+    /// transparent black.
+    ///
+    /// C++ never clears the cell: `AddRenderedChar`'s copy loop only covers
+    /// `bitmap.width/rows + shadowSize` (`src/StdFont.cpp:224-226`), so every
+    /// other pixel of the `width x iGfxLineHgt` cell keeps whatever the font
+    /// surface was created with — and `C4TexRef` memsets its backing bits to
+    /// `0xff` (`src/C4Surface.cpp:1113`), which under the engine's inverted
+    /// alpha is white at zero alpha.
+    ///
+    /// The RGB of a zero-alpha pixel is not dead data: the atlas is sampled
+    /// with `GL_LINEAR` at nondefault scale, so a glyph edge blends toward its
+    /// padding. Black padding darkens the edge; white padding is what C++
+    /// actually shows.
+    #[test]
+    fn compose_pads_untouched_cell_area_with_transparent_white() {
+        // A 1x1 glyph in a tall cell: rows 2.. are never visited by the loop,
+        // which extends only to cov + shadowSize.
+        let cell = compose_glyph_cell(&[255], 1, 1, 2, 4, 0, 0);
+        assert_eq!(cell.len(), 8);
+        for (index, pixel) in cell.iter().enumerate().skip(4) {
+            assert_eq!(
+                *pixel,
+                Color::new(255, 255, 255, 0),
+                "padding pixel {index} must be transparent white, not transparent black"
+            );
+        }
     }
 
     #[test]
