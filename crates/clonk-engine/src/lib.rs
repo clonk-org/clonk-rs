@@ -387,6 +387,7 @@ std::thread_local! {
     static SYNTHETIC_COMMAND_FOLDS: Cell<usize> = const { Cell::new(0) };
     static ACTION_CALLBACK_DRAIN_INVOCATIONS: Cell<usize> = const { Cell::new(0) };
     static DEFINITION_METADATA_TABLE_READS: Cell<usize> = const { Cell::new(0) };
+    static HOST_SCRIPT_ORDER_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static OBJECT_VISIBILITY_VISITING_SETS: Cell<usize> = const { Cell::new(0) };
 }
 

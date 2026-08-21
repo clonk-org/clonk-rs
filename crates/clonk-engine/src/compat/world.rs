@@ -1606,6 +1606,7 @@ pub(crate) struct HostDefinitionTables {
     rank_names: Rc<HashMap<DefinitionId, RankNameTable>>,
     rank_bases: Rc<HashMap<DefinitionId, i32>>,
     scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
+    ordered_scripts: Rc<Vec<(DefinitionId, Arc<ScriptEngine>)>>,
     linked_script_hosts: Rc<Vec<(String, Arc<ScriptEngine>)>>,
     standard_crew_names: Option<String>,
     definition_crew_names: Rc<HashMap<String, String>>,
@@ -1617,7 +1618,7 @@ pub(crate) struct HostDefinitionTables {
 fn script_for_host_identity_from_hosts(
     scenario_script: Option<&Arc<ScriptEngine>>,
     linked_script_hosts: &[(String, Arc<ScriptEngine>)],
-    definition_scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+    ordered_definition_scripts: &[(DefinitionId, Arc<ScriptEngine>)],
     identity: clonk_script::ScriptHostIdentity,
 ) -> Option<(String, Option<DefinitionId>, Arc<ScriptEngine>)> {
     if let Some(script) = scenario_script.filter(|script| script.host_identity() == identity) {
@@ -1629,24 +1630,22 @@ fn script_for_host_identity_from_hosts(
     {
         return Some((name.clone(), None, Arc::clone(script)));
     }
-    let mut matches = definition_scripts
+    ordered_definition_scripts
         .iter()
-        .filter(|(_, script)| script.host_identity() == identity)
-        .collect::<Vec<_>>();
-    matches.sort_by_key(|(definition, _)| *definition);
-    matches.first().map(|(definition, script)| {
-        (
-            (*definition).clone(),
-            Some((*definition).clone()),
-            Arc::clone(script),
-        )
-    })
+        .find(|(_, script)| script.host_identity() == identity)
+        .map(|(definition, script)| {
+            (
+                definition.clone(),
+                Some(definition.clone()),
+                Arc::clone(script),
+            )
+        })
 }
 
 fn resolve_engine_global_script_from_hosts(
     scenario_script: Option<&Arc<ScriptEngine>>,
     linked_script_hosts: &[(String, Arc<ScriptEngine>)],
-    definition_scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+    ordered_definition_scripts: &[(DefinitionId, Arc<ScriptEngine>)],
     name: &str,
 ) -> Option<(Arc<ScriptEngine>, clonk_script::ScriptFunctionResolution)> {
     let resolve = |script: &Arc<ScriptEngine>| {
@@ -1654,7 +1653,7 @@ fn resolve_engine_global_script_from_hosts(
         let exact_script = script_for_host_identity_from_hosts(
             scenario_script,
             linked_script_hosts,
-            definition_scripts,
+            ordered_definition_scripts,
             resolution.host_identity,
         )
         .map(|(_, _, script)| script)
@@ -1672,11 +1671,22 @@ fn resolve_engine_global_script_from_hosts(
             return Some(resolved);
         }
     }
-    let mut definitions = definition_scripts.iter().collect::<Vec<_>>();
-    definitions.sort_by_key(|(definition, _)| *definition);
-    definitions
-        .into_iter()
+    ordered_definition_scripts
+        .iter()
         .find_map(|(_, script)| resolve(script))
+}
+
+fn ordered_definition_scripts(
+    scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+) -> Vec<(DefinitionId, Arc<ScriptEngine>)> {
+    #[cfg(test)]
+    HOST_SCRIPT_ORDER_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+    let mut ordered = scripts
+        .iter()
+        .map(|(definition, script)| (definition.clone(), Arc::clone(script)))
+        .collect::<Vec<_>>();
+    ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
+    ordered
 }
 
 impl HostDefinitionTables {
@@ -1695,6 +1705,7 @@ impl HostDefinitionTables {
         definition_crew_names: HashMap<String, String>,
         reloadable_definitions: HashSet<String>,
     ) -> Self {
+        let ordered_scripts = ordered_definition_scripts(&scripts);
         Self {
             color_by_owner: Rc::new(color_by_owner),
             base_auto_sell: Rc::new(base_auto_sell),
@@ -1712,6 +1723,7 @@ impl HostDefinitionTables {
                 &linked_script_hosts,
             )),
             scripts: Rc::new(scripts),
+            ordered_scripts: Rc::new(ordered_scripts),
             linked_script_hosts: Rc::new(linked_script_hosts),
             standard_crew_names,
             definition_crew_names: Rc::new(definition_crew_names),
@@ -1727,7 +1739,7 @@ impl HostDefinitionTables {
         resolve_engine_global_script_from_hosts(
             scenario_script,
             self.linked_script_hosts.as_ref(),
-            self.scripts.as_ref(),
+            self.ordered_scripts.as_ref(),
             name,
         )
         .is_some()
@@ -2359,6 +2371,11 @@ pub struct HostWorldContext {
     /// functions can run script functions on other objects mid-VM-call
     /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
     definition_scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
+    /// The same scripts in the prior resolver's lexical `DefinitionId` order.
+    /// Global/native resolution is hot enough that rebuilding this order per
+    /// lookup makes callback-heavy activation scale with definitions times
+    /// callbacks.
+    ordered_definition_scripts: Rc<Vec<(DefinitionId, Arc<ScriptEngine>)>>,
     /// Engine-wide `&`-parameter slots per function name (C4AulParse's
     /// `anyfunctakesref` chain, folded once when the tables are installed).
     reference_parameter_slots: Rc<HashMap<String, u32>>,
@@ -2505,6 +2522,7 @@ impl Default for HostWorldContext {
             reloadable_definitions: None,
             definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
             definition_scripts: Rc::new(HashMap::new()),
+            ordered_definition_scripts: Rc::new(Vec::new()),
             reference_parameter_slots: Rc::new(HashMap::new()),
             direct_call_function_names: Rc::new(HashSet::new()),
             linked_script_hosts: Rc::new(Vec::new()),
@@ -2608,6 +2626,7 @@ impl HostWorldContext {
         self.definition_rank_names = Rc::clone(&tables.rank_names);
         self.definition_rank_bases = Rc::clone(&tables.rank_bases);
         self.definition_scripts = Rc::clone(&tables.scripts);
+        self.ordered_definition_scripts = Rc::clone(&tables.ordered_scripts);
         self.reference_parameter_slots = Rc::clone(&tables.reference_parameter_slots);
         self.direct_call_function_names = Rc::clone(&tables.direct_call_function_names);
         self.linked_script_hosts = Rc::clone(&tables.linked_script_hosts);
@@ -2887,6 +2906,7 @@ impl HostWorldContext {
             reloadable_definitions: None,
             definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
             definition_scripts: Rc::new(HashMap::new()),
+            ordered_definition_scripts: Rc::new(Vec::new()),
             reference_parameter_slots: Rc::new(HashMap::new()),
             direct_call_function_names: Rc::new(HashSet::new()),
             linked_script_hosts: Rc::new(Vec::new()),
@@ -3407,6 +3427,7 @@ impl HostWorldContext {
             &scripts,
             self.linked_script_hosts.as_ref(),
         ));
+        self.ordered_definition_scripts = Rc::new(ordered_definition_scripts(&scripts));
         self.definition_scripts = Rc::new(scripts);
         self
     }
@@ -3456,7 +3477,7 @@ impl HostWorldContext {
         script_for_host_identity_from_hosts(
             self.scenario_script.as_ref(),
             self.linked_script_hosts.as_ref(),
-            self.definition_scripts.as_ref(),
+            self.ordered_definition_scripts.as_ref(),
             identity,
         )
     }
@@ -3472,7 +3493,7 @@ impl HostWorldContext {
         resolve_engine_global_script_from_hosts(
             self.scenario_script.as_ref(),
             self.linked_script_hosts.as_ref(),
-            self.definition_scripts.as_ref(),
+            self.ordered_definition_scripts.as_ref(),
             name,
         )
     }
@@ -3495,10 +3516,8 @@ impl HostWorldContext {
         {
             return Some(Arc::clone(script));
         }
-        let mut definitions = self.definition_scripts.iter().collect::<Vec<_>>();
-        definitions.sort_by_key(|(definition, _)| *definition);
-        definitions
-            .into_iter()
+        self.ordered_definition_scripts
+            .iter()
             .find_map(|(_, script)| script.has_host_function(name).then(|| Arc::clone(script)))
     }
 

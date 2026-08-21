@@ -3446,10 +3446,11 @@ fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
     let mut reporter = ScenarioLoadingReporter::new(sender);
     reporter.report(42, "Exact phase-status line");
     reporter.report(40, "Definition metadata and sources collected");
+    reporter.report(45, "");
     reporter.send(ScenarioLoadingEvent::RefreshResources);
     app.poll_loading().test_value();
     let state = app.loader_screen.test_ref().state();
-    main_assert_eq!(state.progress() => 42);
+    main_assert_eq!(state.progress() => 45);
     main_assert_eq!(state.process() => None);
     main_assert!(matches!(
         state.log(),
@@ -3481,6 +3482,9 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     app.start_scenario(scenario).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
+    main_assert_eq!(app.mode => AppMode::Running);
+    main_assert!(app.terminal_loader_frame_pending);
+    main_assert!(app.loader_presentation_active());
     let state = app.loader_screen.test_ref().state();
     main_assert_eq!(state.progress() => 100);
     let clonk_frontend::loader_screen::LoaderLog::Visible(lines) = state.log() else {
@@ -3505,6 +3509,18 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
         }
         previous = Some(index);
     }
+
+    let mut frame = vec![0; app.graphics.surface().pixels().len()];
+    app.render(&mut frame).test_value();
+    main_assert!(app.terminal_loader_frame_pending, "preparing a frame is not a successful window presentation");
+    main_assert!(app.finish_terminal_loader_frame_presentation());
+    main_assert!(!app.loader_presentation_active());
+    app.terminal_loader_frame_pending = true;
+    main_assert!(app.discard_terminal_loader_frame_for_headless_render());
+    main_assert!(!app.loader_presentation_active());
+    app.console_mode = true;
+    app.arm_terminal_loader_frame_presentation();
+    main_assert!(!app.loader_presentation_active());
 }
 
 #[test]

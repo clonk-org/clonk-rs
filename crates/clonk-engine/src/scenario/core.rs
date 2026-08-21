@@ -279,6 +279,21 @@ pub(crate) struct ScenarioScriptSource {
 /// used at apply time so #appendto is resolved before scenario #include.
 /// Engine-global functions remain excluded: Game.Script.GetSFunc performs a
 /// local-owner lookup and the declaring host's global FnLink is unnamed.
+pub(in crate::scenario) fn scenario_may_need_map_callbacks(
+    group: &Group,
+) -> Result<bool, ScenarioError> {
+    if group.exists("Landscape.txt") {
+        return Ok(true);
+    }
+    Ok(group
+        .entries()?
+        .into_iter()
+        // This is deliberately only a conservative candidate check. Native
+        // validates the 1..=30-byte section name later, after landscape init;
+        // validating here would change which load error wins.
+        .any(|entry| legacy_group_wildcard_match(b"Sect*.c4g", &entry.name_bytes)))
+}
+
 fn scenario_map_callback_functions(
     script: Option<&ScenarioScriptSource>,
     definitions: &[ScenarioDefinition],
@@ -3100,6 +3115,8 @@ impl Scenario {
         discover_folder_definitions: bool,
         report_progress: &mut dyn FnMut(i32, &'static str),
     ) -> Result<Self, ScenarioError> {
+        let indexed_group = group.is_directory().then(|| group.indexed()).transpose()?;
+        let group = indexed_group.as_ref().unwrap_or(group);
         let mut manifest = parse_legacy_scenario_manifest(group)?;
         let language_packs = resolver.resolve_language_packs(group)?;
         let scenario_origin = manifest.core.head.origin.clone();
@@ -3180,6 +3197,24 @@ impl Scenario {
         } else {
             selected_definition_spellings
         };
+        let folder_definition_groups = if discover_folder_definitions {
+            folder_local_definition_groups(group)?
+        } else {
+            Vec::new()
+        };
+        let external_definition_group_count = definition_specs_to_resolve.len()
+            * if definition_path_expansion.is_some() {
+                2
+            } else {
+                1
+            }
+            + folder_definition_groups.len();
+        let definition_progress_range = |index: usize| {
+            let count = external_definition_group_count.max(1) as i32;
+            let index = index as i32;
+            (10 + 25 * index / count, 10 + 25 * (index + 1) / count)
+        };
+        let mut external_definition_group_index = 0;
         if let Some(expansion) = definition_path_expansion {
             // C4Game::OpenScenario inserts an expanded copy of every selected
             // module at the vector's beginning, preserving the original
@@ -3199,7 +3234,10 @@ impl Scenario {
                 };
                 definition_resource_paths.push(definition_group.root().to_path_buf());
                 definition_root_groups.push(definition_group.clone());
-                collect_definitions_from_group(
+                let (min_progress, max_progress) =
+                    definition_progress_range(external_definition_group_index);
+                external_definition_group_index += 1;
+                collect_definitions_from_group_with_progress(
                     &definition_group,
                     true,
                     &skip_ids,
@@ -3209,13 +3247,20 @@ impl Scenario {
                     scenario_origin.as_deref(),
                     &mut sound_effect_groups,
                     &mut load_items,
+                    min_progress,
+                    max_progress,
+                    "",
+                    report_progress,
                 )?;
             }
             for spec in definition_specs_to_resolve {
                 let definition_group = resolve_one_definition_group(group, resolver, spec)?;
                 definition_resource_paths.push(definition_group.root().to_path_buf());
                 definition_root_groups.push(definition_group.clone());
-                collect_definitions_from_group(
+                let (min_progress, max_progress) =
+                    definition_progress_range(external_definition_group_index);
+                external_definition_group_index += 1;
+                collect_definitions_from_group_with_progress(
                     &definition_group,
                     true,
                     &skip_ids,
@@ -3225,6 +3270,10 @@ impl Scenario {
                     scenario_origin.as_deref(),
                     &mut sound_effect_groups,
                     &mut load_items,
+                    min_progress,
+                    max_progress,
+                    "",
+                    report_progress,
                 )?;
             }
         } else {
@@ -3232,7 +3281,10 @@ impl Scenario {
                 let definition_group = resolve_one_definition_group(group, resolver, spec)?;
                 definition_resource_paths.push(definition_group.root().to_path_buf());
                 definition_root_groups.push(definition_group.clone());
-                collect_definitions_from_group(
+                let (min_progress, max_progress) =
+                    definition_progress_range(external_definition_group_index);
+                external_definition_group_index += 1;
+                collect_definitions_from_group_with_progress(
                     &definition_group,
                     true,
                     &skip_ids,
@@ -3242,31 +3294,40 @@ impl Scenario {
                     scenario_origin.as_deref(),
                     &mut sound_effect_groups,
                     &mut load_items,
+                    min_progress,
+                    max_progress,
+                    "",
+                    report_progress,
                 )?;
             }
         }
 
-        if discover_folder_definitions {
-            for folder_group in folder_local_definition_groups(group)? {
-                definition_resource_paths.push(folder_group.root().to_path_buf());
-                definition_root_groups.push(folder_group.clone());
-                collect_definitions_from_group(
-                    &folder_group,
-                    true,
-                    &skip_ids,
-                    languages,
-                    &language_packs,
-                    group,
-                    scenario_origin.as_deref(),
-                    &mut sound_effect_groups,
-                    &mut load_items,
-                )?;
-            }
+        for folder_group in folder_definition_groups {
+            definition_resource_paths.push(folder_group.root().to_path_buf());
+            definition_root_groups.push(folder_group.clone());
+            let (min_progress, max_progress) =
+                definition_progress_range(external_definition_group_index);
+            external_definition_group_index += 1;
+            collect_definitions_from_group_with_progress(
+                &folder_group,
+                true,
+                &skip_ids,
+                languages,
+                &language_packs,
+                group,
+                scenario_origin.as_deref(),
+                &mut sound_effect_groups,
+                &mut load_items,
+                min_progress,
+                max_progress,
+                "",
+                report_progress,
+            )?;
         }
 
         // InitDefs' scenario pass disables System.c4g discovery because the
         // scenario-local group is loaded later by LoadScenarioScripts.
-        collect_definitions_from_group(
+        collect_definitions_from_group_with_progress(
             group,
             false,
             &skip_ids,
@@ -3276,6 +3337,10 @@ impl Scenario {
             scenario_origin.as_deref(),
             &mut sound_effect_groups,
             &mut load_items,
+            35,
+            40,
+            "Definition metadata and sources collected",
+            report_progress,
         )?;
 
         // fOverload replaces and destroys an earlier same-ID C4Def script,
@@ -3411,8 +3476,6 @@ impl Scenario {
             | DefinitionLoadStep::SystemScripts(_)
             | DefinitionLoadStep::Particle(_) => true,
         });
-        report_progress(40, "Definition metadata and sources collected");
-
         let script = load_legacy_scenario_script(group, &scenario_components, languages)?;
         let scenario_system_scripts = load_scenario_system_scripts(
             group,
@@ -3421,12 +3484,16 @@ impl Scenario {
             languages,
         )?;
         report_progress(56, "Scenario script sources loaded");
-        let map_callback_functions = scenario_map_callback_functions(
-            script.as_ref(),
-            &collected,
-            &definition_load_steps,
-            &scenario_system_scripts,
-        )?;
+        let map_callback_functions = if scenario_may_need_map_callbacks(group)? {
+            scenario_map_callback_functions(
+                script.as_ref(),
+                &collected,
+                &definition_load_steps,
+                &scenario_system_scripts,
+            )?
+        } else {
+            HashSet::new()
+        };
         report_progress(57, "Scenario callback names indexed");
         let mut classifier = build_map_pixel_classifier(group, resolver)?;
         report_progress(58, "Material and texture-map data decoded");
@@ -3437,7 +3504,7 @@ impl Scenario {
         report_progress(60, "Material library prepared");
         let mut post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
         let mut prepared_map_creator = None;
-        let mut landscape = load_legacy_landscape(
+        let mut landscape = load_legacy_landscape_with_progress(
             group,
             &manifest,
             runtime_landscape.as_ref(),
@@ -3448,6 +3515,7 @@ impl Scenario {
             &map_callback_functions,
             &mut post_init_map_callbacks,
             &mut prepared_map_creator,
+            report_progress,
         )?;
         report_progress(88, "Landscape data generated or decoded");
         if let (Some(runtime), Some(landscape)) = (runtime_landscape, landscape.as_mut()) {

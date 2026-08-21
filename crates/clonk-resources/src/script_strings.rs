@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{ComponentGroups, Group, GroupError};
+use crate::{ComponentGroups, Group, GroupError, ResourceLoadDiagnostic};
 
 const C4_MAX_NAME: usize = 30;
 
@@ -66,11 +66,32 @@ pub fn localize_script_source_with_components<S: AsRef<str>>(
     source: &str,
     languages: &[S],
 ) -> Result<String, GroupError> {
+    localize_script_source_with_components_and_diagnostics(
+        components,
+        source,
+        languages,
+        ResourceLoadDiagnostic::emit,
+    )
+}
+
+/// Applies a script string table while returning non-fatal missing-key
+/// diagnostics to the caller instead of emitting them immediately.
+pub fn localize_script_source_with_components_and_diagnostics<S: AsRef<str>>(
+    components: &ComponentGroups,
+    source: &str,
+    languages: &[S],
+    mut report_diagnostic: impl FnMut(ResourceLoadDiagnostic),
+) -> Result<String, GroupError> {
     let (table, table_path) = load_script_string_table(components, languages)?;
     let entries = parse_string_table(&table);
     let source = clonk_script::c4_string_bytes(source);
     Ok(clonk_script::c4_string_from_bytes(
-        &replace_localization_keys(&source, &entries, &table_path),
+        &replace_localization_keys_with_diagnostics(
+            &source,
+            &entries,
+            &table_path,
+            &mut report_diagnostic,
+        ),
     ))
 }
 
@@ -129,10 +150,25 @@ fn parse_string_table(table: &[u8]) -> HashMap<&[u8], &[u8]> {
     entries
 }
 
+#[cfg(test)]
 fn replace_localization_keys(
     source: &[u8],
     entries: &HashMap<&[u8], &[u8]>,
     table_path: &std::path::Path,
+) -> Vec<u8> {
+    replace_localization_keys_with_diagnostics(
+        source,
+        entries,
+        table_path,
+        &mut ResourceLoadDiagnostic::emit,
+    )
+}
+
+fn replace_localization_keys_with_diagnostics(
+    source: &[u8],
+    entries: &HashMap<&[u8], &[u8]>,
+    table_path: &std::path::Path,
+    report_diagnostic: &mut impl FnMut(ResourceLoadDiagnostic),
 ) -> Vec<u8> {
     let mut result = Vec::with_capacity(source.len());
     let mut copied_through = 0;
@@ -166,11 +202,10 @@ fn replace_localization_keys(
             continue;
         }
         let Some(value) = entries.get(key) else {
-            tracing::warn!(
-                path = %table_path.display(),
-                key = %String::from_utf8_lossy(key),
-                "string table entry not found"
-            );
+            report_diagnostic(ResourceLoadDiagnostic::ScriptStringTableEntryNotFound {
+                path: table_path.to_path_buf(),
+                key: String::from_utf8_lossy(key).into_owned(),
+            });
             continue;
         };
 
@@ -184,6 +219,10 @@ fn replace_localization_keys(
     }
     result.extend_from_slice(&source[copied_through..]);
     result
+}
+
+pub(crate) fn emit_missing_script_string(table_path: &std::path::Path, key: &str) {
+    tracing::warn!(path = %table_path.display(), %key, "string table entry not found");
 }
 
 #[cfg(test)]
@@ -210,6 +249,38 @@ mod tests {
         assert_eq!(
             clonk_script::c4_string_bytes(&localized),
             [b'"', 0xff, b' ', 0xe9, 0xff, b'"']
+        );
+    }
+
+    #[test]
+    fn localization_reports_missing_keys_in_source_order() {
+        let directory = tempdir().expect("tempdir");
+        let table_path = directory.path().join("StringTblUS.txt");
+        std::fs::write(&table_path, b"Known=value\n").expect("write string table");
+        let group = Group::open(directory.path()).expect("open group");
+        let mut diagnostics = Vec::new();
+
+        let localized = localize_script_source_with_components_and_diagnostics(
+            &ComponentGroups::local(&group),
+            "$First$/$Known$/$Second$",
+            &["US"],
+            |diagnostic| diagnostics.push(diagnostic),
+        )
+        .expect("source localizes");
+
+        assert_eq!(localized, "$First$/value/$Second$");
+        assert_eq!(
+            diagnostics,
+            [
+                ResourceLoadDiagnostic::ScriptStringTableEntryNotFound {
+                    path: table_path.clone(),
+                    key: "First".to_string(),
+                },
+                ResourceLoadDiagnostic::ScriptStringTableEntryNotFound {
+                    path: table_path,
+                    key: "Second".to_string(),
+                },
+            ]
         );
     }
 

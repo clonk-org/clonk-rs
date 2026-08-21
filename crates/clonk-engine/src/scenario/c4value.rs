@@ -820,15 +820,16 @@ pub(in crate::scenario) fn folder_local_definition_groups(
 
     let mut groups = Vec::new();
     for path in folder_paths {
-        let group = match open_group_path(&path) {
-            Ok(group) => group,
-            // C4Game::FoldersWithLocalsDefs skips path prefixes it cannot
-            // open rather than turning them into definition resources.
-            Err(error) if is_missing_group_error(&error) => continue,
-            Err(error) => return Err(ScenarioError::Resources(error)),
+        // C4Game::FoldersWithLocalsDefs treats every failed Open/FindEntry as
+        // a folder without local definitions (src/C4Game.cpp:3976-3990).
+        // Discovery is a best-effort pre-count, not a new load-error source.
+        let Ok(group) = open_group_path(&path) else {
+            continue;
         };
-        let has_immediate_definition = group
-            .entries()?
+        let Ok(entries) = group.entries() else {
+            continue;
+        };
+        let has_immediate_definition = entries
             .into_iter()
             .any(|entry| legacy_group_wildcard_match(b"*.c4d", &entry.name_bytes));
         if has_immediate_definition {

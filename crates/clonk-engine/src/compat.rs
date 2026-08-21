@@ -49,6 +49,7 @@ use crate::{
 #[cfg(test)]
 use crate::{
     LiquidSegment, PlayerViewport, CONTENTS_SCOPE_GROWTH_VISITS, FIND_CONDITION_OBJECT_REFRESHES,
+    HOST_SCRIPT_ORDER_MATERIALIZATIONS,
 };
 use chrono::{Datelike, Local, Timelike};
 use clonk_resources::{PhysicalInfo, RankNameTable};
