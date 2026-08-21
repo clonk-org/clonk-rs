@@ -3823,6 +3823,62 @@ fn install_definition_resolver_prefers_global_pack_before_folder_local_collision
     main_assert_eq!(engine.definition_value("SAME") => Some(2), "the later folder-local pass overloads the explicit global pack");
 }
 
+#[test]
+fn install_definition_resolver_falls_back_to_the_folder_local_pack() {
+    // C4Game::InitDefs appends every `.c4f` ancestor holding definitions to the
+    // same NRT_Definitions vector the explicit entries populate
+    // (C4Game.cpp:210-213, FoldersWithLocalsDefs :3961-3994), so a pack nested
+    // beside its scenarios is already a definition source. Failing the explicit
+    // lookup for that same pack is what forces every mod to be unpacked into
+    // the data root; resolve it from the folder chain instead.
+    clonk_logging::init();
+    let _env_lock = crate::tests::env_lock().lock();
+    reset_cached_app_paths();
+
+    let install_dir = tempdir();
+    let planet_dir = install_dir.path().join("planet");
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
+
+    let family = planet_dir.join("Mods.c4f");
+    let nested = family.join("OnlyNested.c4d").join("Nested.c4d");
+    fs::create_dir_all(&nested).test_value();
+    fs::write(
+        nested.join("DefCore.txt"),
+        "[DefCore]\nid=NEST\nName=NEST\nCategory=0\nValue=7\n",
+    )
+    .test_value();
+
+    let scenario_dir = family.join("Alpha.c4s");
+    fs::create_dir_all(&scenario_dir).test_value();
+    fs::write(
+        scenario_dir.join("Scenario.txt"),
+        "[Head]\nTitle=Nested\n\n[Definitions]\nDefinition1=OnlyNested.c4d\n",
+    )
+    .test_value();
+    let scenario_group = Group::open(&scenario_dir).test_value();
+
+    let user_dir = install_dir.path().join("user-data");
+    fs::create_dir_all(&user_dir).test_value();
+    let _guard = test_env_guard(install_dir.path(), user_dir.as_path());
+
+    let paths = cached_app_paths().test_value();
+    let resolver = InstallDefinitionResolver::new(Some(paths));
+    let groups = resolver
+        .resolve_definition_groups(&scenario_group, "OnlyNested.c4d")
+        .test_value();
+    main_assert_eq!(
+        groups
+            .iter()
+            .map(|group| group.root().to_path_buf())
+            .collect::<Vec<_>>() =>
+        vec![family.join("OnlyNested.c4d")],
+        "a pack that exists only inside the scenario's .c4f resolves from there"
+    );
+
+    reset_cached_app_paths();
+}
+
 fn assert_parent_resource_order(scenario: &Group, inner: &Path, outer: &Path) {
     let resolver = InstallDefinitionResolver::new(None);
     let graphics = resolver.resolve_graphics_groups(scenario).test_value();
