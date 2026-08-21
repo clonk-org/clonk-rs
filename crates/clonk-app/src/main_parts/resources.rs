@@ -615,6 +615,26 @@ impl InstallDefinitionResolver {
         Ok(())
     }
 
+    /// Reports a definition name that resolves at the data root while a `.c4f`
+    /// ancestor holds a pack of the same name. This is not an error and does
+    /// not change the outcome — InitDefs loads the folder afterwards and its
+    /// definitions overload the root pack by id (C4Game.cpp:95,210-213) — but
+    /// the two packs are distinguishable only by content, so which one a
+    /// scenario ends up running is worth stating.
+    fn report_shadowed_folder_packs(folders: &[PathBuf], relative: &Path, resolved: &Path) {
+        for folder in folders {
+            let candidate = folder.join(relative);
+            if candidate.exists() {
+                tracing::info!(
+                    definition = %relative.display(),
+                    resolved = %resolved.display(),
+                    folder_local = %candidate.display(),
+                    "definition name resolves at the data root while a folder-local pack of the same name will overload it"
+                );
+            }
+        }
+    }
+
     fn resolve_definition_groups_ordered(
         &self,
         scenario: &Group,
@@ -632,12 +652,27 @@ impl InstallDefinitionResolver {
         if relative.is_absolute() {
             Self::open_and_push(&relative, &mut groups, &mut seen)?;
         } else {
-            // DefinitionFilenames are opened once from executable-data roots.
-            // Folder/scenario-local resources are appended by clonk-engine's
-            // separate outer-to-inner InitDefs pass and cannot rescue a
-            // missing explicit vector entry (C4Game.cpp:181-213,3961-3994).
+            // DefinitionFilenames are opened once from executable-data roots
+            // (C4Game.cpp:181-213). The data root is therefore searched first
+            // and a name that resolves there keeps the exact pack C++ gave it.
+            //
+            // Only a name that resolves nowhere falls through to the
+            // scenario's own `.c4f` chain, innermost first. InitDefs appends
+            // every such folder to the same NRT_Definitions vector moments
+            // later (FoldersWithLocalsDefs, :3961-3994), so the pack is
+            // already a definition source; refusing it here bought nothing
+            // and forced every mod to be unpacked into the data root.
+            let folders = if self.app_paths.is_some() {
+                let mut folders = Self::c4f_parent_paths(scenario.root());
+                folders.reverse();
+                folders
+            } else {
+                Vec::new()
+            };
             let bases = if self.app_paths.is_some() {
-                self.app_definition_bases()
+                let mut bases = self.app_definition_bases();
+                bases.extend(folders.iter().cloned());
+                bases
             } else {
                 let mut ancestors = scenario
                     .root()
@@ -652,15 +687,14 @@ impl InstallDefinitionResolver {
                 if base_seen.insert(base.clone()) {
                     Self::append_relative_at(&base, &relative, &mut groups, &mut seen)?;
                     if !groups.is_empty() {
+                        if !folders.contains(&base) {
+                            Self::report_shadowed_folder_packs(&folders, &relative, &base);
+                        }
                         return Ok(groups);
                     }
                 }
             }
         }
-
-        // Explicit DefinitionFilenames are opened directly from ExePath.
-        // Folder/scenario-local definitions are a separate InitDefs pass in
-        // clonk-engine and must not rescue a missing external vector entry here.
 
         if groups.is_empty() {
             Err(ScenarioError::LegacyDefinitionNotFound {
