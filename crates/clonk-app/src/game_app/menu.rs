@@ -1824,11 +1824,16 @@ impl GameApp {
                 ElementState::Released => {}
             },
             StartupView::NetworkGame | StartupView::PlayerSelection => {}
-            StartupView::MainMenu => {
-                if state == ElementState::Pressed {
-                    self.request_exit("the main menu was closed");
-                }
-            }
+            // Escape does not quit here, diverging from C++ deliberately.
+            // `C4StartupMainDlg::OnClosed` exits whenever the dialog closes
+            // without OK - "if dlg got aborted (by user), quit startup"
+            // (src/C4StartupMainDlg.cpp:202-206). But Escape is also how a
+            // player leaves a running game, so it arrives in bursts while a
+            // scenario unloads, and the presses that outlast the transition
+            // would kill the process with no confirmation
+            // (clonk-org/clonk-rs#943). Quitting stays with the explicit Quit
+            // item, which is the same affordance C++ offers here.
+            StartupView::MainMenu => {}
             StartupView::NetworkLobby => {
                 if state == ElementState::Pressed {
                     self.show_main_menu();

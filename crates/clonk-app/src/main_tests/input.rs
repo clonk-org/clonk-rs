@@ -3579,20 +3579,53 @@ fn portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
     main_assert!(app.status_text.is_empty());
 }
 
-/// Escape on the main menu ends the process with no confirmation and, until
-/// now, no trace: the session log simply stopped, which reads exactly like a
-/// crash to anyone triaging it (clonk-org/clonk-rs#40). Record which exit ran
-/// so the shutdown banner can name it.
+/// Escape on the main menu must **not** end the process.
+///
+/// This is a deliberate divergence from C++, which quits here:
+/// `C4StartupMainDlg::OnClosed` runs `C4Startup::Get()->Exit()` whenever the
+/// dialog is closed without OK, and its own comment says so - "if dlg got
+/// aborted (by user), quit startup" (`src/C4StartupMainDlg.cpp:202-206`).
+///
+/// Faithful, and a trap. Escape is how a player leaves a running game, so it
+/// gets pressed repeatedly while a scenario unloads; the presses that outlast
+/// the transition land on the freshly raised main menu, and C++'s answer to
+/// that is to kill the process with no confirmation
+/// (clonk-org/clonk-rs#943). Quitting is not a keystroke worth losing a
+/// session to by accident, so it belongs to the explicit Quit item and to
+/// nothing else - which is also the only quit affordance C++ shows on this
+/// screen (`IDS_DLG_EXIT`, `src/C4StartupMainDlg.cpp:65`).
+///
+/// Every other Escape binding is untouched; only this one stops quitting.
 #[test]
-fn quitting_from_the_main_menu_records_why_the_session_ended() {
+fn escape_on_the_main_menu_never_ends_the_session() {
     let mut app = new_classic_menu_app(640, 480);
     main_assert_eq!(app.startup_view => StartupView::MainMenu);
     main_assert_eq!(app.exit_reason => None);
 
-    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    // Spam it the way the report describes, not once.
+    for _ in 0..8 {
+        app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    }
+
+    main_assert!(!app.exit_requested);
+    main_assert_eq!(app.exit_reason => None);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+}
+
+/// The Quit item still ends the session and still names itself, which is what
+/// clonk-org/clonk-rs#40 asked for: before it, the session log simply stopped,
+/// which reads exactly like a crash to anyone triaging it.
+#[test]
+fn the_main_menu_quit_item_records_why_the_session_ended() {
+    let mut app = new_classic_menu_app(640, 480);
+    main_assert_eq!(app.exit_reason => None);
+
+    app.handle_main_menu_activation(clonk_frontend::MainMenuItem::Quit)
+        .expect("the Quit item activates");
 
     main_assert!(app.exit_requested);
-    main_assert_eq!(app.exit_reason => Some("the main menu was closed"));
+    main_assert_eq!(app.exit_reason => Some("the main menu Quit item"));
 }
 
 #[test]
