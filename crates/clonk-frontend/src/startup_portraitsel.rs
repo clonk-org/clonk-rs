@@ -214,6 +214,22 @@ pub enum PortraitSelAction {
     Accept(PortraitSelCommit),
     SelectionRequired,
     Cancel,
+    GuiSound(PortraitSelSound),
+}
+
+/// The `GUISound` names `C4GUI::ContextMenu` raises for the location dropdown
+/// (`C4GuiMenu.cpp:172,418,465,528`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortraitSelSound {
+    /// `ContextMenu::Open` — unconditional.
+    DoorOpen,
+    /// `ContextMenu::Abort(fByUser)` — a user dismissal only. Activation
+    /// deliberately aborts with `fByUser = false` and is silent here.
+    DoorClose,
+    /// `ContextMenu::SelectionChanged(fByUser)` — only with a selected entry.
+    Command,
+    /// Entry activation, played *after* the silent abort.
+    Click,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -565,10 +581,17 @@ impl PortraitSelController {
             return Vec::new();
         }
         if self.combo_open {
+            let previous = self.combo_highlight;
             self.combo_highlight = match self.hit_target(point) {
                 HitTarget::LocationOption(index) => Some(index),
                 _ => None,
             };
+            // SelectionChanged(true) sounds only when a change lands on an
+            // entry — moving off the entries selects nothing and is silent
+            // (C4GuiMenu.cpp:412-421).
+            if self.combo_highlight != previous && self.combo_highlight.is_some() {
+                return vec![PortraitSelAction::GuiSound(PortraitSelSound::Command)];
+            }
         }
         Vec::new()
     }
@@ -589,15 +612,17 @@ impl PortraitSelController {
                 HitTarget::Location => {
                     // Screen aborts the old context before ComboBox sees this
                     // click. The combo recognizes its just-closed menu and
-                    // deliberately does not reopen it.
+                    // deliberately does not reopen it. That abort is by the
+                    // user, so it sounds (C4GuiMenu.cpp:172).
                     self.combo_open = false;
                     self.combo_highlight = None;
                     self.pressed = HitTarget::Location;
-                    return Vec::new();
+                    return vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)];
                 }
                 _ => {
                     self.combo_open = false;
                     self.combo_highlight = None;
+                    return vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)];
                 }
             }
         }
@@ -637,6 +662,8 @@ impl PortraitSelController {
             HitTarget::Location => {
                 self.combo_open = true;
                 self.combo_highlight = None;
+                // ContextMenu::Open (C4GuiMenu.cpp:465).
+                return vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorOpen)];
             }
             HitTarget::SetPicture
             | HitTarget::SetBigIcon
@@ -749,9 +776,10 @@ impl PortraitSelController {
         if self.combo_open {
             match key {
                 KeyCode::Escape => {
+                    // Keyboard form of ContextMenu::Abort(true).
                     self.combo_open = false;
                     self.combo_highlight = None;
-                    return Vec::new();
+                    return vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)];
                 }
                 KeyCode::Up => {
                     if !self.locations.is_empty() {
@@ -1008,6 +1036,9 @@ impl PortraitSelController {
     }
 
     fn choose_location(&mut self, index: usize) -> Vec<PortraitSelAction> {
+        // Activation closes the context with `AbortContext(false)` — silent —
+        // and then plays Click (C4GuiMenu.cpp:518-529). Routing this through
+        // the ordinary user-abort path would wrongly add DoorClose.
         self.combo_open = false;
         self.combo_highlight = None;
         let Some(location) = self.locations.get(index).cloned() else {
@@ -1015,10 +1046,13 @@ impl PortraitSelController {
         };
         self.current_location = index;
         self.install_entries(Vec::new());
-        vec![PortraitSelAction::ChangeLocation {
-            index,
-            path: location.path,
-        }]
+        vec![
+            PortraitSelAction::GuiSound(PortraitSelSound::Click),
+            PortraitSelAction::ChangeLocation {
+                index,
+                path: location.path,
+            },
+        ]
     }
 
     fn move_focus(&mut self, backwards: bool) {
@@ -3090,7 +3124,11 @@ mod tests {
             (combo.y + combo.h / 2) as f32,
         );
 
-        assert!(controller.handle_pointer_down(combo_point).is_empty());
+        assert_eq!(
+            controller.handle_pointer_down(combo_point),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorOpen)],
+            "opening the context is only the dropdown sound, not a button action"
+        );
         assert!(controller.combo_open);
         assert!(controller.handle_key_up(KeyCode::Space).is_empty());
         assert!(controller.combo_open);
@@ -3106,10 +3144,14 @@ mod tests {
 
         assert_eq!(
             controller.choose_location(0),
-            vec![PortraitSelAction::ChangeLocation {
-                index: 0,
-                path: PathBuf::from("/portraits"),
-            }]
+            vec![
+                // Activation sounds before the callback (C4GuiMenu.cpp:528).
+                PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                PortraitSelAction::ChangeLocation {
+                    index: 0,
+                    path: PathBuf::from("/portraits"),
+                }
+            ]
         );
         assert_eq!(
             controller.items().len(),
@@ -4068,10 +4110,13 @@ mod tests {
         let stale = controller.advance_idle().expect("old load request");
         assert_eq!(
             controller.choose_location(1),
-            vec![PortraitSelAction::ChangeLocation {
-                index: 1,
-                path: temp.path().to_path_buf(),
-            }]
+            vec![
+                PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                PortraitSelAction::ChangeLocation {
+                    index: 1,
+                    path: temp.path().to_path_buf(),
+                }
+            ]
         );
         assert!(
             !controller.complete_thumbnail(&stale, Ok(ImageData::new(1, 1, vec![1, 2, 3, 255])),)
@@ -4239,5 +4284,95 @@ mod tests {
             layout.location_popup.y < layout.location_combo.y,
             "with no room below, it opens above the combo rather than clipping"
         );
+    }
+
+    /// The location dropdown raises C++'s context-menu sounds
+    /// (clonk-org/clonk-rs#571).
+    ///
+    /// `C4GUI::ContextMenu` has four sound sites, and which one fires depends
+    /// on *how* the menu closes:
+    ///
+    /// | site | sound | condition |
+    /// |---|---|---|
+    /// | `Open` (`C4GuiMenu.cpp:465`) | `DoorOpen` | always |
+    /// | `Abort` (`:172`) | `DoorClose` | `fByUser` only |
+    /// | `SelectionChanged` (`:418`) | `Command` | `fByUser`, and only with a selected entry |
+    /// | entry activation (`:528`) | `Click` | always |
+    ///
+    /// The trap is the last row. Activating an entry calls
+    /// `AbortContext(false)` — closing the menu *without* its sound — and then
+    /// plays `Click`. An implementation that routed activation through its
+    /// ordinary close path would emit `DoorClose` too, so choosing a location
+    /// would sound different from C++ even though every individual site was
+    /// "implemented".
+    #[test]
+    fn the_location_dropdown_raises_the_native_context_menu_sounds() {
+        let sounds = |actions: &[PortraitSelAction]| {
+            actions
+                .iter()
+                .filter_map(|action| match action {
+                    PortraitSelAction::GuiSound(sound) => Some(*sound),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let combo = portrait_sel_layout(600, 500, 2).location_combo;
+        let combo_point = GuiPoint::new(
+            (combo.x + combo.w / 2) as f32,
+            (combo.y + combo.h / 2) as f32,
+        );
+        let controller_with_two = || {
+            PortraitSelController::new(
+                vec![
+                    PortraitLocation::new("User", "/u"),
+                    PortraitLocation::new("Program", "/p"),
+                ],
+                0,
+                Vec::new(),
+                true,
+                true,
+            )
+        };
+
+        // Opening always sounds.
+        let mut controller = controller_with_two();
+        let opened = controller.handle_pointer_down(combo_point);
+        assert!(controller.combo_open);
+        assert_eq!(sounds(&opened), [PortraitSelSound::DoorOpen]);
+
+        // Moving the highlight over an entry is a user selection change.
+        let option = controller.layout().location_options[1];
+        let option_point = GuiPoint::new(
+            (option.x + option.w / 2) as f32,
+            (option.y + option.h / 2) as f32,
+        );
+        let moved = controller.handle_pointer_move(option_point);
+        assert_eq!(sounds(&moved), [PortraitSelSound::Command]);
+        // Staying on the same entry is not a change and must stay silent.
+        assert!(sounds(&controller.handle_pointer_move(option_point)).is_empty());
+
+        // Choosing an entry plays Click and *not* DoorClose. A context menu
+        // activates on press, not release.
+        let chosen = controller.handle_pointer_down(option_point);
+        assert!(!controller.combo_open);
+        assert_eq!(
+            sounds(&chosen),
+            [PortraitSelSound::Click],
+            "activation aborts the context without its sound, then clicks"
+        );
+
+        // Dismissing it by clicking elsewhere is a user abort.
+        let mut controller = controller_with_two();
+        controller.handle_pointer_down(combo_point);
+        let dismissed = controller.handle_pointer_down(GuiPoint::new(2.0, 2.0));
+        assert!(!controller.combo_open);
+        assert_eq!(sounds(&dismissed), [PortraitSelSound::DoorClose]);
+
+        // Escape is the keyboard form of the same user abort.
+        let mut controller = controller_with_two();
+        controller.handle_pointer_down(combo_point);
+        let escaped = controller.handle_key_down(KeyCode::Escape);
+        assert!(!controller.combo_open);
+        assert_eq!(sounds(&escaped), [PortraitSelSound::DoorClose]);
     }
 }

@@ -10,7 +10,7 @@ use crate::startup_main_menu::StartupTooltip;
 use crate::startup_options_dlg::BookFonts;
 use crate::startup_portraitsel::{
     PortraitFileEntry, PortraitLocation, PortraitSelAction, PortraitSelCommit,
-    PortraitSelController, PortraitSelResources, PortraitThumbnailRequest,
+    PortraitSelController, PortraitSelResources, PortraitSelSound, PortraitThumbnailRequest,
 };
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use clonk_engine::player_file::PlayerFile;
@@ -80,10 +80,18 @@ pub enum PlayerPropertiesAction {
     Submit,
     Cancel,
     ChoosePicture,
-    PortraitLocationChanged { index: usize, path: PathBuf },
-    PortraitSelectorClosed { location_index: usize },
+    PortraitLocationChanged {
+        index: usize,
+        path: PathBuf,
+    },
+    PortraitSelectorClosed {
+        location_index: usize,
+    },
     PortraitSelectionRequired,
     ApplyPicture(PortraitSelCommit),
+    /// A `GUISound` the nested portrait selector raised, forwarded verbatim so
+    /// the host plays it (`C4GuiMenu.cpp:172,418,465,528`).
+    GuiSound(PortraitSelSound),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1317,6 +1325,9 @@ impl PlayerPropertiesController {
                 }
                 PortraitSelAction::SelectionRequired => {
                     outer.push(PlayerPropertiesAction::PortraitSelectionRequired);
+                }
+                PortraitSelAction::GuiSound(sound) => {
+                    outer.push(PlayerPropertiesAction::GuiSound(sound));
                 }
             }
         }
