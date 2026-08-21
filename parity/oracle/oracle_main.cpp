@@ -5171,6 +5171,57 @@ static int32_t run(
 // members: the out-of-line virtuals the real class also declares
 // (AdjustCore/WriteDesc/SaveComponents/OnSaving) are never reached from a
 // query, which is what lets this compile without linking the engine.
+// --- C4Value type tags ------------------------------------------------------
+//
+// The character every saved script value leads with. Three of its pairs differ
+// only by CASE — `i`/`I` is Int vs C4ID, `o`/`O` is object vs enumerated
+// object, `a`/`A` is array vs any — so a slip does not fail a load, it changes
+// the value's type on the way back in. The reverse direction answers C4V_Any
+// for any character it does not know, so a corrupted tag reads as nil rather
+// than being rejected.
+//
+// The file-scope C4V_Type above carries only the five types that enum needs,
+// so the full set is declared here and shadows it.
+namespace c4value_tags
+{
+enum C4V_Type
+{
+	C4V_Any,
+	C4V_Int,
+	C4V_Bool,
+	C4V_C4Object,
+	C4V_C4ID,
+	C4V_String,
+	C4V_Array,
+	C4V_Map,
+	C4V_pC4Value,
+	C4V_C4ObjectEnum,
+};
+
+#include "c4value_get_id.inc"
+#include "c4value_from_id.inc"
+
+struct Named
+{
+	C4V_Type type;
+	const char *name;
+};
+
+// The names are the port's `Value` variants, so a reader can line the two up.
+inline constexpr Named kTypes[] = {
+	{C4V_Any, "Nil"},
+	{C4V_Int, "Int"},
+	{C4V_Bool, "Bool"},
+	{C4V_C4Object, "Object"},
+	{C4V_C4ID, "C4Id"},
+	{C4V_String, "String"},
+	{C4V_Array, "Array"},
+	{C4V_Map, "Proplist"},
+	{C4V_pC4Value, "Reference"},
+	{C4V_C4ObjectEnum, "ObjectEnum"},
+};
+} // namespace c4value_tags
+
 namespace game_save_policy
 {
 
@@ -7921,6 +7972,50 @@ int main()
                    v.save_script_players ? 1 : 0, v.save_user_player_files ? 1 : 0,
                    v.save_script_player_files ? 1 : 0, v.is_exact ? 1 : 0, v.is_synced ? 1 : 0,
                    v.sort_order ? 1 : 0);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // The character every saved script value leads with, both directions.
+    //
+    // `compile_char` is what C4Value::CompileFunc actually writes, which is
+    // NOT always GetC4VID of the value's own type: a live C4V_C4Object is
+    // written with the *enumerated* object tag, because the number rather than
+    // the pointer is what goes to disk (C4Value.cpp:722-729). That
+    // substitution is the one rule here a reader cannot get from the table.
+    arr_begin("c4value_type_tags");
+    {
+        using namespace c4value_tags;
+        for (const auto &named : kTypes)
+        {
+            const char id = GetC4VID(named.type);
+            const char compiled =
+                (named.type == C4V_C4Object) ? GetC4VID(C4V_C4ObjectEnum) : id;
+            sep();
+            printf("{\"type\":\"%s\",\"id_char\":\"%c\",\"compile_char\":\"%c\"}",
+                   named.name, id, compiled);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // The reverse direction, including characters that mean nothing. An
+    // unknown tag is answered with C4V_Any rather than refused, so a damaged
+    // saved value reads back as nil instead of failing the load.
+    arr_begin("c4value_tag_types");
+    {
+        using namespace c4value_tags;
+        const char probes[] = {'A', 'i', 'b', 'o', 'I', 'S', 'V', 'O', 'a', 'm',
+                               'x', 'Z', '0', ' '};
+        for (const char probe : probes)
+        {
+            const C4V_Type type = GetC4VFromID(probe);
+            const char *name = "?";
+            for (const auto &named : kTypes)
+                if (named.type == type) { name = named.name; break; }
+            sep();
+            printf("{\"char\":\"%c\",\"type\":\"%s\"}", probe, name);
         }
     }
     arr_end();
