@@ -8801,6 +8801,61 @@ mod tests {
     }
 
     #[test]
+    fn object_at_point_ignores_the_fore_and_background_categories() {
+        // `FindVisObject` reads as a two-pass scan over `ForeObjects` and then
+        // `Objects`, and its inner test excludes `C4D_BackgroundOrForeground`
+        // on the second pass. Both passes nevertheless iterate **`Objects`**:
+        // `pLst` is initialised to `&ForeObjects` but the loop is
+        // `for (cLnk = Objects.First; ...)`, so `pLst` is only ever read by
+        // that exclusion test (7d43b47b src/C4Game.cpp:1435-1439,1447-1449).
+        //
+        // Pass one therefore scans the whole list with the exclusion vacuously
+        // true, and pass two re-scans the same list under a strictly narrower
+        // filter — so the category can never change which object is returned,
+        // and plain front-to-back order decides. Reintroducing a fore-first
+        // pass, or adding the exclusion the port appears to be "missing",
+        // would be a real divergence rather than a fix.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        snapshot.objects[0].ocf = 1;
+        let back_id = snapshot.objects[0].id;
+        let mut front = snapshot.objects[0].clone();
+        front.id = ObjectId::new(2);
+        let front_id = front.id;
+        snapshot.objects.push(front);
+        snapshot.render_order = vec![back_id, front_id];
+
+        let focus = snapshot.objects[0].clone();
+        let mut graphics = test_graphics((320, 180, 150), "Category Pick");
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(&focus)]);
+        let (screen_x, screen_y) = graphics.world_to_screen(1, focus.position).test_value();
+        let point = GuiPoint::new(screen_x, screen_y);
+
+        // A foreground object *behind* a plain one stays behind it: the pick
+        // is decided by render order alone, not by the category.
+        snapshot.objects[0].category |= CATEGORY_FOREGROUND_FLAG;
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, point) => Some(front_id),
+            "a background-listed foreground object does not jump ahead of the front object"
+        };
+
+        // And the same object still wins the pick once it *is* in front.
+        snapshot.objects[0].category &= !CATEGORY_FOREGROUND_FLAG;
+        snapshot.objects[1].category |= CATEGORY_FOREGROUND_FLAG;
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, point) => Some(front_id),
+            "nor is a foreground front object excluded from the search"
+        };
+
+        snapshot.objects[1].category &= !CATEGORY_FOREGROUND_FLAG;
+        snapshot.objects[1].category |= CATEGORY_BACKGROUND_FLAG;
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, point) => Some(front_id),
+            "a background front object is likewise still a valid target"
+        };
+    }
+
+    #[test]
     fn object_visibility_matches_cpp_masks_layers_and_local_bits() {
         let mut snapshot = make_snapshot();
         let object = &mut snapshot.objects[0];
