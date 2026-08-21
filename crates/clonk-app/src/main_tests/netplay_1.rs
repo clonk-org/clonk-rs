@@ -3049,6 +3049,72 @@ fn client_start_and_abort_report_the_cpp_host_only_error() {
     );
 }
 
+/// A running host must advertise the runtime-join admission it is actually
+/// enforcing, not the one its reference template was built with.
+///
+/// C++ never consults `fAllowJoin` on the accept path. It publishes it -
+/// `C4Network2Reference::InitLocal` copies `Network.isJoinAllowed()`
+/// (`src/C4Network2Reference.cpp:75`) - and the *client's* browser is what
+/// gates the join, showing the runtime-join affordance only for a reference
+/// that is both join-allowed and past the lobby
+/// (`src/C4StartupNetDlg.cpp:480`) and refusing one that is not (`:495`). So a
+/// stale advertised flag is not cosmetic: it is the whole mechanism, and a
+/// host that advertises the wrong value cannot be runtime-joined at all
+/// (clonk-org/clonk-rs#948).
+///
+/// `HostSettings::prepared` is `None` for a host that did not come through the
+/// prepared-lobby flow, which is exactly when the published value used to fall
+/// back to the template instead of the live admission.
+#[test]
+fn a_running_host_advertises_its_live_runtime_join_admission() {
+    let mut app = new_menu_app(640, 480);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+        player_name: "Exact Host".to_string(),
+        prepared: None,
+    }));
+    let (manager, _events, _commands) =
+        NetworkManager::test_stub_with_league_commands_for_client_id(0);
+    app.network = Some(manager);
+    let (snapshot, reference) = default_exact_host_reference();
+    main_assert!(
+        reference.summary().join_allowed,
+        "the template starts join-allowed, so a stale read is visible"
+    );
+    app.control_clients = ControlClientRegistry::default();
+    app.control_clients
+        .replace_snapshot(snapshot.parameters.clients.clients.clone());
+    app.host_join_snapshot = Some(snapshot);
+    app.advertised_game_reference = Some(reference);
+
+    // The host barred runtime joins at runtime; nothing about that reaches
+    // `prepared`, because there is no prepared host here.
+    app.runtime_network_join_allowed = Some(false);
+    app.publish_running_host_reference();
+
+    main_assert!(
+        !app.advertised_game_reference
+            .as_ref()
+            .expect("the running host republishes its reference")
+            .summary()
+            .join_allowed,
+        "the advertised reference must follow the live admission, not the template"
+    );
+
+    // And back again, so this pins "follows the live value" rather than
+    // "always false".
+    app.runtime_network_join_allowed = Some(true);
+    app.publish_running_host_reference();
+
+    main_assert!(
+        app.advertised_game_reference
+            .as_ref()
+            .expect("the running host republishes its reference")
+            .summary()
+            .join_allowed
+    );
+}
+
 #[test]
 fn set_comment_updates_state_reference_and_invalidation() {
     let mut app = new_menu_app(640, 480);

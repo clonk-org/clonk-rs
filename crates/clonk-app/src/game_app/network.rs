@@ -1826,25 +1826,7 @@ impl GameApp {
             })
             .collect::<Vec<_>>();
         let network_host = matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
-        let runtime_join_allowed = self
-            .runtime_network_join_allowed
-            .or_else(|| match self.network_mode.as_ref() {
-                Some(NetworkMode::Host(HostSettings {
-                    prepared: Some(prepared),
-                    ..
-                })) => Some(prepared.admission().runtime_join_allowed()),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                !native_config_text(
-                    &load_native_config_bytes(self.app_paths.as_ref()),
-                    "Network",
-                    "NoRuntimeJoin",
-                )
-                .as_deref()
-                .map(parse_config_bool)
-                .unwrap_or(true)
-            });
+        let runtime_join_allowed = self.runtime_join_admission_allowed();
         let options = core_runtime_option_rows(
             self.engine.is_control_host(),
             network_host,
@@ -5548,6 +5530,35 @@ impl GameApp {
         }
     }
 
+    /// The runtime-join admission this host is actually enforcing.
+    ///
+    /// Mirrors C++'s single `C4Network2::fAllowJoin`, which the lobby exit
+    /// seeds from `Config.Network.NoRuntimeJoin` and `AllowJoin` overwrites
+    /// thereafter (`src/C4Network2.cpp:513,835-842`). The port spreads the same
+    /// value over three places - the live field a runtime toggle writes, a
+    /// prepared host's admission, and the config file - so resolve them in one
+    /// place rather than at each use.
+    pub(crate) fn runtime_join_admission_allowed(&self) -> bool {
+        self.runtime_network_join_allowed
+            .or_else(|| match self.network_mode.as_ref() {
+                Some(NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                })) => Some(prepared.admission().runtime_join_allowed()),
+                Some(NetworkMode::Host(_) | NetworkMode::Client(_)) | None => None,
+            })
+            .unwrap_or_else(|| {
+                !native_config_text(
+                    &load_native_config_bytes(self.app_paths.as_ref()),
+                    "Network",
+                    "NoRuntimeJoin",
+                )
+                .as_deref()
+                .map(parse_config_bool)
+                .unwrap_or(true)
+            })
+    }
+
     pub(crate) fn publish_running_host_reference(&mut self) {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             return;
@@ -5564,17 +5575,15 @@ impl GameApp {
             .engine
             .max_players()
             .unwrap_or_else(|| i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
-        let join_allowed = self
-            .network_mode
-            .as_ref()
-            .and_then(|mode| match mode {
-                NetworkMode::Host(HostSettings {
-                    prepared: Some(prepared),
-                    ..
-                }) => Some(prepared.admission().runtime_join_allowed()),
-                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
-            })
-            .unwrap_or(template.summary().join_allowed);
+        // Advertise the admission this host is enforcing, not the template's.
+        // C++ never gates the accept path on fAllowJoin - it publishes it
+        // (C4Network2Reference.cpp:75) and the joining client's browser is what
+        // refuses (C4StartupNetDlg.cpp:480,495) - so a stale flag here is the
+        // whole reason a runtime join cannot be attempted
+        // (clonk-org/clonk-rs#948). Reading only `prepared` missed every host
+        // that did not come through the prepared-lobby flow, and missed the
+        // runtime toggle even for one that did.
+        let join_allowed = self.runtime_join_admission_allowed();
         let control_mode = self.runtime_network_control_mode;
         let updated = match running_host_reference(
             &template,
