@@ -695,6 +695,26 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/find_mat_slide.inc"
 
+# 3q4. Lift mrfUserCheck and mrfConvert. Convert carries two rules that a port
+#      can silently lose: C++'s `case meePXSMove:` falls **through** into
+#      `meePXSPos` for user-defined reactions (Rust has no implicit
+#      fallthrough), and a *successful* conversion still returns false — it is
+#      "not handled", so the caller keeps going — while a conversion to an
+#      unloaded or sky target returns true and kills the pixel.
+awk '
+  /^bool mrfUserCheck\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/mrf_user_check.inc"
+
+awk '
+  /^bool C4MaterialMap::mrfConvert\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/mrf_convert.inc"
+
 # 3r. Lift the container lifecycle: C4Object::Enter, Exit and Collect. These are
 #     ordered state machines whose SHAPE is the parity fact — which script call
 #     runs before which mutation, which rollback undoes a failed insert, and

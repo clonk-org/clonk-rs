@@ -34,7 +34,9 @@ use serde_json::Value;
 
 use crate::compat::{cos_func, sin_func, sqrt_func, LandscapeOperation};
 use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
-use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion, MaterialSet};
+use crate::material::{
+    consume_corrosion_effect_rng, evaluate_corrosion, MaterialInteractionEvent, MaterialSet,
+};
 use crate::math::{
     fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed, FixedVec2,
 };
@@ -7171,6 +7173,199 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i(case, "draws"),
             i64::from(engine.rng.count - draws_before),
         );
+    }
+
+    // 16d. convert_check: `mrfConvert` (C4Material.cpp:626-661) with the
+    //      `mrfUserCheck` wrapper it calls. Three rules a port can lose in
+    //      translation:
+    //
+    //      * C++'s `case meePXSMove:` falls **through** into `meePXSPos` when
+    //        the reaction is user-defined, so a user conversion fires on a
+    //        move event where a hardcoded one breaks out. Rust has no implicit
+    //        fallthrough, so this is an easy arm to drop.
+    //      * A *successful* conversion returns `false` — "not handled", the
+    //        caller keeps going — while a conversion whose target is not
+    //        loaded returns `true` and kills the pixel. The verdict reads
+    //        backwards from the intuitive one.
+    //      * The `meeMassMove` arm hands the PXS system the mover's
+    //        **original** material, not the convert target: that case jumps
+    //        straight past the reassignment above it.
+    //
+    //      The port splits the mass-move arm out into
+    //      `Engine::execute_mass_move_reaction`, because that event needs
+    //      engine state the PXS path does not have. Driving both against the
+    //      one lifted C++ function is the point — it shows the split kept the
+    //      behaviour.
+    for case in golden["convert_check"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("convert_check[{name}]");
+
+        // Indices match the oracle's Map: 0 Vacuum, 1 Water, 2 Lava (which
+        // carries the hardcoded InMatConvert to Granite at depth 2), 3 Granite.
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+
+            [Material Lava]
+            Name=Lava
+            Density=25
+            InMatConvert=Granite
+            InMatConvertTo=Granite
+            InMatConvertDepth=2
+
+            [Material Granite]
+            Name=Granite
+            Density=50
+            "#,
+        )
+        .expect("convert oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const PX: i32 = 8;
+        const PY: i32 = 6;
+        let user_defined = case["user_defined"].as_bool().unwrap_or(false);
+        // Hardcoded conversions read the depth off the material; user ones
+        // carry their own, and every user case here leaves it at 0.
+        let depth = if user_defined {
+            i(case, "depth") as i32
+        } else {
+            2
+        };
+        let ls_mat = i(case, "ls_mat") as usize;
+        let event = match i(case, "event") {
+            0 => MaterialInteractionEvent::PxsPos,
+            1 => MaterialInteractionEvent::PxsMove,
+            _ => MaterialInteractionEvent::MassMove,
+        };
+
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        if event == MaterialInteractionEvent::MassMove {
+            // The mass-move entry derives its own reaction from the landscape
+            // material under the mover, so the pixel goes at (PX, PY).
+            bytes[PY as usize * WDT as usize + PX as usize] = ls_mat as u8;
+        } else if case["matching_above"].as_bool().unwrap_or(false) && depth != 0 {
+            bytes[(PY - depth) as usize * WDT as usize + PX as usize] = ls_mat as u8;
+        }
+        let mut densities = vec![0; 128];
+        densities[ls_mat] = 50;
+        let mut material_names = vec![None; 128];
+        material_names[ls_mat] = Some("Granite".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+
+        let pxs_mat = crate::material::MaterialId::new(i(case, "pxs_mat0") as usize)
+            .expect("oracle pxs material");
+
+        if event == MaterialInteractionEvent::MassMove {
+            let execution = engine.execute_mass_move_reaction(pxs_mat, PX, PY, PX, PY);
+            let (created, created_mat) = match execution {
+                crate::material::MaterialReactionExecution::Converted(mat) => {
+                    (1, mat.index() as i64)
+                }
+                _ => (0, -1),
+            };
+            expect_eq(
+                &label,
+                0,
+                "handled",
+                i64::from(case["handled"].as_bool().unwrap_or(false)),
+                i64::from(!matches!(
+                    execution,
+                    crate::material::MaterialReactionExecution::Unhandled
+                )),
+            );
+            expect_eq(&label, 0, "pxs_created", i(case, "pxs_created"), created);
+            expect_eq(
+                &label,
+                0,
+                "pxs_created_mat",
+                i(case, "pxs_created_mat"),
+                created_mat,
+            );
+            continue;
+        }
+
+        let target = if user_defined {
+            i(case, "convert_mat") as usize
+        } else {
+            3
+        };
+        let reaction = crate::material::MaterialReaction {
+            kind: crate::material::MaterialReactionKind::Convert {
+                target: crate::material::MaterialId::new(target),
+                depth: (depth != 0).then_some(depth),
+            },
+            user_defined,
+            // The oracle drives mrfConvert with CheckSlide off, so the
+            // mrfUserCheck splash/slide branch stays out of this section —
+            // `insert_check` covers it directly.
+            insertion_check: false,
+        };
+        let mut pixel = crate::pxs::Pxs {
+            mat: pxs_mat,
+            x: itofix(PX),
+            y: itofix(PY),
+            xdir: itofix_prec(1, 2),
+            ydir: itofix_prec(1, 2),
+        };
+        let (mut x, mut y) = (PX, PY);
+        let mut pos_changed = false;
+        let handled = engine.execute_pxs_reaction(
+            reaction,
+            &mut x,
+            &mut y,
+            PX,
+            PY,
+            &mut pixel,
+            crate::material::MaterialId::new(ls_mat),
+            event,
+            &mut pos_changed,
+        );
+
+        expect_eq(
+            &label,
+            0,
+            "handled",
+            i64::from(case["handled"].as_bool().unwrap_or(false)),
+            i64::from(handled),
+        );
+        expect_eq(&label, 0, "xdir", i(case, "xdir"), pixel.xdir.val() as i64);
+        expect_eq(&label, 0, "ydir", i(case, "ydir"), pixel.ydir.val() as i64);
+        expect_eq(
+            &label,
+            0,
+            "pos_changed",
+            i64::from(case["pos_changed"].as_bool().unwrap_or(false)),
+            i64::from(pos_changed),
+        );
+        // C++ assigns the target id *before* validating it, so a failed
+        // conversion leaves `iPxsMat` holding an unloaded index
+        // (C4Material.cpp:646-649); the port leaves the id alone. Neither is
+        // observable — the caller deactivates the pixel on the `true` return
+        // and `Deactivate` overwrites Mat — so the material is compared where
+        // the conversion actually took, which is where it is read.
+        if !handled {
+            expect_eq(
+                &label,
+                0,
+                "pxs_mat",
+                i(case, "pxs_mat"),
+                pixel.mat.index() as i64,
+            );
+        }
     }
 
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
