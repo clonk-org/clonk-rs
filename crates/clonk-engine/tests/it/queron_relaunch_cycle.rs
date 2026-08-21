@@ -22,6 +22,17 @@ public func Slay(object target, int killer)
 public func CrewOf(int plr) { return GetCrew(plr, 0); }
 public func CrewId(int plr) { return GetID(GetCrew(plr, 0)); }
 public func Waiting() { return GetEffect("IntWait2Launch"); }
+
+// IntWait2Launch is global and carries its player in EffectVar(0)
+// (Queron3.c4s/Script.c:580,845), so a per-player probe has to scan.
+public func WaitingFor(int plr)
+{
+    var index, number;
+    while (number = GetEffect("IntWait2Launch", 0, index++))
+        if (EffectVar(0, 0, number) == plr)
+            return number;
+    return 0;
+}
 public func Inactive(object target) { return GetEffect("IntInactive", target); }
 
 public func VanishOnly(object target) { return RemoveObject(target); }
@@ -198,4 +209,124 @@ fn queron_removed_crew_still_reaches_the_relaunch_countdown() {
         !matches!(replacement, Value::Nil),
         "and the player is given a live clonk again rather than left empty"
     );
+}
+
+/// Two players waiting to relaunch at once (clonk-org/clonk-rs#590).
+///
+/// Queron installs the countdown as a **global** effect —
+/// `AddEffect("IntWait2Launch",, 1, 5, clonk,, iPlr, …)` with an empty target
+/// (`Queron3.c4s/Script.c:580,601`) — so concurrent relaunches mean several
+/// same-named global effects distinguished only by `EffectVar(0)`. The report
+/// is from a host with two clients and says the black screen happens
+/// "sometimes", which is the shape of one player's wait being resolved against
+/// another player's effect.
+///
+/// Priority 1 is what should make that safe: C4Effect keeps priority-1 effects
+/// out of the `Fx*Effect` call chain entirely (`C4Effect.cpp:97`), so a second
+/// countdown neither merges with nor displaces the first, and
+/// `FxIntWait2LaunchStop` cycles `EffectVar(0, pTarget, iNr)` — its own player,
+/// not a looked-up one (`Script.c:866-869`).
+///
+/// This pins that reasoning against the shipped scripts rather than leaving it
+/// as an argument: both players must reach their own countdown and both must
+/// advance a class.
+#[test]
+fn queron_overlapping_relaunches_each_keep_their_own_countdown() {
+    let mut engine = load_installed_scenario("Melees.c4f/Queron3.c4s", 4);
+    let host = join_local_player_on_team(&mut engine, "Host", 1);
+    let guest = join_local_player_on_team(&mut engine, "Guest", 2);
+    let third = join_local_player_on_team(&mut engine, "Third", 2);
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "QPRB",
+        "Queron relaunch probe",
+        PROBE,
+    ));
+    let probe =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("QPRB")));
+
+    ask(&mut engine, probe, "Options", vec![]);
+    tick(&mut engine, 120);
+    for player in [host, guest, third] {
+        assert_eq!(
+            ask(&mut engine, probe, "CrewId", vec![Value::Int(player)]),
+            Value::C4Id("KNIG".into()),
+            "every player starts on the knight"
+        );
+    }
+
+    // Kill the host, let its countdown start, then kill the guest while that
+    // first wait is still running. Overlapping rather than simultaneous is the
+    // harder case: it is when a second effect joins a list that already has one.
+    let host_crew = ask(&mut engine, probe, "CrewOf", vec![Value::Int(host)]);
+    ask(
+        &mut engine,
+        probe,
+        "Slay",
+        vec![host_crew, Value::Int(third)],
+    );
+    let mut host_waiting = false;
+    for _ in 0..400 {
+        tick(&mut engine, 1);
+        if !matches!(
+            ask(&mut engine, probe, "WaitingFor", vec![Value::Int(host)]),
+            Value::Nil | Value::Int(0)
+        ) {
+            host_waiting = true;
+            break;
+        }
+    }
+    assert!(host_waiting, "the host reaches its own relaunch countdown");
+
+    let guest_crew = ask(&mut engine, probe, "CrewOf", vec![Value::Int(guest)]);
+    ask(
+        &mut engine,
+        probe,
+        "Slay",
+        vec![guest_crew, Value::Int(third)],
+    );
+    let mut guest_waiting = false;
+    for _ in 0..400 {
+        tick(&mut engine, 1);
+        if !matches!(
+            ask(&mut engine, probe, "WaitingFor", vec![Value::Int(guest)]),
+            Value::Nil | Value::Int(0)
+        ) {
+            guest_waiting = true;
+            break;
+        }
+    }
+    assert!(
+        guest_waiting,
+        "a second player's countdown starts while the first is still running"
+    );
+
+    // The crux: two *distinct* global effects coexist, one per player, rather
+    // than the second replacing or merging with the first. Equal numbers here
+    // would mean one countdown serving two players, which is how a player ends
+    // up stranded on the black screen.
+    let host_wait = ask(&mut engine, probe, "WaitingFor", vec![Value::Int(host)]);
+    let guest_wait = ask(&mut engine, probe, "WaitingFor", vec![Value::Int(guest)]);
+    assert!(
+        !matches!(host_wait, Value::Nil | Value::Int(0)),
+        "the first countdown survives the second player joining the wait"
+    );
+    assert_ne!(
+        host_wait, guest_wait,
+        "each player owns its own IntWait2Launch effect"
+    );
+
+    // Both must finish. A wait resolved against the wrong player would strand
+    // one of them with no crew and the fog never reopening — the reported
+    // black screen.
+    for _ in 0..1200 {
+        tick(&mut engine, 1);
+    }
+    for (label, player) in [("host", host), ("guest", guest)] {
+        let crew = ask(&mut engine, probe, "CrewId", vec![Value::Int(player)]);
+        assert_eq!(
+            crew,
+            Value::C4Id("ASAS".into()),
+            "{label} advanced to its own next life instead of being stranded"
+        );
+    }
 }
