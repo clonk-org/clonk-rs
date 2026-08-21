@@ -1251,10 +1251,14 @@ impl GameApp {
                     Vec::new()
                 }
             };
+        let labels = self.portrait_sel_labels();
         if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
-            pending
-                .controller
-                .open_portrait_selector(locations, current_location, entries);
+            pending.controller.open_portrait_selector_with_labels(
+                locations,
+                current_location,
+                entries,
+                labels,
+            );
             pending.controller.clear_validation_error();
         }
         self.startup_tooltip.pointer_left();

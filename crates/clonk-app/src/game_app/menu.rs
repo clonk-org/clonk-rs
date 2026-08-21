@@ -594,6 +594,30 @@ impl GameApp {
     /// (C4MainMenu.cpp:59-732; C4Player.cpp:1801). A key missing from the
     /// table falls back to its shipped `LanguageUS.txt` value, matching
     /// C4ResStrTable.
+    /// The portrait selector's visible strings, resolved like every other
+    /// startup caption (`C4FileSelDlg.cpp:142,439,535,568-571`). The title is
+    /// `IDS_MSG_SELECT` ("Select %s") filled with `IDS_TYPE_PORTRAIT`.
+    pub(crate) fn portrait_sel_labels(
+        &self,
+    ) -> clonk_frontend::startup_portraitsel::PortraitSelLabels {
+        use clonk_frontend::startup_portraitsel::PortraitSelLabels;
+        let defaults = PortraitSelLabels::default();
+        let portrait = self.runtime_resource_text("IDS_TYPE_PORTRAIT", "Portrait");
+        let select = self.runtime_resource_text("IDS_MSG_SELECT", "Select %s");
+        PortraitSelLabels {
+            select_portrait: select.replacen("%s", &portrait, 1),
+            location: self.runtime_resource_text("IDS_TEXT_LOCATION", &defaults.location),
+            import_image_as: self
+                .runtime_resource_text("IDS_CTL_IMPORTIMAGEAS", &defaults.import_image_as),
+            player_image: self
+                .runtime_resource_text("IDS_TEXT_PLAYERIMAGE", &defaults.player_image),
+            lobby_icon: self.runtime_resource_text("IDS_TEXT_LOBBYICON", &defaults.lobby_icon),
+            no_portrait: self.runtime_resource_text("IDS_MSG_NOPORTRAIT", &defaults.no_portrait),
+            ok: self.runtime_resource_text("IDS_BTN_OK", &defaults.ok),
+            cancel: self.runtime_resource_text("IDS_BTN_CANCEL", &defaults.cancel),
+        }
+    }
+
     pub(crate) fn ingame_menu_labels(&self) -> IngameMenuLabels {
         let defaults = IngameMenuLabels::default();
         IngameMenuLabels {

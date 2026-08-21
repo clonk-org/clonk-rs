@@ -176,11 +176,11 @@ const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
 const TITLE_LEFT_INDENT: i32 = 5;
 
 impl PortraitItem {
-    fn none() -> Self {
+    fn none(label: &str) -> Self {
         Self {
             choice: PortraitChoice::None,
             filename: None,
-            label: "No Portrait".to_string(),
+            label: label.to_string(),
             thumbnail: PortraitThumbnail::None,
         }
     }
@@ -216,6 +216,71 @@ pub struct PortraitSelCommit {
     pub choice: PortraitChoice,
     pub set_picture: bool,
     pub set_big_icon: bool,
+}
+
+/// Every visible string in the portrait selector, resolved through the active
+/// language table the way `C4FileSelDlg` resolves them with `LoadResStr`
+/// (`C4FileSelDlg.cpp:142,439,535,568-571`).
+///
+/// `Default` reproduces the shipped `LanguageUS.txt` values verbatim, which is
+/// what `C4ResStrTable` falls back to for a missing key, so pure constructors
+/// and presentation tests stay usable without a table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortraitSelLabels {
+    /// `IDS_MSG_SELECT` ("Select %s") filled with `IDS_TYPE_PORTRAIT`.
+    pub select_portrait: String,
+    /// `IDS_TEXT_LOCATION`.
+    pub location: String,
+    /// `IDS_CTL_IMPORTIMAGEAS`.
+    pub import_image_as: String,
+    /// `IDS_TEXT_PLAYERIMAGE`.
+    pub player_image: String,
+    /// `IDS_TEXT_LOBBYICON`.
+    pub lobby_icon: String,
+    /// `IDS_MSG_NOPORTRAIT`, the trailing null tile.
+    pub no_portrait: String,
+    /// `IDS_BTN_OK`.
+    pub ok: String,
+    /// `IDS_BTN_CANCEL`.
+    pub cancel: String,
+}
+
+impl Default for PortraitSelLabels {
+    fn default() -> Self {
+        Self {
+            select_portrait: "Select Portrait".to_string(),
+            location: "Location:".to_string(),
+            import_image_as: "Import image as:".to_string(),
+            player_image: "Player image".to_string(),
+            lobby_icon: "Lobby-Icon".to_string(),
+            no_portrait: "No Portrait".to_string(),
+            ok: "OK".to_string(),
+            cancel: "Cancel".to_string(),
+        }
+    }
+}
+
+/// Font measurements the layout needs but cannot take itself.
+///
+/// `portrait_sel_layout` stays font-independent — 26 callers rely on that — so
+/// the measured values arrive here instead. `None` keeps each one at the
+/// English geometry the C++ capture was taken at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PortraitSelMetrics {
+    /// Width of the widest location caption, which the dropdown grows to.
+    pub caption_width: Option<i32>,
+    /// Width of the Location label, which `C4FileSelDlg.cpp:143` takes from
+    /// `pUseFont->GetTextWidth`.
+    pub location_label_width: Option<i32>,
+}
+
+impl PortraitSelMetrics {
+    pub fn measured(font: &ClonkFont, labels: &PortraitSelLabels) -> Self {
+        Self {
+            caption_width: None,
+            location_label_width: Some(font.measure(&labels.location, true).0),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -323,6 +388,10 @@ pub struct PortraitSelController {
     /// (`C4GuiComboBox.cpp:116`).
     location_caption_width: RefCell<Option<i32>>,
     caption_scroll: Cell<CaptionScrollState>,
+    labels: PortraitSelLabels,
+    /// Measured Location-label width, cached during render and read by layout,
+    /// the same way `grid_layout` caches measured item geometry.
+    location_label_width: RefCell<Option<i32>>,
 }
 
 impl PortraitSelController {
@@ -332,6 +401,24 @@ impl PortraitSelController {
         entries: Vec<PortraitFileEntry>,
         set_picture: bool,
         set_big_icon: bool,
+    ) -> Self {
+        Self::with_labels(
+            locations,
+            current_location,
+            entries,
+            set_picture,
+            set_big_icon,
+            PortraitSelLabels::default(),
+        )
+    }
+
+    pub fn with_labels(
+        locations: Vec<PortraitLocation>,
+        current_location: usize,
+        entries: Vec<PortraitFileEntry>,
+        set_picture: bool,
+        set_big_icon: bool,
+        labels: PortraitSelLabels,
     ) -> Self {
         let current_location = current_location.min(locations.len().saturating_sub(1));
         let mut controller = Self {
@@ -348,6 +435,8 @@ impl PortraitSelController {
             grid_layout: RefCell::new(None),
             location_caption_width: RefCell::new(None),
             caption_scroll: Cell::new(CaptionScrollState::default()),
+            labels,
+            location_label_width: RefCell::new(None),
             set_picture,
             set_big_icon,
             combo_open: false,
@@ -501,7 +590,8 @@ impl PortraitSelController {
             .extend(entries.into_iter().map(PortraitItem::file));
         // `C4FileSelDlg::UpdateFileList` appends the null entry after every
         // matching file (`C4FileSelDlg.cpp:251-266`).
-        self.items.push(PortraitItem::none());
+        self.items
+            .push(PortraitItem::none(&self.labels.no_portrait));
         // Pinned C++ then loses this null filename in GetSelection and makes
         // the visible "No Portrait" choice ineffective
         // (`C4FileSelDlg.cpp:305-315,627-642`). Keep the intended UI action:
@@ -1345,26 +1435,31 @@ impl PortraitSelController {
     /// The layout for a surface, which may differ in size from the stored
     /// screen extent the controller was last resized to.
     fn layout_for(&self, surface: &Surface) -> PortraitSelLayout {
-        portrait_sel_layout_with_caption_width(
+        portrait_sel_layout_with_metrics(
             surface.width() as i32,
             surface.height() as i32,
             self.locations.len(),
-            *self.location_caption_width.borrow(),
+            self.metrics(),
         )
     }
 
     fn layout(&self) -> PortraitSelLayout {
-        portrait_sel_layout_with_caption_width(
+        portrait_sel_layout_with_metrics(
             self.width,
             self.height,
             self.locations.len(),
-            *self.location_caption_width.borrow(),
+            self.metrics(),
         )
     }
 
-    /// Measures the widest location caption so the dropdown can grow to it.
-    /// Called from render, where the font is known; hit testing then reads the
-    /// cache, exactly as the grid content layout works.
+    fn metrics(&self) -> PortraitSelMetrics {
+        PortraitSelMetrics {
+            caption_width: *self.location_caption_width.borrow(),
+            location_label_width: *self.location_label_width.borrow(),
+        }
+    }
+
+    /// Measures the widest popup caption and the localized Location label.
     pub(crate) fn update_location_popup_width(&self, font: &ClonkFont) {
         let widest = self
             .locations
@@ -1372,6 +1467,12 @@ impl PortraitSelController {
             .map(|location| font.measure(&location.label, true).0)
             .max();
         self.location_caption_width.replace(widest);
+    }
+
+    fn update_label_metrics(&self, font: &ClonkFont) {
+        self.update_location_popup_width(font);
+        self.location_label_width
+            .replace(Some(font.measure(&self.labels.location, true).0));
     }
 
     fn hit_target(&self, point: GuiPoint) -> HitTarget {
@@ -1441,9 +1542,7 @@ impl PortraitSelController {
         resources: PortraitSelResources<'_>,
         gamma: Option<&GammaRamp>,
     ) {
-        // Measure captions before laying out: the dropdown grows to the
-        // widest one, and hit testing reads the same cached measurement.
-        self.update_location_popup_width(&resources.fonts.text);
+        self.update_label_metrics(&resources.fonts.text);
         let layout = self.layout_for(surface);
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
         let right_indent = layout.close.w + 4;
@@ -1481,7 +1580,7 @@ impl PortraitSelController {
             surface,
             layout.location_label.x,
             layout.location_label.y,
-            "Location:",
+            &self.labels.location,
             [255, 255, 255, 255],
             TextAlign::Left,
             false,
@@ -1557,7 +1656,7 @@ impl PortraitSelController {
             surface,
             layout.import_label.x,
             layout.import_label.y,
-            "Import image as:",
+            &self.labels.import_image_as,
             [255, 255, 255, 255],
             TextAlign::Left,
             false,
@@ -1568,13 +1667,13 @@ impl PortraitSelController {
                 PortraitSelControl::SetPicture,
                 layout.set_picture,
                 self.set_picture,
-                "Player image",
+                self.labels.player_image.as_str(),
             ),
             (
                 PortraitSelControl::SetBigIcon,
                 layout.set_big_icon,
                 self.set_big_icon,
-                "Lobby-Icon",
+                self.labels.lobby_icon.as_str(),
             ),
         ] {
             draw_checkbox(
@@ -1591,12 +1690,17 @@ impl PortraitSelController {
             );
         }
         for (control, target, rect, label) in [
-            (PortraitSelControl::Ok, HitTarget::Ok, layout.ok, "OK"),
+            (
+                PortraitSelControl::Ok,
+                HitTarget::Ok,
+                layout.ok,
+                self.labels.ok.as_str(),
+            ),
             (
                 PortraitSelControl::Cancel,
                 HitTarget::Cancel,
                 layout.cancel,
-                "Cancel",
+                self.labels.cancel.as_str(),
             ),
         ] {
             let pointer_over = self.pointer.is_some_and(|point| contains(rect, point));
@@ -1636,7 +1740,7 @@ impl PortraitSelController {
         if !self.combo_open {
             return;
         }
-        self.update_location_popup_width(&resources.fonts.text);
+        self.update_label_metrics(&resources.fonts.text);
         let layout = self.layout_for(surface);
         draw_engine_box(
             surface,
@@ -1688,9 +1792,18 @@ impl PortraitSelController {
     }
 
     fn caption(&self) -> String {
+        // C++ titles the dialog `IDS_MSG_SELECT` filled with
+        // `IDS_TYPE_PORTRAIT` (`C4FileSelDlg.cpp:535`); the bracketed path is
+        // a port addition that survives localization unchanged.
         self.current_location().map_or_else(
-            || "Select Portrait".to_string(),
-            |location| format!("Select Portrait [{}]", location.path.display()),
+            || self.labels.select_portrait.clone(),
+            |location| {
+                format!(
+                    "{} [{}]",
+                    self.labels.select_portrait,
+                    location.path.display()
+                )
+            },
         )
     }
 
@@ -1904,17 +2017,38 @@ pub fn portrait_sel_layout(
     screen_height: i32,
     location_count: usize,
 ) -> PortraitSelLayout {
-    portrait_sel_layout_with_caption_width(screen_width, screen_height, location_count, None)
+    portrait_sel_layout_with_metrics(
+        screen_width,
+        screen_height,
+        location_count,
+        PortraitSelMetrics::default(),
+    )
 }
 
-/// [`portrait_sel_layout`] with the widest measured location caption, which
-/// the dropdown grows to fit. `None` keeps the dropdown at the combo's width —
-/// the minimum `ComboBox::DoDropdown` seeds it with (`C4GuiComboBox.cpp:116`).
+/// [`portrait_sel_layout`] with the widest measured location caption.
 pub fn portrait_sel_layout_with_caption_width(
     screen_width: i32,
     screen_height: i32,
     location_count: usize,
     caption_width: Option<i32>,
+) -> PortraitSelLayout {
+    portrait_sel_layout_with_metrics(
+        screen_width,
+        screen_height,
+        location_count,
+        PortraitSelMetrics {
+            caption_width,
+            ..PortraitSelMetrics::default()
+        },
+    )
+}
+
+/// [`portrait_sel_layout`] with the font measurements it cannot take itself.
+pub fn portrait_sel_layout_with_metrics(
+    screen_width: i32,
+    screen_height: i32,
+    location_count: usize,
+    metrics: PortraitSelMetrics,
 ) -> PortraitSelLayout {
     let width = (i64::from(screen_width) * 2 / 3 + 10)
         .clamp(i64::from(MIN_WIDTH), i64::from(MAX_WIDTH)) as i32;
@@ -1929,7 +2063,15 @@ pub fn portrait_sel_layout_with_caption_width(
     let caption = IntRect::new(bounds.x, bounds.y, bounds.w, CAPTION_HEIGHT);
     let close = IntRect::new(bounds.x + bounds.w - 20, bounds.y + 4, 16, 16);
     let location_y = bounds.y + CAPTION_HEIGHT + 14;
-    let location_label = IntRect::new(bounds.x + 20, location_y, 57, TEXT_LINE_HEIGHT);
+    // `C4FileSelDlg.cpp:143` sizes the label box with
+    // `pUseFont->GetTextWidth(sText)`; 57 is the English width the pinned C++
+    // capture was taken at, kept as the unmeasured fallback.
+    let location_label = IntRect::new(
+        bounds.x + 20,
+        location_y,
+        metrics.location_label_width.unwrap_or(57),
+        TEXT_LINE_HEIGHT,
+    );
     let location_combo = IntRect::new(
         location_label.x + location_label.w + 20,
         location_y,
@@ -1999,7 +2141,8 @@ pub fn portrait_sel_layout_with_caption_width(
     // entry and never shrinks it below the width it already has, which
     // `DoDropdown` seeded from the combo (`C4GuiMenu.cpp:333-358`). The 10px
     // is the same left+right margin the entries are inset by below.
-    let popup_width = caption_width
+    let popup_width = metrics
+        .caption_width
         .map(|width| width.saturating_add(10))
         .unwrap_or(location_combo.w)
         .max(location_combo.w);
@@ -4518,5 +4661,94 @@ mod tests {
                 "iMaxScroll clamps to zero for a caption that fits"
             );
         }
+    }
+
+    /// Every visible selector string resolves through the active language
+    /// table, and the Location label's box is the width of that string
+    /// (clonk-org/clonk-rs#571).
+    ///
+    /// C++ builds this dialog entirely from `LoadResStr`
+    /// (`C4FileSelDlg.cpp:142-143,535,568-571`, `:439`), and sizes the Location
+    /// label with `pUseFont->GetTextWidth(sText)` — so the label box *is* the
+    /// text, and the combo box starts after it. The port had all seven strings
+    /// hardcoded in English and the label box frozen at 57px, which is the
+    /// English width: a longer localized caption would have run under the combo
+    /// rather than pushing it aside.
+    ///
+    /// `Default` reproduces the shipped `LanguageUS.txt` values verbatim, which
+    /// is what `C4ResStrTable` falls back to for a missing key.
+    #[test]
+    fn every_selector_caption_comes_from_the_language_table() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let font = &fonts.text;
+        let defaults = PortraitSelLabels::default();
+
+        // Pinned against the shipped table, so a silent drift in either
+        // direction is caught.
+        assert_eq!(defaults.location, "Location:");
+        assert_eq!(defaults.import_image_as, "Import image as:");
+        assert_eq!(defaults.player_image, "Player image");
+        assert_eq!(defaults.lobby_icon, "Lobby-Icon");
+        assert_eq!(defaults.no_portrait, "No Portrait");
+        assert_eq!(defaults.ok, "OK");
+        assert_eq!(defaults.cancel, "Cancel");
+        // IDS_MSG_SELECT is "Select %s", filled with IDS_TYPE_PORTRAIT.
+        assert_eq!(defaults.select_portrait, "Select Portrait");
+
+        let german = PortraitSelLabels {
+            location: "Verzeichnis auswählen:".to_string(),
+            no_portrait: "Kein Portrait".to_string(),
+            ..defaults.clone()
+        };
+
+        // The label box tracks the caption it has to hold.
+        let english_width = portrait_sel_layout_with_metrics(
+            640,
+            480,
+            1,
+            PortraitSelMetrics::measured(font, &defaults),
+        );
+        let german_width = portrait_sel_layout_with_metrics(
+            640,
+            480,
+            1,
+            PortraitSelMetrics::measured(font, &german),
+        );
+        assert_eq!(
+            english_width.location_label.w,
+            font.measure(&defaults.location, true).0,
+            "the label box is exactly its text, as GetTextWidth makes it"
+        );
+        // The measurement independently reproduces the width the pinned
+        // 1152x723 C++ capture recorded, so switching from the frozen constant
+        // to the font changes nothing for English while fixing every other
+        // language (`portrait_selector_layout_matches_cpp_at_1152x723`).
+        assert_eq!(
+            english_width.location_label.w, 57,
+            "measuring must agree with the C++-verified English geometry"
+        );
+        assert!(
+            german_width.location_label.w > english_width.location_label.w,
+            "a longer caption widens the label"
+        );
+        assert!(
+            german_width.location_combo.x > english_width.location_combo.x,
+            "and pushes the combo box along instead of running underneath it"
+        );
+
+        // The null tile takes its label from the table too.
+        let controller = PortraitSelController::with_labels(
+            vec![PortraitLocation::new("User", "/u")],
+            0,
+            Vec::new(),
+            true,
+            true,
+            german.clone(),
+        );
+        assert_eq!(
+            controller.items().last().map(|item| item.label()),
+            Some("Kein Portrait"),
+            "the No Portrait tile is localized"
+        );
     }
 }
