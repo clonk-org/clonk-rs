@@ -4,6 +4,25 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] - 2026-08-21
+
+### Bug fixes
+
+- Expand the mouse pick box upward by addtop for short objects (#958)
+- Carry the emitting object's position on attached sound calls (#956)
+- Transfer large classic definition families (#953)
+- Advertise the live runtime-join admission on a running host (#952)
+- Bind portrait selector access keys to the caption's own letter (#951)
+- Stop Escape from quitting the game at the main menu (#950)
+- Use configured network identity for lobby clients (#944)
+- Resolve definition packs from the directory holding the scenario pack (#942)
+- Measure the connection acceptance window with a monotonic clock (#937)
+
+### Testing
+
+- Pin that a denied effect keeps its number until the next cycle (#954)
+- Pin the dead font-atlas branch and fractional italic compounding (#949)
+
 ## [0.19.0] - 2026-08-21
 
 ### Bug fixes
