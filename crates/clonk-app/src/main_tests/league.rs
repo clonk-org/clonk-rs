@@ -5313,3 +5313,44 @@ fn compat_profile_launch_override_is_parsed_but_never_persisted() {
     app.apply_classic_command_line(&parsed).test_value();
     main_assert_eq!(app.compat_profile => CompatProfile::LegacyClonk);
 }
+
+#[test]
+fn compat_profile_overlays_the_cpp_control_mode_without_touching_the_saved_key() {
+    use crate::settings::{session_control_mode, CompatProfile, CPP_CONTROL_MODE_DECENTRAL};
+    use clonk_core::std_config::Config;
+
+    // The port's measured default is CNM_Async (2); C++ ships CNM_Decentral (0)
+    // and calls it the standard mode (C4Config.cpp:540,
+    // C4GameControlNetwork.h:51). ControlMode is synchronized, so two peers
+    // disagreeing about it is a desync rather than a preference.
+    const PORT_ASYNC: i32 = 2;
+    main_assert_eq!(CPP_CONTROL_MODE_DECENTRAL => 0);
+
+    // Normal profile: the configured value stands, whatever it is.
+    main_assert_eq!(session_control_mode(CompatProfile::Normal, PORT_ASYNC) => PORT_ASYNC);
+    main_assert_eq!(session_control_mode(CompatProfile::Normal, 1) => 1);
+    main_assert_eq!(session_control_mode(CompatProfile::Normal, 0) => 0);
+
+    // Compatibility profile: C++'s value wins over ANY configured value,
+    // including one the player set deliberately.
+    for configured in [0, 1, 2, 7] {
+        main_assert_eq!(
+            session_control_mode(CompatProfile::LegacyClonk, configured)
+                => CPP_CONTROL_MODE_DECENTRAL
+        );
+    }
+
+    // The overlay is non-persistent: resolving it does not write the key, so a
+    // round played under the profile leaves the saved configuration exactly as
+    // the player left it.
+    let mut saved = Config::default();
+    saved.set_in(Some("Network"), "ControlMode", "2");
+    let before = saved
+        .get_in(Some("Network"), "ControlMode")
+        .map(str::to_string);
+    let _ = session_control_mode(CompatProfile::LegacyClonk, 2);
+    main_assert_eq!(
+        saved.get_in(Some("Network"), "ControlMode").map(str::to_string) => before
+    );
+    main_assert_eq!(before.as_deref() => Some("2"));
+}

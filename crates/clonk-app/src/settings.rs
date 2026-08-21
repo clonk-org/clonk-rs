@@ -125,6 +125,31 @@ pub fn resolve_compat_profile(
         .unwrap_or_default()
 }
 
+/// `CNM_Decentral`, C++'s `Network.ControlMode` default
+/// (`C4GameControlNetwork.h:51`, `C4Config.cpp:540` — "0 is the standard mode
+/// set in config").
+pub const CPP_CONTROL_MODE_DECENTRAL: i32 = 0;
+
+/// Resolve `Network.ControlMode` for a session that is about to be constructed.
+///
+/// This is a **non-persistent overlay**, which is the whole point: under the
+/// compatibility profile the C++ default wins, and the player's saved
+/// `Network.ControlMode` is neither read into the session nor written back. A
+/// normal-profile session is untouched and keeps the port's measured async
+/// default.
+///
+/// It is resolved once, at session construction, and the resolved value travels
+/// in the prepared host parameters. A configuration edit mid-round therefore
+/// cannot move a running session between control modes — which matters because
+/// `ControlMode` is synchronized: two peers disagreeing about it is a desync,
+/// not a preference.
+pub fn session_control_mode(profile: CompatProfile, configured: i32) -> i32 {
+    match profile {
+        CompatProfile::LegacyClonk => CPP_CONTROL_MODE_DECENTRAL,
+        CompatProfile::Normal => configured,
+    }
+}
+
 /// The two tuning values a voice-activated capture needs, resolved into the
 /// units the gate compares against: a level threshold on the same `0.0..=1.0`
 /// scale as [`clonk_audio::voice_activation_level`], and a release tail counted
