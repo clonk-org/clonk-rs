@@ -7057,6 +7057,144 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b7. dig_free: `C4Landscape::DigFree` (C4Landscape.cpp:1023-1044) walks a
+    //       circle row by row, and two of its details are easy to "tidy" into
+    //       something that digs a different shape.
+    //
+    //       `iLineWidth` is declared OUTSIDE the row loop, and the bottom-edge
+    //       pass reads it after the loop has ended — so the bottom edge is as
+    //       wide as the LAST row was, not as wide as the circle. And a row whose
+    //       half-width computes to 0 still digs one pixel, via the
+    //       `+ (iLineWidth == 0)` bump that appears in the loop bound and again
+    //       in the right-hand edge position.
+    //
+    //       `DigFreeSinglePix` (C4Landscape.h:255-259) clears its pixel only
+    //       when it is DENSER than the neighbour toward `(dx, dy)`, so the edge
+    //       passes do nothing inside a uniform block and bite exactly at a
+    //       material boundary. The fixtures place those boundaries deliberately:
+    //       sky below row 10 for the bottom edge, and an optional sky column for
+    //       the side.
+    //
+    //       DigFree returns void, so the cleared pixels are the only thing
+    //       either engine can be asked about — which is also what a desync would
+    //       consist of. DigFreePix's unconditional instability probe is not
+    //       compared here; it is pinned by
+    //       `dig_free_pix_probes_even_undiggable_pixels` in mass_mover.rs.
+    //
+    //       `rad <= 0` is deliberately uncovered: C++ leaves `iLineWidth`
+    //       uninitialised when the row loop never runs and the bottom pass then
+    //       reads it, so there is no defined behaviour to pin. The port guards.
+    for case in golden["dig_free"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("dig_free[{name}]");
+
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            DigFree=1
+
+            [Material Sand]
+            Name=Sand
+            Density=50
+            DigFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+            DigFree=1
+            "#,
+        )
+        .expect("dig free oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const GRANITE: u8 = 3;
+
+        let sky_from_row = i(case, "sky_from_row") as i32;
+        let sky_column = i(case, "sky_column") as i32;
+
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        for gy in 0..HGT as usize {
+            if sky_from_row >= 0 && gy >= sky_from_row as usize {
+                continue;
+            }
+            for gx in 0..WDT as usize {
+                bytes[gy * WDT as usize + gx] = GRANITE;
+            }
+        }
+        if sky_column >= 0 {
+            for gy in 0..HGT as usize {
+                bytes[gy * WDT as usize + sky_column as usize] = 0;
+            }
+        }
+
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 50;
+        densities[GRANITE as usize] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Water".to_string());
+        material_names[2] = Some("Sand".to_string());
+        material_names[GRANITE as usize] = Some("Granite".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+
+        let before: Vec<Option<crate::material::MaterialId>> = (0..HGT as i32)
+            .flat_map(|gy| (0..WDT as i32).map(move |gx| (gx, gy)))
+            .map(|(gx, gy)| {
+                engine
+                    .landscape()
+                    .and_then(|landscape| landscape.border_material_at(gx, gy))
+            })
+            .collect();
+
+        engine.execute_dig_circle_operation(
+            crate::Vector2::new(i(case, "tx") as i32, i(case, "ty") as i32),
+            i(case, "rad") as i32,
+            false,
+            None,
+        );
+
+        // Emitted in row-major order as `y,x` pairs, which is the order this
+        // scan produces.
+        let changed: Vec<String> = (0..HGT as i32)
+            .flat_map(|gy| (0..WDT as i32).map(move |gx| (gx, gy)))
+            .enumerate()
+            .filter_map(|(index, (gx, gy))| {
+                let after = engine
+                    .landscape()
+                    .and_then(|landscape| landscape.border_material_at(gx, gy));
+                (after != before[index]).then(|| format!("{gy},{gx}"))
+            })
+            .collect();
+
+        expect_eq(
+            &label,
+            0,
+            "changed_count",
+            i(case, "changed_count"),
+            changed.len() as i64,
+        );
+        assert_eq!(
+            case["changed"].as_str().unwrap_or(""),
+            changed.join(";"),
+            "PARITY DIVERGENCE in `{label}` field `changed`",
+        );
+    }
+
     // 16b6. extract_material: `C4Landscape::ExtractMaterial` (C4Landscape.cpp:
     //       1191-1199) and the `FindMatTop` walk it depends on
     //       (C4Landscape.cpp:1161-1189).

@@ -6178,6 +6178,206 @@ int32_t C4Landscape::GetMat(int32_t x, int32_t y) { return GBackMat(x, y); }
 
 } // namespace extract_material_check
 
+// C4Landscape::DigFree (src/C4Landscape.cpp:1023-1044) and DigFreePix
+// (src/C4Landscape.cpp:979-987), with DigFreeSinglePix from the header
+// (C4Landscape.h:255-259) beside them.
+//
+// DigFree walks a circle row by row, and two of its details are easy to "tidy"
+// into something that digs a different shape:
+//
+//   * `iLineWidth` is declared OUTSIDE the row loop, and the bottom-edge pass
+//     reads it after the loop has ended -- so the bottom edge is as wide as the
+//     LAST row was, not as wide as the circle. Recomputing it there clears a
+//     different set of pixels.
+//   * a row whose half-width computes to 0 still digs one pixel, via the
+//     `+ (iLineWidth == 0)` bump that appears in the loop bound and again in the
+//     right-hand edge position.
+//
+// DigFreePix probes instability for EVERY pixel it is handed -- sky included,
+// and material whose DigFree is 0 included -- because the probe sits after the
+// conditional clear rather than inside it.
+//
+// DigFreeSinglePix clears its pixel only when it is DENSER than the neighbour
+// toward (dx, dy), so the edge passes do nothing inside a uniform block and
+// bite exactly at a material boundary. The cases below place those boundaries
+// deliberately.
+//
+// `rad <= 0` is deliberately NOT covered: C++ leaves `iLineWidth` uninitialised
+// when the row loop never runs and the bottom pass then reads it, so there is no
+// defined behaviour to pin. The port guards the case instead.
+namespace dig_free_check
+{
+
+constexpr int32_t GridWdt = 16, GridHgt = 12;
+static int32_t g_grid[GridHgt][GridWdt];
+
+struct MaterialCore
+{
+    int32_t Density;
+    int32_t DigFree;
+};
+static MaterialCore Map[4] = {
+    {0, 0},     // Vacuum
+    {25, 1},    // Water
+    {50, 1},    // Sand
+    {100, 1},   // Granite -- diggable, so the circle actually clears
+};
+constexpr int32_t MVehic = 3;
+
+constexpr int32_t MNone = -1;
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
+
+// DigFreePix fires the instability probe once per pixel it is handed, whether or
+// not anything cleared. It is recorded so the extracted code has somewhere to
+// call, but not emitted: see the note above printDigFreeCases.
+static int32_t g_instability_probes = 0;
+static int32_t g_cleared = 0;
+
+// pByObj is null in every case here, so the material-contents accounting and
+// the Tick5 material cast are both unreachable; they have callers of their own.
+struct C4Object
+{
+    void AddMaterialContents(int32_t, int32_t) {}
+    void DigOutMaterialCast(bool) {}
+};
+static int32_t Tick5 = 1;
+
+struct C4MaterialMapStub
+{
+    MaterialCore *Map = dig_free_check::Map;
+};
+
+struct C4Landscape
+{
+    int32_t Width = GridWdt, Height = GridHgt;
+    int32_t GetMat(int32_t x, int32_t y);
+    int32_t GetDensity(int32_t x, int32_t y);
+    void CheckInstabilityRange(int32_t, int32_t) { g_instability_probes++; }
+    void ClearPix(int32_t x, int32_t y)
+    {
+        g_cleared++;
+        if (x >= 0 && x < GridWdt && y >= 0 && y < GridHgt) g_grid[y][x] = 0;
+    }
+    int32_t DigFreePix(int32_t tx, int32_t ty);
+    void DigFreeSinglePix(int32_t x, int32_t y, int32_t dx, int32_t dy)
+    {
+        if (GetDensity(x, y) > GetDensity(x + dx, y + dy))
+            DigFreePix(x, y);
+    }
+    void DigFree(int32_t tx, int32_t ty, int32_t rad, bool fRequest, C4Object *pByObj);
+};
+
+struct GameStub
+{
+    C4MaterialMapStub Material;
+    C4Landscape Landscape;
+};
+
+static GameStub Game;
+
+// Sides and bottom closed, top open -- the default border.
+static int32_t GBackMat(int32_t x, int32_t y)
+{
+    if (y < 0) return MNone; // TopOpen
+    if (x < 0 || x >= GridWdt || y >= GridHgt) return MVehic;
+    const int32_t mat = g_grid[y][x];
+    return mat ? mat : MNone;
+}
+
+int32_t C4Landscape::GetMat(int32_t x, int32_t y) { return GBackMat(x, y); }
+
+int32_t C4Landscape::GetDensity(int32_t x, int32_t y)
+{
+    const int32_t mat = GBackMat(x, y);
+    return mat < 0 ? 0 : Map[mat].Density;
+}
+
+#include "dig_free_pix.inc"
+#include "dig_free.inc"
+
+} // namespace dig_free_check
+
+// Runs one DigFree and records the shape it actually dug. That delta is the
+// whole comparison: DigFree returns void, so the pixels it cleared are the only
+// thing either engine can be asked about, and the bottom edge's width comes from
+// the LAST row's `iLineWidth` -- a port that recomputed it digs a visibly
+// different shape while still returning nothing.
+//
+// DigFreePix's unconditional instability probe is deliberately NOT compared
+// here. The oracle can count the calls, but the port has no counter -- it
+// observes the probe through the mass movers it arms, which would mean lifting
+// CheckInstabilityRange as well. That behaviour is pinned by
+// `dig_free_pix_probes_even_undiggable_pixels` in mass_mover.rs instead; this
+// section is about the shape of the walk.
+static void printDigFreeCases()
+{
+    printf("%s", "\"dig_free\":[");
+    struct Case
+    {
+        const char *name;
+        int32_t tx, ty, rad;
+        // Rows at or below this are sky, giving the bottom edge pass a density
+        // boundary to bite on. -1 fills the whole grid.
+        int32_t sky_from_row;
+        // An optional sky column, so the side edge pass has a boundary too.
+        int32_t sky_column;
+    };
+    const Case cases[] = {
+        // A radius-2 circle with sky below row 10: the four dug rows, and then
+        // the bottom edge clearing the two pixels the LAST row's width covers.
+        {"radius_two_digs_circle_and_bottom_edge", 8, 8, 2, 11, -1},
+        // The same dig with a sky column at x=4, which lets the left edge pass
+        // clear the pixel at x=5 on the widest row.
+        {"side_edge_clears_where_it_is_denser", 8, 8, 2, 11, 4},
+        // Radius 1: the top row's half-width computes to 0 and the
+        // `+ (iLineWidth == 0)` bump still digs its single pixel.
+        {"zero_width_row_still_digs_one_pixel", 8, 8, 1, 11, -1},
+        // Digging in open sky clears nothing at all.
+        {"sky_dig_clears_nothing", 8, 3, 2, 0, -1},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        for (int32_t gy = 0; gy < dig_free_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < dig_free_check::GridWdt; gx++)
+                dig_free_check::g_grid[gy][gx] =
+                    (c.sky_from_row >= 0 && gy >= c.sky_from_row) ? 0 : 3;
+        if (c.sky_column >= 0)
+            for (int32_t gy = 0; gy < dig_free_check::GridHgt; gy++)
+                dig_free_check::g_grid[gy][c.sky_column] = 0;
+
+        int32_t before[dig_free_check::GridHgt][dig_free_check::GridWdt];
+        for (int32_t gy = 0; gy < dig_free_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < dig_free_check::GridWdt; gx++)
+                before[gy][gx] = dig_free_check::g_grid[gy][gx];
+
+        dig_free_check::g_cleared = 0;
+
+        dig_free_check::Game.Landscape.DigFree(c.tx, c.ty, c.rad, false, nullptr);
+
+        char delta[1024];
+        int32_t used = 0, changed = 0;
+        delta[0] = '\0';
+        for (int32_t gy = 0; gy < dig_free_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < dig_free_check::GridWdt; gx++)
+                if (dig_free_check::g_grid[gy][gx] != before[gy][gx])
+                {
+                    changed++;
+                    used += snprintf(delta + used, sizeof(delta) - used, "%s%d,%d",
+                                     used ? ";" : "", gy, gx);
+                }
+
+        printf("{\"name\":\"%s\",\"tx\":%d,\"ty\":%d,\"rad\":%d,"
+               "\"sky_from_row\":%d,\"sky_column\":%d,"
+               "\"changed_count\":%d,\"changed\":\"%s\"}",
+               c.name, c.tx, c.ty, c.rad, c.sky_from_row, c.sky_column, changed, delta);
+    }
+    printf("]");
+}
+
 // Runs one ExtractMaterial and records which pixel it actually cleared. The
 // returned material alone is not enough: a port that cleared the requested
 // pixel instead of the column top would return the very same value.
@@ -9807,6 +10007,12 @@ int main()
     //       material's own column, not the pixel it was handed, and FindMatTop
     //       examines both sides per iteration with left winning a tie.
     printExtractMaterialCases();
+    printf(",\n");
+
+    // 22e7. dig_free: DigFree's circle walk, whose bottom edge is as wide as the
+    //       LAST row rather than the circle, whose zero-width row still digs one
+    //       pixel, and whose edge passes bite only at a density boundary.
+    printDigFreeCases();
     printf(",\n");
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.
