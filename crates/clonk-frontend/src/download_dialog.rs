@@ -47,6 +47,13 @@ pub struct DownloadDialogState {
     transfer_dialog: Option<ProgressDialogState>,
     error_dialog: Option<MessageDialogState>,
     outcome: Option<DownloadDialogOutcome>,
+    /// Localized `IDS_PRC_DOWNLOADERROR` ("Error downloading the file %s.|%s.")
+    /// and the filename its first argument names. Unset leaves an error
+    /// message as the caller composed it.
+    error_format: Option<(String, String)>,
+    /// Appended after a `'|'` when the composed error mentions 404
+    /// (`C4DownloadDlg.cpp:184-189`).
+    not_found_message: Option<String>,
 }
 
 impl DownloadDialogState {
@@ -82,7 +89,68 @@ impl DownloadDialogState {
             transfer_dialog: Some(transfer_dialog),
             error_dialog: None,
             outcome: None,
+            error_format: None,
+            not_found_message: None,
         }
+    }
+
+    /// Installs the localized `IDS_PRC_DOWNLOADERROR` format and the filename
+    /// the wrapper names in it (`C4DownloadDlg.cpp:182`).
+    #[must_use]
+    pub fn with_error_format(
+        mut self,
+        format: impl Into<String>,
+        filename: impl Into<String>,
+    ) -> Self {
+        self.error_format = Some((format.into(), filename.into()));
+        self
+    }
+
+    /// Installs the extended message a 404 appends
+    /// (`C4DownloadDlg.cpp:184-189`).
+    #[must_use]
+    pub fn with_not_found_message(mut self, message: impl Into<String>) -> Self {
+        self.not_found_message = Some(message.into());
+        self
+    }
+
+    /// Composes the terminal modal text for an error exactly as
+    /// `C4DownloadDlg::DownloadFile` does.
+    fn compose_error(&self, error: &str) -> String {
+        let mut composed = match self.error_format.as_ref() {
+            Some((format, filename)) => format.replacen("%s", filename, 1).replacen("%s", error, 1),
+            None => error.to_string(),
+        };
+        // C++ tests the *composed* string, not the raw error.
+        if composed.contains("404") {
+            if let Some(message) = self.not_found_message.as_deref() {
+                composed.push('|');
+                composed.push_str(message);
+            }
+        }
+        composed
+    }
+
+    /// Ends the transfer in the download-error modal. Shared by a transport
+    /// failure and by a user cancel, which C++ routes through the same wrapper
+    /// path with `IDS_ERR_USERCANCEL` as the error text.
+    fn open_error_dialog(&mut self, error: &str) {
+        self.transfer_dialog = None;
+        self.error_dialog = Some(MessageDialogState::regular_ok(
+            self.compose_error(error),
+            self.caption.clone(),
+            MessageDialogIcon::ERROR,
+        ));
+    }
+
+    /// Fails the transfer with `error`, opening the terminal modal.
+    pub fn fail_with_error(&mut self, error: impl AsRef<str>) {
+        if self.outcome.is_some() {
+            return;
+        }
+        let error = error.as_ref();
+        self.open_error_dialog(error);
+        self.outcome = Some(DownloadDialogOutcome::Failed(self.compose_error(error)));
     }
 
     pub fn transfer_dialog(&self) -> Option<&MessageDialogState> {
@@ -136,13 +204,10 @@ impl DownloadDialogState {
                 self.outcome = Some(DownloadDialogOutcome::Completed);
             }
             DownloadTransferEvent::Failed { display_message } => {
-                self.transfer_dialog = None;
-                self.error_dialog = Some(MessageDialogState::regular_ok(
-                    display_message.clone(),
-                    self.caption.clone(),
-                    MessageDialogIcon::ERROR,
+                self.open_error_dialog(&display_message);
+                self.outcome = Some(DownloadDialogOutcome::Failed(
+                    self.compose_error(&display_message),
                 ));
-                self.outcome = Some(DownloadDialogOutcome::Failed(display_message));
             }
         }
     }
@@ -181,11 +246,13 @@ impl DownloadDialogState {
         {
             return None;
         }
-        self.transfer_dialog = None;
+        // `UserClose` does not simply dismiss: it fails the transfer with
+        // `IDS_ERR_USERCANCEL`, and the wrapper shows the same terminal modal
+        // it shows for a transport failure (`C4DownloadDlg.cpp:128-131,167-196`).
+        let reason = self.cancel_reason.clone();
+        self.open_error_dialog(&reason);
         self.outcome = Some(DownloadDialogOutcome::Cancelled);
-        Some(DownloadDialogAction::AbortTransfer {
-            reason: self.cancel_reason.clone(),
-        })
+        Some(DownloadDialogAction::AbortTransfer { reason })
     }
 }
 
@@ -338,5 +405,106 @@ mod tests {
         assert_eq!(error_dialog.caption(), "Downloading Update");
         assert_eq!(error_dialog.icon(), MessageDialogIcon::ERROR);
         assert_eq!(error_dialog.buttons(), MessageDialogButtons::OK);
+    }
+
+    /// Cancelling still ends in the download-error modal
+    /// (clonk-org/clonk-rs#575).
+    ///
+    /// This is the part that reads as "nothing happened" if you only follow
+    /// the cancel path: `UserClose` does not close the dialog with a result,
+    /// it *fails the transfer* with `IDS_ERR_USERCANCEL` as the error text
+    /// (`C4DownloadDlg.cpp:128-131`). `ShowModal` then returns false and
+    /// `DownloadFile` shows the same terminal modal it shows for a transport
+    /// failure, with `IDS_PRC_DOWNLOADERROR` naming the file and the error
+    /// (`:167-196`).
+    ///
+    /// So a user cancel and a network failure are the same shape to the
+    /// player; only the error text differs. A port that treated Cancel as a
+    /// plain dismissal would silently swallow the outcome.
+    #[test]
+    fn cancelling_ends_in_the_download_error_modal_naming_the_user_abort() {
+        let mut dialog = DownloadDialogState::new_localized(
+            "Downloading patch.c4u...",
+            "Downloading Update",
+            "Cancel",
+            "User abort",
+        )
+        // IDS_PRC_DOWNLOADERROR, already localized, with the filename the
+        // wrapper passes as its first argument.
+        .with_error_format("Error downloading the file %s.|%s.", "patch.c4u");
+
+        let action = dialog
+            .handle_transfer_dialog_result(MessageDialogResult::Cancel)
+            .expect("cancel must abort the transfer");
+        assert_eq!(
+            action,
+            DownloadDialogAction::AbortTransfer {
+                reason: "User abort".to_string()
+            }
+        );
+        assert!(
+            dialog.transfer_dialog().is_none(),
+            "the progress dialog closes first"
+        );
+        assert_eq!(
+            dialog.outcome(),
+            Some(&DownloadDialogOutcome::Cancelled),
+            "the outcome stays Cancelled — it is not reported as a transport failure"
+        );
+
+        let error = dialog
+            .error_dialog()
+            .expect("cancel ends in the same terminal modal as a failure");
+        assert_eq!(
+            error.message(),
+            "Error downloading the file patch.c4u.|User abort."
+        );
+        assert_eq!(error.caption(), "Downloading Update");
+        assert_eq!(error.icon(), MessageDialogIcon::ERROR);
+        assert_eq!(error.buttons(), MessageDialogButtons::OK);
+    }
+
+    /// A 404 appends the caller's not-found message on its own line
+    /// (clonk-org/clonk-rs#575).
+    ///
+    /// `DownloadFile` tests the *composed* error for `"404"` and appends
+    /// `'|'` plus the supplied message (`C4DownloadDlg.cpp:184-189`). The
+    /// separator is the classic line break, not a space, so the extra
+    /// sentence lands on its own line in the modal.
+    #[test]
+    fn a_404_failure_appends_the_not_found_message_on_its_own_line() {
+        let build = |error: &str, not_found: Option<&str>| {
+            let mut dialog = DownloadDialogState::new_localized(
+                "Downloading patch.c4u...",
+                "Downloading Update",
+                "Cancel",
+                "User abort",
+            )
+            .with_error_format("Error downloading the file %s.|%s.", "patch.c4u");
+            if let Some(message) = not_found {
+                dialog = dialog.with_not_found_message(message);
+            }
+            dialog.fail_with_error(error);
+            dialog
+                .error_dialog()
+                .expect("a failure opens the modal")
+                .message()
+                .to_string()
+        };
+
+        assert_eq!(
+            build("404 Not Found", Some("Check the update server.")),
+            "Error downloading the file patch.c4u.|404 Not Found.|Check the update server.",
+        );
+        // No 404 in the text: the extra message is not appended.
+        assert_eq!(
+            build("Connection reset", Some("Check the update server.")),
+            "Error downloading the file patch.c4u.|Connection reset.",
+        );
+        // A 404 without a supplied message stays as it is.
+        assert_eq!(
+            build("404 Not Found", None),
+            "Error downloading the file patch.c4u.|404 Not Found.",
+        );
     }
 }
