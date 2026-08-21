@@ -2670,6 +2670,13 @@ impl GameApp {
             key,
             key == VirtualKeyCode::F4 && c4_modifiers.is_empty(),
         );
+        // The pause key registers with no explicit priority, so it takes
+        // `C4CustomKey`'s default `PRIO_Base` (`C4Game.cpp:3429`,
+        // `C4KeyboardInput.h:362`). `PRIO_PlrControl` is 7 against its 1
+        // (`C4KeyboardInput.h:344-354`), so a player control always wins the
+        // collision. Only a *rebound* chord can collide — the default Pause
+        // key is not a player control — so this guard does not affect the
+        // shipped configuration.
         let pause_binding = self.runtime_keyboard_binding_matches(
             if self.console_mode {
                 "ConsolePauseToggle"
@@ -2678,7 +2685,7 @@ impl GameApp {
             },
             key,
             key == VirtualKeyCode::Pause && c4_modifiers.is_empty(),
-        );
+        ) && !self.local_player_key_binding_in_scope(key);
         if client_list_binding {
             if state == ElementState::Released {
                 return Ok(RuntimeGlobalKeyOutcome::Handled);

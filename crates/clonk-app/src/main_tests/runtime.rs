@@ -8169,3 +8169,62 @@ fn runtime_language_treats_an_empty_table_as_a_miss_not_an_empty_table() {
         table.entries.get("Probe").map(String::as_str) => Some("US after the empty ZZ");
     );
 }
+
+
+/// A player control outranks a pause chord rebound onto the same key
+/// (clonk-org/clonk-rs#577).
+///
+/// `FullscreenPauseToggle` is registered with no explicit priority
+/// (`C4Game.cpp:3429`), so it takes `C4CustomKey`'s default `PRIO_Base`
+/// (`C4KeyboardInput.h:362`). `PRIO_PlrControl` is 7 against its 1
+/// (`C4KeyboardInput.h:344-354`) — the highest real priority in the ladder —
+/// so a player control always wins the collision.
+///
+/// This only becomes reachable once the key is *rebound*: the default Pause
+/// key is not a player control, so the default configuration never collides
+/// and the wrong order stays invisible. That is exactly why it needs pinning
+/// rather than trusting the dispatch order.
+#[test]
+fn a_rebound_pause_chord_loses_to_the_player_control_on_the_same_key() {
+    // Rebind pause onto a key the local player already drives.
+    let mut app = new_running_sandbox_app();
+    let player_key = VirtualKeyCode::KeyW;
+    runtime_assert!(
+        app.local_player_key_binding_in_scope(player_key),
+        "the fixture must actually bind {player_key:?} as a player control"
+    );
+    install_runtime_key_config(
+        &mut app,
+        Ok(parse_runtime_key_config(b"[Keys]\nFullscreenPauseToggle=W\n").test_value()),
+    );
+
+    let before = app.runtime_halt_active();
+    app.test_key(player_key, ElementState::Pressed);
+    app.test_key(player_key, ElementState::Released);
+
+    runtime_assert_eq!(
+        app.runtime_halt_active() => before,
+        "PRIO_PlrControl (7) outranks the pause key's PRIO_Base (1), so the \
+         rebound chord must reach the player and not toggle pause"
+    );
+
+    // The same rebinding on a key the player does *not* drive still pauses,
+    // so the guard is a collision rule rather than a blanket refusal.
+    let mut free = new_running_sandbox_app();
+    let free_key = VirtualKeyCode::F8;
+    runtime_assert!(
+        !free.local_player_key_binding_in_scope(free_key),
+        "{free_key:?} must be free for this half to say anything"
+    );
+    install_runtime_key_config(
+        &mut free,
+        Ok(parse_runtime_key_config(b"[Keys]\nFullscreenPauseToggle=F8\n").test_value()),
+    );
+    let before = free.runtime_halt_active();
+    free.test_key(free_key, ElementState::Pressed);
+    free.test_key(free_key, ElementState::Released);
+    runtime_assert!(
+        free.runtime_halt_active() != before,
+        "a rebound pause chord with no player control on it still toggles pause"
+    );
+}
