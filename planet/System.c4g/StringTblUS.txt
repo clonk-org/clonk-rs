@@ -8,3 +8,5 @@ MenuUndo=Undo: %s
 MenuChoose=Choose %s for %s
 MarsOrderTooExpensive=That order costs %d clunkers. You have %d.
 MarsOrderSent=Capsule called: %d goods for %d clunkers.
+GatherTask=Gather
+GatherRow=Gather %s (%d)

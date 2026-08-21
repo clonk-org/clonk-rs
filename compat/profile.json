@@ -522,6 +522,20 @@
       "owner": "docs/COMPAT_PROFILE.md (port content appends)"
     },
     {
+      "id": "content-append-gather-order",
+      "area": "content",
+      "summary": "planet/System.c4g/GatherMenu.c #appendto CLNK adds a \"Gather\" context row to an owned crew member, offering one entry per loose item type the Clonk can both walk to and carry home, and queueing Get/Enter for each in one batch. LegacyClonk has no standing order of this shape, so a spare crew member is either driven by hand or left as a backup. The row issues ordinary player commands through the existing queue, exactly as if each had been given by hand, so every peer sees them through the normal control path; it is listed here rather than under port-only features because it does reach the control stream.",
+      "cited_in": [
+        "planet/System.c4g/GatherMenu.c",
+        "planet/System.c4g/GatherTask.c"
+      ],
+      "cpp_reference": "C4ObjectMenu.cpp:399,670-682, C4Command.cpp:1180-1218",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "clonk-org/clonk-rs#334"
+    },
+    {
       "id": "content-append-menu-range-row",
       "area": "content",
       "summary": "planet/System.c4g/MenuRangeRow.c #appendto MS4C collapses a ClonkMars range choice from three rows (value, Increase by 1, Decrease by 1) into one row with primary/secondary stepping.",

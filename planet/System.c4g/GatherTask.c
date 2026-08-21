@@ -71,3 +71,51 @@ global func ClonkRsGatherOrder(object clonk, id item, object base)
   }
   return(GetLength(candidates));
 }
+
+// The distinct item types this Clonk could fetch and bring back, as
+// [id, count] rows. This is the list the menu is built from.
+//
+// One row per type rather than one per object: a menu built straight off the
+// object list is a list of litter rather than a list of orders, and the count
+// is the only thing on a row that tells the player whether the order is worth
+// giving at all.
+//
+// `Find_Category(C4D_Object)` is what separates that litter from the crew
+// member standing in it and the building it would be carried to. Both of those
+// are uncontained and both are trivially reachable, so nothing else here would
+// keep them off the menu.
+global func ClonkRsGatherTypes(object clonk, object base)
+{
+  var rows = CreateArray();
+  if (!clonk)
+    return(rows);
+
+  var seen = CreateArray();
+  var candidate, item, i, known, count, row;
+  for (candidate in FindObjects(Find_Category(C4D_Object)))
+  {
+    if (!candidate)
+      continue;
+    // Uncontained only, for the same reason as the candidate list.
+    if (Contained(candidate))
+      continue;
+    item = GetID(candidate);
+    known = false;
+    for (i = 0; i < GetLength(seen); i++)
+      if (seen[i] == item)
+        known = true;
+    if (known)
+      continue;
+    seen[GetLength(seen)] = item;
+    // Reuse the reachability filter rather than repeating it here, so the
+    // count on a row can never disagree with what the order actually fetches.
+    count = GetLength(ClonkRsGatherCandidates(clonk, item, base));
+    if (!count)
+      continue;
+    row = CreateArray(2);
+    row[0] = item;
+    row[1] = count;
+    rows[GetLength(rows)] = row;
+  }
+  return(rows);
+}
