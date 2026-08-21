@@ -755,6 +755,35 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/extract_material.inc"
 
+# 3q3f. Lift C4Landscape::DigFree and DigFreePix.
+#       DigFree walks a circle row by row, and two of its details are easy to
+#       "tidy" into something that digs a different shape:
+#
+#         * `iLineWidth` is declared OUTSIDE the row loop and the bottom-edge
+#           pass reads it after the loop has ended -- so the bottom edge is as
+#           wide as the LAST row was, not as wide as the circle. A port that
+#           recomputed it there would clear a different set of pixels.
+#         * a row whose half-width computes to 0 still digs one pixel, via the
+#           `+ (iLineWidth == 0)` bump that appears in the loop bound and again
+#           in the right-hand edge position.
+#
+#       DigFreePix itself probes instability for EVERY pixel it is handed,
+#       including sky and including material whose DigFree is 0 -- the probe sits
+#       after the conditional clear, not inside it.
+awk '
+  /^int32_t C4Landscape::DigFreePix\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/dig_free_pix.inc"
+
+awk '
+  /^void C4Landscape::DigFree\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/dig_free.inc"
+
 # 3q3b. Lift mrfIncinerate. It is the one reaction whose arms are asymmetric in
 #       a way a port is likely to flatten: `meeMassMove` and `meePXSPos` try to
 #       incinerate and report **unhandled** when they cannot, while `meePXSMove`
