@@ -33,6 +33,7 @@ fn pristine_tutorial01_resolves_cpp_game_resource_order_and_wire_names() {
 
     let sources = resolve_host_game_resource_sources(
         &scenario,
+        None,
         &[content.clone(), planet.clone()],
         &definition_resources,
         &content,
@@ -51,6 +52,204 @@ fn pristine_tutorial01_resolves_cpp_game_resource_order_and_wire_names() {
     assert_eq!(
         source_pairs(&sources.materials),
         vec![(content.join("Material.c4g"), b"Material.c4g".to_vec(),)]
+    );
+}
+
+#[test]
+fn savegame_origin_folder_material_is_published_before_global() {
+    // OpenScenario registers Origin parents after physical parents, then
+    // C4GameResList publishes every registered Material.c4g in GroupSet order
+    // (src/C4Game.cpp:142-179; src/C4GameParameters.cpp:212-222).
+    let fixture = tempfile::tempdir().unwrap();
+    let content = fixture.path().join("content");
+    let planet = fixture.path().join("planet");
+    let save_parent = fixture.path().join("Savegames.c4f/Fossae.c4f");
+    let scenario = save_parent.join("Fossae1.c4s");
+    let origin_materials = content.join("ClonkMars.c4f/Material.c4g");
+    for path in [
+        &scenario,
+        &origin_materials,
+        &content.join("Material.c4g"),
+        &planet.join("System.c4g"),
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::write(
+        scenario.join("Scenario.txt"),
+        b"[Head]\nTitle=Saved Fossae\nSaveGame=1\nOrigin=content/ClonkMars.c4f/01_Fossae.c4s\n",
+    )
+    .unwrap();
+
+    for origin in [
+        "content/ClonkMars.c4f/01_Fossae.c4s",
+        "ClonkMars.c4f/01_Fossae.c4s",
+    ] {
+        let sources = resolve_host_game_resource_sources(
+            &scenario,
+            Some(origin),
+            &[save_parent.clone(), content.clone(), planet.clone()],
+            &[],
+            &content,
+        )
+        .unwrap();
+
+        assert_eq!(
+            source_pairs(&sources.materials),
+            vec![
+                (
+                    origin_materials.clone(),
+                    b"ClonkMars.c4f/Material.c4g".to_vec(),
+                ),
+                (content.join("Material.c4g"), b"Material.c4g".to_vec()),
+            ],
+            "Origin spelling {origin}"
+        );
+    }
+}
+
+#[test]
+fn missing_origin_inner_folder_keeps_outer_material_publication() {
+    // RegisterParentFolders keeps every parent opened before a missing child,
+    // and OpenScenario ignores its final failure (src/C4GroupSet.cpp:279-318;
+    // src/C4Game.cpp:176-179).
+    let fixture = tempfile::tempdir().unwrap();
+    let content = fixture.path().join("content");
+    let planet = fixture.path().join("planet");
+    let scenario_root = fixture.path().join("Savegames.c4f");
+    let scenario = scenario_root.join("Saved.c4s");
+    let outer_materials = content.join("Outer.c4f/Material.c4g");
+    for path in [
+        &scenario,
+        &outer_materials,
+        &content.join("Material.c4g"),
+        &planet.join("System.c4g"),
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+
+    let sources = resolve_host_game_resource_sources(
+        &scenario,
+        Some("content/Outer.c4f/Missing.c4f/Original.c4s"),
+        &[scenario_root, content.clone(), planet],
+        &[],
+        &content,
+    )
+    .unwrap();
+
+    assert_eq!(
+        source_pairs(&sources.materials),
+        vec![
+            (outer_materials, b"Outer.c4f/Material.c4g".to_vec(),),
+            (content.join("Material.c4g"), b"Material.c4g".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn identical_origin_alias_does_not_publish_parent_material_twice() {
+    // OpenScenario compares Origin and ScenarioFilename through ItemIdentical,
+    // whose RealPath normalization removes lexical aliases before deciding
+    // whether to register Origin parents (src/C4Game.cpp:176-179;
+    // src/StdFile.cpp:696-708).
+    let fixture = tempfile::tempdir().unwrap();
+    let content = fixture.path().join("content");
+    let planet = fixture.path().join("planet");
+    let scenario = content.join("Parent.c4f/Actual.c4s");
+    let parent_materials = content.join("Parent.c4f/Material.c4g");
+    for path in [
+        &scenario,
+        &parent_materials,
+        &content.join("Material.c4g"),
+        &planet.join("System.c4g"),
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+
+    let sources = resolve_host_game_resource_sources(
+        &scenario,
+        Some("Parent.c4f/../Parent.c4f/Actual.c4s"),
+        &[content.clone(), planet],
+        &[],
+        &content,
+    )
+    .unwrap();
+
+    assert_eq!(
+        source_pairs(&sources.materials),
+        vec![
+            (parent_materials, b"Parent.c4f/Material.c4g".to_vec(),),
+            (content.join("Material.c4g"), b"Material.c4g".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn corrupt_wildcard_origin_parent_does_not_fall_through_to_later_root() {
+    // The loader has one ExePath: once an Origin parent item is present there,
+    // RegisterParentFolders may fail to open it but cannot substitute content
+    // from another root (src/C4GroupSet.cpp:279-318).
+    let fixture = tempfile::tempdir().unwrap();
+    let first = fixture.path().join("first");
+    let second = fixture.path().join("second");
+    let scenario = first.join("Saved.c4s");
+    for path in [
+        &scenario,
+        &first.join("Material.c4g"),
+        &first.join("System.c4g"),
+        &second.join("Outer.c4f/Material.c4g"),
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::write(first.join("Outer.c4f"), b"not a C4Group").unwrap();
+
+    let sources = resolve_host_game_resource_sources(
+        &scenario,
+        Some("Out?r.c4f/Original.c4s"),
+        &[first.clone(), second],
+        &[],
+        &first,
+    )
+    .unwrap();
+
+    assert_eq!(
+        source_pairs(&sources.materials),
+        vec![(first.join("Material.c4g"), b"Material.c4g".to_vec())]
+    );
+}
+
+#[test]
+fn direct_c4f_origin_registers_its_material_child() {
+    // RegisterParentFolders treats a filename that is itself a .c4f as the
+    // first parent rather than stripping it before registration
+    // (src/C4GroupSet.cpp:250-259).
+    let fixture = tempfile::tempdir().unwrap();
+    let content = fixture.path().join("content");
+    let scenario = content.join("Saved.c4s");
+    let origin_materials = content.join("Origin.c4f/Material.c4g");
+    for path in [
+        &scenario,
+        &origin_materials,
+        &content.join("Material.c4g"),
+        &content.join("System.c4g"),
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+
+    let sources = resolve_host_game_resource_sources(
+        &scenario,
+        Some("Origin.c4f"),
+        std::slice::from_ref(&content),
+        &[],
+        &content,
+    )
+    .unwrap();
+
+    assert_eq!(
+        source_pairs(&sources.materials),
+        vec![
+            (origin_materials, b"Origin.c4f/Material.c4g".to_vec()),
+            (content.join("Material.c4g"), b"Material.c4g".to_vec()),
+        ]
     );
 }
 
@@ -102,6 +301,7 @@ fn nested_folders_keep_repeated_defs_and_publish_materials_inner_to_outer() {
 
     let sources = resolve_host_game_resource_sources(
         &scenario,
+        None,
         &[content.clone(), planet.clone()],
         &definition_resources,
         &content,
@@ -164,6 +364,7 @@ fn exact_effective_path_is_not_re_resolved_through_later_roots() {
     .unwrap();
     let sources = resolve_host_game_resource_sources(
         &scenario,
+        None,
         &[first.clone(), second],
         &definition_resources,
         &first,
@@ -208,6 +409,7 @@ fn definition_wire_names_strip_only_the_executable_root() {
     .unwrap();
     let sources = resolve_host_game_resource_sources(
         &scenario,
+        None,
         &[scenario_root, content.clone(), planet],
         &definition_resources,
         &content,
@@ -428,6 +630,7 @@ fn packed_nested_host_groups_are_snapshotted_for_network_publication() {
     .unwrap();
     let sources = resolve_host_game_resource_sources(
         &scenario_path,
+        None,
         &[content.clone(), planet],
         &definition_resources,
         &content,
@@ -492,6 +695,7 @@ fn folder_material_identity_uses_the_opened_parent_spelling() {
     let selected_scenario = content.join("Out?r.c4f/Round.c4s");
     let sources = resolve_host_game_resource_sources(
         &selected_scenario,
+        None,
         &[content.clone(), planet],
         &[],
         &content,
@@ -530,6 +734,7 @@ fn global_resource_opened_names_use_win32_disk_case() {
 
     let sources = resolve_host_game_resource_sources(
         &scenario,
+        None,
         std::slice::from_ref(&content),
         &[],
         &content,
@@ -573,6 +778,7 @@ fn corrupt_first_root_source_fails_typed_without_falling_through() {
     .unwrap();
     let error = resolve_host_game_resource_sources(
         &scenario,
+        None,
         &[first, second],
         &definition_resources,
         fixture.path(),

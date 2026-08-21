@@ -1343,6 +1343,47 @@ LastPlayerID=2\n\
 }
 
 #[test]
+fn savegame_origin_material_satisfies_enumeration_across_host_publication() {
+    // A save keeps only its material index ledger; OpenScenario recovers the
+    // definitions from the original scenario's registered parent folders and
+    // publishes those groups for the network reload (src/C4Game.cpp:142-179,
+    // 901-996; src/C4GameParameters.cpp:212-222).
+    let mut fixture = minimal_install(None);
+    let content = fixture.install_roots[0].clone();
+    let save_parent = fixture._root.path().join("Savegames.c4f/Fossae.c4f");
+    let save = save_parent.join("Fossae1.c4s");
+    let origin_materials = content.join("ClonkMars.c4f/Material.c4g");
+    fs::create_dir_all(&save).unwrap();
+    fs::create_dir_all(&origin_materials).unwrap();
+    fs::write(
+        save.join("Scenario.txt"),
+        fixture.scenario_text.replace(
+            "Title=Fixture",
+            "Title=Saved Fossae\nSaveGame=1\nOrigin=content/ClonkMars.c4f/01_Fossae.c4s",
+        ),
+    )
+    .unwrap();
+    fs::write(save.join("Game.txt"), b"[Game]\nTime=123\n").unwrap();
+    fs::write(save.join("MatMap.txt"), b"[Enumeration]\r\nSilicium\r\n").unwrap();
+    fs::write(
+        origin_materials.join("Si.c4m"),
+        b"[Material]\nName=Silicium\nDensity=100\n",
+    )
+    .unwrap();
+    fixture.scenario_path = save;
+    fixture.install_roots.push(save_parent);
+
+    let prepared = prepare(&fixture, &[])
+        .expect("Origin material survives pre-publication and network reload");
+
+    assert!(prepared
+        .host_config()
+        .resource_files
+        .iter()
+        .any(|resource| resource.core.filename.as_bytes() == b"ClonkMars.c4f/Material.c4g"));
+}
+
+#[test]
 fn old_style_savegame_player_files_restore_rows_and_capacity() {
     let game = b"[PlayerFiles]\r\n\
 Player1=Old.c4p\r\n\
