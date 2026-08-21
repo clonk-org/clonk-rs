@@ -726,6 +726,27 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Material.cpp" > "$gen/mrf_insert.inc"
 
+# 3s. Lift `Create` and `Cast`, the two callers of the already-lifted `New`.
+#     `Cast` draws its two randoms in an order the C++ had to force explicitly
+#     with named locals, and the one drawn FIRST is the one used for ydir — so a
+#     port reading them in argument order gets swapped velocities while drawing
+#     exactly as many numbers.
+for fn in Create Cast; do
+  awk -v fn="$fn" '
+    $0 ~ ("^(C4PXS \\*|bool |void )C4PXSSystem::" fn "\\(") { p = 1 }
+    p { print }
+    p && /^}$/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$src/C4PXS.cpp" > "$gen/pxs_$(echo "$fn" | tr 'A-Z' 'a-z').inc"
+done
+
+awk '
+  /^void C4PXS::Deactivate\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4PXS.cpp" > "$gen/pxs_deactivate.inc"
+
 # 3r. Lift the container lifecycle: C4Object::Enter, Exit and Collect. These are
 #     ordered state machines whose SHAPE is the parity fact — which script call
 #     runs before which mutation, which rollback undoes a failed insert, and

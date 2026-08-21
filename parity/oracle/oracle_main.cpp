@@ -5758,6 +5758,150 @@ static void printInsertCases()
     printf("]");
 }
 
+// --- PXS casting into slots -------------------------------------------------
+//
+// `pxs_allocation` above already pins `C4PXSSystem::New`'s slot choice in
+// isolation, over four slots freed out of order. This section runs the layer
+// that USES it, and covers three things that one does not:
+//
+//   * **`Cast`'s draw order.** The C++ pulls both randoms into named locals
+//     with a `// force argument evaluation order` comment, and the one drawn
+//     FIRST (`r2`) is the one used for ydir. Reading them in argument order
+//     swaps the two velocities while drawing exactly as many numbers, so no
+//     draw-count check can see it — only the raw fixed values can.
+//   * **Per-slot state and chunk counts**, rather than just which slot a
+//     pointer landed in: `Create`'s field init is compared alongside it.
+//   * **The chunk boundary.** Filling chunk 0 to its 500-slot capacity and
+//     creating one more allocates chunk 1 on demand; `pxs_allocation` never
+//     makes enough particles to reach it.
+namespace pxs_slots
+{
+const int32_t MNone = -1;
+const size_t PXSChunkSize = 500, PXSMaxChunk = 20;
+
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
+
+struct C4PXS
+{
+    int32_t Mat = MNone;
+    C4Fixed x = itofix(0), y = itofix(0), xdir = itofix(0), ydir = itofix(0);
+    void Deactivate();
+};
+
+struct C4PXSSystem
+{
+    int32_t Count = 0;
+    C4PXS *Chunk[PXSMaxChunk] = {};
+    size_t iChunkPXS[PXSMaxChunk] = {};
+
+    C4PXS *New();
+    bool Create(int32_t mat, C4Fixed ix, C4Fixed iy, C4Fixed ixdir, C4Fixed iydir);
+    void Cast(int32_t mat, int32_t num, int32_t tx, int32_t ty, int32_t level);
+    void Delete(C4PXS *pPXS);
+
+    void reset()
+    {
+        for (size_t cnt = 0; cnt < PXSMaxChunk; cnt++)
+        {
+            delete[] Chunk[cnt];
+            Chunk[cnt] = nullptr;
+            iChunkPXS[cnt] = 0;
+        }
+        Count = 0;
+    }
+};
+
+struct GameStub
+{
+    C4PXSSystem PXS;
+};
+
+static GameStub Game;
+
+#include "pxs_new.inc"
+#include "pxs_create.inc"
+#include "pxs_cast.inc"
+#include "pxs_delete.inc"
+#include "pxs_deactivate.inc"
+} // namespace pxs_slots
+
+static void printPxsSlotStep(const char *step, int32_t draws)
+{
+    size_t live = 0;
+    for (size_t cnt = 0; cnt < pxs_slots::PXSMaxChunk; cnt++)
+        live += pxs_slots::Game.PXS.iChunkPXS[cnt];
+
+    printf("{\"step\":\"%s\",\"draws\":%d,\"live\":%zu,\"chunks\":[", step, draws, live);
+    for (size_t cnt = 0; cnt < 3; cnt++)
+    {
+        if (cnt) printf(",");
+        printf("{\"i\":%zu,\"alloc\":%s,\"count\":%zu}", cnt,
+               pxs_slots::Game.PXS.Chunk[cnt] ? "true" : "false",
+               pxs_slots::Game.PXS.iChunkPXS[cnt]);
+    }
+    printf("],\"slots\":[");
+    for (size_t slot = 0; slot < 6; slot++)
+    {
+        if (slot) printf(",");
+        const pxs_slots::C4PXS *pxp =
+            pxs_slots::Game.PXS.Chunk[0] ? &pxs_slots::Game.PXS.Chunk[0][slot] : nullptr;
+        if (!pxp)
+        {
+            printf("{\"i\":%zu,\"mat\":%d,\"x\":0,\"y\":0,\"xdir\":0,\"ydir\":0}",
+                   slot, pxs_slots::MNone);
+            continue;
+        }
+        printf("{\"i\":%zu,\"mat\":%d,\"x\":%d,\"y\":%d,\"xdir\":%d,\"ydir\":%d}",
+               slot, pxp->Mat, pxp->x.val, pxp->y.val, pxp->xdir.val, pxp->ydir.val);
+    }
+    printf("]}");
+}
+
+static void printPxsSlotCases()
+{
+    printf("\"pxs_slots\":[");
+    pxs_slots::Game.PXS.reset();
+    FixedRandom(0x5151);
+    Randomize3();
+    int32_t mark = RandomCount;
+
+    // 1. Three cast particles take slots 0, 1, 2 of a freshly allocated chunk,
+    //    and their velocities record which random went where.
+    pxs_slots::Game.PXS.Cast(2, 3, 30, 40, 20);
+    printPxsSlotStep("cast_three", RandomCount - mark);
+    mark = RandomCount;
+
+    // 2. Deactivating the middle particle frees slot 1 and decrements the
+    //    chunk counter without touching its neighbours.
+    printf(",");
+    pxs_slots::Game.PXS.Chunk[0][1].Deactivate();
+    printPxsSlotStep("free_middle", RandomCount - mark);
+    mark = RandomCount;
+
+    // 3. The next particle must land back in slot 1 — the freed one — rather
+    //    than at the end.
+    printf(",");
+    pxs_slots::Game.PXS.Cast(1, 1, 10, 12, 4);
+    printPxsSlotStep("reuse_freed_slot", RandomCount - mark);
+    mark = RandomCount;
+
+    // 4. Fill chunk 0 exactly to capacity. Nothing is drawn: Create is not Cast.
+    printf(",");
+    while (pxs_slots::Game.PXS.iChunkPXS[0] < pxs_slots::PXSChunkSize)
+        pxs_slots::Game.PXS.Create(3, itofix(1), itofix(2), itofix(0), itofix(0));
+    printPxsSlotStep("fill_chunk", RandomCount - mark);
+    mark = RandomCount;
+
+    // 5. One more spills into chunk 1, which is allocated on demand.
+    printf(",");
+    pxs_slots::Game.PXS.Create(3, itofix(7), itofix(8), itofix(0), itofix(0));
+    printPxsSlotStep("spill_to_chunk1", RandomCount - mark);
+
+
+    pxs_slots::Game.PXS.reset();
+    printf("]");
+}
+
 static void printConvertCases()
 {
     printf("\"convert_check\":[");
@@ -8277,6 +8421,10 @@ int main()
 
     // 22e. insert_arm: mrfInsert's event gate and its once-only splash check.
     printInsertCases();
+    printf(",\n");
+
+    // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.
+    printPxsSlotCases();
     printf(",\n");
 
     // 23. DFA_FLOAT's raw C4Fixed bounds. C4DefCore's Physical member is
