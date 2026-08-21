@@ -7684,6 +7684,92 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         );
     }
 
+    // 16g. pxs_load: `C4PXSSystem::Load` (C4PXS.cpp:362-399). Its accept/reject
+    //      decision is pure arithmetic on the file length — the four-byte
+    //      number-format tag is detected by the remainder being *exactly 4*,
+    //      never by reading a magic value, so an untagged file and a tagged one
+    //      with the same payload must load identically. Everything after that
+    //      follows: the 1..2 format range, the chunk ceiling, and a per-chunk
+    //      recount that has to attribute live slots to the chunk they sit in.
+    //
+    //      The float-format conversion sits *inside* the `Mat != MNone` branch,
+    //      so it never touches a dead slot. The golden carries a compact recipe
+    //      rather than the bytes — one case is 21 chunks, 210 KB — and both
+    //      sides build the buffer from it.
+    for case in golden["pxs_load"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("pxs_load[{name}]");
+
+        let tag = i(case, "tag") as i32;
+        let chunks = i(case, "chunks") as usize;
+        let extra = i(case, "extra") as usize;
+        let mut bytes = Vec::new();
+        if tag != 0 {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+        }
+        let payload_start = bytes.len();
+        for _ in 0..chunks {
+            for _ in 0..crate::pxs::PXS_CHUNK_SIZE {
+                bytes.extend_from_slice(&(-1i32).to_le_bytes());
+                bytes.extend_from_slice(&[0u8; 16]);
+            }
+        }
+        for live in case["input"].as_array().unwrap() {
+            let offset = payload_start
+                + (i(live, "chunk") as usize * crate::pxs::PXS_CHUNK_SIZE
+                    + i(live, "slot") as usize)
+                    * 20;
+            for (field, key) in ["mat", "x", "y", "xdir", "ydir"].iter().enumerate() {
+                let value = i(live, key) as i32;
+                bytes[offset + field * 4..offset + field * 4 + 4]
+                    .copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        bytes.extend(std::iter::repeat_n(0u8, extra));
+
+        // C++ reads the entry through a C4Group and returns false when it is
+        // absent; the port is handed the bytes, so absence is the caller's
+        // concern and the case only pins the verdict.
+        let present = case["present"].as_bool().unwrap_or(true);
+        let loaded = present.then(|| crate::pxs::PxsSystem::from_c4b(&bytes));
+        let ok = matches!(loaded, Some(Ok(_)));
+        expect_eq(
+            &label,
+            0,
+            "ok",
+            i64::from(case["ok"].as_bool().unwrap_or(false)),
+            i64::from(ok),
+        );
+
+        let Some(Ok(system)) = loaded else {
+            continue;
+        };
+        for (index, count) in case["counts"].as_array().unwrap().iter().enumerate() {
+            let live = (0..crate::pxs::PXS_CHUNK_SIZE)
+                .filter(|slot| system.peek_slot(index, *slot).is_some())
+                .count() as i64;
+            expect_eq(
+                &label,
+                index,
+                "chunk_count",
+                count.as_i64().unwrap_or(-1),
+                live,
+            );
+        }
+        for live in case["loaded"].as_array().unwrap() {
+            let chunk = i(live, "chunk") as usize;
+            let slot = i(live, "slot") as usize;
+            let pxs = system
+                .peek_slot(chunk, slot)
+                .unwrap_or_else(|| panic!("{label}: chunk {chunk} slot {slot} did not load"));
+            expect_eq(&label, slot, "mat", i(live, "mat"), pxs.mat.index() as i64);
+            expect_eq(&label, slot, "x", i(live, "x"), pxs.x.val() as i64);
+            expect_eq(&label, slot, "y", i(live, "y"), pxs.y.val() as i64);
+            expect_eq(&label, slot, "xdir", i(live, "xdir"), pxs.xdir.val() as i64);
+            expect_eq(&label, slot, "ydir", i(live, "ydir"), pxs.ydir.val() as i64);
+        }
+    }
+
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
     // including the zero default for a real resource without [Physical]
     // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance
