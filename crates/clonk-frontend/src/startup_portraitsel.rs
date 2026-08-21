@@ -19,6 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 const MIN_WIDTH: i32 = 300;
@@ -36,6 +37,23 @@ const BUTTON_HEIGHT: i32 = 32;
 const SCROLLBAR_WIDTH: i32 = 16;
 const CONTEXT_ROW_SPACING: i32 = 1;
 const LOAD_IDLE_INTERVAL: u8 = 10;
+
+/// `C4PortraitSelDlg::OnIdle` throttles decoding with a **function-local
+/// static** — one counter for the whole process, shared by every dialog
+/// instance and never reset (`C4FileSelDlg.cpp:598-602`):
+///
+/// ```cpp
+/// static int32_t i = 0;
+/// if (!(i++ % 10)) ImageLoader.Execute();
+/// ```
+static IDLE_CADENCE: AtomicU32 = AtomicU32::new(0);
+
+/// Resets the process-wide cadence so a test does not inherit the phase left
+/// by whatever ran before it.
+#[cfg(test)]
+fn reset_idle_cadence_for_test() {
+    IDLE_CADENCE.store(0, Ordering::Relaxed);
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortraitLocation {
@@ -377,7 +395,6 @@ pub struct PortraitSelController {
     scrollbar_dragging: bool,
     scrollbar_arrow_captured: bool,
     scrollbar_arrow: i8,
-    idle_tick: u8,
     generation: u64,
     validation_error: Option<String>,
     /// Measured width of the widest location caption, cached the way
@@ -392,6 +409,10 @@ pub struct PortraitSelController {
     /// Measured Location-label width, cached during render and read by layout,
     /// the same way `grid_layout` caches measured item geometry.
     location_label_width: RefCell<Option<i32>>,
+    /// Absolute top-left installed by title dragging, `None` while centered.
+    location: Option<(i32, i32)>,
+    /// Pointer offset inside the window while a title drag is live.
+    title_drag: Option<(i32, i32)>,
 }
 
 impl PortraitSelController {
@@ -437,6 +458,8 @@ impl PortraitSelController {
             caption_scroll: Cell::new(CaptionScrollState::default()),
             labels,
             location_label_width: RefCell::new(None),
+            location: None,
+            title_drag: None,
             set_picture,
             set_big_icon,
             combo_open: false,
@@ -447,7 +470,6 @@ impl PortraitSelController {
             scrollbar_dragging: false,
             scrollbar_arrow_captured: false,
             scrollbar_arrow: 0,
-            idle_tick: 0,
             generation: 0,
             validation_error: None,
         };
@@ -603,15 +625,17 @@ impl PortraitSelController {
         self.scrollbar_arrow_captured = false;
         self.scrollbar_arrow = 0;
         self.grid_layout.get_mut().take();
-        self.idle_tick = 0;
         self.validation_error = None;
     }
 
     /// Simulates one `OnIdle` call. At most one request is released on every
     /// tenth call, with the first item released immediately like `i++ % 10`.
     pub fn advance_idle(&mut self) -> Option<PortraitThumbnailRequest> {
-        let release = self.idle_tick == 0;
-        self.idle_tick = (self.idle_tick + 1) % LOAD_IDLE_INTERVAL;
+        // `i++ % 10`: the post-increment means the *first* call of the process
+        // releases, and the counter is shared by every dialog.
+        let release = IDLE_CADENCE
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(u32::from(LOAD_IDLE_INTERVAL));
         if !release {
             return None;
         }
@@ -682,6 +706,12 @@ impl PortraitSelController {
             }
             return Vec::new();
         }
+        if let Some((offset_x, offset_y)) = self.title_drag {
+            // `DoDragging` moves the target by the pointer delta and does not
+            // clamp it to the viewport (`C4Gui.cpp:243-253`).
+            self.location = Some((point.x as i32 - offset_x, point.y as i32 - offset_y));
+            return Vec::new();
+        }
         if self.combo_open {
             let previous = self.combo_highlight;
             self.combo_highlight = match self.hit_target(point) {
@@ -742,6 +772,15 @@ impl PortraitSelController {
         }
         let target = self.hit_target(point);
         self.pressed = target;
+        // `Element::MouseInput` starts a drag on left-down over the title,
+        // whose `pDragTarget` is the dialog (`C4Gui.cpp:222-224`). The close
+        // button sits inside the caption bar and owns its own press.
+        if target != HitTarget::Close && contains(layout.caption, point) {
+            self.title_drag = Some((
+                point.x as i32 - layout.bounds.x,
+                point.y as i32 - layout.bounds.y,
+            ));
+        }
         if contains(layout.grid, point) && self.focus != PortraitSelControl::SelectedItem {
             self.focus = PortraitSelControl::Grid;
             self.focused_item = None;
@@ -799,6 +838,12 @@ impl PortraitSelController {
 
     pub fn handle_pointer_up(&mut self, point: GuiPoint) -> Vec<PortraitSelAction> {
         self.pointer = Some(point);
+        if self.title_drag.take().is_some() {
+            // `StopDragging` applies one last motion and ends the drag; the
+            // window keeps the position it was dropped at.
+            self.pressed = HitTarget::None;
+            return Vec::new();
+        }
         if self.scrollbar_dragging {
             self.set_scroll_from_scrollbar_pointer(point);
             self.scrollbar_dragging = false;
@@ -1435,20 +1480,22 @@ impl PortraitSelController {
     /// The layout for a surface, which may differ in size from the stored
     /// screen extent the controller was last resized to.
     fn layout_for(&self, surface: &Surface) -> PortraitSelLayout {
-        portrait_sel_layout_with_metrics(
+        portrait_sel_layout_with_metrics_at(
             surface.width() as i32,
             surface.height() as i32,
             self.locations.len(),
             self.metrics(),
+            self.location,
         )
     }
 
     fn layout(&self) -> PortraitSelLayout {
-        portrait_sel_layout_with_metrics(
+        portrait_sel_layout_with_metrics_at(
             self.width,
             self.height,
             self.locations.len(),
             self.metrics(),
+            self.location,
         )
     }
 
@@ -2050,16 +2097,44 @@ pub fn portrait_sel_layout_with_metrics(
     location_count: usize,
     metrics: PortraitSelMetrics,
 ) -> PortraitSelLayout {
+    portrait_sel_layout_with_metrics_at(screen_width, screen_height, location_count, metrics, None)
+}
+
+/// [`portrait_sel_layout`] with an absolute top-left installed by title
+/// dragging. `Element::DoDragging` does not clamp to the viewport
+/// (`C4Gui.cpp:243-253`), so the origin is used verbatim.
+pub fn portrait_sel_layout_at(
+    screen_width: i32,
+    screen_height: i32,
+    location_count: usize,
+    origin: Option<(i32, i32)>,
+) -> PortraitSelLayout {
+    portrait_sel_layout_with_metrics_at(
+        screen_width,
+        screen_height,
+        location_count,
+        PortraitSelMetrics::default(),
+        origin,
+    )
+}
+
+pub fn portrait_sel_layout_with_metrics_at(
+    screen_width: i32,
+    screen_height: i32,
+    location_count: usize,
+    metrics: PortraitSelMetrics,
+    origin: Option<(i32, i32)>,
+) -> PortraitSelLayout {
     let width = (i64::from(screen_width) * 2 / 3 + 10)
         .clamp(i64::from(MIN_WIDTH), i64::from(MAX_WIDTH)) as i32;
     let height = (i64::from(screen_height) * 2 / 3 + 10)
         .clamp(i64::from(MIN_HEIGHT), i64::from(MAX_HEIGHT)) as i32;
-    let bounds = IntRect::new(
+    let (default_x, default_y) = (
         ((i64::from(screen_width) - i64::from(width)) / 2) as i32,
         ((i64::from(screen_height) - i64::from(height)) / 2) as i32,
-        width,
-        height,
     );
+    let (origin_x, origin_y) = origin.unwrap_or((default_x, default_y));
+    let bounds = IntRect::new(origin_x, origin_y, width, height);
     let caption = IntRect::new(bounds.x, bounds.y, bounds.w, CAPTION_HEIGHT);
     let close = IntRect::new(bounds.x + bounds.w - 20, bounds.y + 4, 16, 16);
     let location_y = bounds.y + CAPTION_HEIGHT + 14;
@@ -4749,6 +4824,181 @@ mod tests {
             controller.items().last().map(|item| item.label()),
             Some("Kein Portrait"),
             "the No Portrait tile is localized"
+        );
+    }
+
+    /// The selector moves when its wooden title is dragged
+    /// (clonk-org/clonk-rs#571).
+    ///
+    /// `Element::MouseInput` starts a drag on left-down over an element that
+    /// has a `pDragTarget`, and `DoDragging` moves that target by the pointer
+    /// delta (`C4Gui.cpp:218-259`). Two properties are worth pinning because
+    /// both are easy to get wrong in a centered layout:
+    ///
+    /// * the *whole* dialog moves, not just the frame — every child rect has
+    ///   to follow, or the grid and buttons detach from the window;
+    /// * `DoDragging` does **not** clamp to the viewport, so a dialog can be
+    ///   dragged partly off-screen and must stay where it was put.
+    ///
+    /// The close button sits inside the caption bar and takes precedence, so
+    /// pressing it must not start a drag — otherwise closing the dialog would
+    /// nudge it first.
+    #[test]
+    fn dragging_the_wooden_title_moves_the_whole_dialog_without_clamping() {
+        let mut controller = test_controller();
+        controller.resize(640, 480);
+        let before = controller.layout();
+        let grab = GuiPoint::new(
+            (before.caption.x + before.caption.w / 2) as f32,
+            (before.caption.y + before.caption.h / 2) as f32,
+        );
+
+        controller.handle_pointer_down(grab);
+        controller.handle_pointer_move(GuiPoint::new(grab.x + 40.0, grab.y + 25.0));
+        let dragged = controller.layout();
+        assert_eq!(
+            (
+                dragged.bounds.x - before.bounds.x,
+                dragged.bounds.y - before.bounds.y
+            ),
+            (40, 25),
+            "the window follows the pointer exactly"
+        );
+        for (moved, original) in [
+            (dragged.grid, before.grid),
+            (dragged.ok, before.ok),
+            (dragged.cancel, before.cancel),
+            (dragged.location_combo, before.location_combo),
+        ] {
+            assert_eq!(
+                (moved.x - original.x, moved.y - original.y),
+                (40, 25),
+                "every child rect moves with the window"
+            );
+        }
+
+        // Releasing leaves it where it was dropped.
+        controller.handle_pointer_up(GuiPoint::new(grab.x + 40.0, grab.y + 25.0));
+        assert_eq!(controller.layout().bounds, dragged.bounds);
+
+        // A second drag continues from the dropped position rather than
+        // snapping back to centre.
+        let grab2 = GuiPoint::new(grab.x + 40.0, grab.y + 25.0);
+        controller.handle_pointer_down(grab2);
+        controller.handle_pointer_move(GuiPoint::new(grab2.x - 400.0, grab2.y - 300.0));
+        let far = controller.layout();
+        assert_eq!(
+            (
+                far.bounds.x - dragged.bounds.x,
+                far.bounds.y - dragged.bounds.y
+            ),
+            (-400, -300),
+        );
+        assert!(
+            far.bounds.x < 0 && far.bounds.y < 0,
+            "DoDragging does not clamp, so the dialog may hang off-screen"
+        );
+        controller.handle_pointer_up(GuiPoint::new(grab2.x - 400.0, grab2.y - 300.0));
+
+        // The close button owns its own press.
+        let mut controller = test_controller();
+        controller.resize(640, 480);
+        let origin = controller.layout().bounds;
+        let close = controller.layout().close;
+        let on_close = GuiPoint::new(
+            (close.x + close.w / 2) as f32,
+            (close.y + close.h / 2) as f32,
+        );
+        controller.handle_pointer_down(on_close);
+        controller.handle_pointer_move(GuiPoint::new(on_close.x + 30.0, on_close.y + 30.0));
+        assert_eq!(
+            controller.layout().bounds,
+            origin,
+            "pressing Close must not drag the dialog out from under the pointer"
+        );
+    }
+
+    /// The thumbnail decode cadence is process-global, not per dialog
+    /// (clonk-org/clonk-rs#571).
+    ///
+    /// ```cpp
+    /// void C4PortraitSelDlg::OnIdle()
+    /// {
+    ///     static int32_t i = 0;
+    ///     if (!(i++ % 10)) ImageLoader.Execute();
+    /// }
+    /// ```
+    ///
+    /// `i` is a **function-local static** (`C4FileSelDlg.cpp:598-602`): one
+    /// counter for the whole process, shared by every dialog instance and
+    /// never reset. The port gave each controller its own counter starting at
+    /// zero, so every reopen — and every location change, which also reset it
+    /// — released a decode immediately instead of continuing the phase.
+    ///
+    /// nextest runs each test in its own process, so the global is naturally
+    /// isolated per test; the counter is reset here anyway so the assertions
+    /// do not depend on what ran before them in this file.
+    #[test]
+    fn the_decode_cadence_is_one_process_wide_counter() {
+        reset_idle_cadence_for_test();
+
+        let entry = |name: &str| PortraitFileEntry {
+            full_path: PathBuf::from(format!("/portraits/{name}.png")),
+            filename: format!("{name}.png"),
+            label: name.to_string(),
+        };
+        let build = || {
+            PortraitSelController::new(
+                vec![PortraitLocation::new("User", "/portraits")],
+                0,
+                vec![entry("a"), entry("b")],
+                true,
+                true,
+            )
+        };
+
+        // First call of the process releases, because 0 % 10 == 0.
+        let mut first = build();
+        assert!(first.advance_idle().is_some());
+        // The next nine are throttled.
+        for tick in 1..LOAD_IDLE_INTERVAL {
+            assert!(
+                first.advance_idle().is_none(),
+                "tick {tick} must be throttled"
+            );
+        }
+
+        // A brand new dialog does **not** restart the phase: the shared
+        // counter is back at a multiple of ten, so this one releases, and the
+        // nine after it do not.
+        let mut second = build();
+        assert!(
+            second.advance_idle().is_some(),
+            "the counter carried across the dialog boundary"
+        );
+        for _ in 1..LOAD_IDLE_INTERVAL {
+            assert!(second.advance_idle().is_none());
+        }
+
+        // Interleaving two live dialogs shares one cadence rather than giving
+        // each its own — the case a per-dialog counter gets visibly wrong.
+        let mut left = build();
+        let mut right = build();
+        assert!(left.advance_idle().is_some(), "first of the shared cycle");
+        for step in 1..LOAD_IDLE_INTERVAL {
+            let released = if step % 2 == 0 {
+                left.advance_idle()
+            } else {
+                right.advance_idle()
+            };
+            assert!(
+                released.is_none(),
+                "step {step} is throttled no matter which dialog asked"
+            );
+        }
+        assert!(
+            right.advance_idle().is_some(),
+            "the tenth call releases even though it came from the other dialog"
         );
     }
 }
