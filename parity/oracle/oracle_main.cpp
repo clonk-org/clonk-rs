@@ -89,6 +89,7 @@
 #include <functional>
 #include <initializer_list>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -5173,6 +5174,87 @@ static int32_t run(
 namespace game_save_policy
 {
 
+// SaveRuntimeData is an ordered sweep over component writers. Each writer is
+// stubbed to a recorder: what is under test is which ones a policy reaches, in
+// what order, and which failures abort — not what any component serialises.
+static std::vector<std::string> g_trace;
+static std::set<std::string> g_failing;
+
+static bool wrote(const char *name)
+{
+	g_trace.emplace_back(name);
+	return !g_failing.count(name);
+}
+
+enum class C4ResStrTableKey
+{
+	IDS_ERR_SAVE_SCENSECTIONS,
+	IDS_ERR_SAVE_LANDSCAPE,
+	IDS_ERR_SAVE_SCRIPTSTRINGS,
+	IDS_ERR_SAVE_OBJECTS,
+	IDS_ERR_ERRORSAVINGROUNDRESULTS,
+	IDS_ERR_ERRORSAVINGTEAMS,
+	IDS_ERR_SAVE_SCRIPT,
+	IDS_ERR_SAVE_TITLE,
+	IDS_ERR_SAVE_INFO,
+	IDS_ERR_SAVE_RESTOREPLAYERINFOS,
+	IDS_ERR_SAVE_PLAYERS,
+};
+
+// The log line is not the parity fact; that a failure was *reached* is, and
+// the trace already carries it.
+static void Log(C4ResStrTableKey) {}
+
+struct C4Group
+{
+	void Delete(const char *name) { g_trace.emplace_back(std::string("delete:") + name); }
+};
+
+struct StringsStub
+{
+	void EnumStrings() { g_trace.emplace_back("EnumStrings"); }
+	bool Save(C4Group &) { return wrote("Strings"); }
+};
+
+struct ScriptEngineStub { StringsStub Strings; };
+struct ObjectsStub { bool Save(C4Group &, bool, bool) { return wrote("Objects"); } };
+struct RoundResultsStub { bool Save(C4Group &) { return wrote("RoundResults"); } };
+struct TeamsStub { bool Save(C4Group &) { return wrote("Teams"); } };
+struct ScriptStub { bool Save(C4Group &) { return wrote("Script"); } };
+struct TitleStub { bool Save(C4Group &) { return wrote("Title"); } };
+struct InfoStub { bool Save(C4Group &) { return wrote("Info"); } };
+struct PlayerInfosStub {};
+
+struct C4PlayerInfoList
+{
+	void SetAsRestoreInfos(PlayerInfosStub &, bool user, bool script, bool user_files, bool script_files)
+	{
+		g_trace.emplace_back("SetAsRestoreInfos");
+		(void)user; (void)script; (void)user_files; (void)script_files;
+	}
+	bool Save(C4Group &, const char *) { return wrote("RestorePlayerInfos"); }
+};
+
+struct PlayersStub
+{
+	bool Save(C4Group &, bool, C4PlayerInfoList &) { return wrote("Players"); }
+};
+
+struct GameStub
+{
+	ScriptEngineStub ScriptEngine;
+	ObjectsStub Objects;
+	RoundResultsStub RoundResults;
+	TeamsStub Teams;
+	ScriptStub Script;
+	TitleStub Title;
+	InfoStub Info;
+	PlayerInfosStub PlayerInfos;
+	PlayersStub Players;
+};
+
+static GameStub Game;
+
 struct C4GameSave
 {
 	bool fInitial;
@@ -5190,6 +5272,16 @@ struct C4GameSave
 
 	bool IsExact() { return Sync >= SyncSavegame; }
 	bool IsSynced() { return Sync >= SyncSynchronized; }
+
+	C4Group *pSaveGroup = nullptr;
+
+	// The two fallible steps SaveRuntimeData opens with. Neither is under test
+	// here — SaveLandscape needs a landscape and SaveScenarioSections a section
+	// list — so both record and honour the injected failure set.
+	bool SaveScenarioSections() { return wrote("ScenarioSections"); }
+	bool SaveLandscape() { return wrote("Landscape"); }
+
+	bool SaveRuntimeData();
 
 #include "game_save_base_queries.inc"
 };
@@ -5230,6 +5322,8 @@ struct C4GameSaveNetwork : C4GameSave
 
 #include "game_save_network_queries.inc"
 };
+
+#include "game_save_runtime_data.inc"
 
 // Read one variant's whole decision vector through the base pointer, so every
 // value goes through the same virtual dispatch the real Save() call uses.
@@ -7385,6 +7479,85 @@ int main()
                    v.save_script_player_files ? 1 : 0, v.is_exact ? 1 : 0, v.is_synced ? 1 : 0,
                    v.sort_order ? 1 : 0);
         }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4GameSave::SaveRuntimeData: the ordered component sweep the policy
+    // queries above actually drive. Three rules the order encodes:
+    //
+    //   * Scenario sections are written for an EXACT save only, and Title for
+    //     a NON-exact one. The second reads backwards from the first.
+    //   * RoundResults is gated on GetSaveUserPlayers(), so the scenario
+    //     variant skips it while every exact variant writes it.
+    //   * A failing Script/Title/Info write is `nofail` — it logs and the
+    //     sweep carries on returning true — while a failing
+    //     Landscape/Strings/Objects/Teams write aborts with false. Which side
+    //     of that line a component sits on is not visible from its name.
+    //
+    // The `else` arm that deletes Game.txt/PlayerInfos.txt/SavePlayerInfos.txt
+    // is deliberately NOT exercised: it needs
+    // `!GetSaveUserPlayers() && !GetSaveScriptPlayers()`, and no shipped
+    // variant can produce that. The base returns `IsExact()` for both, so an
+    // exact save takes the first arm; and C4GameSaveScenario, the only
+    // non-exact one, overrides GetSaveScriptPlayers to a flat true ("script
+    // players are also saved; but user players aren't!"). Reaching that arm
+    // would need a fabricated sixth variant, which would pin the fixture
+    // rather than the engine.
+    arr_begin("save_runtime_sequence");
+    {
+        using namespace game_save_policy;
+
+        struct Case
+        {
+            const char *name;
+            int variant;  // 0 scenario, 1 savegame, 2 record, 3 network
+            const char *failing;
+        };
+        const Case cases[] = {
+            {"scenario", 0, nullptr},
+            {"savegame", 1, nullptr},
+            {"record_runtime", 2, nullptr},
+            {"network_runtime", 3, nullptr},
+            // Script is nofail: the sweep logs and keeps going.
+            {"savegame_script_fails", 1, "Script"},
+            // Teams is not: it aborts the whole save.
+            {"savegame_teams_fails", 1, "Teams"},
+            // And an early abort stops before anything after it.
+            {"savegame_landscape_fails", 1, "Landscape"},
+        };
+
+        for (const auto &c : cases)
+        {
+            g_trace.clear();
+            g_failing.clear();
+            if (c.failing) g_failing.insert(c.failing);
+
+            C4GameSaveScenario scenario(false, false);
+            C4GameSaveSavegame savegame;
+            C4GameSaveRecord record(false, true);
+            C4GameSaveNetwork network(false);
+            C4GameSave *save = &scenario;
+            if (c.variant == 1) save = &savegame;
+            else if (c.variant == 2) save = &record;
+            else if (c.variant == 3) save = &network;
+
+            game_save_policy::C4Group group;
+            save->pSaveGroup = &group;
+            const bool ok = save->SaveRuntimeData();
+
+            sep();
+            printf("{\"case\":\"%s\",\"failing\":\"%s\",\"ok\":%s,\"trace\":[",
+                   c.name, c.failing ? c.failing : "", ok ? "true" : "false");
+            for (size_t i = 0; i < g_trace.size(); i++)
+            {
+                if (i) printf(",");
+                printf("\"%s\"", g_trace[i].c_str());
+            }
+            printf("]}");
+        }
+        g_trace.clear();
+        g_failing.clear();
     }
     arr_end();
     printf(",\n");

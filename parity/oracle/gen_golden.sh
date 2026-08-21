@@ -954,6 +954,18 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Config.cpp" > "$gen/config_language_sequence.inc"
 
+# 3t. Lift C4GameSave::SaveRuntimeData, the ordered component sweep the save
+#     policy queries drive. The order is the parity fact, and two of its rules
+#     read backwards: Title is written only when the save is NOT exact, and a
+#     failing Script/Title/Info write is `nofail` — it logs and carries on —
+#     while a failing Landscape/Objects/Teams write aborts the whole save.
+awk '
+  /^bool C4GameSave::SaveRuntimeData\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4GameSave.cpp" > "$gen/game_save_runtime_data.inc"
+
 # 3r. Lift C4Value::operator== whole. It is a nested switch on the LEFT tag and
 #     then the right, which is what makes it asymmetric: the object arm demands
 #     an equal tag as well as an equal payload, so `nil == object_zero` is true

@@ -8111,6 +8111,118 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16h. save_runtime_sequence: `C4GameSave::SaveRuntimeData`
+    //      (C4GameSave.cpp:188-262) — the ordered component sweep the save
+    //      policy queries drive. `game_save_policy` pins what each variant
+    //      *decides*; this pins what that decision then *does*.
+    //
+    //      The rule worth an oracle is the one that reads backwards: scenario
+    //      sections are written for an **exact** save, and the Title component
+    //      for a **non-exact** one. Getting that pair the same way round is a
+    //      coin flip from the names alone.
+    //
+    //      Two things are deliberately not compared. The golden's failure
+    //      cases pin that a Script/Title/Info write is `nofail` while
+    //      Landscape/Teams aborts; the port reports an aborted save as `Err`
+    //      rather than a truncated sweep, so there is no ordered counterpart.
+    //      And the `else` arm that deletes Game.txt/PlayerInfos.txt is
+    //      unreachable for every shipped variant — the base returns
+    //      `IsExact()` for both player queries and `C4GameSaveScenario`, the
+    //      only non-exact one, overrides `GetSaveScriptPlayers` to a flat true
+    //      — so the golden does not exercise it either.
+    for case in golden["save_runtime_sequence"].as_array().unwrap() {
+        let name = case["case"].as_str().unwrap_or("?");
+        if !case["failing"].as_str().unwrap_or("").is_empty() {
+            continue;
+        }
+        let label = format!("save_runtime_sequence[{name}]");
+        let trace: Vec<&str> = case["trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step.as_str())
+            .collect();
+
+        let policy = match name {
+            "scenario" => crate::live_c4_save::LiveC4SavePolicy::Scenario {
+                force_exact_landscape: false,
+            },
+            "savegame" => crate::live_c4_save::LiveC4SavePolicy::Savegame {
+                target_group_name: "Savegame.c4s",
+            },
+            "record_runtime" => crate::live_c4_save::LiveC4SavePolicy::Record,
+            _ => crate::live_c4_save::LiveC4SavePolicy::RuntimeNetwork,
+        };
+
+        // The Title *decision* is not re-checked here: `game_save_policy`
+        // already owns `GetKeepTitle`, and an assertion on it here was caught
+        // by that section rather than this one. What is left, and what nothing
+        // else covers, is the sweep that acts on the decision.
+        //
+        // The scenario variant is the one that saves without a landscape, so
+        // it is the one where the real sweep can be run end to end. Every host
+        // is modified, so each one the sweep reaches leaves a mutation and the
+        // Script/Title/Info order is observable.
+        if name != "scenario" {
+            continue;
+        }
+        let hosts: Vec<&str> = trace
+            .iter()
+            .copied()
+            .filter(|step| matches!(*step, "Script" | "Title" | "Info"))
+            .collect();
+        let replacement = |name: &'static str| {
+            crate::live_c4_save::LiveC4ComponentHost::Replace(
+                crate::live_c4_save::LiveC4SaveComponentRef {
+                    name,
+                    payload: b"x",
+                },
+            )
+        };
+        let modules: Vec<String> = Vec::new();
+        let spec = crate::live_c4_save::LiveC4SaveSpec {
+            title: "Sequence",
+            definition_modules: &modules,
+            definition_executable_path: "",
+            definition_path: "",
+            origin: "",
+            music_enabled: false,
+            copied_material_group_is_file: false,
+            title_component: replacement("Title.txt"),
+            info_component: replacement("Info.txt"),
+            script_component: replacement("Script.c"),
+        };
+
+        let mut engine = Engine::new();
+        let mut landscape =
+            Landscape::with_default_material(16, vec![8; 16], None).expect("save landscape");
+        landscape.set_world_height(8);
+        engine.set_landscape(landscape);
+
+        let save = engine
+            .serialize_live_c4_save_with_policy(spec, policy)
+            .unwrap_or_else(|error| panic!("{label}: the save must succeed, got {error:?}"));
+
+        let ported: Vec<&str> = save
+            .component_host_mutations
+            .iter()
+            .map(|mutation| match mutation {
+                crate::live_c4_save::LiveC4SaveComponentMutation::Replace(component) => {
+                    match component.name.as_str() {
+                        "Script.c" => "Script",
+                        "Title.txt" => "Title",
+                        _ => "Info",
+                    }
+                }
+                crate::live_c4_save::LiveC4SaveComponentMutation::Delete { .. } => "delete",
+            })
+            .collect();
+        assert_eq!(
+            ported, hosts,
+            "PARITY DIVERGENCE in `{label}` field `component_hosts`: C++ golden = {hosts:?}, Rust = {ported:?}"
+        );
+    }
+
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
     // including the zero default for a real resource without [Physical]
     // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance
