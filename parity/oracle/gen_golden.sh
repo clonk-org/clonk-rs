@@ -675,6 +675,26 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4PXS.cpp" > "$gen/pxs_execute.inc"
 
+# 3q3. Lift mrfInsertCheck and the FindMatSlide it calls. This is the arm every
+#      falling pixel takes on landing, and its RNG ledger is property-dependent:
+#      a rough contact spends two draws on the splash roll, an incendiary
+#      material another two on its smoke, and a found slide one more. It also
+#      rewrites the pixel's position and velocity, so a wrong branch moves the
+#      pixel and desynchronises the stream at once.
+awk '
+  /^bool mrfInsertCheck\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/mrf_insert_check.inc"
+
+awk '
+  /^bool C4Landscape::FindMatSlide\(int32_t &fx, int32_t &fy, int32_t ydir, int32_t mdens, int32_t mslide\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/find_mat_slide.inc"
+
 # 3r. Lift the container lifecycle: C4Object::Enter, Exit and Collect. These are
 #     ordered state machines whose SHAPE is the parity fact — which script call
 #     runs before which mutation, which rollback undoes a failed insert, and

@@ -7055,6 +7055,124 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16c. insert_check: `mrfInsertCheck` (C4Material.cpp:567-609) with the
+    //      `FindMatSlide` it calls (C4Landscape.cpp:1247-1277) — the arm every
+    //      falling pixel takes on landing, which `pxs_execute` deliberately
+    //      excludes because it needs the reaction table. Its RNG ledger is
+    //      property-dependent, so the draw count is compared alongside the
+    //      rewritten position and velocity.
+    for case in golden["insert_check"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("insert_check[{name}]");
+
+        // Indices match the oracle's Map: 0 Vacuum, 1 Water (SplashRate 1 makes
+        // the roll certain), 2 Lava (incendiary), 3 Granite (the floor).
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            SplashRate=1
+            MaxSlide=4
+
+            [Material Lava]
+            Name=Lava
+            Density=25
+            Incindiary=1
+            MaxSlide=4
+
+            [Material Granite]
+            Name=Granite
+            Density=50
+            "#,
+        )
+        .expect("insert check oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const GRANITE: u8 = 3;
+        let hole = i(case, "hole") as i32;
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        if case["floor"].as_bool().unwrap_or(false) {
+            for gx in 0..WDT as i32 {
+                if gx != hole {
+                    bytes[10 * WDT as usize + gx as usize] = GRANITE;
+                }
+            }
+        }
+        if case["walled"].as_bool().unwrap_or(false) {
+            for gy in 0..HGT as usize {
+                for gx in 0..WDT as usize {
+                    if gx != 8 {
+                        bytes[gy * WDT as usize + gx] = GRANITE;
+                    }
+                }
+            }
+        }
+        let mut densities = vec![0; 128];
+        densities[GRANITE as usize] = 50;
+        let mut material_names = vec![None; 128];
+        material_names[GRANITE as usize] = Some("Granite".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+        engine.rng = LcgRng::new(i(case, "seed") as u32);
+        engine.rng.randomize3();
+        let draws_before = engine.rng.count;
+
+        let mut x = i(case, "x0") as i32;
+        let mut y = i(case, "y0") as i32;
+        let mut xdir = C4Fixed::from_raw(i(case, "xdir0") as i32);
+        let mut ydir = C4Fixed::from_raw(i(case, "ydir0") as i32);
+        let mut pos_changed = false;
+        let verdict = engine.mrf_insert_check(
+            &mut x,
+            &mut y,
+            &mut xdir,
+            &mut ydir,
+            crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
+                .expect("oracle pxs material"),
+            crate::material::MaterialId::new(i(case, "ls_mat") as usize),
+            &mut pos_changed,
+        );
+
+        expect_eq(
+            &label,
+            0,
+            "verdict",
+            i64::from(case["verdict"].as_bool().unwrap_or(false)),
+            i64::from(verdict),
+        );
+        expect_eq(&label, 0, "x", i(case, "x"), i64::from(x));
+        expect_eq(&label, 0, "y", i(case, "y"), i64::from(y));
+        expect_eq(&label, 0, "xdir", i(case, "xdir"), xdir.val() as i64);
+        expect_eq(&label, 0, "ydir", i(case, "ydir"), ydir.val() as i64);
+        expect_eq(
+            &label,
+            0,
+            "pos_changed",
+            i64::from(case["pos_changed"].as_bool().unwrap_or(false)),
+            i64::from(pos_changed),
+        );
+        expect_eq(
+            &label,
+            0,
+            "draws",
+            i(case, "draws"),
+            i64::from(engine.rng.count - draws_before),
+        );
+    }
+
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
     // including the zero default for a real resource without [Physical]
     // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance

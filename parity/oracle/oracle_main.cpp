@@ -5522,6 +5522,160 @@ struct C4PXS
 
 } // namespace pxs_exec
 
+// ---------------------------------------------------------------------------
+// mrfInsertCheck (src/C4Material.cpp:567-609) with the C4Landscape::FindMatSlide
+// it calls (src/C4Landscape.cpp:1247-1277). This is the arm every falling pixel
+// takes on landing, and it is worth pinning for two reasons: its RNG ledger is
+// property-dependent — a rough contact spends two draws on the splash roll, an
+// incendiary material two more on its smoke, and a found slide one further —
+// and it rewrites the pixel's position and velocity in place, so a wrong branch
+// both moves the pixel and desynchronises the stream.
+namespace insert_check
+{
+const int32_t GridWdt = 16;
+const int32_t GridHgt = 12;
+const int32_t MNone = -1;
+
+struct MaterialCore
+{
+    int32_t Density;
+    int32_t SplashRate;
+    int32_t Incindiary;
+    int32_t MaxSlide;
+};
+
+static int32_t g_grid[GridHgt][GridWdt];
+static int32_t g_smoke = 0;
+
+struct C4MaterialMap
+{
+    // 0 vacuum, 1 water (splashes), 2 lava (incendiary), 3 granite (the floor).
+    MaterialCore Map[4] = {
+        {0, 0, 0, 0},
+        {25, 1, 0, 4},   // Water: SplashRate 1 makes `!Random(1)` certain
+        {25, 0, 1, 4},   // Lava: incendiary, no splash
+        {50, 0, 0, 0},   // Granite floor
+    };
+};
+
+struct C4Landscape
+{
+    C4Fixed Gravity{itofix(20, 100)};
+    int32_t GetDensity(int32_t x, int32_t y);
+    bool FindMatSlide(int32_t &fx, int32_t &fy, int32_t ydir, int32_t mdens, int32_t mslide);
+};
+
+struct GameStub
+{
+    C4MaterialMap Material;
+    C4Landscape Landscape;
+};
+
+static GameStub Game;
+
+#define GravAccel (Game.Landscape.Gravity)
+
+static int32_t GBackMat(int32_t x, int32_t y)
+{
+    if (x < 0 || x >= GridWdt || y < 0 || y >= GridHgt) return 3; // closed border reads solid
+    const int32_t mat = g_grid[y][x];
+    return mat ? mat : MNone;
+}
+
+int32_t C4Landscape::GetDensity(int32_t x, int32_t y)
+{
+    const int32_t mat = GBackMat(x, y);
+    return mat < 0 ? 0 : Game.Material.Map[mat].Density;
+}
+
+#include "find_mat_slide.inc"
+
+static void Smoke(int32_t, int32_t, int32_t) { g_smoke++; }
+static int32_t Sign(int32_t x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
+template <class T> static T Abs(T v) { return v < 0 ? -v : v; }
+
+#include "mrf_insert_check.inc"
+
+} // namespace insert_check
+
+// Runs one mrfInsertCheck and records the rewritten position/velocity, the
+// verdict, and the RNG ledger. The draw count is the point: it varies with the
+// material's SplashRate and Incindiary and with whether a slide was found.
+static void printInsertCheckCases()
+{
+    printf("\"insert_check\":[");
+    struct Case
+    {
+        const char *name;
+        int32_t pxs_mat;
+        int32_t ls_mat;
+        int32_t x, y;
+        int32_t xdir_n, xdir_p, ydir_n, ydir_p;
+        int32_t seed;
+        bool floor;      // solid row under the pixel
+        bool walled;     // solid to both sides, so no slide exists
+        int32_t hole;    // column where the floor is missing, or -1
+    };
+    const Case cases[] = {
+        // Gentle contact, boxed in: no splash roll, no slide, insertion OK.
+        {"insert_ok", 1, 3, 8, 9, 0, 1, 1, 2, 0x2222, true, true, -1},
+        // Rough contact (fYDir > itofix(1)) on a splashing material. SplashRate
+        // 1 makes the roll certain, so this pins the two-draw splash arm and
+        // its `fYDir = -fYDir / 8` bounce rather than sampling it.
+        {"splash", 1, 3, 8, 9, 0, 1, 3, 1, 0x2222, true, true, -1},
+        // Incendiary contact rolls Random(25) before sliding.
+        {"incendiary", 2, 3, 8, 9, 0, 1, 1, 2, 0x2222, true, true, -1},
+        // A hole in the floor gives FindMatSlide a reachable target. Different
+        // material, so the acceleration arm runs and spends one draw.
+        {"slide_other_mat", 1, 3, 8, 9, 0, 1, 1, 2, 0x2222, true, false, 5},
+        // Same material as the landscape: the snap arm returns without drawing.
+        {"slide_same_mat", 1, 1, 8, 9, 0, 1, 1, 2, 0x2222, true, false, 5},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        for (int32_t gy = 0; gy < insert_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+                insert_check::g_grid[gy][gx] = 0;
+        if (c.floor)
+            for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+                if (gx != c.hole) insert_check::g_grid[10][gx] = 3;
+        if (c.walled)
+            for (int32_t gy = 0; gy < insert_check::GridHgt; gy++)
+                for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+                    if (gx != 8) insert_check::g_grid[gy][gx] = 3;
+        insert_check::g_smoke = 0;
+
+        FixedRandom(c.seed);
+        Randomize3();
+        const int32_t rnd3_before = RandomCount;
+
+        int32_t iX = c.x, iY = c.y;
+        C4Fixed xdir = itofix(c.xdir_n, c.xdir_p);
+        C4Fixed ydir = itofix(c.ydir_n, c.ydir_p);
+        int32_t pxs_mat = c.pxs_mat;
+        bool pos_changed = false;
+        const bool verdict = insert_check::mrfInsertCheck(iX, iY, xdir, ydir, pxs_mat,
+                                                          c.ls_mat, &pos_changed);
+
+        printf("{\"name\":\"%s\",\"pxs_mat\":%d,\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,"
+               "\"xdir0\":%d,\"ydir0\":%d,\"seed\":%d,\"floor\":%s,\"walled\":%s,"
+               "\"verdict\":%s,\"x\":%d,\"y\":%d,\"xdir\":%d,\"ydir\":%d,"
+               "\"pos_changed\":%s,\"smoke\":%d,\"draws\":%d,\"hole\":%d}",
+               c.name, c.pxs_mat, c.ls_mat, c.x, c.y,
+               itofix(c.xdir_n, c.xdir_p).val, itofix(c.ydir_n, c.ydir_p).val, c.seed,
+               c.floor ? "true" : "false", c.walled ? "true" : "false",
+               verdict ? "true" : "false", iX, iY, xdir.val, ydir.val,
+               pos_changed ? "true" : "false", insert_check::g_smoke,
+               RandomCount - rnd3_before, c.hole);
+    }
+    printf("]");
+}
+
+
 // Steps one pixel for a fixed number of frames, recording the raw fixed state
 // after every frame together with the RNG ledger, so a wrong draw count shows
 // up even when the position happens to agree.
@@ -7875,6 +8029,11 @@ int main()
     //      `movement` above deliberately excludes and `pxs_allocation` does not
     //      reach.
     printPxsExecuteCases();
+    printf(",\n");
+
+    // 22c. insert_check: mrfInsertCheck, the landing arm pxs_execute
+    //      deliberately excludes because it needs the reaction table.
+    printInsertCheckCases();
     printf(",\n");
 
     // 23. DFA_FLOAT's raw C4Fixed bounds. C4DefCore's Physical member is
