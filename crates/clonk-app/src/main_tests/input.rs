@@ -5641,3 +5641,112 @@ fn platform_ime_tracks_external_irc_z_order_and_menu_mode() {
     app.close_context_menu_silently();
     main_assert!(app.platform_ime_allowed());
 }
+
+
+/// `C4D_Foreground` (`C4Def.h:73`); the engine exports no constant for it.
+const C4D_FOREGROUND: i32 = 1 << 23;
+
+/// Overlapping mouse candidates resolve front-to-back, and a foreground
+/// object gets no priority for being foreground (clonk-org/clonk-rs#521).
+///
+/// Both halves look like bugs and are neither.
+///
+/// **Front-to-back.** `FindVisObject` walks `Objects.First` forward and
+/// returns the first match (`C4Game.cpp:1436-1487`), while every draw walks
+/// `Last` backwards (`C4ObjectList.cpp:387-420`). So `First` is the
+/// *frontmost* object, and the search returns what the player can actually
+/// see rather than something buried under it.
+///
+/// **No fore/background priority.** The search looks like a two-pass scan —
+/// `ForeObjects` then `Objects` — but the inner loop always iterates
+/// `Objects.First` regardless of which list `pLst` names. `pLst` is used only
+/// in the category filter `(pLst != &Objects) || !(Category &
+/// C4D_BackgroundOrForeground)`, whose first disjunct is true on the opening
+/// pass. So pass one already considers *every* object, and pass two is
+/// strictly narrower over the same list and can never match anything pass one
+/// missed. The effective behaviour is a single scan with no fore/background
+/// distinction at all — which is why the port applies no such filter, and why
+/// adding one would be a regression rather than a fix.
+#[test]
+fn overlapping_mouse_candidates_pick_the_frontmost_regardless_of_foreground() {
+    let mut app = new_running_sandbox_app();
+    let owner = app.local_owner;
+    let crew = app.engine.test_crew_cursor(owner);
+    let crew_position = app.engine.test_object_snapshot(crew).position;
+    let layer = app.engine.test_object_snapshot(crew).layer;
+
+    // Two grabbable vehicles with identical shapes, so only ordering can
+    // separate them at a shared point.
+    let mut plain = test_definition("MOVP", "Overlap plain", "#strict\n");
+    plain.set_category(clonk_engine::CATEGORY_VEHICLE);
+    plain.set_grab(1);
+    plain.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -8, 16, 16)));
+    app.engine.register_test_definition(plain);
+
+    let mut fore = test_definition("MOVF", "Overlap foreground", "#strict\n");
+    fore.set_category(clonk_engine::CATEGORY_VEHICLE | C4D_FOREGROUND);
+    fore.set_grab(1);
+    fore.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -8, 16, 16)));
+    app.engine.register_test_definition(fore);
+
+    let spawn_at = |definition: &str, position: Vector2| {
+        layer
+            .map(|layer| {
+                SpawnConfig::new(definition)
+                    .with_position(position)
+                    .with_layer(layer)
+            })
+            .unwrap_or_else(|| SpawnConfig::new(definition).with_position(position))
+    };
+    let shared = Vector2::new(crew_position.x - 60, crew_position.y);
+
+    // Spawned in order, so the second is in front of the first.
+    let behind = app.engine.spawn_test_object(spawn_at("MOVF", shared));
+    let in_front = app.engine.spawn_test_object(spawn_at("MOVP", shared));
+    render_mouse_test_app(&mut app);
+
+    let point = mouse_test_object_point(&app, owner, in_front);
+    main_assert_eq!(
+        app.graphics.object_at_point_with_ocf(&app.snapshot, owner, point, clonk_engine::ocf::GRAB) => Some(in_front),
+        "the frontmost candidate wins even though the one behind it is C4D_Foreground"
+    );
+    let _ = behind;
+
+    // Reverse the spawn order: the foreground object is now in front and wins
+    // on position, not on category. Without this half the test would pass
+    // against a port that simply always ignored foreground objects.
+    let mut swapped = new_running_sandbox_app();
+    let owner = swapped.local_owner;
+    let crew = swapped.engine.test_crew_cursor(owner);
+    let crew_position = swapped.engine.test_object_snapshot(crew).position;
+    let layer = swapped.engine.test_object_snapshot(crew).layer;
+    let mut plain = test_definition("MOVP", "Overlap plain", "#strict\n");
+    plain.set_category(clonk_engine::CATEGORY_VEHICLE);
+    plain.set_grab(1);
+    plain.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -8, 16, 16)));
+    swapped.engine.register_test_definition(plain);
+    let mut fore = test_definition("MOVF", "Overlap foreground", "#strict\n");
+    fore.set_category(clonk_engine::CATEGORY_VEHICLE | C4D_FOREGROUND);
+    fore.set_grab(1);
+    fore.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -8, 16, 16)));
+    swapped.engine.register_test_definition(fore);
+    let spawn_at = |definition: &str, position: Vector2| {
+        layer
+            .map(|layer| {
+                SpawnConfig::new(definition)
+                    .with_position(position)
+                    .with_layer(layer)
+            })
+            .unwrap_or_else(|| SpawnConfig::new(definition).with_position(position))
+    };
+    let shared = Vector2::new(crew_position.x - 60, crew_position.y);
+    let _behind = swapped.engine.spawn_test_object(spawn_at("MOVP", shared));
+    let fore_front = swapped.engine.spawn_test_object(spawn_at("MOVF", shared));
+    render_mouse_test_app(&mut swapped);
+
+    let point = mouse_test_object_point(&swapped, owner, fore_front);
+    main_assert_eq!(
+        swapped.graphics.object_at_point_with_ocf(&swapped.snapshot, owner, point, clonk_engine::ocf::GRAB) => Some(fore_front),
+        "a foreground object is neither preferred nor excluded — only its depth decides"
+    );
+}
