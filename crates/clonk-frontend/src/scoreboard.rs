@@ -2501,4 +2501,69 @@ mod tests {
         let resources = resources.with_font_images(&images);
         assert!(scoreboard_layout(preferred(), &board, &resources).is_err());
     }
+
+    /// A facet drawn from the shared icon sheet samples only its own cell
+    /// (clonk-org/clonk-rs#568).
+    ///
+    /// `GUIIcons.png` is a 240x360 parent atlas of 40px cells, and the
+    /// scoreboard blits single cells out of it. Every icon therefore has eight
+    /// neighbours one texel away, so a sampler that reaches outside the source
+    /// rect — which is what a stretched bilinear blit does at its edges unless
+    /// it is clamped — pulls in a *different icon's* pixels rather than
+    /// something merely blurry.
+    ///
+    /// The synthetic sheet below makes that visible: the drawn cell is pure
+    /// red and every other cell is pure blue, so any blue in the output is a
+    /// neighbour that leaked in. Stretch ratios are deliberately non-integer
+    /// in both axes, which is when edge weights are nonzero.
+    #[test]
+    fn an_icon_facet_never_samples_its_neighbours_in_the_parent_sheet() {
+        let columns = 240 / ICON_CELL;
+        let mut pixels = Vec::with_capacity(240 * 360 * 4);
+        for y in 0..360_u32 {
+            for x in 0..240_u32 {
+                let cell = (y / ICON_CELL) * columns + (x / ICON_CELL);
+                let colour: [u8; 4] = if cell == PLAYER_ICON_PHASE {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                };
+                pixels.extend_from_slice(&colour);
+            }
+        }
+        let sheet = ImageData::new(240, 360, pixels);
+
+        // Several destinations, none an integer multiple of the 40px source.
+        for (w, h) in [(37, 37), (53, 41), (40, 63), (17, 96)] {
+            let mut surface = Surface::new(160, 160, PixelFormat::Rgba8888);
+            surface.fill(Color::transparent());
+            draw_icon_phase(
+                &mut surface,
+                &sheet,
+                PLAYER_ICON_PHASE,
+                IntRect::new(11, 7, w, h),
+                None,
+            )
+            .expect("the synthetic sheet has the classic geometry");
+
+            let leaked = (0..surface.width())
+                .flat_map(|x| (0..surface.height()).map(move |y| (x, y)))
+                .filter_map(|(x, y)| surface.get_pixel(x, y))
+                .find(|pixel| pixel.a != 0 && pixel.b > pixel.r);
+            assert!(
+                leaked.is_none(),
+                "{w}x{h} sampled a neighbouring icon cell: {leaked:?}"
+            );
+
+            // And it really drew something, so "no blue" is not vacuously true
+            // because nothing was blitted at all.
+            assert!(
+                (0..surface.width())
+                    .flat_map(|x| (0..surface.height()).map(move |y| (x, y)))
+                    .filter_map(|(x, y)| surface.get_pixel(x, y))
+                    .any(|pixel| pixel.r > 0 && pixel.a != 0),
+                "{w}x{h} drew no icon at all"
+            );
+        }
+    }
 }
