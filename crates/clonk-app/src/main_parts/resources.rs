@@ -536,6 +536,44 @@ impl InstallDefinitionResolver {
         parents
     }
 
+    /// The ancestor directories an explicit definition name may fall back to,
+    /// innermost first.
+    ///
+    /// A `.c4f` ancestor is already a definition source in C++, appended to
+    /// the same NRT_Definitions vector moments later (`FoldersWithLocalsDefs`,
+    /// C4Game.cpp:210-213,3961-3994). The plain directories enclosing it are
+    /// not: a mod dropped whole into a subdirectory of the data root ships its
+    /// `.c4d` beside the `.c4f` that names it, and C4GameResList::Load opens
+    /// that name against the working directory only
+    /// (C4GameParameters.cpp:199-210), so the pair had to be flattened into
+    /// the data root by hand. Walk out of the `.c4f` chain into the enclosing
+    /// data-root directories as well, stopping at the first ancestor that is
+    /// neither a `.c4f` nor inside a data root — a scenario opened from
+    /// outside the install keeps the `.c4f`-only chain.
+    fn definition_fallback_folders(&self, scenario_root: &Path) -> Vec<PathBuf> {
+        let bases = self.executable_data_bases();
+        let base_keys = bases
+            .iter()
+            .map(|base| scenario_root_key(base))
+            .collect::<HashSet<_>>();
+        let mut folders = Vec::new();
+        let mut current = scenario_root.parent();
+        while let Some(candidate) =
+            current.filter(|candidate| !base_keys.contains(&scenario_root_key(candidate)))
+        {
+            let is_family = candidate
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"));
+            if !is_family && !bases.iter().any(|base| candidate.starts_with(base)) {
+                break;
+            }
+            folders.push(candidate.to_path_buf());
+            current = candidate.parent();
+        }
+        folders
+    }
+
     fn scenario_origin(&self, scenario: &Group) -> Option<PathBuf> {
         let source = read_group_file_case_insensitive(scenario, "Scenario.txt")?;
         let mut reader = io::Cursor::new(source);
@@ -623,6 +661,15 @@ impl InstallDefinitionResolver {
     /// scenario ends up running is worth stating.
     fn report_shadowed_folder_packs(folders: &[PathBuf], relative: &Path, resolved: &Path) {
         for folder in folders {
+            // Only a `.c4f` ancestor is appended to NRT_Definitions and can
+            // overload; a plain enclosing directory is a fallback source only.
+            if !folder
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+            {
+                continue;
+            }
             let candidate = folder.join(relative);
             if candidate.exists() {
                 tracing::info!(
@@ -663,9 +710,7 @@ impl InstallDefinitionResolver {
             // already a definition source; refusing it here bought nothing
             // and forced every mod to be unpacked into the data root.
             let folders = if self.app_paths.is_some() {
-                let mut folders = Self::c4f_parent_paths(scenario.root());
-                folders.reverse();
-                folders
+                self.definition_fallback_folders(scenario.root())
             } else {
                 Vec::new()
             };

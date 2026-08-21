@@ -4187,6 +4187,70 @@ fn install_definition_resolver_falls_back_to_the_folder_local_pack() {
     reset_cached_app_paths();
 }
 
+#[test]
+fn install_definition_resolver_falls_back_to_the_pack_beside_the_scenario_pack() {
+    // A downloaded mod ships a definition pack and the scenario pack that
+    // names it as siblings — `Definition1=Epic.c4d` next to `Epic.c4f` — and
+    // is dropped whole into a subdirectory of the data root. C++ opens the
+    // explicit name relative to the working directory only
+    // (C4GameParameters.cpp:199-210), and FoldersWithLocalsDefs scans just the
+    // `.c4f` path components (C4Game.cpp:3961-3994), so neither reaches a
+    // sibling one directory down and the scenario refuses to start.
+    //
+    // Extending the existing folder-chain fallback past the `.c4f` ancestors
+    // to the enclosing data-root directories costs no parity: the data root is
+    // still searched first, so every name C++ resolves keeps the exact pack it
+    // has, and only a name that resolves nowhere — a scenario C++ would refuse
+    // to start at all — reaches the sibling.
+    clonk_logging::init();
+    let _env_lock = crate::tests::env_lock().lock();
+    reset_cached_app_paths();
+
+    let install_dir = tempdir();
+    let planet_dir = install_dir.path().join("planet");
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
+
+    let mods = planet_dir.join("mods");
+    let beside = mods.join("Epic.c4d");
+    fs::create_dir_all(&beside).test_value();
+    fs::write(
+        beside.join("DefCore.txt"),
+        "[DefCore]\nid=EPIC\nName=EPIC\nCategory=0\nValue=7\n",
+    )
+    .test_value();
+
+    let family = mods.join("Epic.c4f");
+    let scenario_dir = family.join("Test map.c4s");
+    fs::create_dir_all(&scenario_dir).test_value();
+    fs::write(
+        scenario_dir.join("Scenario.txt"),
+        "[Head]\nTitle=Test map\n\n[Definitions]\nDefinition1=Epic.c4d\n",
+    )
+    .test_value();
+    let scenario_group = Group::open(&scenario_dir).test_value();
+
+    let user_dir = install_dir.path().join("user-data");
+    fs::create_dir_all(&user_dir).test_value();
+    let _guard = test_env_guard(install_dir.path(), user_dir.as_path());
+
+    let paths = cached_app_paths().test_value();
+    let resolver = InstallDefinitionResolver::new(Some(paths));
+    let groups = resolver
+        .resolve_definition_groups(&scenario_group, "Epic.c4d")
+        .test_value();
+    main_assert_eq!(
+        groups
+            .iter()
+            .map(|group| group.root().to_path_buf())
+            .collect::<Vec<_>>() =>
+        vec![beside],
+        "a pack shipped beside the scenario's .c4f resolves from the mod directory"
+    );
+
+    reset_cached_app_paths();
+}
+
 fn assert_parent_resource_order(scenario: &Group, inner: &Path, outer: &Path) {
     let resolver = InstallDefinitionResolver::new(None);
     let graphics = resolver.resolve_graphics_groups(scenario).test_value();
@@ -4632,3 +4696,4 @@ fn load_install_definitions_discovers_mixed_case_objects_group() {
 
     reset_cached_app_paths();
 }
+
