@@ -10,7 +10,8 @@ use crate::startup_main_menu::StartupTooltip;
 use crate::startup_options_dlg::BookFonts;
 use crate::startup_portraitsel::{
     PortraitFileEntry, PortraitLocation, PortraitSelAction, PortraitSelCommit,
-    PortraitSelController, PortraitSelResources, PortraitSelSound, PortraitThumbnailRequest,
+    PortraitSelController, PortraitSelLabels, PortraitSelResources, PortraitSelSound,
+    PortraitThumbnailRequest,
 };
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use clonk_engine::player_file::PlayerFile;
@@ -793,11 +794,34 @@ impl PlayerPropertiesController {
         current_location: usize,
         entries: Vec<PortraitFileEntry>,
     ) {
+        self.open_portrait_selector_with_labels(
+            locations,
+            current_location,
+            entries,
+            PortraitSelLabels::default(),
+        );
+    }
+
+    /// As [`Self::open_portrait_selector`], with captions resolved from the
+    /// active language table.
+    pub fn open_portrait_selector_with_labels(
+        &mut self,
+        locations: Vec<PortraitLocation>,
+        current_location: usize,
+        entries: Vec<PortraitFileEntry>,
+        labels: PortraitSelLabels,
+    ) {
         // The sole C++ caller always passes `true, true`
         // (`C4StartupPlrSelDlg.cpp:1509-1517`). The selector still keeps both
         // presentation-only channels independent after the user changes them.
-        let mut selector =
-            PortraitSelController::new(locations, current_location, entries, true, true);
+        let mut selector = PortraitSelController::with_labels(
+            locations,
+            current_location,
+            entries,
+            true,
+            true,
+            labels,
+        );
         selector.resize(self.width, self.height);
         if let Some(point) = self.pointer_position {
             selector.handle_pointer_move(point);
