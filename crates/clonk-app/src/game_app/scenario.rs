@@ -1074,6 +1074,15 @@ impl GameApp {
         self.begin_loading_scenario(scenario, definition_load)
     }
 
+    fn is_missing_explicit_definition_error(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<ScenarioError>(),
+                Some(ScenarioError::LegacyDefinitionNotFound { .. })
+            )
+        })
+    }
+
     pub(crate) fn begin_loading_scenario(
         &mut self,
         mut scenario: FrontendScenario,
@@ -1089,28 +1098,32 @@ impl GameApp {
             "starting asynchronous scenario load"
         );
 
-        let loader_setup = self
-            .app_paths
-            .as_ref()
-            .ok_or_else(|| {
+        let loader_result = {
+            let paths = self.app_paths.as_ref().ok_or_else(|| {
                 classic_parity_engine_error(report_classic_parity_boundary(
                     ClassicParityBoundary::LoaderScreen {
                         context: "scenario initialization",
                         detail: "application paths are unavailable".to_string(),
                     },
                 ))
-            })
-            .and_then(|paths| {
-                build_scenario_loader(&scenario, &definition_load, paths, self.assets.as_ref())
-                    .map_err(|error| {
-                        classic_parity_engine_error(report_classic_parity_boundary(
-                            ClassicParityBoundary::LoaderScreen {
-                                context: "scenario initialization",
-                                detail: error.to_string(),
-                            },
-                        ))
-                    })
             })?;
+            build_scenario_loader(&scenario, &definition_load, paths, self.assets.as_ref())
+        };
+        let loader_setup = match loader_result {
+            Ok(loader_setup) => loader_setup,
+            Err(error) if Self::is_missing_explicit_definition_error(&error) => {
+                self.finish_scenario_loading_failure(error.to_string(), false)?;
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::LoaderScreen {
+                        context: "scenario initialization",
+                        detail: error.to_string(),
+                    },
+                )))
+            }
+        };
         // `C4Game::OpenScenario` resolves the running Parameters title through
         // the same pack-aware Title component used by the selected loader.
         // Retain that exact result instead of re-reading a local-only
