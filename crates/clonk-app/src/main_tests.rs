@@ -3359,7 +3359,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
 
 #[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
-fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
+fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
     // RetrieveScenario waits for Parameters.Scenario and ResDynamic, merges
     // them into Combined<client>.c4s, then waits for ordinary GameRes files.
     // It does not acknowledge GO until InitGame reaches FinalInit
@@ -3382,7 +3382,7 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     scenario_group
                 .add_file(
                     "Scenario.txt",
-                    b"[Head]\nTitle=Client start\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n"
+                    b"[Head]\nTitle=Client start\nNetworkGame=1\nNetworkRuntimeJoin=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n"
                         .to_vec(),
                 ).test_value();
     fs::write(&scenario_path, scenario_group.pack().test_value()).test_value();
@@ -3486,6 +3486,19 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     let network_random_seed = 7_i32;
     snapshot.parameters.random_seed = network_random_seed;
     snapshot.parameters.control_rate = 2;
+    snapshot
+        .parameters
+        .clients
+        .clients
+        .push(clonk_engine::ClientCoreControlData {
+            client_id: 7,
+            activated: false,
+            observer: false,
+            name: clonk_engine::LegacyCString::from_bytes(b"Late client".to_vec()).test_value(),
+            nick: clonk_engine::LegacyCString::from_bytes(b"Late client".to_vec()).test_value(),
+            lobby_ready: false,
+        });
+    snapshot.parameters.clients.local_client_id = Some(7);
     snapshot.parameters.scenario = resource(70, b"Scenario.c4s");
     snapshot.dynamic = resource(71, b"Dynamic.c4s");
     let mut definitions = resource(72, b"Objects.c4d");
@@ -3496,8 +3509,11 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     let mut materials = resource(73, b"HostMaterials.c4g");
     materials.resource_type = clonk_network::HostResourceType::Material as u8;
     snapshot.parameters.game_resources = vec![definitions, system, materials];
-    let mut reference_status = host_config.initial_status;
-    reference_status.target_tick = -1;
+    let reference_status = clonk_network::NetworkStatus {
+        state: clonk_network::NETWORK_STATE_GO,
+        control_mode: 2,
+        target_tick: -1,
+    };
     let join_data = clonk_network::JoinDataEnvelope {
         client_id: 7,
         start_control_tick: 23,
@@ -3505,10 +3521,10 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
         dynamic: snapshot.dynamic.clone(),
         parameters: snapshot.parameters,
     };
-    let go = clonk_network::NetworkStatus {
+    let chase = clonk_network::NetworkStatus {
         state: clonk_network::NETWORK_STATE_GO,
         control_mode: 2,
-        target_tick: 23,
+        target_tick: 25,
     };
     event_tx
         .send(NetworkEvent::JoinData(join_data.clone()))
@@ -3521,10 +3537,48 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             local: true,
         })
         .test_value();
+    // A running host starts sending catch-up controls as soon as SendJoinData
+    // puts the new peer into NCS_Chasing. They can arrive throughout the
+    // client's blocking resource load and must remain queued until FinalInit
+    // completes (7d43b47b src/C4Network2.cpp:1820-1850,2161-2183;
+    // src/C4Game.cpp:455-482).
     event_tx
-        .send(NetworkEvent::StatusRequested(go))
+        .send(NetworkEvent::ReadyTick {
+            tick: 23,
+            controls: Vec::new(),
+        })
+        .test_value();
+    event_tx
+        .send(NetworkEvent::ScheduledSync {
+            tick: 23,
+            controls: Vec::new(),
+        })
         .test_value();
     app.process_network_events().test_value();
+    assert_eq!(app.expected_network_control_tick(), 23);
+    assert!(
+        app.network_ticks.ready.contains_key(&23),
+        "the start control tick must survive while runtime-join resources load"
+    );
+    assert!(app.network_sync.scheduled.contains_key(&23));
+    // UpdateChaseTarget publishes the live control target every five seconds.
+    // The reporter's resource load crossed that interval, so the joiner must
+    // finish InitGame, run the buffered backlog to the newer target, and only
+    // then acknowledge it (7d43b47b src/C4Network2.cpp:558-616,2017-2057,
+    // 2161-2183; src/C4Game.cpp:455-512).
+    event_tx
+        .send(NetworkEvent::StatusRequested(chase))
+        .test_value();
+    for tick in 24..=25 {
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: Vec::new(),
+            })
+            .test_value();
+    }
+    app.process_network_events().test_value();
+    assert_eq!(app.pending_client_start_status, Some(chase));
     // A client publishes 6 before RetrieveScenario blocks; the modal
     // transfer percentage below remains a separate progress domain
     // (src/C4Game.cpp:2558-2568).
@@ -3614,9 +3668,6 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             local: false,
         })
         .test_value();
-    event_tx
-        .send(NetworkEvent::StatusRequested(go))
-        .test_value();
     app.process_network_events().test_value();
     let combined_files = fs::read_dir(directory.path())
         .test_value()
@@ -3666,15 +3717,29 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             .progress(),
         7
     );
+    // GS_Go is not a frozen status while the joiner is still chasing. A
+    // synchronized control arriving after InitGame started must wait at its
+    // authored tick instead of executing against the partial world
+    // (7d43b47b src/C4Network2.cpp:1982-1991;
+    // src/C4GameControlNetwork.cpp:558-588).
+    event_tx
+        .send(NetworkEvent::ScheduledSync {
+            tick: 24,
+            controls: Vec::new(),
+        })
+        .test_value();
+    app.process_network_events().test_value();
+    assert!(app.network_sync.scheduled.contains_key(&24));
     let loading_deadline = Instant::now() + Duration::from_secs(5);
     loop {
         app.poll_loading().test_value();
-        if app.message_dialogs.iter().any(|dialog| {
+        let waiting_for_start = app.message_dialogs.iter().any(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::NetworkClientStartWait
             )
-        }) {
+        });
+        if app.mode == AppMode::Running || waiting_for_start {
             break;
         }
         assert!(
@@ -3683,40 +3748,23 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert!(matches!(app.mode, AppMode::Loading));
+    assert!(
+        matches!(app.mode, AppMode::Running),
+        "a chase target ahead of the saved tick must enter running catch-up"
+    );
     assert_eq!(
         app.loader_screen
             .as_ref()
-            .expect("client loader retained through GO wait")
+            .expect("client loader retained through final init")
             .state()
             .progress(),
-        97
-    );
-    assert!(
-        app.loading_state.as_ref().is_some_and(|loading| loading
-            .log
-            .iter()
-            .any(|line| line == "Definition selection resolved")),
-        "the authoritative network worker must publish its shared InitGame phases"
+        100
     );
     assert!(app.network_start_wait.is_none());
-    let client_wait = app
-        .message_dialogs
-        .iter()
-        .find(|dialog| {
-            matches!(
-                dialog.continuation,
-                MessageDialogContinuation::NetworkClientStartWait
-            )
-        })
-        .test_value();
-    assert_eq!(client_wait.state.message(), "Waiting for start...");
-    assert_eq!(client_wait.state.caption(), "Network");
-    assert_eq!(
-        client_wait.state.buttons(),
-        clonk_frontend::message_dialog::MessageDialogButtons::CANCEL
-    );
-    assert_eq!(client_wait.state.focused_button(), None);
+    assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+        dialog.continuation,
+        MessageDialogContinuation::NetworkClientStartWait
+    )));
     assert!(app.engine.snapshot().players.is_empty());
     assert!(app.engine.definition_ids().any(|id| id == "HOST"));
     // InitClient copies JoinData's start tick and control rate before
@@ -3730,6 +3778,15 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
         ),
         (23, 2)
     );
+    assert!(
+        app.network_ticks.ready.contains_key(&23),
+        "scenario activation must retain the runtime-join control backlog"
+    );
+    assert!(
+        app.network_sync.scheduled.contains_key(&23),
+        "scenario activation must retain preexecuted synchronized controls"
+    );
+    assert!(app.network_sync.scheduled.contains_key(&24));
     // C4Game opens the combined scenario's Material.c4g first and then the
     // host-ordered NRT_Material files. A client never re-resolves those
     // external files from its local installation, even when the last host
@@ -3772,14 +3829,47 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
         expected_wind,
         "client InitGame must use JoinData Parameters.RandomSeed before Weather.Init"
     );
+    assert!(commands.take_framed_status_acknowledgements().is_empty());
     assert_eq!(
-        commands.take_framed_status_acknowledgements(),
-        vec![(go, 0)]
+        app.runtime_network_status_barrier,
+        Some(RuntimeNetworkStatusBarrier {
+            status: chase,
+            local_reached: false,
+            actual_control_tick: None,
+        })
     );
+    assert!(app.network_control_running);
+    assert!(app.loading_state.is_none());
+
+    let catch_up_frame = app.engine.frame();
+    app.update().test_value();
+    assert_eq!(app.engine.frame(), catch_up_frame + 1);
+    assert_eq!(app.expected_network_control_tick(), 24);
+    assert!(!app.control_clients.is_activated(7));
+    assert!(commands.take_executed_client_updates().is_empty());
+
+    let mut acknowledgements = Vec::new();
+    for _ in 0..7 {
+        app.update().test_value();
+        acknowledgements.extend(commands.take_framed_status_acknowledgements());
+        if !acknowledgements.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(acknowledgements, vec![(chase, 4)]);
+    assert_eq!(
+        (app.engine.frame(), app.expected_network_control_tick()),
+        (4, 25)
+    );
+    assert!(!app.network_control_running);
+    assert!(!app.network_ticks.ready.contains_key(&23));
+    assert!(!app.network_ticks.ready.contains_key(&24));
+    assert!(app.network_ticks.ready.contains_key(&25));
+    assert!(app.network_sync.scheduled.is_empty());
 
     let host_commit = clonk_network::NetworkStatus {
         control_mode: 9,
-        ..go
+        ..chase
     };
     event_tx
         .send(NetworkEvent::StatusCommitted(host_commit))
@@ -3796,19 +3886,38 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     );
     assert!(app.loading_state.is_none());
     assert!(app.network_control_running);
+    assert_eq!(app.expected_network_control_tick(), 25);
+    assert!(app.network_ticks.ready.contains_key(&25));
     assert!(app.message_dialogs.iter().all(|dialog| !matches!(
         dialog.continuation,
         MessageDialogContinuation::NetworkClientStartWait
     )));
-    let initial_frame = app.engine.frame();
+    // JoinLocalPlayer delays RequestActivate until status reach, so the host's
+    // CUT_Activate cannot occur in the pre-ack backlog. Model the first
+    // possible host-authored activation on a later control tick
+    // (7d43b47b src/C4Network2.cpp:1553-1571,2041-2058,2116-2145).
+    let activate =
+        clonk_engine::ClientUpdateControlData::new(clonk_engine::CLIENT_UPDATE_ACTIVATE, 7, 1, 0);
     event_tx
         .send(NetworkEvent::ReadyTick {
-            tick: 23,
-            controls: Vec::new(),
+            tick: 26,
+            controls: vec![NetworkControl::ClientUpdate(activate.clone())],
         })
         .test_value();
+    app.process_network_events().test_value();
+
+    let initial_frame = app.engine.frame();
     app.update().test_value();
     assert_eq!(app.engine.frame(), initial_frame + 1);
+    assert!(!app.network_ticks.ready.contains_key(&25));
+    assert_eq!(app.expected_network_control_tick(), 26);
+    assert!(!app.control_clients.is_activated(7));
+    app.update().test_value();
+    assert!(!app.control_clients.is_activated(7));
+    app.update().test_value();
+    assert!(app.control_clients.is_activated(7));
+    assert_eq!(commands.take_executed_client_updates(), vec![activate]);
+    assert_eq!(app.expected_network_control_tick(), 27);
 }
 
 fn set_control_test_team(

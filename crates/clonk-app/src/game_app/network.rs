@@ -2187,7 +2187,10 @@ impl GameApp {
             .collect();
     }
 
-    fn arm_runtime_network_status_barrier(&mut self, status: clonk_network::NetworkStatus) -> bool {
+    pub(crate) fn arm_runtime_network_status_barrier(
+        &mut self,
+        status: clonk_network::NetworkStatus,
+    ) -> bool {
         if self.mode != AppMode::Running || self.network.is_none() {
             return false;
         }
@@ -2330,12 +2333,20 @@ impl GameApp {
         let Ok(expected_tick) = Tick::try_from(current_control_tick) else {
             return RuntimeStatusReachOutcome::NotReached;
         };
+        let role = self.runtime_network_role();
+        let startup_chasing = role == RuntimeNetworkRole::Client
+            && self
+                .client_start_barrier
+                .is_runtime_join_chasing(pending.status);
         // Native reaches only after the current *executable* control queue is
         // empty. CheckCompleteCtrl advances readiness only after PreExecute;
         // raw packets blocked on a resource do not keep the barrier running.
         // While committed Pause is stopped, newly received controls likewise
-        // have not been promoted to CtrlReady yet.
-        let current_control_ready = if self.network_control_running {
+        // have not been promoted to CtrlReady yet. A client still marked
+        // NCS_Chasing is the exception: its current ready tick belongs after
+        // the catch-up target and must execute only after the status commit
+        // (src/C4Network2.cpp:2017-2046).
+        let current_control_ready = if self.network_control_running && !startup_chasing {
             let network_ticks = &self.network_ticks;
             let admission_resources = &mut self.admission_resources;
             let control_clients = &self.control_clients;
@@ -2359,7 +2370,6 @@ impl GameApp {
         // or the client sends PID_StatusAck.
         self.network_control_running = false;
         let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-        let role = self.runtime_network_role();
         let reached = match role {
             RuntimeNetworkRole::Host => self
                 .network
@@ -2376,6 +2386,10 @@ impl GameApp {
         };
         match reached {
             Some(Ok(())) => {
+                if startup_chasing {
+                    self.client_start_barrier
+                        .local_initialized_at(current_control_tick);
+                }
                 if let Some(active) = self.runtime_network_status_barrier.as_mut() {
                     if same_runtime_network_status_barrier(active.status, pending.status) {
                         active.local_reached = true;
@@ -3770,15 +3784,35 @@ impl GameApp {
         {
             for event in events {
                 // C4GameControlNetwork::HandleControlPkt executes synchronized
-                // controls immediately while network control is frozen in the
-                // lobby (src/C4GameControlNetwork.cpp:558-588).
+                // controls immediately while Network::isFrozen: in the lobby,
+                // or after the current Pause barrier is acknowledged and
+                // committed (src/C4Network2.cpp:1982-1991;
+                // src/C4GameControlNetwork.cpp:558-588).
+                let frozen_loading_pause = self.mode == AppMode::Loading
+                    && self.loading_state.as_ref().is_some_and(|loading| {
+                        loading.prepared_go.as_ref().is_some_and(|prepared| {
+                            prepared.local_reached
+                                && self
+                                    .runtime_network_committed_status
+                                    .is_some_and(|committed| {
+                                        committed.state == clonk_network::NETWORK_STATE_PAUSE
+                                            && if matches!(
+                                                self.network_mode,
+                                                Some(NetworkMode::Client(_))
+                                            ) {
+                                                same_runtime_network_status_barrier(
+                                                    prepared.status,
+                                                    committed,
+                                                )
+                                            } else {
+                                                prepared.status == committed
+                                            }
+                                    })
+                        })
+                    });
                 let frozen_lobby = self.joined_network_lobby_active()
                     || self.classic_host_lobby_active()
-                    || (self.mode == AppMode::Loading
-                        && self
-                            .loading_state
-                            .as_ref()
-                            .is_some_and(|loading| loading.prepared_go.is_some()));
+                    || frozen_loading_pause;
                 let frozen_runtime = self.mode == AppMode::Running
                     && self.host_reference_paused
                     && !self.network_control_running
@@ -3994,6 +4028,16 @@ impl GameApp {
                     // topology sampled at the consumed-control boundary.
                     NetworkEvent::HostPingMeasured { .. } => {}
                     NetworkEvent::HostStatusChanged(status) => {
+                        if self
+                            .loading_state
+                            .as_ref()
+                            .is_some_and(|loading| loading.prepared_go.is_some())
+                        {
+                            // ChangeGameStatus begins a new acknowledgement
+                            // generation even for an identical status
+                            // (src/C4Network2.cpp:1993-2015).
+                            self.runtime_network_committed_status = None;
+                        }
                         self.retarget_network_start_wait(status);
                         if let Some(clock) = self.network_control_clock.as_mut() {
                             clock.set_target_tick(Some(status.target_tick));
@@ -4150,16 +4194,44 @@ impl GameApp {
                             && join_data.status.state == clonk_network::NETWORK_STATE_LOBBY;
                         self.client_start_barrier =
                             ClientStartBarrier::from_join_data_status(join_data.status);
-                        self.pending_client_start_status = None;
+                        self.pending_client_start_status = matches!(
+                            join_data.status.state,
+                            clonk_network::NETWORK_STATE_GO | clonk_network::NETWORK_STATE_PAUSE
+                        )
+                        .then_some(join_data.status);
                         self.clear_lobby_preload();
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.preload.reset_for_context();
                         }
                         self.pending_network_join_data = Some(join_data);
+                        if self.pending_client_start_status.is_some() {
+                            // InitNetwork returns directly into InitGame when
+                            // HandleJoinData installed Go/Pause; DoLobby is
+                            // entered only for GS_Lobby (src/C4Game.cpp:400-417;
+                            // src/C4Network2.cpp:1574-1592).
+                            if let Some(loader) = self.loader_screen.as_mut() {
+                                // RetrieveScenario publishes 6 before blocking
+                                // on synchronized resources (src/C4Game.cpp:2558-2568).
+                                loader.update(LoaderUpdate::SetProgress(6));
+                            }
+                            if self.joined_network_lobby_active() {
+                                self.close_lobby_child_dialogs_silently();
+                                self.network_lobby = None;
+                                self.host_lobby_countdown = None;
+                                self.pending_local_lobby_countdown_echoes.clear();
+                            }
+                            self.mode = AppMode::Loading;
+                        }
                         self.sync_network_lobby_game_option_state();
                         self.sync_classic_lobby_roster();
                         self.sync_classic_lobby_resource_ready();
                         self.acknowledge_initial_lobby_status_if_ready();
+                        if self.pending_client_start_status.is_some() {
+                            self.prepare_client_network_scenario_if_ready()?;
+                            if self.network.is_none() {
+                                break;
+                            }
+                        }
                     }
                     NetworkEvent::LeagueRoundResults(packet) => {
                         self.apply_league_round_results_packet(&packet);
@@ -4227,6 +4299,9 @@ impl GameApp {
                             self.mode = AppMode::Loading;
                         }
                         if self.mode == AppMode::Running {
+                            if self.client_start_barrier.is_pending() {
+                                self.client_start_barrier.status_requested(status);
+                            }
                             // CheckStatusReached keeps control running until
                             // the requested target is reached at an empty
                             // cadence boundary. Receipt alone never pauses.
@@ -4245,7 +4320,31 @@ impl GameApp {
                                 if let Some(requested) =
                                     self.client_start_barrier.status_requested(status)
                                 {
+                                    // HandleStatus starts a new acknowledgement
+                                    // generation even when state and target
+                                    // are unchanged; an older PID_StatusAck
+                                    // cannot commit it (src/C4Network2.cpp:
+                                    // 1501-1510,1536-1550).
+                                    self.runtime_network_committed_status = None;
                                     self.pending_client_start_status = Some(requested);
+                                    let reopened_reached_barrier = self
+                                        .loading_state
+                                        .as_mut()
+                                        .and_then(|loading| loading.prepared_go.as_mut())
+                                        .is_some_and(|prepared| {
+                                            let reopened = prepared.local_reached;
+                                            prepared.status = requested;
+                                            prepared.local_reached = false;
+                                            reopened
+                                        });
+                                    if reopened_reached_barrier {
+                                        // HandleStatus clears fStatusReached;
+                                        // FinalInit's modal wait exits as soon
+                                        // as a replacement chase target
+                                        // arrives (src/C4Network2.cpp:558-616,
+                                        // 1501-1510).
+                                        self.dismiss_network_client_start_wait();
+                                    }
                                     // InitGameFirstPart publishes 6 before
                                     // RetrieveScenario may block on either
                                     // synchronized scenario resource
@@ -4403,12 +4502,24 @@ impl GameApp {
                         );
                     }
                     NetworkEvent::ReadyTick { tick, controls } => {
+                        let loading_client_start = self.mode == AppMode::Loading
+                            && matches!(self.network_mode, Some(NetworkMode::Client(_)))
+                            && self.pending_client_start_status.is_some_and(|status| {
+                                matches!(
+                                    status.state,
+                                    clonk_network::NETWORK_STATE_GO
+                                        | clonk_network::NETWORK_STATE_PAUSE
+                                )
+                            });
                         let recreating_after_go = self.mode == AppMode::Loading
                             && self.network_savegame_recreation_progress.is_some()
                             && self.runtime_network_committed_status.is_some_and(|status| {
                                 status.state == clonk_network::NETWORK_STATE_GO
                             });
-                        if self.mode == AppMode::Running || recreating_after_go {
+                        if self.mode == AppMode::Running
+                            || loading_client_start
+                            || recreating_after_go
+                        {
                             let expected_tick = self.expected_network_control_tick();
                             self.network_ticks.queue(expected_tick, tick, controls);
                         }

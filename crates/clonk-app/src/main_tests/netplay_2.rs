@@ -4996,6 +4996,36 @@ fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
 }
 
 #[test]
+fn ordinary_lobby_join_go_waits_for_the_current_ready_tick_before_acknowledging() {
+    // A client that joined in GS_Lobby is NCS_NotReady, not NCS_Chasing, when
+    // the host later requests Go. CheckStatusReached may ignore the current
+    // ready control only for the distinct runtime-join chase path
+    // (7d43b47b src/C4Network2.cpp:1536-1548,2017-2057;
+    // src/C4Network2Client.cpp:633-638).
+    let mut app = new_running_sandbox_app();
+    let (events, mut commands) = install_running_network_stub(&mut app, 7, 0, 1);
+    let lobby = n2_fixture!(status: clonk_network::NETWORK_STATE_LOBBY, 1, -1);
+    let go = n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 1, 0);
+    app.client_start_barrier = ClientStartBarrier::from_join_data_status(lobby);
+    main_assert_eq!(app.client_start_barrier.status_requested(go) => Some(go));
+
+    n2_send_event(&events, n2_fixture!(ready_tick: 0, Vec::new()));
+    n2_send_event(&events, NetworkEvent::StatusRequested(go));
+    app.test_network_events();
+
+    main_assert!(app.network_control_running);
+    main_assert_eq!(
+        app.runtime_network_status_barrier =>
+            Some(RuntimeNetworkStatusBarrier {
+                status: go,
+                local_reached: false,
+                actual_control_tick: None,
+            })
+    );
+    main_assert!(commands.take_framed_status_acknowledgements().is_empty());
+}
+
+#[test]
 fn a_status_without_a_runtime_reach_condition_supersedes_the_pending_barrier() {
     // HandleStatus installs every received status and clears fStatusReached,
     // so a lobby status the client can never reach still replaces a pending
@@ -11547,6 +11577,351 @@ fn network_savegame_finalization_does_not_rerun_scenario_initialize() {
 }
 
 #[test]
+fn runtime_join_into_committed_pause_finishes_initialization_without_starting_control() {
+    // FinalInit waits for either Go or Pause, and OnStatusAck(Pause) retains
+    // HaltCount only after InitPlayers/InitGameFinal have made the loaded
+    // world renderable (7d43b47b src/C4Network2.cpp:558-616,2017-2113;
+    // src/C4Game.cpp:455-512).
+    let mut app = new_state_only_running_sandbox_app();
+    let (network, events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
+    app.network_control_clock = Some(NetworkControlClock::new(0, 1));
+    app.engine.initialize_network_control_timing(
+        clonk_engine::NetworkControlTiming::new(0, 1).test_value(),
+    );
+    app.mode = AppMode::Loading;
+
+    let pause_reference = n2_fixture!(status: clonk_network::NETWORK_STATE_PAUSE, 2, -1);
+    let pause = n2_fixture!(status: clonk_network::NETWORK_STATE_PAUSE, 2, 0);
+    app.client_start_barrier = ClientStartBarrier::from_join_data_status(pause_reference);
+    main_assert_eq!(app.client_start_barrier.local_initialized_at(0) => Some(pause));
+    app.pending_client_start_status = Some(pause_reference);
+    let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
+    prepared.status = pause;
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(test_loading_state(
+        FrontendScenario::fallback(),
+        receiver,
+        true,
+        prepared,
+    ));
+    events
+        .send(NetworkEvent::ReadyTick {
+            tick: 0,
+            controls: Vec::new(),
+        })
+        .test_value();
+    app.process_network_events().test_value();
+    main_assert!(app.network_ticks.ready.contains_key(&0));
+
+    app.handle_status_committed(pause).test_value();
+
+    main_assert_eq!(app.mode => AppMode::Running);
+    main_assert!(app.loading_state.is_none());
+    main_assert!(app.pending_client_start_status.is_none());
+    main_assert!(app.host_reference_paused);
+    main_assert!(!app.network_control_running);
+    main_assert!(app.network_ticks.ready.contains_key(&0));
+}
+
+#[test]
+fn deferred_paused_runtime_join_finishes_after_player_resources_arrive() {
+    // A blocking player-file retrieval may make the first post-commit
+    // InitPlayers pass return early. The later completion resumes the same
+    // committed Pause and must not wait for a Go that may never come
+    // (7d43b47b src/C4Network2.cpp:558-616; src/C4Game.cpp:455-482,
+    // 2805-2863).
+    let mut app = new_state_only_running_sandbox_app();
+    let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
+    app.network_control_clock = Some(NetworkControlClock::new(0, 1));
+    app.engine.initialize_network_control_timing(
+        clonk_engine::NetworkControlTiming::new(0, 1).test_value(),
+    );
+    app.mode = AppMode::Loading;
+    let pause = n2_fixture!(status: clonk_network::NETWORK_STATE_PAUSE, 2, 0);
+    let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
+    prepared.status = pause;
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(test_loading_state(
+        FrontendScenario::fallback(),
+        receiver,
+        true,
+        prepared,
+    ));
+    app.runtime_network_committed_status = Some(pause);
+    app.host_reference_paused = true;
+
+    app.try_finish_deferred_prepared_network_go().test_value();
+
+    main_assert_eq!(app.mode => AppMode::Running);
+    main_assert!(app.loading_state.is_none());
+    main_assert!(!app.network_control_running);
+}
+
+#[test]
+fn deferred_runtime_join_waits_for_the_commit_matching_its_latest_status() {
+    // HandleStatus replaces the one active status and clears its flags;
+    // HandleStatusAck accepts only the matching state and exact target. An
+    // earlier opposite-state commit cannot finish deferred InitPlayers after
+    // a retarget (7d43b47b src/C4Network2.cpp:1501-1550,2017-2113).
+    for (committed_state, committed_tick, prepared_state, prepared_tick) in [
+        (
+            clonk_network::NETWORK_STATE_GO,
+            0,
+            clonk_network::NETWORK_STATE_PAUSE,
+            0,
+        ),
+        (
+            clonk_network::NETWORK_STATE_PAUSE,
+            0,
+            clonk_network::NETWORK_STATE_GO,
+            0,
+        ),
+        (
+            clonk_network::NETWORK_STATE_GO,
+            0,
+            clonk_network::NETWORK_STATE_GO,
+            1,
+        ),
+        (
+            clonk_network::NETWORK_STATE_PAUSE,
+            0,
+            clonk_network::NETWORK_STATE_PAUSE,
+            1,
+        ),
+    ] {
+        let mut app = new_state_only_running_sandbox_app();
+        let (network, events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
+        app.network_control_clock = Some(NetworkControlClock::new(0, 1));
+        app.mode = AppMode::Loading;
+        let committed = n2_fixture!(status: committed_state, 2, committed_tick);
+        let mut prepared =
+            test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
+        prepared.status = n2_fixture!(status: prepared_state, 2, prepared_tick);
+        let (_sender, receiver) = mpsc::channel();
+        app.loading_state = Some(test_loading_state(
+            FrontendScenario::fallback(),
+            receiver,
+            true,
+            prepared,
+        ));
+        app.runtime_network_committed_status = Some(committed);
+
+        app.try_finish_deferred_prepared_network_go().test_value();
+
+        main_assert_eq!(app.mode => AppMode::Loading);
+        main_assert!(app.loading_state.is_some());
+        events
+            .send(NetworkEvent::ScheduledSync {
+                tick: 1,
+                controls: Vec::new(),
+            })
+            .test_value();
+        app.process_network_events().test_value();
+        main_assert!(
+            app.network_sync.scheduled.contains_key(&1),
+            "a stale committed Pause must not make the replacement status frozen"
+        );
+    }
+}
+
+#[test]
+fn replacement_status_with_same_target_requires_a_fresh_runtime_join_commit() {
+    // HandleStatus clears fStatusAck even when the replacement keeps the same
+    // state and target. A prior commit must not satisfy the new generation
+    // after it has been reached again (7d43b47b
+    // src/C4Network2.cpp:1501-1510,1536-1550,2017-2057).
+    let mut app = new_state_only_running_sandbox_app();
+    let (network, events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
+    app.network_control_clock = Some(NetworkControlClock::new(0, 1));
+    app.mode = AppMode::Loading;
+    let committed = n2_fixture!(status: clonk_network::NETWORK_STATE_PAUSE, 2, 0);
+    let replacement = n2_fixture!(status: clonk_network::NETWORK_STATE_PAUSE, 9, 0);
+    let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
+    prepared.status = committed;
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(test_loading_state(
+        FrontendScenario::fallback(),
+        receiver,
+        true,
+        prepared,
+    ));
+    app.runtime_network_committed_status = Some(committed);
+
+    events
+        .send(NetworkEvent::StatusRequested(replacement))
+        .test_value();
+    app.process_network_events().test_value();
+
+    main_assert!(app.runtime_network_committed_status.is_none());
+    let prepared = app
+        .loading_state
+        .as_mut()
+        .and_then(|loading| loading.prepared_go.as_mut())
+        .test_value();
+    main_assert_eq!(prepared.status => replacement);
+    prepared.local_reached = true;
+    app.try_finish_deferred_prepared_network_go().test_value();
+    main_assert_eq!(app.mode => AppMode::Loading);
+}
+
+#[test]
+fn host_replacement_status_invalidates_a_deferred_matching_commit() {
+    // ChangeGameStatus resets fStatusAck before broadcasting even when the
+    // replacement keeps the same state and target, so the host also needs a
+    // fresh acknowledgement generation (7d43b47b
+    // src/C4Network2.cpp:1993-2015,2061-2080).
+    let mut app = new_state_only_running_sandbox_app();
+    let (network, events) = NetworkManager::test_stub_for_client_id(0);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.network_control_clock = Some(NetworkControlClock::new(0, 1));
+    app.mode = AppMode::Loading;
+    let committed = n2_fixture!(status: clonk_network::NETWORK_STATE_PAUSE, 2, 0);
+    let replacement = n2_fixture!(status: clonk_network::NETWORK_STATE_PAUSE, 9, 0);
+    let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
+    prepared.status = committed;
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(test_loading_state(
+        FrontendScenario::fallback(),
+        receiver,
+        true,
+        prepared,
+    ));
+    app.runtime_network_committed_status = Some(committed);
+
+    events
+        .send(NetworkEvent::HostStatusChanged(replacement))
+        .test_value();
+    app.process_network_events().test_value();
+
+    main_assert!(app.runtime_network_committed_status.is_none());
+    let prepared = app
+        .loading_state
+        .as_ref()
+        .and_then(|loading| loading.prepared_go.as_ref())
+        .test_value();
+    main_assert_eq!(prepared.status => replacement);
+}
+
+#[test]
+fn runtime_join_chase_retarget_reopens_a_reached_loading_barrier() {
+    // HandleStatus always clears fStatusReached/fStatusAck. A chase target
+    // received after FinalInit reached the JoinData status therefore leaves
+    // its wait and drives the initialized game toward the replacement tick
+    // (7d43b47b src/C4Network2.cpp:558-616,1501-1510,2017-2057,
+    // 2161-2183).
+    let mut app = new_running_sandbox_app();
+    let (network, events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
+    app.network_control_clock = Some(NetworkControlClock::new(23, 1));
+    app.mode = AppMode::Loading;
+
+    let reference = n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 2, -1);
+    let reached = n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 2, 23);
+    let chase = n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 2, 25);
+    app.client_start_barrier = ClientStartBarrier::from_join_data_status(reference);
+    main_assert_eq!(app.client_start_barrier.local_initialized_at(23) => Some(reached));
+    app.pending_client_start_status = Some(reference);
+    let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
+    prepared.status = reached;
+    prepared.local_reached = true;
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(test_loading_state(
+        FrontendScenario::fallback(),
+        receiver,
+        true,
+        prepared,
+    ));
+    app.show_reached_network_start_wait().test_value();
+    main_assert!(app.message_dialogs.iter().any(|dialog| matches!(
+        dialog.continuation,
+        MessageDialogContinuation::NetworkClientStartWait
+    )));
+    events
+        .send(NetworkEvent::StatusRequested(chase))
+        .test_value();
+    app.process_network_events().test_value();
+
+    let prepared = app
+        .loading_state
+        .as_ref()
+        .and_then(|loading| loading.prepared_go.as_ref())
+        .test_value();
+    main_assert_eq!(prepared.status => chase);
+    main_assert!(!prepared.local_reached);
+    main_assert_eq!(app.pending_client_start_status => Some(chase));
+    main_assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+        dialog.continuation,
+        MessageDialogContinuation::NetworkClientStartWait
+    )));
+}
+
+#[test]
+fn runtime_join_drains_a_queued_chase_target_before_finishing_loading() {
+    // RetrieveScenario pumps network messages while it blocks, so a queued
+    // replacement PID_Status is installed before FinalInit checks the current
+    // barrier. The client must not acknowledge the obsolete JoinData target
+    // when both completion and the chase update become ready together
+    // (7d43b47b src/C4Network2.cpp:558-616,1501-1510,2017-2057,
+    // 2161-2183).
+    let mut app = new_running_sandbox_app();
+    let (network, events, mut commands) =
+        NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
+    app.network_control_clock = Some(NetworkControlClock::new(23, 1));
+    app.engine.initialize_network_control_timing(
+        clonk_engine::NetworkControlTiming::new(23, 1).test_value(),
+    );
+    app.mode = AppMode::Loading;
+
+    let reference = n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 2, -1);
+    let reached = n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 2, 23);
+    let chase = n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 2, 25);
+    main_assert!(app
+        .network
+        .as_mut()
+        .test_value()
+        .test_receive_client_status_request(reached));
+    app.client_start_barrier = ClientStartBarrier::from_join_data_status(reference);
+    app.pending_client_start_status = Some(reference);
+    let mut prepared = test_prepared_go(2, false, false, true, Vec::new(), Vec::new(), Vec::new());
+    prepared.status = reference;
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(test_loading_state(
+        FrontendScenario::fallback(),
+        receiver,
+        true,
+        prepared,
+    ));
+
+    events
+        .send(NetworkEvent::StatusRequested(chase))
+        .test_value();
+    app.update().test_value();
+
+    main_assert_eq!(app.mode => AppMode::Running);
+    main_assert_eq!(
+        app.runtime_network_status_barrier =>
+            Some(RuntimeNetworkStatusBarrier {
+                status: chase,
+                local_reached: false,
+                actual_control_tick: None,
+            })
+    );
+    main_assert!(commands.take_framed_status_acknowledgements().is_empty());
+}
+
+#[test]
 fn runtime_network_client_join_loading_reaches_running_render() {
     // A client that connects after GS_Go must consume the production loading
     // completion event, reach/commit the GO barrier, and execute a later
@@ -11556,18 +11931,20 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     // 2017-2059;
     // C4Game.cpp:455-483,2805-2863).
     //
-    // Deliberately no StatusRequested event: a host that is already running
-    // never calls ChangeGameStatus, so no PID_Status reaches a runtime joiner.
-    // The JoinData status is its only barrier. Feeding one here is what let
-    // this test pass while clonk-org/clonk-rs#895 froze every real join.
+    // Deliberately no StatusRequested event: JoinData must start a fast load
+    // before UpdateChaseTarget's five-second PID_Status. The slower retargeted
+    // path is covered by the production resource-lifecycle regression
+    // (src/C4Network2.cpp:2161-2183).
     let directory = tempdir();
     let combined_path = directory.path().join("Combined7.c4s");
+    let scenario_path = directory.path().join("Scenario.c4s");
+    let dynamic_path = directory.path().join("Dynamic.c4s");
     let player_path = directory.path().join("Late.c4p");
-    let mut player_group = MutableGroup::new("Late.c4p");
-    player_group
+    let mut host_player_group = MutableGroup::new("Host.c4p");
+    host_player_group
         .add_file(
             "Player.txt",
-            b"[Player]\nName=Late client\n[Preferences]\nControl=0\nMouse=0\n".to_vec(),
+            b"[Player]\nName=Host\n[Preferences]\nControl=0\nMouse=0\n".to_vec(),
         )
         .test_value();
     let mut standalone_player_group = MutableGroup::new("Late.c4p");
@@ -11580,9 +11957,9 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     fs::write(&player_path, standalone_player_group.pack().test_value()).test_value();
 
     let player_info = n2_fixture!(player {
-        id: 7,
-        name: LegacyCString::from_bytes(b"Late client".to_vec()).test_value(),
-        filename: LegacyCString::from_bytes(b"Late.c4p".to_vec()).test_value(),
+        id: 1,
+        name: LegacyCString::from_bytes(b"Host".to_vec()).test_value(),
+        filename: LegacyCString::from_bytes(b"Host.c4p".to_vec()).test_value(),
         flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
             | clonk_engine::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
         player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
@@ -11590,38 +11967,41 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     let restore_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: player_info.id,
         clients: vec![clonk_network::ClientPlayerInfosSnapshot {
-            client_id: 7,
+            client_id: 0,
             flags: 0,
             players: vec![player_info.clone()],
         }],
     };
-    let mut combined_group = MutableGroup::new("Combined7.c4s");
-    combined_group
+    let mut scenario_group = MutableGroup::new("Scenario.c4s");
+    scenario_group
         .add_file(
             "Scenario.txt",
             b"[Head]\nTitle=Runtime join\nNetworkGame=1\nNetworkRuntimeJoin=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n"
                 .to_vec(),
         )
         .test_value();
-    combined_group
+    scenario_group
         .add_child("Defs.c4d", packed_network_definition("Defs.c4d", "CLNK"))
         .test_value();
-    combined_group
+    fs::write(&scenario_path, scenario_group.pack().test_value()).test_value();
+
+    let mut dynamic_group = MutableGroup::new("Dynamic.c4s");
+    dynamic_group
         .add_file(
             "Game.txt",
-            b"[Player7]\nStatus=1\nIndex=7\nID=7\nWealth=19\n".to_vec(),
+            b"[Player1]\nStatus=1\nIndex=1\nID=1\nWealth=19\n".to_vec(),
         )
         .test_value();
-    combined_group
+    dynamic_group
         .add_file(
             "SavePlayerInfos.txt",
             clonk_network::encode_player_info_list_ini(&restore_infos).test_value(),
         )
         .test_value();
-    combined_group
-        .add_child("Late.c4p", player_group)
+    dynamic_group
+        .add_child("Host.c4p", host_player_group)
         .test_value();
-    fs::write(&combined_path, combined_group.pack().test_value()).test_value();
+    fs::write(&dynamic_path, dynamic_group.pack().test_value()).test_value();
 
     let resource = |resource_type: clonk_network::HostResourceType, id: i32, filename: &[u8]| {
         n2_fixture!(resource {
@@ -11657,6 +12037,7 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     parameters.clients.local_client_id = Some(7);
     parameters.player_infos = restore_infos.clone();
     parameters.restore_player_infos = restore_infos.clone();
+    parameters.game_resources.clear();
     let join_data = n2_fixture!(join_data:
         7,
         23,
@@ -11665,11 +12046,6 @@ fn runtime_network_client_join_loading_reaches_running_render() {
         parameters
     );
     let go = n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 2, 23);
-    let scenario_data = clonk_engine::Scenario::load_from_path_with(
-        &combined_path,
-        &InstallDefinitionResolver::new(None),
-    )
-    .test_value();
 
     let mut app = new_menu_app(320, 200);
     let (manager, event_tx, mut commands) =
@@ -11689,22 +12065,66 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     main_assert_eq!(initial.flags => clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL);
     main_assert!(initial.players.is_empty());
 
-    // This is the same completion event consumed by poll_loading after the
-    // production network loader finishes, but supplied synchronously through
-    // the prepared/preloaded path so no detached thread or scheduler race is
-    // part of this lifecycle assertion.
-    app.install_prepared_client_network_scenario(
-        go,
-        join_data,
-        combined_path.clone(),
-        scenario_data,
-        None,
-        Vec::new(),
-        false,
-    )
-    .test_value();
+    // Exercise RetrieveScenario's real two-resource path. In particular, the
+    // app retains JoinData's reference-form target -1 while NetworkManager
+    // independently normalizes the pending acknowledgement to start tick 23
+    // (7d43b47b src/C4Network2.cpp:619-671,1574-1623,2017-2057).
+    n2_send_event(
+        &event_tx,
+        NetworkEvent::ResourceComplete {
+            resource_id: 70,
+            core: join_data.parameters.scenario.clone(),
+            path: scenario_path,
+            local: false,
+        },
+    );
     app.process_network_events().test_value();
-    app.poll_loading().test_value();
+    main_assert_eq!(
+        app.blocking_resource_wait.as_ref().map(|wait| wait.resource_id) => Some(71)
+    );
+
+    let (removed_tx, removed_rx) = mpsc::channel();
+    let removal_observer = thread::spawn(move || {
+        let (resource_id, completion) = commands.receive_resource_removal();
+        completion.send(Ok(())).test_value();
+        removed_tx.send(resource_id).test_value();
+        commands
+    });
+    n2_send_event(
+        &event_tx,
+        NetworkEvent::ResourceComplete {
+            resource_id: 71,
+            core: join_data.dynamic.clone(),
+            path: dynamic_path,
+            local: false,
+        },
+    );
+    app.process_network_events().test_value();
+    main_assert_eq!(
+        removed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("client did not retire its merged dynamic resource") => 71
+    );
+    let mut commands = removal_observer.test_join();
+    main_assert!(combined_path.exists());
+    main_assert!(app.blocking_resource_wait.is_none());
+    main_assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+        dialog.continuation,
+        MessageDialogContinuation::BlockingResourceWait { .. }
+    )));
+
+    let loading_deadline = Instant::now() + Duration::from_secs(5);
+    while app.message_dialogs.iter().all(|dialog| !matches!(
+        dialog.continuation,
+        MessageDialogContinuation::NetworkClientStartWait
+    )) {
+        app.poll_loading().test_value();
+        main_assert!(
+            Instant::now() < loading_deadline,
+            "production runtime-join loader did not reach its start barrier"
+        );
+        thread::yield_now();
+    }
     main_assert!(matches!(app.mode, AppMode::Loading));
     main_assert!(app.loading_state.as_ref().is_some_and(|loading| loading.finished));
     let prepared = app
@@ -11725,61 +12145,70 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(app.network_control_running);
     main_assert!(app.network_start_wait.is_none());
-    main_assert!(app.local_controls.assignment(7).is_some());
     main_assert!(!app.control_clients.is_activated(7));
-    main_assert!(app.engine.players().any(|player| player.player_info_id() == 7));
+    main_assert!(app.engine.players().any(|player| player.player_info_id() == 1));
+    main_assert!(app.engine.players().all(|player| player.player_info_id() != 2));
 
-    // The local inactive client must use the production runtime player path,
-    // including publication and a non-empty CIF_AddPlayers request. Use a
-    // fresh stub only to keep this wire assertion independent from the GO
-    // acknowledgement commands above.
-    let (runtime_manager, _runtime_event_tx, runtime_commands) =
-        NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(runtime_manager);
+    // JoinData's dynamic contains only players that existed before this
+    // client connected. The client's PlayerInfo, activation and JoinPlayer
+    // arrive afterward, on the same session, and the synchronized controls
+    // must create its locally controlled player after the start commit
+    // (7d43b47b src/C4Game.cpp:3848-3869;
+    // src/C4Network2Players.cpp:38-49,124-136,245-269).
     let wire_name =
         LegacyCString::from_bytes(player_path.as_os_str().as_encoded_bytes().to_vec()).test_value();
     let player_resource = n2_fixture!(player_resource: 7 << 16, wire_name.clone());
-    let runtime_observer =
-        thread::spawn(move || runtime_commands.complete_initial_client_join(vec![player_resource]));
-    let result = app.submit_runtime_network_player(&player_path.to_string_lossy());
-    drop(app.network.take());
-    let (order, publications, player_infos, acknowledgements) = runtime_observer.test_join();
-    result.test_value();
-    main_assert_eq!(order => vec!["publish", "player-info"]);
-    main_assert_eq!(publications.len() => 1);
-    main_assert_eq!(publications[0].source_path => player_path);
-    main_assert_eq!(publications[0].wire_name => wire_name);
-    main_assert_eq!(player_infos.len() => 1);
-    let [request] = player_infos.as_slice() else {
-        panic!("expected one runtime player-info request");
-    };
-    main_assert_eq!(request.client_id => 7);
-    main_assert_eq!(request.flags => clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
-    let [player] = request.players.as_slice() else {
-        panic!("runtime AddPlayers request must contain the selected player");
-    };
-    main_assert_eq!(player.id => 0);
-    main_assert_eq!(player.name.as_bytes() => b"Late client");
-    main_assert_eq!(player.filename => wire_name);
-    main_assert_eq!(player.resource.as_ref().map(|resource| resource.id) => Some(7 << 16));
-    main_assert!(acknowledgements.is_empty());
-
-    let (manager, event_tx, mut commands) =
-        NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.admission_resources
+        .register_lobby_resource(&player_resource);
+    app.admission_resources
+        .mark_complete(player_resource.id, player_path.clone());
+    let client_player = n2_fixture!(player {
+        id: 2,
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        name: LegacyCString::from_bytes(b"Late client".to_vec()).test_value(),
+        filename: wire_name.clone(),
+        resource: Some(player_resource.clone()),
+    });
     let initial_frame = app.engine.frame();
     let activate = n2_fixture!(client_update: clonk_engine::CLIENT_UPDATE_ACTIVATE, 7, 1, 0);
+    let join = clonk_engine::JoinPlayerControlData {
+        filename: wire_name,
+        at_client: 7,
+        info_id: 2,
+        source: clonk_engine::JoinPlayerSource::Resource(player_resource),
+        by_client: 0,
+    };
     n2_send_event(
         &event_tx,
         n2_fixture!(ready_tick:
             23,
-            vec![NetworkControl::ClientUpdate(activate.clone())]
+            vec![
+                NetworkControl::PlayerInfo(clonk_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![client_player],
+                    by_client: 0,
+                }),
+                NetworkControl::ClientUpdate(activate.clone()),
+                NetworkControl::JoinPlayer(join),
+            ]
         ),
     );
     app.update().test_value();
     main_assert_eq!(app.engine.frame() => initial_frame + 1);
     main_assert!(app.control_clients.is_activated(7));
     main_assert_eq!(commands.take_executed_client_updates() => vec![activate]);
+    let local_player = app
+        .engine
+        .players()
+        .find(|player| player.player_info_id() == 2)
+        .test_value();
+    main_assert_eq!(local_player.at_client().get() => 7);
+    main_assert!(app.local_controls.assignment(local_player.id()).is_some());
+    main_assert!(app
+        .physical_viewports
+        .iter()
+        .any(|viewport| viewport.displayed_player == local_player.id()));
 
     let mut frame = vec![0x4c; 320 * 200 * 4];
     main_assert!(app.test_render(&mut frame));

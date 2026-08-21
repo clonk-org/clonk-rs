@@ -206,11 +206,18 @@ fn client_resource_timeout_closes_progress_and_shows_fatal_error_log() {
 }
 
 #[test]
-fn headless_client_join_tracks_slow_resource_then_cancel_aborts() {
+fn runtime_join_data_tracks_slow_resource_then_cancel_aborts_without_status_packet() {
+    // HandleJoinData installs the reference-form GS_Go before C4Game checks
+    // isLobbyActive and proceeds directly into InitGame. UpdateChaseTarget
+    // may send a newer PID_Status five seconds later, but loading does not
+    // wait for that timer (7d43b47b src/C4Game.cpp:400-417;
+    // src/C4Network2.cpp:1574-1592,1820-1850,2161-2183).
     let mut app = new_menu_app(800, 600);
     let (manager, event_tx, _commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+    app.startup_view = StartupView::NetworkLobby;
+    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
 
     let resource = |resource_type: clonk_network::HostResourceType, id, name: &[u8]| {
         netresources_fixture!(
@@ -231,16 +238,19 @@ fn headless_client_join_tracks_slow_resource_then_cancel_aborts() {
     );
     snapshot.dynamic = resource(clonk_network::HostResourceType::Dynamic, 71, b"Dynamic.c4s");
     snapshot.parameters.game_resources.clear();
-    let mut reference_status = host_config.initial_status;
-    reference_status.target_tick = -1;
-    let go = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 23);
+    let reference_status = clonk_network::NetworkStatus::new(
+        clonk_network::NETWORK_STATE_GO,
+        host_config.initial_status.control_mode,
+        -1,
+    );
     event_tx
         .send(NetworkEvent::JoinData(netresources_fixture!(join_envelope: 7, reference_status, snapshot.dynamic, snapshot.parameters)))
         .test_value();
-    event_tx
-        .send(NetworkEvent::StatusRequested(go))
-        .test_value();
     app.test_network_events();
+
+    main_assert_eq!(app.mode => AppMode::Loading);
+    main_assert!(app.network_lobby.is_none(), "a running host never enters DoLobby");
+    main_assert_eq!(app.pending_client_start_status => Some(reference_status));
 
     let progress = app
         .message_dialogs
@@ -299,6 +309,274 @@ fn headless_client_join_tracks_slow_resource_then_cancel_aborts() {
     };
     main_assert_eq!(failure.state.caption() => "Error Log");
     main_assert_eq!(failure.state.message() => "Waiting for Scenario was aborted.");
+}
+
+#[test]
+fn ordinary_client_go_tracks_slow_resource_then_cancel_aborts() {
+    // A lobby join starts RetrieveScenario only after the host's ordinary Go
+    // status closes DoLobby; cancelling that wait aborts the join and restores
+    // startup (7d43b47b src/C4Game.cpp:400-417;
+    // src/C4Network2.cpp:475-515,619-671,2017-2057).
+    let mut app = new_menu_app(800, 600);
+    let (manager, event_tx, _commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+
+    let resource = |resource_type: clonk_network::HostResourceType, id, name: &[u8]| {
+        netresources_fixture!(
+            resource_resource_type_id_loadable_filename:
+                resource_type as u8,
+                id,
+                true,
+                clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value(),
+                Default::default(),
+        )
+    };
+    let host_config = clonk_network::HostConfig::default();
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
+    snapshot.parameters.scenario = resource(
+        clonk_network::HostResourceType::Scenario,
+        70,
+        b"Scenario.c4s",
+    );
+    snapshot.dynamic = resource(clonk_network::HostResourceType::Dynamic, 71, b"Dynamic.c4s");
+    snapshot.parameters.game_resources.clear();
+    let mut reference_status = host_config.initial_status;
+    reference_status.target_tick = -1;
+    let go = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 23);
+    event_tx
+        .send(NetworkEvent::JoinData(netresources_fixture!(join_envelope: 7, reference_status, snapshot.dynamic, snapshot.parameters)))
+        .test_value();
+    event_tx
+        .send(NetworkEvent::StatusRequested(go))
+        .test_value();
+    app.test_network_events();
+
+    let progress = app
+        .message_dialogs
+        .iter()
+        .find(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::BlockingResourceWait {
+                    scope: BlockingResourceScope::ClientStart,
+                    resource_id: 70,
+                }
+            )
+        })
+        .test_value();
+    main_assert_eq!(progress.state.message() => "Waiting for Scenario...");
+    main_assert_eq!(progress.state.progress() => Some(0));
+    main_assert_eq!(progress.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::CANCEL);
+
+    for present_percent in [17, 63] {
+        event_tx
+            .send(NetworkEvent::ResourceProgress {
+                resource_id: 70,
+                present_percent,
+            })
+            .test_value();
+        app.test_update();
+        main_assert_eq!(
+            app.message_dialogs
+                .iter()
+                .find(|dialog| matches!(
+                    dialog.continuation,
+                    MessageDialogContinuation::BlockingResourceWait { .. }
+                ))
+                .and_then(|dialog| dialog.state.progress()) =>
+            Some(present_percent)
+        );
+    }
+
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+        .test_value();
+
+    main_assert!(app.network.is_none());
+    main_assert!(app.network_mode.is_none());
+    main_assert!(app.pending_network_join_data.is_none());
+    main_assert!(app.pending_client_start_status.is_none());
+    main_assert!(app.blocking_resource_wait.is_none());
+    main_assert_eq!(app.mode => AppMode::Menu);
+    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    let [failure] = app.message_dialogs.as_slice() else {
+        panic!("Cancel should report one startup-network failure");
+    };
+    main_assert_eq!(failure.state.caption() => "Error Log");
+    main_assert_eq!(failure.state.message() => "Waiting for Scenario was aborted.");
+}
+
+#[test]
+fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging() {
+    // RetrieveScenario merges the synchronized scenario and dynamic groups
+    // only after DoLobby closes, then FinalInit acknowledges the ordinary Go
+    // barrier (7d43b47b src/C4Network2.cpp:475-515,558-671,2017-2057;
+    // src/C4Game.cpp:455-483).
+    let directory = tempdir();
+    let scenario_path = directory.path().join("Scenario.c4s");
+    let dynamic_path = directory.path().join("Dynamic.c4s");
+    let combined_path = directory.path().join("Combined7.c4s");
+    let mut scenario_group = MutableGroup::new("Scenario.c4s");
+    scenario_group
+        .add_file(
+            "Scenario.txt",
+            b"[Head]\nTitle=Ordinary client start\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n"
+                .to_vec(),
+        )
+        .test_value();
+    scenario_group
+        .add_child("Defs.c4d", packed_network_definition("Defs.c4d", "CLNK"))
+        .test_value();
+    fs::write(&scenario_path, scenario_group.pack().test_value()).test_value();
+    let mut dynamic_group = MutableGroup::new("Dynamic.c4s");
+    dynamic_group
+        .add_file("Dynamic.txt", b"ordinary".to_vec())
+        .test_value();
+    fs::write(&dynamic_path, dynamic_group.pack().test_value()).test_value();
+
+    let resource = |resource_type: clonk_network::HostResourceType, id, name: &[u8]| {
+        netresources_fixture!(
+            resource_resource_type_id_loadable_filename:
+                resource_type as u8,
+                id,
+                true,
+                clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value(),
+                Default::default(),
+        )
+    };
+    let host_config = clonk_network::HostConfig::default();
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
+    snapshot.parameters.scenario = resource(
+        clonk_network::HostResourceType::Scenario,
+        70,
+        b"Scenario.c4s",
+    );
+    snapshot.dynamic = resource(clonk_network::HostResourceType::Dynamic, 71, b"Dynamic.c4s");
+    snapshot.parameters.game_resources.clear();
+    snapshot
+        .parameters
+        .clients
+        .clients
+        .push(clonk_engine::ClientCoreControlData {
+            client_id: 7,
+            activated: false,
+            observer: true,
+            name: clonk_engine::LegacyCString::from_bytes(b"Client".to_vec()).test_value(),
+            nick: clonk_engine::LegacyCString::from_bytes(b"Client".to_vec()).test_value(),
+            lobby_ready: false,
+        });
+    snapshot.parameters.clients.local_client_id = Some(7);
+    let mut reference_status = host_config.initial_status;
+    reference_status.target_tick = -1;
+    let go = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 23);
+    let join_data = netresources_fixture!(join_envelope:
+        7,
+        reference_status,
+        snapshot.dynamic,
+        snapshot.parameters
+    );
+
+    let mut app = new_menu_app(800, 600);
+    let (manager, event_tx, mut commands) =
+        NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(manager);
+    let mut settings = client_network_settings();
+    settings.resource_directory = directory.path().to_path_buf();
+    app.network_mode = Some(NetworkMode::Client(settings));
+    app.startup_view = StartupView::NetworkLobby;
+    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    event_tx
+        .send(NetworkEvent::JoinData(join_data.clone()))
+        .test_value();
+    app.test_network_events();
+    let lobby_reached = reference_status.with_target_tick(23);
+    main_assert_eq!(
+        commands.take_framed_status_acknowledgements() => vec![(lobby_reached, 0)]
+    );
+    event_tx
+        .send(NetworkEvent::StatusCommitted(lobby_reached))
+        .test_value();
+    app.test_network_events();
+
+    event_tx
+        .send(NetworkEvent::StatusRequested(go))
+        .test_value();
+    event_tx
+        .send(NetworkEvent::ReadyTick {
+            tick: 23,
+            controls: Vec::new(),
+        })
+        .test_value();
+    app.test_network_events();
+    main_assert_eq!(
+        app.blocking_resource_wait.as_ref().map(|wait| wait.resource_id) => Some(70)
+    );
+
+    event_tx
+        .send(NetworkEvent::ResourceComplete {
+            resource_id: 70,
+            core: join_data.parameters.scenario.clone(),
+            path: scenario_path,
+            local: false,
+        })
+        .test_value();
+    app.test_network_events();
+    main_assert_eq!(
+        app.blocking_resource_wait.as_ref().map(|wait| wait.resource_id) => Some(71)
+    );
+
+    let (removed_tx, removed_rx) = mpsc::channel();
+    let removal_observer = thread::spawn(move || {
+        let (resource_id, completion) = commands.receive_resource_removal();
+        completion.send(Ok(())).test_value();
+        removed_tx.send(resource_id).test_value();
+        commands
+    });
+    event_tx
+        .send(NetworkEvent::ResourceComplete {
+            resource_id: 71,
+            core: join_data.dynamic,
+            path: dynamic_path,
+            local: false,
+        })
+        .test_value();
+    app.test_network_events();
+    main_assert_eq!(
+        removed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("client did not retire the ordinary merged dynamic") => 71
+    );
+    let mut commands = removal_observer.test_join();
+    main_assert!(combined_path.exists());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        app.poll_loading().test_value();
+        let waiting_for_start = app.message_dialogs.iter().any(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::NetworkClientStartWait
+            )
+        });
+        if app.mode == AppMode::Running || waiting_for_start {
+            break;
+        }
+        main_assert!(Instant::now() < deadline, "ordinary client loader stalled");
+        thread::yield_now();
+    }
+    main_assert_eq!(app.mode => AppMode::Loading);
+    main_assert!(!app.network_control_running);
+    main_assert!(app.network_ticks.ready.contains_key(&23));
+    main_assert_eq!(commands.take_framed_status_acknowledgements() => vec![(go, 0)]);
+    event_tx
+        .send(NetworkEvent::StatusCommitted(go))
+        .test_value();
+    app.test_network_events();
+    main_assert_eq!(app.mode => AppMode::Running);
+    main_assert!(app.network_control_running);
+    app.update().test_value();
+    main_assert!(!app.network_ticks.ready.contains_key(&23));
+    main_assert_eq!(app.expected_network_control_tick() => 24);
 }
 
 #[test]
@@ -2326,13 +2604,11 @@ fn client_retains_exact_join_data_until_resource_bootstrap_can_apply_it() {
 
 #[test]
 fn runtime_join_data_arms_the_client_start_barrier_without_a_status_request() {
-    // A client joining an already-running game never receives an ordinary
-    // PID_Status: the host broadcasts one only from ChangeGameStatus, which a
-    // running host has no reason to call. HandleJoinData hands the JoinData
-    // status to HandleStatus itself, so the joiner owes an acknowledgement
-    // from that packet alone, and FinalInit's CheckStatusReached(true) reaches
-    // that barrier while Game.IsRunning is still false
-    // (7d43b47b src/C4Network2.cpp:558-561,1574-1592,2017-2057).
+    // HandleJoinData hands the JoinData status to HandleStatus, so the joiner
+    // begins loading from that packet alone. UpdateChaseTarget may replace it
+    // five seconds later, but FinalInit reaches this initial barrier when the
+    // load finishes first (7d43b47b src/C4Network2.cpp:558-561,1574-1592,
+    // 2017-2057,2161-2183).
     let mut app = new_state_only_menu_app(320, 200);
     let (manager, event_tx) = NetworkManager::test_stub();
     app.network = Some(manager);
@@ -2352,7 +2628,7 @@ fn runtime_join_data_arms_the_client_start_barrier_without_a_status_request() {
     main_assert_eq!(
         app.client_start_barrier.local_initialized_at(23) =>
             Some(clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 23)),
-        "the JoinData status is the only barrier a runtime joiner ever gets"
+        "the JoinData status must arm the initial runtime-join barrier"
     );
 }
 
