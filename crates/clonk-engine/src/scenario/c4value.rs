@@ -837,3 +837,89 @@ pub(in crate::scenario) fn folder_local_definition_groups(
     }
     Ok(groups)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_serialized_c4value, SerializedC4Value};
+    use clonk_script::Value;
+
+    fn parse(encoded: &str) -> SerializedC4Value {
+        parse_serialized_c4value(encoded, 1).expect("the encoding parses")
+    }
+
+    /// The savegame `C4Value` tag table, which had no test despite deciding how
+    /// every stored local, array and map comes back (clonk-org/clonk-rs#523).
+    ///
+    /// The pair worth pinning is the asymmetry the module comment describes:
+    /// C++'s reader consumes a type *character* only when it is alphabetic, so
+    /// an unknown letter is swallowed and its payload parsed, while a bare
+    /// number keeps **all** of its digits and falls back to `C4V_Any`. An
+    /// implementation that always consumed the first byte would silently turn
+    /// `42` into `2`, which no round-trip of well-formed data would ever
+    /// reveal — every value it writes carries a tag.
+    #[test]
+    fn serialized_c4value_tags_follow_the_cpp_consume_rules() {
+        // The ordinary tags.
+        assert!(matches!(
+            parse("i42"),
+            SerializedC4Value::Value(Value::Int(42))
+        ));
+        assert!(matches!(parse("o7"), SerializedC4Value::ObjectNumber(7)));
+        assert!(matches!(parse("O7"), SerializedC4Value::ObjectNumber(7)));
+        assert!(matches!(
+            parse("S3"),
+            SerializedC4Value::StringTableIndex(3)
+        ));
+
+        // An empty encoding is nil rather than an error.
+        assert!(matches!(parse(""), SerializedC4Value::Value(Value::Nil)));
+
+        // An unknown *alphabetic* tag is consumed, so the payload is what
+        // follows it.
+        assert!(matches!(parse("z42"), SerializedC4Value::Any(42)));
+
+        // A bare number has no tag to consume, so the whole text is the
+        // payload — the digit must not be eaten.
+        assert!(matches!(parse("42"), SerializedC4Value::Any(42)));
+        assert!(matches!(parse("-7"), SerializedC4Value::Any(-7)));
+
+        // `C4V_pC4Value` is the one type that cannot be serialized.
+        assert!(parse_serialized_c4value("V1", 1).is_err());
+    }
+
+    /// Arrays restore the trailing nils that the writer omits, and refuse a
+    /// declared size past `C4ValueList::MaxSize`.
+    ///
+    /// The restore matters because the stored element count and the declared
+    /// size legitimately disagree: a writer that drops trailing nils produces
+    /// `a[4;i1,i2]`, and reading that as a two-element array would shift every
+    /// later index.
+    #[test]
+    fn serialized_arrays_restore_omitted_trailing_nils_and_bound_their_size() {
+        let SerializedC4Value::Array(elements) = parse("a[4;i1,i2]") else {
+            panic!("expected an array");
+        };
+        assert_eq!(elements.len(), 4, "the declared size wins over the count");
+        assert!(matches!(elements[3], SerializedC4Value::Value(Value::Nil)));
+
+        // More elements than declared are truncated rather than growing it.
+        let SerializedC4Value::Array(elements) = parse("a[1;i1,i2,i3]") else {
+            panic!("expected an array");
+        };
+        assert_eq!(elements.len(), 1);
+
+        // An empty array keeps its size.
+        let SerializedC4Value::Array(elements) = parse("a[0;]") else {
+            panic!("expected an array");
+        };
+        assert!(elements.is_empty());
+
+        let error = parse_serialized_c4value("a[1000001;]", 1)
+            .expect_err("a size past C4ValueList::MaxSize is refused");
+        assert!(
+            error.to_string().contains("MaxSize"),
+            "the refusal should name the native bound: {error}"
+        );
+        assert!(parse_serialized_c4value("a[-1;]", 1).is_err());
+    }
+}
