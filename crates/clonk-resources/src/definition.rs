@@ -1682,8 +1682,13 @@ fn parse_followed_physical(nodes: &[IniNameNode<'_>]) -> PhysicalInfo {
     physical
 }
 
-#[cfg(test)]
-fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
+/// Parse a `DefCore.txt` body with the ordinary diagnostic sink.
+///
+/// Public so the resource-text fuzz harness reaches the same entry point
+/// production loading uses (clonk-org/clonk-rs#963); `DefCore::load` is the
+/// ordinary caller, and `parse_def_core_with_diagnostics` is the form that
+/// takes a custom sink.
+pub fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     parse_def_core_with_diagnostics(bytes, &mut ResourceLoadDiagnostic::emit)
 }
 

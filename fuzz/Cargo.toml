@@ -1,0 +1,53 @@
+# cargo-fuzz targets for the externally supplied legacy formats
+# (clonk-org/clonk-rs#957). This crate is deliberately OUTSIDE the workspace:
+# libFuzzer needs a nightly toolchain and sanitizer flags, and pulling it into
+# the workspace would put both on every ordinary `cargo` invocation.
+#
+# The input-safety contract each target checks is also enforced without the
+# fuzzing engine, by the ordinary test suite — see
+# `crates/clonk-resources/tests/resource_text_fuzz.rs`. Run these for longer
+# campaigns and to grow the corpus:
+#
+#   cargo +nightly fuzz run resource_text -- -max_total_time=300
+[package]
+name = "clonk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+clonk-resources = { path = "../crates/clonk-resources" }
+
+[[bin]]
+name = "resource_text"
+path = "fuzz_targets/resource_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "def_core"
+path = "fuzz_targets/def_core.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "material_text"
+path = "fuzz_targets/material_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtf_plain_text"
+path = "fuzz_targets/rtf_plain_text.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
