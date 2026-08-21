@@ -84,6 +84,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cctype>
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
@@ -5263,6 +5264,16 @@ inline Vector read(C4GameSave &save)
 
 } // namespace game_save_policy
 
+// C4Group's entry matcher, lifted whole. Nothing but tolower is needed, so the
+// real backtracking loop runs here rather than a restatement of it.
+namespace wildcard
+{
+
+#include "wildcard_match.inc"
+
+} // namespace wildcard
+
+
 
 int main()
 {
@@ -6070,6 +6081,76 @@ int main()
         sep();
         printf("{\"case\":\"scenario_sort_order\",\"order\":\"%s\"}",
                savegame.GetSortOrder());
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("wildcard_match");
+    {
+        struct Case
+        {
+            const char *pattern;
+            const char *name;
+        };
+
+        const Case cases[] = {
+            // Exact and case-insensitive equality.
+            {"Scenario.txt", "Scenario.txt"},
+            {"scenario.TXT", "Scenario.txt"},
+            {"Scenario.txt", "Scenario.tx"},
+            {"Scenario.txt", "Scenario.txtx"},
+            // The extension patterns every stock sort list is built from.
+            {"*.c4d", "Objects.c4d"},
+            {"*.c4d", "objects.C4D"},
+            {"*.c4d", ".c4d"},
+            {"*.c4d", "c4d"},
+            {"*.c4d", "Objects.c4dx"},
+            // A `*` in the MIDDLE, which needs the backtracking arm.
+            {"Loader*.bmp", "Loader.bmp"},
+            {"Loader*.bmp", "Loader2.bmp"},
+            {"Loader*.bmp", "Loader.bmp.bmp"},
+            {"Loader*.bmp", "Loade.bmp"},
+            {"Desc*.rtf", "DescDE.rtf"},
+            {"Sect*.c4g", "Sect1.c4g"},
+            {"StringTbl*.txt", "StringTblUS.txt"},
+            // Backtracking that must retry more than once: the first candidate
+            // position fails and a later one succeeds.
+            {"*ab", "aab"},
+            {"*ab", "abab"},
+            {"*ab*", "xxabyy"},
+            {"a*b*c", "abc"},
+            {"a*b*c", "axxbyyc"},
+            {"a*b*c", "axxbyy"},
+            // Leading, trailing and repeated stars.
+            {"*", ""},
+            {"*", "anything"},
+            {"**", "anything"},
+            {"Title*", "Title"},
+            {"*Title", "Title"},
+            // `?` matches exactly one character and NEVER the end of string.
+            {"?", ""},
+            {"?", "a"},
+            {"?", "ab"},
+            {"Icon.?ng", "Icon.png"},
+            {"Icon.??g", "Icon.png"},
+            {"Icon.???", "Icon.pn"},
+            {"Player?.txt", "Player1.txt"},
+            {"Player?.txt", "Player.txt"},
+            // A literal star in the NAME: the pattern's star matches it, and an
+            // exact pattern matches it too.
+            {"Wild*.c4d", "Wild*.c4d"},
+            {"*.c4d", "Wild*.c4d"},
+            // Empty pattern.
+            {"", ""},
+            {"", "a"},
+        };
+
+        for (const Case &c : cases)
+        {
+            sep();
+            printf("{\"pattern\":\"%s\",\"name\":\"%s\",\"match\":%d}", c.pattern, c.name,
+                   wildcard::WildcardMatch(c.pattern, c.name) ? 1 : 0);
+        }
     }
     arr_end();
     printf(",\n");
