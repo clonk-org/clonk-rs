@@ -8228,3 +8228,53 @@ fn a_rebound_pause_chord_loses_to_the_player_control_on_the_same_key() {
         "a rebound pause chord with no player control on it still toggles pause"
     );
 }
+
+/// The console Play/Halt buttons stay in step with the live halt state
+/// (clonk-org/clonk-rs#577).
+///
+/// `C4Console::UpdateHaltCtrls(fHalt)` sets Play active to `!fHalt` and Halt
+/// active to `fHalt` (`C4Console.cpp:709-730`), and every caller passes
+/// `!!Game.HaltCount` (`:1711,1720`). The two buttons are therefore strictly
+/// complementary and always reflect the *engine's* halt count rather than
+/// whichever button was last clicked — which is the property that breaks if a
+/// port latches button state locally.
+///
+/// The offline round trip was uncovered; only the network barrier case was.
+#[test]
+fn console_play_and_halt_track_the_live_offline_halt_count() {
+    let mut app = new_running_sandbox_app();
+    app.console_mode = true;
+    runtime_assert!(
+        !app.developer_console_view_model().halted,
+        "a running offline round starts unhalted"
+    );
+
+    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::Halt])
+        .test_value();
+    runtime_assert!(
+        app.developer_console_view_model().halted,
+        "Halt raises the offline halt count and the toolbar follows"
+    );
+    runtime_assert!(
+        app.runtime_halt_active(),
+        "the button reflects real engine state, not a latched toolbar flag"
+    );
+
+    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::Play])
+        .test_value();
+    runtime_assert!(
+        !app.developer_console_view_model().halted,
+        "Play clears it again"
+    );
+    runtime_assert!(!app.runtime_halt_active());
+
+    // Pausing by any other route moves the toolbar too, because the view model
+    // is derived from the halt count rather than from the last button press.
+    app.toggle_runtime_pause();
+    runtime_assert!(
+        app.developer_console_view_model().halted,
+        "a pause that did not come from the toolbar still updates it"
+    );
+    app.toggle_runtime_pause();
+    runtime_assert!(!app.developer_console_view_model().halted);
+}
