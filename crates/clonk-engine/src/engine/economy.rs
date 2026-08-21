@@ -1181,6 +1181,7 @@ impl Engine {
                     looped: false,
                     multiple: false,
                     custom_falloff: None,
+                    target_position: None,
                 });
             }
         }
@@ -1305,6 +1306,7 @@ impl Engine {
                                 looped: false,
                                 multiple: false,
                                 custom_falloff: None,
+                                target_position: None,
                             });
                             self.set_object_owner(base_id, flag_owner)?;
                         }

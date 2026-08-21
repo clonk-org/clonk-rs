@@ -2596,6 +2596,10 @@ pub(crate) struct AudioContext {
     /// graphics pass. A skipped or failed pass deliberately leaves this map
     /// untouched.
     pub(crate) rendered_object_audibility: HashMap<ObjectId, CachedObjectAudibilityMix>,
+    /// Where a sound's object stood when the engine queued the call, for
+    /// objects that did not survive into the snapshot this frame applies
+    /// against. Entries live only as long as an instance refers to them.
+    emitter_positions: HashMap<ObjectId, Vector2>,
     pub(crate) resolver: SoundResolver,
     pub(crate) music_resolver: MusicResolver,
     pub(crate) missing_sounds: HashSet<String>,
@@ -2668,6 +2672,7 @@ impl AudioContext {
             active_channels: HashMap::new(),
             next_sound_instance_order: 1,
             rendered_object_audibility: HashMap::new(),
+            emitter_positions: HashMap::new(),
             resolver,
             music_resolver,
             missing_sounds: HashSet::new(),
@@ -3256,7 +3261,14 @@ impl AudioContext {
                     looped,
                     multiple,
                     custom_falloff,
+                    target_position,
                 } => {
+                    // The emitting object may already be gone from `snapshot`;
+                    // the tick stamped where it stood so the near gate can still
+                    // answer. See `sound_targets_are_near`.
+                    if let (Some(target), Some(position)) = (*target, *target_position) {
+                        self.emitter_positions.insert(target, position);
+                    }
                     if let Err(err) = self.start_sound(
                         name,
                         *target,
@@ -3551,7 +3563,7 @@ impl AudioContext {
         // (C4SoundSystem.cpp:341-350).
         let already_playing_near = self.active_channels.values().any(|info| {
             info.sample_key == resolved.sample_key
-                && sound_targets_are_near(info.target, target, snapshot)
+                && sound_targets_are_near(info.target, target, snapshot, &self.emitter_positions)
         });
         if already_playing_near {
             return Ok(false);
@@ -4137,21 +4149,39 @@ impl ChannelInfo {
     }
 }
 
+/// `IsNear` reads the position off the live `C4Object`
+/// (`C4SoundSystem.cpp:252-261`). A script that calls `Sound` and then
+/// `RemoveObject` is still live at that moment — C++ processes the removal
+/// afterwards — so both sides of this comparison exist in C++ even when neither
+/// survives into the snapshot the command is applied against. `emitters`
+/// carries those positions from the tick that queued the calls; without it the
+/// lookup fails, the gate reports "not near", and every one of a dissipating
+/// wall's seven segments gets its own instance
+/// (clonk-org/clonk-rs#946).
+///
+/// A *detached* instance is a different case and stays `false`: C++ deliberately
+/// does not honour a deleted object's sound as near (`C4SoundSystem.cpp:263-267`).
 fn sound_targets_are_near(
     existing: Option<ObjectId>,
     requested: Option<ObjectId>,
     snapshot: &SimulationSnapshot,
+    emitters: &HashMap<ObjectId, Vector2>,
 ) -> bool {
     const NEAR_SOUND_RADIUS: i64 = 50;
+    let position = |id: ObjectId| {
+        snapshot
+            .object(id)
+            .map(|object| object.position)
+            .or_else(|| emitters.get(&id).copied())
+    };
     match (existing, requested) {
         (None, None) => true,
         (Some(existing), Some(requested)) if existing == requested => true,
-        (Some(existing), Some(requested)) => snapshot
-            .object(existing)
-            .zip(snapshot.object(requested))
+        (Some(existing), Some(requested)) => position(existing)
+            .zip(position(requested))
             .is_some_and(|(existing, requested)| {
-                let dx = i64::from(existing.position.x) - i64::from(requested.position.x);
-                let dy = i64::from(existing.position.y) - i64::from(requested.position.y);
+                let dx = i64::from(existing.x) - i64::from(requested.x);
+                let dy = i64::from(existing.y) - i64::from(requested.y);
                 dx * dx + dy * dy <= NEAR_SOUND_RADIUS * NEAR_SOUND_RADIUS
             }),
         _ => false,

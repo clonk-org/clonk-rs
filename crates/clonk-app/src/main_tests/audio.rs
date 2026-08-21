@@ -2597,6 +2597,78 @@ fn nearby_objects_share_the_cpp_sample_instance_even_when_multiple_is_requested(
 }
 
 #[test]
+fn the_near_gate_survives_objects_removed_in_the_same_frame() {
+    // clonk-org/clonk-rs#946: a dissipating force-field wall is SEVEN segments
+    // (ForceFieldWall.c4d/Script.c spawns `i < 7`), stacked 20px apart, and each
+    // one runs the shared `Destroy()` in ForceFieldAirShield.c4d/Script.c:68-72
+    //
+    //     private func Destroy() { Sound("DeEnergize"); RemoveObject(); }
+    //
+    // so all seven ask for the same sample and then remove themselves in the
+    // same frame.
+    //
+    // C++ answers that with `NewInstance`'s "Already playing near?" gate, which
+    // reads the position straight off the still-live `C4Object`
+    // (`C4SoundSystem.cpp:341-348`, `IsNear` at :252-261) — `RemoveObject` has
+    // not been processed yet when the script calls `Sound`. Segments within
+    // NearSoundRadius=50 of a live instance are refused.
+    //
+    // The port applies the queued command against the snapshot the tick
+    // produced, in which those objects are already gone. `zip` then yields None
+    // and the gate reports "not near", so every segment gets its own instance
+    // and the dissipation is as many times too loud as there are segments.
+    let dir = tempdir();
+    let scenario = dir.path().join("Goldrush.c4s");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("DeEnergize.wav"), silent_pcm_wav(1_000)).test_value();
+
+    let options = audio_fixture!(audio_max_channels: 8);
+    let mut audio = AudioContext::try_new(options).test_value();
+    audio.configure_scenario(Some(&scenario));
+
+    // Two of the seven, at the definition's 20px spacing — well inside 50.
+    let upper = make_object(1, "FCWS", Vector2::new(100, 100));
+    let lower = make_object(2, "FCWS", Vector2::new(100, 120));
+    let alive = make_snapshot(vec![upper.clone(), lower.clone()], Vec::new());
+    let viewports = [audio_viewport(0, OWNER_NONE, upper.position)];
+
+    // Drive the real command path: the tick stamps each call with where its
+    // object stood, which is the whole point of the fix.
+    let segment_sound = |segment: &ObjectSnapshot| AudioCommand::PlaySound {
+        name: "DeEnergize".to_string(),
+        target: Some(segment.id),
+        volume: 100,
+        looped: false,
+        multiple: false,
+        custom_falloff: None,
+        target_position: Some(segment.position),
+    };
+
+    let mut music_enabled = true;
+    audio.handle_events(
+        &[segment_sound(&upper)],
+        &alive,
+        &viewports,
+        &mut music_enabled,
+    );
+    main_assert_eq!(audio.active_channels.len() => 1);
+
+    // Both segments removed themselves this frame, so neither survives into the
+    // snapshot the command is applied against.
+    let removed = make_snapshot(Vec::new(), Vec::new());
+    audio.handle_events(
+        &[segment_sound(&lower)],
+        &removed,
+        &viewports,
+        &mut music_enabled,
+    );
+    main_assert_eq!(
+        audio.active_channels.len() => 1,
+        "a segment 20px away is still near, whether or not it outlived the frame"
+    );
+}
+
+#[test]
 fn name_conflicts_use_cpp_raw_byte_case_folding() {
     let configured = LegacyCString::from_bytes(b"\xe4lpha".to_vec()).test_value();
     let active = [b"\xc4LPHA".as_slice()];

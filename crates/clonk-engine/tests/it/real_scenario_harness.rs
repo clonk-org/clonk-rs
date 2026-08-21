@@ -4921,6 +4921,9 @@ fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags(
     // Script.c:112; C4Script.cpp:2297; C4Value.cpp:509-520).
     engine.call_test_object_function(engine.test_object_index(field), "Timer", Vec::new());
     let snapshot = crate::support::TestValueExt::test_value(engine.tick());
+    // The call is attached to the rock, so the tick stamps where it stood.
+    let rock_position =
+        crate::support::TestValueExt::test_value(engine.object_snapshot(rock)).position;
     assert!(snapshot.audio.contains(&AudioCommand::PlaySound {
         name: "MgWind*".into(),
         target: Some(rock),
@@ -4928,6 +4931,7 @@ fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags(
         looped: false,
         multiple: true,
         custom_falloff: Some(300),
+        target_position: Some(rock_position),
     }));
 }
 

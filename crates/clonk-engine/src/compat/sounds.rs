@@ -418,6 +418,7 @@ impl AudioRegistry {
             looped,
             multiple,
             custom_falloff,
+            target_position: None,
         });
     }
 

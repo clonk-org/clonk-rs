@@ -473,6 +473,7 @@
                     looped: false,
                     multiple: false,
                     custom_falloff: Some(-700),
+                    target_position: None,
                 },
                 AudioCommand::PlaySound {
                     name: "DefaultFalloff".into(),
@@ -481,6 +482,7 @@
                     looped: false,
                     multiple: false,
                     custom_falloff: None,
+                    target_position: None,
                 },
             ]
         );
@@ -671,6 +673,7 @@
                     looped: false,
                     multiple: false,
                     custom_falloff: None,
+                    target_position: None,
                 },
                 AudioCommand::StopSound {
                     name: "Shot".into(),
@@ -744,6 +747,7 @@
                     looped: true,
                     multiple: false,
                     custom_falloff: None,
+                    target_position: None,
                 },
             ]
         );
@@ -781,6 +785,7 @@
             looped: true,
             multiple: false,
             custom_falloff: None,
+            target_position: None,
         };
         assert_eq!(
             outcome.audio.events,
@@ -833,6 +838,7 @@
                     looped: true,
                     multiple: false,
                     custom_falloff: None,
+                    target_position: None,
                 },
                 AudioCommand::PlaySound {
                     name: "Fire".into(),
@@ -841,6 +847,7 @@
                     looped: true,
                     multiple: false,
                     custom_falloff: None,
+                    target_position: None,
                 },
                 AudioCommand::PlaySound {
                     name: "Impact".into(),
@@ -849,6 +856,7 @@
                     looped: false,
                     multiple: false,
                     custom_falloff: None,
+                    target_position: None,
                 },
                 AudioCommand::DetachObjectSounds {
                     target,

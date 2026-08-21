@@ -3880,6 +3880,7 @@ impl Engine {
             looped: false,
             multiple: false,
             custom_falloff: None,
+            target_position: None,
         });
         Ok(())
     }
@@ -5987,6 +5988,7 @@ impl Engine {
                     looped: false,
                     multiple: false,
                     custom_falloff: None,
+                    target_position: None,
                 });
             }
         }
@@ -6264,6 +6266,7 @@ impl Engine {
             looped: false,
             multiple: false,
             custom_falloff: None,
+            target_position: None,
         });
     }
 

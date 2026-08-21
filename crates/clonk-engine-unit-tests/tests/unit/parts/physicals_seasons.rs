@@ -3368,6 +3368,9 @@ fn exec_life_periodic_birthday_updates_info_and_presents_once() -> Result<(), En
     engine.game_time = 1;
     engine.frame = 254;
     let snapshot = engine.tick()?;
+    // The birthday trumpet is attached to the crew, so it carries where the
+    // crew stood — read it rather than restating a runtime coordinate.
+    let crew_position = engine.object_snapshot(crew_id).test_value().position;
     let info_state = engine.capture_state();
     let link = info_state.crew_info_links[&crew_id];
     unit_assert_eq!(info_state.crew_info_rosters[&link.player_id][link.roster_index].age => 1);
@@ -3387,6 +3390,7 @@ fn exec_life_periodic_birthday_updates_info_and_presents_once() -> Result<(), En
                 looped: false,
                 multiple: false,
                 custom_falloff: None,
+                target_position: Some(crew_position),
             },
         ]
     );

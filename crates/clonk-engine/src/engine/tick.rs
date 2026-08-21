@@ -1910,6 +1910,7 @@ impl Engine {
                         // sound must not inherit it.
                         multiple: true,
                         custom_falloff: None,
+                        target_position: None,
                     });
                     self.objects[index].active_action_sound = Some(sound);
                 }
@@ -1942,6 +1943,7 @@ impl Engine {
                     // sound must not inherit it.
                     multiple: true,
                     custom_falloff: None,
+                    target_position: None,
                 });
                 self.objects[index].active_action_sound = Some(sound);
             }
@@ -1972,7 +1974,31 @@ impl Engine {
                 _ => {}
             }
         }
-        let audio = self.pending_audio.drain(..).collect();
+        // Stamp each attached PlaySound with where its object stood this tick.
+        //
+        // The presentation layer needs it for NewInstance's "already playing
+        // near" gate, which C++ answers off the live `C4Object`
+        // (`C4SoundSystem.cpp:341-348`). A script that calls `Sound` and then
+        // `RemoveObject` — the shared `Destroy()` every force-field segment runs
+        // — is still live at that moment, because C++ processes the removal
+        // afterwards. The object is gone from the snapshot the frontend applies
+        // this against, so the position has to travel with the command or the
+        // gate silently passes and every segment gets its own instance.
+        let mut audio: Vec<AudioCommand> = self.pending_audio.drain(..).collect();
+        for command in &mut audio {
+            if let AudioCommand::PlaySound {
+                target: Some(target),
+                target_position,
+                ..
+            } = command
+            {
+                if target_position.is_none() {
+                    *target_position = self
+                        .find_object_index(*target)
+                        .map(|index| self.objects[index].state.position);
+                }
+            }
+        }
         TickPresentation {
             scoreboard_presentations,
             menu_requests,

@@ -3628,6 +3628,7 @@ impl Engine {
             looped: false,
             multiple: false,
             custom_falloff: None,
+            target_position: None,
         });
     }
 
