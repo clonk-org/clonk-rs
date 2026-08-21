@@ -181,8 +181,8 @@ fn folder_local_lookup_names(
 }
 
 /// The ordered `NRT_Material` groups a host publishes for `scenario_path`:
-/// every registered parent folder's `Material.c4g`, innermost folder first,
-/// then the installed one (C4GameParameters.cpp:214-222).
+/// every physical- and Origin-path parent folder's `Material.c4g` in GroupSet
+/// priority order, then the installed one (C4GameParameters.cpp:214-222).
 ///
 /// Inputs that carry no chain — a scenario outside every install root, an
 /// installation without `Material.c4g` — resolve to the shorter chain they
@@ -191,19 +191,21 @@ fn folder_local_lookup_names(
 /// changes which failure a host bootstrap reports first.
 pub fn resolve_host_material_groups(
     scenario_path: &Path,
+    scenario_origin: Option<&str>,
     install_roots: &[PathBuf],
+    executable_root: &Path,
 ) -> Result<Vec<Group>, GroupError> {
-    let mut groups = scenario_install_root(scenario_path, install_roots)
-        .ok()
-        .map(|(scenario_root, scenario_relative)| {
-            folder_material_groups(scenario_root, scenario_relative)
-        })
-        .transpose()
-        .map_err(|(_, source)| source)?
-        .unwrap_or_default()
-        .into_iter()
-        .map(|folder| folder.material)
-        .collect::<Vec<_>>();
+    let mut groups = ordered_folder_material_groups(
+        scenario_path,
+        scenario_origin,
+        install_roots,
+        executable_root,
+    )
+    .map_err(|(_, source)| source)?
+    .unwrap_or_default()
+    .into_iter()
+    .map(|folder| folder.material)
+    .collect::<Vec<_>>();
     match open_installed_group(
         HostGameResourceSourceKind::Material,
         "Material.c4g",
@@ -219,6 +221,7 @@ pub fn resolve_host_material_groups(
 /// Resolves the C4GameRes sources without consulting process-global app state.
 pub fn resolve_host_game_resource_sources(
     scenario_path: impl AsRef<Path>,
+    scenario_origin: Option<&str>,
     install_roots: &[PathBuf],
     definition_resources: &[HostInitialResourceSource],
     executable_root: &Path,
@@ -231,7 +234,7 @@ pub fn resolve_host_game_resource_sources(
             source,
         }
     })?;
-    let (scenario_root, scenario_relative) = scenario_install_root(scenario_path, install_roots)?;
+    scenario_install_root(scenario_path, install_roots)?;
 
     let definitions = definition_resources
         .iter()
@@ -244,7 +247,15 @@ pub fn resolve_host_game_resource_sources(
         install_roots,
         executable_root,
     )?;
-    let mut materials = folder_materials(scenario_root, scenario_relative, executable_root)?;
+    let registered_materials = ordered_folder_material_groups(
+        scenario_path,
+        scenario_origin,
+        install_roots,
+        executable_root,
+    )
+    .map_err(folder_material_group_error)?
+    .unwrap_or_default();
+    let mut materials = folder_materials(registered_materials, executable_root)?;
     materials.push(resolve_installed_group(
         HostGameResourceSourceKind::Material,
         "Material.c4g",
@@ -350,9 +361,184 @@ fn resolve_installed_group(
 /// One registered parent folder's `Material.c4g`, kept beside the folder group
 /// whose spelling `C4GameParameters::Load` passes to `AddByFile`.
 struct FolderMaterialGroup {
+    folder_priority: usize,
     folder: Group,
     material: Group,
     material_path: PathBuf,
+}
+
+fn ordered_folder_material_groups(
+    scenario_path: &Path,
+    scenario_origin: Option<&str>,
+    install_roots: &[PathBuf],
+    executable_root: &Path,
+) -> Result<Option<Vec<FolderMaterialGroup>>, (PathBuf, GroupError)> {
+    let actual = scenario_install_root(scenario_path, install_roots)
+        .ok()
+        .map(|(scenario_root, scenario_relative)| {
+            folder_material_groups(scenario_root, scenario_relative)
+        })
+        .transpose()?;
+    let origin = scenario_origin
+        .and_then(|origin| {
+            resolve_origin_location(origin, install_roots, executable_root).filter(
+                |(root, relative)| !loader_items_identical(&root.join(relative), scenario_path),
+            )
+        })
+        .map(|(root, relative)| origin_folder_material_groups(&root, &relative))
+        .transpose()?;
+
+    if actual.is_none() && origin.is_none() {
+        return Ok(None);
+    }
+
+    let mut registered = Vec::new();
+    for (registration_order, groups) in [actual, origin].into_iter().flatten().enumerate() {
+        registered.extend(
+            groups
+                .into_iter()
+                .map(|group| (group.folder_priority, registration_order, group)),
+        );
+    }
+    registered.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    Ok(Some(
+        registered.into_iter().map(|(_, _, group)| group).collect(),
+    ))
+}
+
+/// `ItemIdentical` compares the `RealPath` of both loader spellings. On POSIX,
+/// that resolves the longest existing prefix and retains any logical suffix,
+/// which also works for children nested below packed groups
+/// (src/StdFile.cpp:114-150,696-708).
+fn loader_items_identical(left: &Path, right: &Path) -> bool {
+    let left = loader_real_path(left);
+    let right = loader_real_path(right);
+    if cfg!(windows) {
+        path_wire_bytes(&left).eq_ignore_ascii_case(&path_wire_bytes(&right))
+    } else {
+        left == right
+    }
+}
+
+fn loader_real_path(logical: &Path) -> PathBuf {
+    let logical = if logical.is_absolute() {
+        logical.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(logical))
+            .unwrap_or_else(|_| logical.to_path_buf())
+    };
+
+    #[cfg(windows)]
+    {
+        // `_fullpath` is lexical and does not require the target to exist.
+        let mut normalized = PathBuf::new();
+        for component in logical.components() {
+            match component {
+                std::path::Component::Prefix(_)
+                | std::path::Component::RootDir
+                | std::path::Component::Normal(_) => normalized.push(component.as_os_str()),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if normalized.file_name().is_some() {
+                        normalized.pop();
+                    }
+                }
+            }
+        }
+        normalized
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut prefix = logical.clone();
+        let mut suffix = Vec::new();
+        loop {
+            if let Ok(mut resolved) = fs::canonicalize(&prefix) {
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return resolved;
+            }
+            let Some(component) = prefix.file_name().map(|name| name.to_os_string()) else {
+                return logical;
+            };
+            suffix.push(component);
+            if !prefix.pop() {
+                return logical;
+            }
+        }
+    }
+}
+
+fn resolve_origin_location(
+    origin: &str,
+    install_roots: &[PathBuf],
+    executable_root: &Path,
+) -> Option<(PathBuf, PathBuf)> {
+    let origin = PathBuf::from(origin.replace('\\', "/"));
+    if origin.is_absolute() {
+        let outer = c4f_parent_paths(&origin).last()?.clone();
+        let root = outer.parent()?.to_path_buf();
+        let relative = origin.strip_prefix(&root).ok()?.to_path_buf();
+        return folder_chain_item_is_present(&root, &relative).then_some((root, relative));
+    }
+
+    std::iter::once(executable_root)
+        .chain(install_roots.iter().map(PathBuf::as_path))
+        .filter(|root| !root.as_os_str().is_empty())
+        .flat_map(|root| {
+            let mut relatives = vec![origin.clone()];
+            // Old saves retained `content/...` while current saves use paths
+            // relative to the executable data root, which is itself content
+            // in a split source checkout.
+            if let Some(stripped) = strip_redundant_root_component(&origin, root) {
+                relatives.push(stripped);
+            }
+            relatives
+                .into_iter()
+                .map(move |relative| (root.to_path_buf(), relative))
+        })
+        .find(|(root, relative)| folder_chain_item_is_present(root, relative))
+}
+
+fn strip_redundant_root_component(origin: &Path, root: &Path) -> Option<PathBuf> {
+    let root_name = root.file_name()?;
+    let mut components = origin.components();
+    let first = components.next()?;
+    if !path_wire_bytes(Path::new(first.as_os_str()))
+        .eq_ignore_ascii_case(&path_wire_bytes(Path::new(root_name)))
+    {
+        return None;
+    }
+    Some(components.map(|component| component.as_os_str()).collect())
+}
+
+fn folder_chain_item_is_present(root: &Path, relative: &Path) -> bool {
+    let Some(outer) = folder_group_paths(root, relative).into_iter().last() else {
+        return false;
+    };
+    // Only a true lookup miss advances to another mapped executable-data
+    // root. A corrupt, unreadable, or dangling selected entry shadows every
+    // later root just as the single C++ ExePath does.
+    match open_group_path(&outer) {
+        Err(GroupError::Missing(_) | GroupError::EntryNotFound(_)) => false,
+        Ok(_) | Err(_) => true,
+    }
+}
+
+fn c4f_parent_paths(path: &Path) -> Vec<PathBuf> {
+    let mut parents = Vec::new();
+    let mut current = if has_extension(path, "c4f") {
+        Some(path)
+    } else {
+        path.parent()
+    };
+    while let Some(parent) = current.filter(|parent| has_extension(parent, "c4f")) {
+        parents.push(parent.to_path_buf());
+        current = parent.parent();
+    }
+    parents
 }
 
 /// Every registered parent folder's `Material.c4g`, innermost folder first, in
@@ -363,45 +549,76 @@ fn folder_material_groups(
     scenario_root: &Path,
     scenario_relative: &Path,
 ) -> Result<Vec<FolderMaterialGroup>, (PathBuf, GroupError)> {
-    let mut relative = PathBuf::new();
-    let mut folder_prefixes = Vec::new();
-    for component in scenario_relative
-        .parent()
+    let folder_paths = folder_group_paths(scenario_root, scenario_relative);
+    let folder_count = folder_paths.len();
+    folder_paths
         .into_iter()
-        .flat_map(Path::components)
-    {
-        relative.push(component.as_os_str());
-        folder_prefixes.push(relative.clone());
-    }
+        .enumerate()
+        .map(|(index, folder_path)| {
+            let folder =
+                open_group_path(&folder_path).map_err(|source| (folder_path.clone(), source))?;
+            folder_material_group(folder_path, folder, folder_count.saturating_sub(index + 1))
+        })
+        .filter_map(Result::transpose)
+        .collect()
+}
 
+fn origin_folder_material_groups(
+    scenario_root: &Path,
+    scenario_relative: &Path,
+) -> Result<Vec<FolderMaterialGroup>, (PathBuf, GroupError)> {
     let mut materials = Vec::new();
-    for relative in folder_prefixes
+    for (folder_priority, folder_path) in folder_group_paths(scenario_root, scenario_relative)
         .into_iter()
         .rev()
-        .take_while(|relative| has_extension(relative, "c4f"))
+        .enumerate()
     {
-        let folder_path = scenario_root.join(&relative);
-        let folder =
-            open_group_path(&folder_path).map_err(|source| (folder_path.clone(), source))?;
-        let material_entry = folder
-            .entries()
-            .map_err(|source| (folder_path.clone(), source))?
-            .into_iter()
-            .find(|entry| matches_ascii_name(&entry.relative_path, b"Material.c4g"));
-        let Some(material_entry) = material_entry else {
-            continue;
+        let folder = match open_group_path(&folder_path) {
+            Ok(folder) => folder,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    parent = %folder_path.display(),
+                    "prepared host stopped at an unavailable Origin parent"
+                );
+                break;
+            }
         };
-        let material_path = folder_path.join(&material_entry.relative_path);
-        let material = folder
-            .open_child_entry_exact(&material_entry)
-            .map_err(|source| (material_path.clone(), source))?;
-        materials.push(FolderMaterialGroup {
-            folder,
-            material,
-            material_path,
-        });
+        if let Some(material) = folder_material_group(folder_path, folder, folder_priority)? {
+            materials.push(material);
+        }
     }
+    materials.sort_by_key(|group| std::cmp::Reverse(group.folder_priority));
     Ok(materials)
+}
+
+fn folder_material_group(
+    folder_path: PathBuf,
+    folder: Group,
+    folder_priority: usize,
+) -> Result<Option<FolderMaterialGroup>, (PathBuf, GroupError)> {
+    let material_entry = folder
+        .entries()
+        .map_err(|source| (folder_path.clone(), source))?
+        .into_iter()
+        .find(|entry| matches_ascii_name(&entry.relative_path, b"Material.c4g"));
+    let Some(material_entry) = material_entry else {
+        return Ok(None);
+    };
+    let material_path = folder_path.join(&material_entry.relative_path);
+    let material = folder
+        .open_child_entry_exact(&material_entry)
+        .map_err(|source| (material_path.clone(), source))?;
+    Ok(Some(FolderMaterialGroup {
+        folder_priority,
+        folder,
+        material,
+        material_path,
+    }))
+}
+
+fn folder_group_paths(scenario_root: &Path, scenario_relative: &Path) -> Vec<PathBuf> {
+    c4f_parent_paths(&scenario_root.join(scenario_relative))
 }
 
 fn folder_material_group_error(
@@ -415,12 +632,10 @@ fn folder_material_group_error(
 }
 
 fn folder_materials(
-    scenario_root: &Path,
-    scenario_relative: &Path,
+    folder_materials: Vec<FolderMaterialGroup>,
     executable_root: &Path,
 ) -> Result<Vec<HostInitialResourceSource>, HostGameResourceSourceError> {
-    folder_material_groups(scenario_root, scenario_relative)
-        .map_err(folder_material_group_error)?
+    folder_materials
         .into_iter()
         .map(|folder| {
             // C4GameParameters passes the already-opened parent group's full

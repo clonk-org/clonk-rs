@@ -1346,8 +1346,11 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     let original_game_text = validate_scenario_group(&scenario_group)?;
     let has_embedded_parameters = read_direct_entry(&scenario_group, "Parameters.txt")?
         .is_some_and(|source| !source.is_empty());
+    let definition_executable_root = path_from_legacy_text(spec.definition_executable_path);
     let definition_resolver = InstallRootDefinitionResolver::new(
         spec.install_roots,
+        &definition_executable_root,
+        loader_head.origin(),
         spec.language_packs,
         spec.effective_definition_modules,
         spec.definition_resources,
@@ -1395,7 +1398,6 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         );
     }
     let prepared_definition_spellings = lobby_metadata.definitions().requested_module_spellings();
-    let definition_executable_root = path_from_legacy_text(spec.definition_executable_path);
     let prepared_definition_resources = freeze_host_definition_resource_sources(
         effective_definition_resource_paths,
         spec.scenario_path,
@@ -1428,6 +1430,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     }
     let resource_sources = resolve_host_game_resource_sources(
         spec.scenario_path,
+        loader_head.origin(),
         spec.install_roots,
         spec.definition_resources,
         &definition_executable_root,
@@ -2046,6 +2049,8 @@ fn frozen_published_scenario_group(
 
 struct InstallRootDefinitionResolver<'a> {
     roots: &'a [PathBuf],
+    executable_root: PathBuf,
+    scenario_origin: Option<String>,
     language_packs: &'a LanguagePacks,
     staged_definitions: Mutex<HashMap<String, VecDeque<PathBuf>>>,
 }
@@ -2053,6 +2058,8 @@ struct InstallRootDefinitionResolver<'a> {
 impl<'a> InstallRootDefinitionResolver<'a> {
     fn new(
         roots: &'a [PathBuf],
+        executable_root: &Path,
+        scenario_origin: Option<&str>,
         language_packs: &'a LanguagePacks,
         effective_modules: &[String],
         definition_resources: &[HostInitialResourceSource],
@@ -2078,6 +2085,8 @@ impl<'a> InstallRootDefinitionResolver<'a> {
         }
         Self {
             roots,
+            executable_root: executable_root.to_path_buf(),
+            scenario_origin: scenario_origin.map(str::to_owned),
             language_packs,
             staged_definitions: Mutex::new(staged_definitions),
         }
@@ -2127,7 +2136,13 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
         // here keeps this pre-publication load's texture map identical to the
         // post-publication reload, which consumes the very same groups after
         // they are published (C4GameParameters.cpp:214-222; C4Game.cpp:901-977).
-        resolve_host_material_groups(scenario.root(), self.roots).map_err(ScenarioError::Resources)
+        resolve_host_material_groups(
+            scenario.root(),
+            self.scenario_origin.as_deref(),
+            self.roots,
+            &self.executable_root,
+        )
+        .map_err(ScenarioError::Resources)
     }
 
     fn resolve_graphics_groups_with_definition_roots(
@@ -3076,7 +3091,15 @@ mod definition_root_graphics_tests {
 
         let roots = [dir.path().to_path_buf()];
         let language_packs = LanguagePacks::default();
-        let resolver = InstallRootDefinitionResolver::new(&roots, &language_packs, &[], &[], false);
+        let resolver = InstallRootDefinitionResolver::new(
+            &roots,
+            dir.path(),
+            None,
+            &language_packs,
+            &[],
+            &[],
+            false,
+        );
         let graphics = resolver
             .resolve_graphics_groups_with_definition_roots(
                 &Group::open(&scenario).expect("scenario root"),
@@ -3110,7 +3133,15 @@ mod definition_root_graphics_tests {
 
         let roots = [dir.path().to_path_buf()];
         let language_packs = LanguagePacks::default();
-        let resolver = InstallRootDefinitionResolver::new(&roots, &language_packs, &[], &[], false);
+        let resolver = InstallRootDefinitionResolver::new(
+            &roots,
+            dir.path(),
+            None,
+            &language_packs,
+            &[],
+            &[],
+            false,
+        );
         let materials = resolver
             .resolve_material_groups(&Group::open(&scenario).expect("scenario root"))
             .expect("prepared host material chain");
@@ -3121,6 +3152,53 @@ mod definition_root_graphics_tests {
                 .map(|group| group.root().to_path_buf())
                 .collect::<Vec<_>>(),
             [folder_materials, installed_materials]
+        );
+    }
+
+    /// OpenScenario registers Origin parents after the physical save path, and
+    /// GameRes publishes their Material.c4g children before the global group
+    /// (src/C4Game.cpp:142-179; src/C4GroupSet.cpp:238-318;
+    /// src/C4GameParameters.cpp:212-222).
+    #[test]
+    fn savegame_origin_materials_precede_prepared_host_installed_materials() {
+        let dir = tempdir().expect("prepared host savegame material fixture");
+        let content = dir.path().join("content");
+        let save = dir.path().join("Savegames.c4f/Fossae.c4f/Fossae1.c4s");
+        let origin_materials = content.join("ClonkMars.c4f/Material.c4g");
+        let installed_materials = content.join("Material.c4g");
+        fs::create_dir_all(&save).expect("savegame group");
+        fs::create_dir_all(&origin_materials).expect("Origin folder materials");
+        fs::create_dir_all(&installed_materials).expect("installed materials");
+        fs::write(
+            save.join("Scenario.txt"),
+            b"[Head]\nTitle=Saved Fossae\nSaveGame=1\nOrigin=content/ClonkMars.c4f/01_Fossae.c4s\n",
+        )
+        .expect("savegame Scenario.txt");
+
+        let roots = [content.clone()];
+        let language_packs = LanguagePacks::default();
+        let save = Group::open(&save).expect("savegame root");
+        let loader_head = ScenarioLoaderHead::load_from_group_for_resource_registration(&save)
+            .expect("savegame loader head");
+        let resolver = InstallRootDefinitionResolver::new(
+            &roots,
+            &content,
+            loader_head.origin(),
+            &language_packs,
+            &[],
+            &[],
+            false,
+        );
+        let materials = resolver
+            .resolve_material_groups(&save)
+            .expect("prepared host material chain");
+
+        assert_eq!(
+            materials
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            [origin_materials, installed_materials]
         );
     }
 }
