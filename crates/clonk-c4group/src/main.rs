@@ -411,7 +411,7 @@ fn sort_entries(group: &mut Option<clonk_resources::Group>, path: &str, list: &s
     let names: Vec<String> = match open.entries() {
         Ok(entries) => entries
             .iter()
-            .map(|entry| String::from_utf8_lossy(&entry.name_bytes).into_owned())
+            .map(|entry| edit::entry_name_for_sort(&entry.name_bytes))
             .collect(),
         Err(error) => {
             eprintln!("Error: {path}: {error}");
