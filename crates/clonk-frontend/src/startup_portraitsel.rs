@@ -289,6 +289,13 @@ pub struct PortraitSelController {
     idle_tick: u8,
     generation: u64,
     validation_error: Option<String>,
+    /// Measured width of the widest location caption, cached the way
+    /// `grid_layout` is: layout is font-independent, so the measurement is
+    /// taken during render and reused by hit testing. `None` falls back to the
+    /// combo's own width, which is exactly the minimum
+    /// `ComboBox::DoDropdown` seeds the menu with
+    /// (`C4GuiComboBox.cpp:116`).
+    location_caption_width: RefCell<Option<i32>>,
 }
 
 impl PortraitSelController {
@@ -312,6 +319,7 @@ impl PortraitSelController {
             scroll_y: 0,
             scrollbar_pin: 0,
             grid_layout: RefCell::new(None),
+            location_caption_width: RefCell::new(None),
             set_picture,
             set_big_icon,
             combo_open: false,
@@ -1288,8 +1296,36 @@ impl PortraitSelController {
         layout
     }
 
+    /// The layout for a surface, which may differ in size from the stored
+    /// screen extent the controller was last resized to.
+    fn layout_for(&self, surface: &Surface) -> PortraitSelLayout {
+        portrait_sel_layout_with_caption_width(
+            surface.width() as i32,
+            surface.height() as i32,
+            self.locations.len(),
+            *self.location_caption_width.borrow(),
+        )
+    }
+
     fn layout(&self) -> PortraitSelLayout {
-        portrait_sel_layout(self.width, self.height, self.locations.len())
+        portrait_sel_layout_with_caption_width(
+            self.width,
+            self.height,
+            self.locations.len(),
+            *self.location_caption_width.borrow(),
+        )
+    }
+
+    /// Measures the widest location caption so the dropdown can grow to it.
+    /// Called from render, where the font is known; hit testing then reads the
+    /// cache, exactly as the grid content layout works.
+    pub(crate) fn update_location_popup_width(&self, font: &ClonkFont) {
+        let widest = self
+            .locations
+            .iter()
+            .map(|location| font.measure(&location.label, true).0)
+            .max();
+        self.location_caption_width.replace(widest);
     }
 
     fn hit_target(&self, point: GuiPoint) -> HitTarget {
@@ -1359,11 +1395,10 @@ impl PortraitSelController {
         resources: PortraitSelResources<'_>,
         gamma: Option<&GammaRamp>,
     ) {
-        let layout = portrait_sel_layout(
-            surface.width() as i32,
-            surface.height() as i32,
-            self.locations.len(),
-        );
+        // Measure captions before laying out: the dropdown grows to the
+        // widest one, and hit testing reads the same cached measurement.
+        self.update_location_popup_width(&resources.fonts.text);
+        let layout = self.layout_for(surface);
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
         resources.skin.draw_caption_with_right_indent(
             surface,
@@ -1548,11 +1583,8 @@ impl PortraitSelController {
         if !self.combo_open {
             return;
         }
-        let layout = portrait_sel_layout(
-            surface.width() as i32,
-            surface.height() as i32,
-            self.locations.len(),
-        );
+        self.update_location_popup_width(&resources.fonts.text);
+        let layout = self.layout_for(surface);
         draw_engine_box(
             surface,
             layout.location_popup.x,
@@ -1808,6 +1840,18 @@ pub fn portrait_sel_layout(
     screen_height: i32,
     location_count: usize,
 ) -> PortraitSelLayout {
+    portrait_sel_layout_with_caption_width(screen_width, screen_height, location_count, None)
+}
+
+/// [`portrait_sel_layout`] with the widest measured location caption, which
+/// the dropdown grows to fit. `None` keeps the dropdown at the combo's width —
+/// the minimum `ComboBox::DoDropdown` seeds it with (`C4GuiComboBox.cpp:116`).
+pub fn portrait_sel_layout_with_caption_width(
+    screen_width: i32,
+    screen_height: i32,
+    location_count: usize,
+    caption_width: Option<i32>,
+) -> PortraitSelLayout {
     let width = (i64::from(screen_width) * 2 / 3 + 10)
         .clamp(i64::from(MIN_WIDTH), i64::from(MAX_WIDTH)) as i32;
     let height = (i64::from(screen_height) * 2 / 3 + 10)
@@ -1887,12 +1931,33 @@ pub fn portrait_sel_layout(
         )
         .max(8);
     let popup_height = popup_content_height.saturating_add(10);
-    let location_popup = IntRect::new(
-        location_combo.x,
-        location_combo.y + location_combo.h,
-        location_combo.w,
-        popup_height,
-    );
+    // `ContextMenu::UpdateElementPositions` widens the menu to its widest
+    // entry and never shrinks it below the width it already has, which
+    // `DoDropdown` seeded from the combo (`C4GuiMenu.cpp:333-358`). The 10px
+    // is the same left+right margin the entries are inset by below.
+    let popup_width = caption_width
+        .map(|width| width.saturating_add(10))
+        .unwrap_or(location_combo.w)
+        .max(location_combo.w);
+    // `Screen::DoContext` opens bottom-right of the anchor, flipping to the
+    // other side when that would cross the screen edge, and falling back to
+    // the edge itself when the flipped side has no room either
+    // (`C4Gui.cpp:877-892`).
+    let mut popup_x = location_combo.x;
+    if popup_x.saturating_add(popup_width) >= screen_width {
+        if popup_x < popup_width {
+            popup_x = screen_width;
+        }
+        popup_x -= popup_width;
+    }
+    let mut popup_y = location_combo.y + location_combo.h;
+    if popup_y.saturating_add(popup_height) >= screen_height {
+        if popup_y < popup_height {
+            popup_y = screen_height;
+        }
+        popup_y -= popup_height;
+    }
+    let location_popup = IntRect::new(popup_x, popup_y, popup_width, popup_height);
     let location_options = (0..location_count)
         .map(|index| {
             IntRect::new(
@@ -4088,6 +4153,91 @@ mod tests {
         assert!(
             blended(&rendered_at(true, 2.0)),
             "PointFiltering must not survive a non-unit application scale"
+        );
+    }
+
+    /// The location dropdown expands for long captions and flips rather than
+    /// running off the screen (clonk-org/clonk-rs#571).
+    ///
+    /// Three C++ rules compose here, and the port implemented none of them —
+    /// it pinned the popup to the combo's own width and always opened
+    /// downward, so a long or localized location caption was simply cut off:
+    ///
+    /// * `ComboBox::DoDropdown` seeds the menu with
+    ///   `max(combo width, menu width)` (`C4GuiComboBox.cpp:116`), so the
+    ///   popup is never *narrower* than the control that opened it;
+    /// * `ContextMenu::UpdateElementPositions` then widens it to the widest
+    ///   entry and never shrinks below its current width
+    ///   (`C4GuiMenu.cpp:333-358`);
+    /// * `Screen::DoContext` flips it above the anchor when it would cross the
+    ///   bottom edge, and to the left when it would cross the right edge,
+    ///   falling back to the screen edge when the flipped side has no room
+    ///   either (`C4Gui.cpp:877-892`).
+    #[test]
+    fn a_long_location_caption_widens_the_dropdown_and_keeps_it_on_screen() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let font = &fonts.text;
+
+        let short = PortraitLocation::new("User", "/u");
+        let long = PortraitLocation::new(
+            "Eigene Dateien \u{2014} Clonk Endeavour Portraitsammlung",
+            "/very/long",
+        );
+
+        let widths = |locations: Vec<PortraitLocation>| {
+            let controller = PortraitSelController::new(locations, 0, Vec::new(), true, true);
+            controller.update_location_popup_width(font);
+            let layout = controller.layout();
+            (layout.location_combo, layout.location_popup)
+        };
+
+        let (combo, narrow_popup) = widths(vec![short.clone()]);
+        assert_eq!(
+            narrow_popup.w, combo.w,
+            "captions that fit leave the popup at the combo's width"
+        );
+
+        let (_, wide_popup) = widths(vec![short.clone(), long.clone()]);
+        assert!(
+            wide_popup.w > combo.w,
+            "a caption wider than the combo must widen the popup, not clip"
+        );
+        let measured = font.measure(&long.label, true).0;
+        assert!(
+            wide_popup.w >= measured,
+            "the widened popup must fit the caption it widened for: {} < {measured}",
+            wide_popup.w
+        );
+
+        // Right edge: a popup wide enough to cross it opens leftwards instead.
+        let mut controller = PortraitSelController::new(
+            vec![short.clone(), long.clone()],
+            0,
+            Vec::new(),
+            true,
+            true,
+        );
+        controller.resize(320, 480);
+        controller.update_location_popup_width(font);
+        let layout = controller.layout();
+        assert!(
+            layout.location_popup.x + layout.location_popup.w <= 320,
+            "the dropdown must stay inside the screen's right edge"
+        );
+
+        // Bottom edge: enough entries to overflow flips it above the combo.
+        let many = std::iter::repeat_n(short.clone(), 40).collect::<Vec<_>>();
+        let mut controller = PortraitSelController::new(many, 0, Vec::new(), true, true);
+        controller.resize(640, 480);
+        controller.update_location_popup_width(font);
+        let layout = controller.layout();
+        assert!(
+            layout.location_popup.y + layout.location_popup.h <= 480,
+            "the dropdown must stay inside the screen's bottom edge"
+        );
+        assert!(
+            layout.location_popup.y < layout.location_combo.y,
+            "with no room below, it opens above the combo rather than clipping"
         );
     }
 }
