@@ -4429,13 +4429,6 @@ impl GameApp {
                         }
                     }
                 }
-                if self.startup_view == StartupView::MainMenu
-                    && state == ElementState::Pressed
-                    && key == VirtualKeyCode::Escape
-                {
-                    self.request_exit("the main menu was closed");
-                    return Ok(());
-                }
                 // `C4StartupMainDlg` registers bare F6 at control-override
                 // priority within its own dialog scope
                 // (C4StartupMainDlg.cpp:95-100). `SwitchToEditor` returning
