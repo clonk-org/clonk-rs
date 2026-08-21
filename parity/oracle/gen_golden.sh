@@ -807,6 +807,86 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Material.cpp" > "$gen/cross_map_reactions.inc"
 
+# 3q3h. Lift the unattached half of C4Object::DoMovement and the force helpers
+#       it drives. This is the per-pixel collision loop: the fixed-point target
+#       is accumulated first, clamped by SideBounds/VerticalBounds, and then
+#       walked ONE PIXEL AT A TIME with a ContactCheck at each step.
+#
+#       The two halves are deliberately asymmetric, and that is the behaviour:
+#       a horizontal contact redirects xdir into ydir and rubs FRICTION off
+#       ydir, while a vertical contact rubs friction off xdir FIRST and then
+#       picks a response from the contact vertices' CNAT — slide left, else
+#       slide right, else (only for a non-Alive rotatable object on a single
+#       contact) bleed ydir into rdir, else zero ydir outright.
+#
+#       On contact the loop also rewrites the fixed coordinate back to the whole
+#       pixel (`fix_x = itofix(x)`), discarding the sub-pixel remainder. A port
+#       that kept the remainder would drift a subpixel per contact.
+awk '
+  /^const C4Fixed FRedirect = /  { print }
+  /^const C4Fixed FFriction = /  { print; exit }
+' "$src/C4Movement.cpp" > "$gen/movement_constants.inc"
+
+awk '
+  /^void RedirectForce\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/redirect_force.inc"
+
+awk '
+  /^void ApplyFriction\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/apply_friction.inc"
+
+awk '
+  /^bool ContactVtxCNAT\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/contact_vtx_cnat.inc"
+
+awk '
+  /^int32_t ContactVtxWeight\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/contact_vtx_weight.inc"
+
+awk '
+  /^int32_t ContactVtxFriction\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/contact_vtx_friction.inc"
+
+awk '
+  /^void C4Object::SideBounds\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/side_bounds.inc"
+
+awk '
+  /^void C4Object::VerticalBounds\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/vertical_bounds.inc"
+
+#       The unattached block is lifted as a STATEMENT, not a function: it is the
+#       `if (!Action.t_attach) { ... }` inside DoMovement, and the surrounding
+#       declarations are supplied by the scaffold that includes it. Stopping at
+#       the attached branch keeps the lift to the half this section covers.
+awk '
+  /^\tif \(!Action.t_attach\) \/\/ Unattached movement$/ { p = 1 }
+  p && /^\tif \(Action.t_attach\)/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/do_movement_unattached.inc"
+
 # 3q3b. Lift mrfIncinerate. It is the one reaction whose arms are asymmetric in
 #       a way a port is likely to flatten: `meeMassMove` and `meePXSPos` try to
 #       incinerate and report **unhandled** when they cannot, while `meePXSMove`
