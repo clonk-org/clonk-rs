@@ -398,7 +398,7 @@ impl GameApp {
             } else {
                 ((u128::from(downloaded) * 100) / u128::from(total)).min(100) as u8
             };
-            self.update_update_download_progress(percent);
+            self.update_update_download_progress(Some(percent));
         }
         let Some(terminal) = terminal else {
             return Ok(());
@@ -439,14 +439,17 @@ impl GameApp {
         Ok(())
     }
 
-    fn update_update_download_progress(&mut self, percent: u8) {
+    pub(crate) fn update_update_download_progress(&mut self, percent: Option<u8>) {
         if let Some(dialog) = self.message_dialogs.iter_mut().find(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::UpdateDownloadWait
             )
         }) {
-            dialog.state.set_progress(percent);
+            match percent {
+                Some(percent) => dialog.state.set_progress(percent),
+                None => dialog.state.hide_progress(),
+            }
         }
     }
 
