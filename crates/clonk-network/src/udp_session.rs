@@ -951,6 +951,39 @@ fn terminal_read_result(terminal: Option<PeerTerminal>) -> io::Result<()> {
     }
 }
 
+/// The write-side counterpart of [`terminal_read_result`].
+///
+/// A read from a cleanly closed stream is end-of-stream, which is why
+/// `terminal_read_result` maps the clean cases to `Ok(())` and varies its error
+/// kind. A *write* to a closed stream is always a `BrokenPipe` — the kind is
+/// deliberately left alone here, because callers match on it to detect "the
+/// peer is gone" and reclassifying it would change control flow rather than
+/// diagnosis.
+///
+/// What the write path *was* missing is **why** the stream closed. A peer that
+/// rejected us and a transport that timed out or starved under load both
+/// surfaced the identical `reliable-UDP peer stream is closed`, which is what
+/// left the merge-queue failure in clonk-org/clonk-rs#915 undiagnosable after
+/// the fact. `PeerTerminalState` has recorded the reason all along; only the
+/// read path spent it.
+///
+/// The original wording is kept as a prefix so existing substring matches are
+/// unaffected. `PeerTerminalState::close` publishes the reason *before* the
+/// `Release` store on `closed`, so a writer that observed `is_closed()` is
+/// guaranteed to see it.
+fn terminal_write_error(terminal: Option<PeerTerminal>) -> io::Error {
+    const CLOSED: &str = "reliable-UDP peer stream is closed";
+    let detail = match terminal {
+        Some(PeerTerminal::Disconnected(reason)) => Some(reason.as_str().to_owned()),
+        Some(PeerTerminal::Failed(error)) => Some(error),
+        Some(PeerTerminal::Closed) | None => None,
+    };
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        detail.map_or_else(|| CLOSED.to_owned(), |detail| format!("{CLOSED}: {detail}")),
+    )
+}
+
 struct ConnectedPeer {
     generation: u64,
     inbound: mpsc::Sender<PeerInbound>,
@@ -1090,11 +1123,9 @@ impl ReliableUdpPeerStream {
 
     fn poll_pending_send(&mut self, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.terminal.is_closed() {
+            let terminal = self.terminal.reason();
             self.mark_write_closed();
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "reliable-UDP peer stream is closed",
-            )));
+            return Poll::Ready(Err(terminal_write_error(terminal)));
         }
         if self.pending_send.is_none() {
             return Poll::Ready(Ok(()));
@@ -1306,11 +1337,9 @@ impl AsyncWrite for ReliableUdpPeerStream {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         if this.write_closed || this.terminal.is_closed() {
+            let terminal = this.terminal.reason();
             this.mark_write_closed();
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "reliable-UDP peer stream is closed",
-            )));
+            return Poll::Ready(Err(terminal_write_error(terminal)));
         }
         if input.is_empty() {
             return Poll::Ready(Ok(0));
@@ -4062,6 +4091,55 @@ mod tests {
 
         let error = stream.write_all(&[TCP_FRAME_PREFIX]).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    /// A write that loses the race against a closing peer must say *why* the
+    /// peer closed. Both causes named in clonk-org/clonk-rs#915 — the peer
+    /// rejecting the connection, and the transport giving up under load —
+    /// reach this path, and before this the message was identical for both,
+    /// so a queue failure could not be told apart after the fact.
+    ///
+    /// The kind stays `BrokenPipe` and the original wording stays a prefix:
+    /// this is a diagnosis change, not a reclassification.
+    #[tokio::test]
+    async fn a_closed_write_names_the_reason_the_peer_terminated() {
+        async fn write_error(reason: PeerTerminal) -> io::Error {
+            let (commands, _command_rx) = mpsc::channel(1);
+            let (_inbound, inbound_rx) = mpsc::channel(1);
+            let terminal = Arc::new(PeerTerminalState::open());
+            let mut stream =
+                ReliableUdpPeerStream::new(loopback(), 9, commands, inbound_rx, terminal.clone());
+            terminal.close(reason);
+            stream.write_all(&[TCP_FRAME_PREFIX]).await.unwrap_err()
+        }
+
+        let rejected = write_error(PeerTerminal::Failed("connection rejected".to_owned())).await;
+        assert_eq!(rejected.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(
+            rejected.to_string(),
+            "reliable-UDP peer stream is closed: connection rejected"
+        );
+
+        let timed_out = write_error(PeerTerminal::Disconnected(
+            ReliableUdpDisconnectReason::ConnectionTimeout,
+        ))
+        .await;
+        assert_eq!(timed_out.kind(), io::ErrorKind::BrokenPipe);
+        assert!(
+            timed_out
+                .to_string()
+                .starts_with("reliable-UDP peer stream is closed: "),
+            "the original wording stays a prefix, so substring matches survive: {timed_out}"
+        );
+        assert_ne!(
+            timed_out.to_string(),
+            rejected.to_string(),
+            "a timeout and a rejection must not be indistinguishable — that is the defect"
+        );
+
+        // A close with no recorded reason keeps the original message exactly.
+        let plain = write_error(PeerTerminal::Closed).await;
+        assert_eq!(plain.to_string(), "reliable-UDP peer stream is closed");
     }
 
     #[tokio::test]
