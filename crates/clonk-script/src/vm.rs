@@ -1989,6 +1989,46 @@ impl LValueRef {
         self.read_tracked().map(|tracked| tracked.value)
     }
 
+    /// The target's value, but **only when it is an object**, without copying a
+    /// container to find out.
+    ///
+    /// An indexed assignment needs to know whether its base is an object,
+    /// because `obj[key]` addresses a local rather than an element. Asking
+    /// [`Self::read`] answers that but clones the whole collection first
+    /// (`read_path` opens with `value.clone()`), which makes a single element
+    /// write cost O(len) and building an array quadratic
+    /// (clonk-org/clonk-rs#759). Walking by reference and cloning only an
+    /// object -- which is a bare id -- answers the same question for free.
+    ///
+    /// `None` means "not an object", including a target that does not resolve;
+    /// the caller falls through to the ordinary container path either way.
+    fn object_target(&self) -> Result<Option<Value>, RuntimeError> {
+        fn object_or_none(value: &Value) -> Option<Value> {
+            matches!(value, Value::Object(_)).then(|| value.clone())
+        }
+
+        match self {
+            Self::Cell { value, .. } => Ok(object_or_none(&value.borrow())),
+            Self::Path { root, segments, .. } => {
+                if let Some(resolved) = self.resolved_legacy_value() {
+                    return Ok(object_or_none(&resolved.value));
+                }
+                let root = root.borrow();
+                let mut current: &Value = &root;
+                for segment in segments {
+                    match path_child(current, segment) {
+                        Some(child) => current = child,
+                        None => return Ok(None),
+                    }
+                }
+                Ok(object_or_none(current))
+            }
+            // A host path has to be called to be read at all, and the caller
+            // already excludes it before reaching here.
+            _ => self.read().map(|value| object_or_none(&value)),
+        }
+    }
+
     fn resolved_legacy_value(&self) -> Option<TrackedValue> {
         match self {
             Self::Path { legacy_pin, .. } => resolved_legacy_path_value(legacy_pin),
@@ -2119,15 +2159,19 @@ impl LValueRef {
                 notify_legacy_path_pins_before_path_write(root, segments, preserves_container);
                 write_path(&mut root.borrow_mut(), segments, value)?;
                 if let Some(identity) = root_identity {
-                    let next_identity = {
-                        let current = identity.borrow().clone();
-                        RawIdentity::after_path_write(
-                            current.as_ref(),
-                            &root.borrow(),
-                            segments,
-                            replacement_identity,
-                        )
-                    };
+                    // Move the old identity out rather than cloning it:
+                    // `RawIdentity` is a recursive tree, so a clone here costs
+                    // the size of the whole structure on *every* element write,
+                    // which is what made building an n x n array cubic
+                    // (clonk-org/clonk-rs#759). `after_path_write` only reads
+                    // it, and the cell is written back immediately.
+                    let current = identity.borrow_mut().take();
+                    let next_identity = RawIdentity::after_path_write(
+                        current.as_ref(),
+                        &root.borrow(),
+                        segments,
+                        replacement_identity,
+                    );
                     *identity.borrow_mut() = next_identity;
                 }
                 Ok(())
@@ -2853,26 +2897,32 @@ fn string_index(text: &str, index: &Value) -> Result<Value, RuntimeError> {
 }
 
 fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeError> {
-    let mut current = value.clone();
-    for segment in segments {
-        current = match (segment, current) {
-            (PathSegment::Property(property), Value::Proplist(entries)) => {
-                entries.get(property).cloned().unwrap_or(Value::Nil)
-            }
+    // Walk by reference and clone only what is actually returned. Cloning the
+    // root up front cost the size of the whole container on every read, and a
+    // read sits on the element-assignment path, so building an array was
+    // quadratic in its length (clonk-org/clonk-rs#759).
+    //
+    // Two steps cannot be followed by reference -- indexing a string
+    // manufactures a value, and a missing element reads as nil -- so each
+    // continues the walk over the produced value instead.
+    let mut current: &Value = value;
+    for (position, segment) in segments.iter().enumerate() {
+        let rest = &segments[position + 1..];
+        let child: Option<&Value> = match (segment, current) {
+            (PathSegment::Property(property), Value::Proplist(entries)) => entries.get(property),
             (PathSegment::Property(property), other) => {
                 return Err(RuntimeError::new(format!(
                     "cannot access property '{property}' on value of type {}",
                     other.type_name()
                 )))
             }
-            (PathSegment::Index(index), Value::Array(elements)) => elements
-                .get(array_index(index)?)
-                .cloned()
-                .unwrap_or(Value::Nil),
-            (PathSegment::Index(index), Value::String(text)) => string_index(&text, index)?,
-            (PathSegment::Index(key), Value::Proplist(entries)) => {
-                entries.get_key(key).cloned().unwrap_or(Value::Nil)
+            (PathSegment::Index(index), Value::Array(elements)) => {
+                elements.get(array_index(index)?)
             }
+            (PathSegment::Index(index), Value::String(text)) => {
+                return read_path(&string_index(text, index)?, rest)
+            }
+            (PathSegment::Index(key), Value::Proplist(entries)) => entries.get_key(key),
             (PathSegment::Index(_), other) => {
                 return Err(RuntimeError::new(format!(
                     "cannot index into value of type {}",
@@ -2880,8 +2930,12 @@ fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeEr
                 )))
             }
         };
+        match child {
+            Some(child) => current = child,
+            None => return read_path(&Value::Nil, rest),
+        }
     }
-    Ok(current)
+    Ok(current.clone())
 }
 
 fn write_path(
@@ -9104,7 +9158,10 @@ impl<'a> Vm<'a> {
                 if !matches!(&reference, LValueRef::HostPath { .. }) {
                     let (index, _index_slot) =
                         self.evaluate_index_operand(index_operand, env, depth)?;
-                    let collection = reference.read()?;
+                    // Only the object cases below need the base's value, and
+                    // asking for it by `read()` copies the whole container on
+                    // every element write (clonk-org/clonk-rs#759).
+                    let collection = reference.object_target()?.unwrap_or(Value::Nil);
                     match (&collection, &index) {
                         (Value::Object(0), _) => {
                             return Err(RuntimeError::new(
