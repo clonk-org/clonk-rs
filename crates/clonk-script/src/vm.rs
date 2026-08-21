@@ -1701,14 +1701,14 @@ impl Binding {
         Self::tracked(TrackedValue::runtime(value))
     }
 
-    fn collect_object_reference_cells(&self, cells: &mut Vec<ValueCell>) {
+    fn collect_object_reference_cells(&self, cells: &mut Vec<Weak<RefCell<Value>>>) {
         match self {
-            Self::Direct { value, .. } => cells.push(value.clone()),
+            Self::Direct { value, .. } => cells.push(Rc::downgrade(value)),
             Self::Inline(inline) => {
                 if let Some((value, _)) = inline.promoted.get() {
-                    cells.push(value.clone());
+                    cells.push(Rc::downgrade(value));
                 } else if inline.initial.value.contains_any_object_reference() {
-                    cells.push(inline.cells().0.clone());
+                    cells.push(Rc::downgrade(&inline.cells().0));
                 }
             }
             Self::Reference(reference) => reference.collect_object_reference_cells(cells),
@@ -1834,10 +1834,10 @@ impl ValueReference {
 }
 
 impl LValueRef {
-    fn collect_object_reference_cells(&self, cells: &mut Vec<ValueCell>) {
+    fn collect_object_reference_cells(&self, cells: &mut Vec<Weak<RefCell<Value>>>) {
         match self {
-            Self::Cell { value, .. } => cells.push(value.clone()),
-            Self::Path { root, .. } => cells.push(root.clone()),
+            Self::Cell { value, .. } => cells.push(Rc::downgrade(value)),
+            Self::Path { root, .. } => cells.push(Rc::downgrade(root)),
             Self::HostPath { .. } => {}
         }
     }
@@ -2323,11 +2323,11 @@ struct ActiveObjectReferenceCellsGuard {
 }
 
 impl ActiveObjectReferenceCellsGuard {
-    fn enter(cells: Vec<ValueCell>) -> Self {
+    fn enter(cells: Vec<Weak<RefCell<Value>>>) -> Self {
         let outermost = ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
             let mut frames = frames.borrow_mut();
             let outermost = frames.is_empty();
-            frames.push(cells.iter().map(Rc::downgrade).collect());
+            frames.push(cells);
             outermost
         });
         if outermost {
@@ -12036,7 +12036,7 @@ impl Environment {
         }
     }
 
-    fn object_reference_cells(&self, vm: &Vm<'_>) -> Vec<ValueCell> {
+    fn object_reference_cells(&self, vm: &Vm<'_>) -> Vec<Weak<RefCell<Value>>> {
         let mut cells = Vec::new();
         for binding in &self.call_args {
             binding.collect_object_reference_cells(&mut cells);
@@ -12052,16 +12052,28 @@ impl Environment {
         for (_, binding) in &self.named_parameters {
             binding.collect_object_reference_cells(&mut cells);
         }
-        cells.extend(self.object_state.named_locals.borrow().values().cloned());
-        cells.extend(self.object_state.local_slots.borrow().values().cloned());
+        cells.extend(
+            self.object_state
+                .named_locals
+                .borrow()
+                .values()
+                .map(Rc::downgrade),
+        );
+        cells.extend(
+            self.object_state
+                .local_slots
+                .borrow()
+                .values()
+                .map(Rc::downgrade),
+        );
         if let Some(globals) = vm.globals_named {
-            cells.extend(globals.borrow().values().cloned());
+            cells.extend(globals.borrow().values().map(Rc::downgrade));
         }
         if let Some(globals) = vm.globals_numbered {
-            cells.extend(globals.borrow().values().cloned());
+            cells.extend(globals.borrow().values().map(Rc::downgrade));
         }
         if let Some(globals) = vm.globals_consts {
-            cells.extend(globals.borrow().values().cloned());
+            cells.extend(globals.borrow().values().map(Rc::downgrade));
         }
         cells
     }
@@ -12232,6 +12244,28 @@ mod tests {
         ($source:expr, $entry:expr, $args:expr; expect $message:expr => $expected:expr) => {
             check_eq!(execute_script($source, $entry, $args).expect($message) => $expected);
         };
+    }
+
+    #[test]
+    fn active_object_reference_collection_keeps_only_weak_owners() {
+        let binding = Binding::tracked(TrackedValue::runtime(Value::Object(7)));
+        let cell = match &binding {
+            Binding::Direct { value, .. } => Rc::clone(value),
+            Binding::Inline(_) | Binding::Reference(_) => {
+                unreachable!("tracked bindings own a direct value cell")
+            }
+        };
+        let strong_owners = Rc::strong_count(&cell);
+        let mut cells = Vec::new();
+
+        binding.collect_object_reference_cells(&mut cells);
+
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            Rc::strong_count(&cell),
+            strong_owners,
+            "the removal guard must not clone strong owners before downgrading them"
+        );
     }
 
     #[cfg(target_pointer_width = "64")]
