@@ -4787,3 +4787,58 @@ fn a_dedicated_server_writes_its_runtime_config_on_a_clean_quit() {
     main_assert_eq!(saved.get_in(Some("Network"), "Comment") => Some("Weekend server"));
     reset_cached_app_paths();
 }
+
+#[test]
+fn explicit_launch_failures_exit_instead_of_reconstructing_startup() {
+    // `C4Application::QuitGame` reconstructs a startup generation only when one
+    // is in use and otherwise reaches `Quit()` (C4Application.cpp:373-405), and
+    // `ParseCommandLine` suppresses `UseStartupDialog` for a scenario, a direct
+    // join or a record stream (C4Game.cpp:3321). So an explicit launch that
+    // fails ends the process rather than settling into a menu it never came
+    // from — on a headless server the alternative is a silent hang.
+    //
+    // `fQuitWithError` does NOT feed the exit status: it is read only by
+    // `C4Startup::DoStartup` (C4Startup.cpp:276), which this path never
+    // reaches, so a failed direct launch presents no log at all.
+    for (label, apply) in [
+        (
+            "scenario",
+            (|app: &mut GameApp| {
+                app.classic_command_line.scenario = Some(PathBuf::from("Explicit.c4s"));
+            }) as fn(&mut GameApp),
+        ),
+        ("join", |app: &mut GameApp| {
+            app.classic_command_line.direct_join = Some("127.0.0.1:11112".to_string());
+        }),
+        ("replay", |app: &mut GameApp| {
+            app.classic_command_line.record_stream = Some(PathBuf::from("Round.c4r"));
+        }),
+    ] {
+        let mut app = new_state_only_menu_app(320, 200);
+        app.console_mode = false;
+        apply(&mut app);
+        main_assert!(
+            !app.failed_open_game_returns_to_startup(),
+            "an explicit {label} launch has no startup generation behind it"
+        );
+
+        app.finish_scenario_loading_failure("boom".to_string(), false)
+            .test_value();
+        main_assert!(
+            app.exit_requested,
+            "a failed {label} launch must end the process, not expose a menu"
+        );
+    }
+
+    // The control is the routing decision itself: an ordinary fullscreen start
+    // DOES have a startup generation, so the same failure reconstructs it
+    // instead of quitting. Only the decision is asserted here -- driving that
+    // branch runs the whole log presentation, which needs more of the app than
+    // a state-only fixture carries, and it is already covered by
+    // `empty_restart_log_uses_regular_error_modal_over_restored_host_selector`.
+    let ordinary = new_state_only_menu_app(320, 200);
+    main_assert!(
+        ordinary.failed_open_game_returns_to_startup(),
+        "an ordinary fullscreen start keeps the startup lineage it came from"
+    );
+}
