@@ -6031,6 +6031,191 @@ template <class T> static T BoundBy(T v, T lo, T hi) { return v < lo ? lo : (v >
 
 } // namespace insert_material_check
 
+// C4Landscape::ExtractMaterial (src/C4Landscape.cpp:1191-1199) and the
+// FindMatTop walk (src/C4Landscape.cpp:1161-1189) it depends on.
+//
+// ExtractMaterial does NOT clear the pixel it was handed. It reads the material
+// there, walks FindMatTop up that material's own column, and clears the pixel it
+// ends on -- so extracting from the middle of a column removes its TOP. A port
+// that cleared the requested pixel would take the material from the wrong place
+// while returning the same value, which is invisible to a return-code check.
+//
+// FindMatTop's loop is also indented in a way that misreads. `if (fLeft)`
+// carries no braces, so it governs only the left if/else-if chain; the `if
+// (fRight)` below it is an INDEPENDENT statement despite sitting one level in.
+// Left and right are both examined in the same `cslide` iteration, left first,
+// and the `break` leaves `cslide` at the matching distance -- which is exactly
+// how far the slide then moves. Reading the indentation instead of the braces
+// gives a port that only ever checks one side per iteration.
+namespace extract_material_check
+{
+
+constexpr int32_t GridWdt = 16, GridHgt = 12;
+static int32_t g_grid[GridHgt][GridWdt];
+
+struct MaterialCore
+{
+    int32_t Density;
+    int32_t MaxSlide;
+};
+static MaterialCore Map[4] = {
+    {0, 0},    // Vacuum
+    {25, 4},   // Water -- a wide slide, so it can walk several columns over
+    {50, 2},   // Sand
+    {100, 0},  // Granite -- no slide at all, so it only ever walks straight up
+};
+constexpr int32_t MVehic = 3;
+
+constexpr int32_t MNone = -1;
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
+
+// The cleared pixel is the observable: which one, and whether anything was
+// cleared at all.
+static int32_t g_cleared = 0;
+static int32_t g_clear_x = -1, g_clear_y = -1;
+static int32_t g_instability_probes = 0;
+static int32_t g_probe_x = -1, g_probe_y = -1;
+
+struct C4MaterialMapStub
+{
+    MaterialCore *Map = extract_material_check::Map;
+};
+
+struct C4Landscape
+{
+    int32_t Width = GridWdt, Height = GridHgt;
+    int32_t GetMat(int32_t x, int32_t y);
+    void FindMatTop(int32_t mat, int32_t &x, int32_t &y);
+    void CheckInstabilityRange(int32_t x, int32_t y)
+    {
+        g_instability_probes++;
+        g_probe_x = x;
+        g_probe_y = y;
+    }
+    void ClearPix(int32_t x, int32_t y)
+    {
+        g_cleared++;
+        g_clear_x = x;
+        g_clear_y = y;
+        if (x >= 0 && x < GridWdt && y >= 0 && y < GridHgt) g_grid[y][x] = 0;
+    }
+    int32_t ExtractMaterial(int32_t fx, int32_t fy);
+};
+
+struct GameStub
+{
+    C4MaterialMapStub Material;
+    C4Landscape Landscape;
+};
+
+static GameStub Game;
+
+// Sides and bottom closed, top open -- the default border, the same one the
+// insert_material fixture above states.
+static int32_t GBackMat(int32_t x, int32_t y)
+{
+    if (y < 0) return MNone; // TopOpen
+    if (x < 0 || x >= GridWdt || y >= GridHgt) return MVehic;
+    const int32_t mat = g_grid[y][x];
+    return mat ? mat : MNone;
+}
+
+int32_t C4Landscape::GetMat(int32_t x, int32_t y) { return GBackMat(x, y); }
+
+#include "find_mat_top.inc"
+#include "extract_material.inc"
+
+} // namespace extract_material_check
+
+// Runs one ExtractMaterial and records which pixel it actually cleared. The
+// returned material alone is not enough: a port that cleared the requested
+// pixel instead of the column top would return the very same value.
+static void printExtractMaterialCases()
+{
+    printf("%s", "\"extract_material\":[");
+    struct Case
+    {
+        const char *name;
+        int32_t fx, fy;
+        // Shape of the material blob laid into the grid. Columns [x0, x1] are
+        // filled from row y_bottom up to row y_top of material `mat`.
+        int32_t mat;
+        int32_t x0, x1, y_top, y_bottom;
+        // An optional neighbouring column that reaches one row higher, to give
+        // the slide somewhere to walk. FindMatTop only steps sideways onto a
+        // column that holds the material on the CURRENT row as well, so the
+        // step is two pixels tall, not one.
+        int32_t step_x;
+    };
+    const Case cases[] = {
+        // Nothing there: MNone straight back, nothing cleared. The instability
+        // probe does not run either -- C++ returns before it.
+        {"sky_returns_none", 8, 5, 0, 0, 0, 0, 0, -1},
+        // A single pixel is its own top.
+        {"single_pixel_clears_itself", 8, 9, 3, 8, 8, 9, 9, -1},
+        // Extracting from the BOTTOM of a granite column clears its TOP, two
+        // rows up -- not the pixel that was asked for.
+        {"column_clears_its_top_not_the_request", 8, 9, 3, 8, 8, 7, 9, -1},
+        // The slide pair. Identical shapes; only MaxSlide differs. Granite's is
+        // 0, so it can only walk straight up and stops at its own top...
+        {"no_slide_material_ignores_the_step", 8, 9, 3, 8, 8, 8, 9, 9},
+        // ...while Water's is 4, so it steps sideways onto the taller column
+        // and keeps climbing.
+        {"sliding_material_walks_onto_the_step", 8, 9, 1, 8, 8, 8, 9, 9},
+        // Both sides offer a step at the same distance. Left is examined first
+        // and breaks, so the walk goes LEFT.
+        {"tie_between_both_sides_goes_left", 8, 9, 1, 7, 9, 9, 9, -1},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        for (int32_t gy = 0; gy < extract_material_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < extract_material_check::GridWdt; gx++)
+                extract_material_check::g_grid[gy][gx] = 0;
+        if (c.mat)
+        {
+            for (int32_t gx = c.x0; gx <= c.x1; gx++)
+                for (int32_t gy = c.y_top; gy <= c.y_bottom; gy++)
+                    extract_material_check::g_grid[gy][gx] = c.mat;
+            // The tie case wants a step on BOTH sides at the same distance.
+            if (c.x0 != c.x1)
+            {
+                extract_material_check::g_grid[c.y_top - 1][c.x0] = c.mat;
+                extract_material_check::g_grid[c.y_top - 1][c.x1] = c.mat;
+            }
+            if (c.step_x >= 0)
+            {
+                extract_material_check::g_grid[c.y_top][c.step_x] = c.mat;
+                extract_material_check::g_grid[c.y_top - 1][c.step_x] = c.mat;
+            }
+        }
+
+        extract_material_check::g_cleared = 0;
+        extract_material_check::g_clear_x = -1;
+        extract_material_check::g_clear_y = -1;
+        extract_material_check::g_instability_probes = 0;
+        extract_material_check::g_probe_x = -1;
+        extract_material_check::g_probe_y = -1;
+
+        const int32_t got = extract_material_check::Game.Landscape.ExtractMaterial(c.fx, c.fy);
+
+        printf("{\"name\":\"%s\",\"fx\":%d,\"fy\":%d,\"mat\":%d,"
+               "\"x0\":%d,\"x1\":%d,\"y_top\":%d,\"y_bottom\":%d,"
+               "\"step_x\":%d,\"result\":%d,"
+               "\"cleared\":%d,\"clear_x\":%d,\"clear_y\":%d,"
+               "\"probes\":%d,\"probe_x\":%d,\"probe_y\":%d}",
+               c.name, c.fx, c.fy, c.mat, c.x0, c.x1, c.y_top, c.y_bottom,
+               c.step_x, got, extract_material_check::g_cleared,
+               extract_material_check::g_clear_x, extract_material_check::g_clear_y,
+               extract_material_check::g_instability_probes,
+               extract_material_check::g_probe_x, extract_material_check::g_probe_y);
+    }
+    printf("]");
+}
+
 // Runs one InsertMaterial against a fresh grid and records where the pixel came
 // to rest.
 //
@@ -9521,6 +9706,12 @@ int main()
     //       density-0 success, the asymmetric bounds test, the non-drifting
     //       primitive slide, the PXS handoff, and the insert-thrust recursion.
     printInsertMaterialCases();
+    printf(",\n");
+
+    // 22e6. extract_material: ExtractMaterial clears the FindMatTop of the
+    //       material's own column, not the pixel it was handed, and FindMatTop
+    //       examines both sides per iteration with left winning a tie.
+    printExtractMaterialCases();
     printf(",\n");
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.

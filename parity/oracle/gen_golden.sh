@@ -728,6 +728,33 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/find_mat_path_push.inc"
 
+# 3q3e. Lift C4Landscape::ExtractMaterial and the FindMatTop walk it depends on.
+#       ExtractMaterial does NOT clear the pixel it was handed: it identifies the
+#       material there, walks FindMatTop up that material's own column, and
+#       clears the pixel it ends on. Extracting from the middle of a column
+#       therefore removes its TOP, which is why a port that simply cleared the
+#       requested pixel would leave a hole in the wrong place.
+#
+#       FindMatTop's loop is also indented in a way that misreads. `if (fLeft)`
+#       carries no braces, so it governs only the left if/else-if chain; the
+#       following `if (fRight)` is an INDEPENDENT statement despite sitting one
+#       level in. Left and right are therefore both examined in the same cslide
+#       iteration, and the `break` leaves cslide at the value that matched --
+#       which is the distance the slide then applies.
+awk '
+  /^void C4Landscape::FindMatTop\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/find_mat_top.inc"
+
+awk '
+  /^int32_t C4Landscape::ExtractMaterial\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/extract_material.inc"
+
 # 3q3b. Lift mrfIncinerate. It is the one reaction whose arms are asymmetric in
 #       a way a port is likely to flatten: `meeMassMove` and `meePXSPos` try to
 #       incinerate and report **unhandled** when they cannot, while `meePXSMove`

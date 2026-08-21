@@ -7057,6 +7057,134 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b6. extract_material: `C4Landscape::ExtractMaterial` (C4Landscape.cpp:
+    //       1191-1199) and the `FindMatTop` walk it depends on
+    //       (C4Landscape.cpp:1161-1189).
+    //
+    //       ExtractMaterial does NOT clear the pixel it was handed. It reads
+    //       the material there, walks FindMatTop up that material's own column,
+    //       and clears the pixel it ends on — so extracting from the middle of
+    //       a column removes its TOP. A port that cleared the requested pixel
+    //       would return the very same material while taking it from the wrong
+    //       place, which no return-code check can see. The cleared coordinates
+    //       are therefore what is compared.
+    //
+    //       FindMatTop's own loop is indented in a way that misreads: `if
+    //       (fLeft)` carries no braces, so it governs only the left if/else-if
+    //       chain and the `if (fRight)` below it is an INDEPENDENT statement.
+    //       Both sides are examined in the same `cslide` iteration, left first,
+    //       and the `break` leaves `cslide` at the matching distance — which is
+    //       how far the slide then moves.
+    for case in golden["extract_material"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("extract_material[{name}]");
+
+        // Granite's MaxSlide is 0 and Water's is 4, so the same shape makes one
+        // walk straight up and the other step sideways.
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            MaxSlide=4
+
+            [Material Sand]
+            Name=Sand
+            Density=50
+            MaxSlide=2
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+            "#,
+        )
+        .expect("extract material oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+
+        let mat = i(case, "mat") as u8;
+        let (x0, x1) = (i(case, "x0") as usize, i(case, "x1") as usize);
+        let (y_top, y_bottom) = (i(case, "y_top") as usize, i(case, "y_bottom") as usize);
+        let step_x = i(case, "step_x") as i32;
+
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        if mat != 0 {
+            for gx in x0..=x1 {
+                for gy in y_top..=y_bottom {
+                    bytes[gy * WDT as usize + gx] = mat;
+                }
+            }
+            // The tie case wants a step on BOTH sides at the same distance.
+            if x0 != x1 {
+                bytes[(y_top - 1) * WDT as usize + x0] = mat;
+                bytes[(y_top - 1) * WDT as usize + x1] = mat;
+            }
+            if step_x >= 0 {
+                bytes[y_top * WDT as usize + step_x as usize] = mat;
+                bytes[(y_top - 1) * WDT as usize + step_x as usize] = mat;
+            }
+        }
+
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 50;
+        densities[3] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Water".to_string());
+        material_names[2] = Some("Sand".to_string());
+        material_names[3] = Some("Granite".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+
+        let (fx, fy) = (i(case, "fx") as i32, i(case, "fy") as i32);
+        let materials = engine.materials.clone();
+        let probe = engine
+            .landscape
+            .as_mut()
+            .and_then(|landscape| landscape.extract_material_probe(fx, fy, &materials));
+
+        expect_eq(
+            &label,
+            0,
+            "result",
+            i(case, "result"),
+            probe.map_or(-1, |(material, _, _)| material.index() as i64),
+        );
+        expect_eq(
+            &label,
+            0,
+            "cleared",
+            i(case, "cleared"),
+            i64::from(probe.is_some()),
+        );
+        expect_eq(
+            &label,
+            0,
+            "clear_x",
+            i(case, "clear_x"),
+            probe.map_or(-1, |(_, x, _)| i64::from(x)),
+        );
+        expect_eq(
+            &label,
+            0,
+            "clear_y",
+            i(case, "clear_y"),
+            probe.map_or(-1, |(_, _, y)| i64::from(y)),
+        );
+    }
+
     // 16b5. insert_material: `C4Landscape::InsertMaterial` (C4Landscape.cpp:
     //       1201-1269) — the landscape-mutation half of a material reaction,
     //       and the destination every `Insert` arm above only recorded a call
