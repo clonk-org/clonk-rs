@@ -11121,6 +11121,50 @@ mod tests {
         (address, server)
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_late_join_data_packet_is_ignored_without_dropping_the_link() {
+        // `HandleJoinData` returns immediately unless the client is still in
+        // GS_Init: it logs "unexpected join data received!" and drops the
+        // packet. That early return is deliberately *before* every `Clear()`
+        // path in the function, so a duplicate or late JoinData neither tears
+        // the session down nor re-applies the client ID, control tick, status
+        // or parameters over a live session
+        // (7d43b47b src/C4Network2.cpp:1574-1592).
+        //
+        // Admission consumes the one valid JoinData, so anything reaching this
+        // packet loop is by definition late. Re-applying one here would reset
+        // the control clock and start barrier mid-game.
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, task) =
+            start_test_client_loop(512, 4, 4);
+        let mut host = crate::ControlTransport::new(host_stream);
+
+        let host_config = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host_config.local_core, 8);
+        host.send_message(ControlMessage::JoinData(Box::new(test_join_data(
+            1,
+            NetworkStatus::new(NETWORK_STATE_GO, 2, 4_242),
+            snapshot,
+        ))))
+        .await
+        .test_value();
+
+        // The next ordinary packet still arrives and is still the *first*
+        // event: the link survived (C++ logs rather than disconnecting) and
+        // the late JoinData produced no event of its own.
+        let status = NetworkStatus::new(NETWORK_STATE_PAUSE, 3, 17);
+        host.send_message(ControlMessage::Status(status))
+            .await
+            .test_value();
+        match timeout(EVENT_WAIT, event_rx.recv()).await {
+            Ok(Some(ClientEvent::Status(received))) => assert_eq!(received, status),
+            other => panic!("expected the Status following a dropped JoinData, got {other:?}"),
+        }
+
+        shutdown_tx.send(()).test_value();
+        drop(command_tx);
+        task.await.test_value();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn accepted_client_continues_the_cpp_ping_timer_after_bootstrap() {
         // C4Network2IO's 500 ms timer and strict one-second ping gate continue
