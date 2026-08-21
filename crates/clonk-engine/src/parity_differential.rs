@@ -8971,6 +8971,144 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         );
     }
 
+    // 16j. save_core: `C4GameSave::SaveCore` (C4GameSave.cpp:58-107) with the
+    //      `AdjustCore` override that runs at the end of it
+    //      (C4GameSave.cpp:541-551, 576-585, 612-616).
+    //
+    //      The rule that needs *both* is `NetworkGame`: `SaveCore` zeroes it
+    //      for every save, and `C4GameSaveNetwork::AdjustCore` then sets it
+    //      back. The field's final value is decided by that sequence, so
+    //      neither function's own test can show it.
+    //
+    //      Three more ride along. `NoInitialize` and `SaveGame` are written
+    //      only for a **non-initial** save, so an initial one keeps the
+    //      scenario's own values — and `NetworkRuntimeJoin` is `!fInitial`,
+    //      which is how `network_initial` and `network_runtime` differ. The
+    //      title is overwritten only when `GetKeepTitle()` is false, the same
+    //      inversion the Title component has in `save_runtime_sequence`; the
+    //      port expresses it structurally, since only the exact serializers
+    //      take a title at all.
+    for case in golden["save_core"].as_array().unwrap() {
+        let name = case["case"].as_str().unwrap_or("?");
+        let label = format!("save_core[{name}]");
+
+        // The savegame icon ladder is a pure function of the destination name
+        // and is compared on its own; the full save that normally reaches it
+        // needs a landscape this section is not about.
+        if let Some(group) = match name {
+            "savegame_no_slot" => Some("Savegame.c4s"),
+            "savegame_slot_1" => Some("Save1.c4s"),
+            "savegame_slot_10" => Some("Save10.c4s"),
+            "savegame_slot_11" => Some("Save11.c4s"),
+            _ => None,
+        } {
+            expect_eq(
+                &label,
+                0,
+                "icon",
+                i(case, "icon"),
+                i64::from(crate::live_c4_save::savegame_icon(group)),
+            );
+        }
+
+        // `Origin` and the store's own title are seeded from a scenario core
+        // the port keeps private, so what is compared is the derived flags
+        // plus whether a passed title reaches the output at all.
+        const PASSED_TITLE: &str = "Passed Title";
+        let store = crate::scenario::ScenarioValueStore::default();
+        let modules: Vec<String> = Vec::new();
+        let bytes = match name {
+            "scenario" | "origin_copied_when_empty" | "origin_kept_when_present" => {
+                store.serialize_runtime_scenario_save()
+            }
+            "record_runtime" => {
+                store.serialize_runtime_record_save(PASSED_TITLE, &modules, "", "", "")
+            }
+            "network_runtime" | "network_initial" => {
+                store.serialize_runtime_network_save(PASSED_TITLE, &modules, "", "", "")
+            }
+            _ => store.serialize_runtime_savegame(PASSED_TITLE, &modules, "", "", "", 29),
+        };
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // The core mixes i32 and bool fields, so a value is written either as
+        // `1` or as `true`; both mean set. An absent key is the writer eliding
+        // a default (`push_value`), which is also unset.
+        let flag = |key: &str| -> i64 {
+            text.lines()
+                .find_map(|line| line.strip_prefix(key))
+                .map_or(0, |value| match value.trim() {
+                    "true" => 1,
+                    "false" => 0,
+                    number => number.parse::<i64>().unwrap_or(0),
+                })
+        };
+
+        // `network_initial` has no port counterpart: every serializer here is
+        // the non-initial form, and an initial save writes its core through a
+        // different path. Its row stays in the golden as the C++ record of the
+        // `!fInitial` gate.
+        if name == "network_initial" {
+            continue;
+        }
+        expect_eq(
+            &label,
+            0,
+            "no_initialize",
+            i64::from(case["no_initialize"].as_bool().unwrap_or(false)),
+            flag("NoInitialize="),
+        );
+        expect_eq(
+            &label,
+            0,
+            "save_game",
+            i64::from(case["save_game"].as_bool().unwrap_or(false)),
+            flag("SaveGame="),
+        );
+        expect_eq(
+            &label,
+            0,
+            "network_game",
+            i64::from(case["network_game"].as_bool().unwrap_or(false)),
+            flag("NetworkGame="),
+        );
+        expect_eq(
+            &label,
+            0,
+            "network_runtime_join",
+            i64::from(case["network_runtime_join"].as_bool().unwrap_or(false)),
+            flag("NetworkRuntimeJoin="),
+        );
+        expect_eq(
+            &label,
+            0,
+            "replay",
+            i64::from(case["replay"].as_bool().unwrap_or(false)),
+            flag("Replay="),
+        );
+        expect_eq(
+            &label,
+            0,
+            "forced_gfx_mode",
+            i(case, "forced_gfx_mode"),
+            flag("ForcedGfxMode="),
+        );
+
+        // The GetKeepTitle inversion: a non-exact save keeps the scenario's own
+        // title, so the caller's never appears; an exact one overwrites with it.
+        let carries_passed_title = text.contains(PASSED_TITLE);
+        let cpp_overwrote = case["title"].as_str() == Some("Original Title")
+            || case["title"]
+                .as_str()
+                .is_some_and(|title| title.contains("Original Title"));
+        expect_eq(
+            &label,
+            0,
+            "title_overwritten",
+            i64::from(cpp_overwrote),
+            i64::from(carries_passed_title),
+        );
+    }
+
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
     // including the zero default for a real resource without [Physical]
     // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance

@@ -5256,10 +5256,121 @@ enum class C4ResStrTableKey
 // the trace already carries it.
 static void Log(C4ResStrTableKey) {}
 
+struct StrBuf
+{
+	std::string data;
+	size_t getLength() const { return data.size(); }
+	const char *getData() const { return data.c_str(); }
+	void Copy(const char *value) { data = value ? value : ""; }
+	void Clear() { data.clear(); }
+};
+
 struct C4Group
 {
-	void Delete(const char *name) { g_trace.emplace_back(std::string("delete:") + name); }
+	std::string name{"Savegame.c4s"};
+	void Delete(const char *entry) { g_trace.emplace_back(std::string("delete:") + entry); }
+	StrBuf GetFullName() const { return StrBuf{name}; }
 };
+
+// Only the Head fields SaveCore and the AdjustCore overrides touch.
+struct ScenarioHead
+{
+	int32_t C4XVer[4]{};
+	bool NoInitialize{};
+	bool SaveGame{};
+	bool NetworkGame{};
+	bool NetworkRuntimeJoin{};
+	bool Replay{};
+	int32_t Icon{};
+	int32_t ForcedGfxMode{};
+	char Title[C4MaxTitle + 1]{};
+	char MissionAccess[64]{"open"};
+	StrBuf Origin;
+};
+
+struct ScenarioDefinitions
+{
+	bool modules_set{};
+	// The argument types are the engine's own; nothing here reads them, only
+	// that SaveCore reached this call for an exact save.
+	template <class A, class B, class C>
+	void SetModules(A &&, B &&, C &&) { modules_set = true; }
+};
+
+struct C4Scenario
+{
+	ScenarioHead Head;
+	ScenarioDefinitions Definitions;
+	bool Save(C4Group &) { return wrote("ScenarioCore"); }
+};
+
+struct ParametersStub
+{
+	StrBuf ScenarioTitle{std::string{"Original Title"}};
+	bool Save(C4Group &, C4Scenario *) { return wrote("Parameters"); }
+};
+
+struct ConfigGeneralStub
+{
+	const char *ExePath = "/opt/game/";
+	const char *DefinitionPath = "Definitions/";
+};
+
+struct ConfigStub
+{
+	ConfigGeneralStub General;
+	void ForceRelativePath(StrBuf *origin)
+	{
+		origin->data = std::string("rel:") + origin->data;
+	}
+};
+
+static ConfigStub Config;
+
+static void SCopy(const char *source, char *target, size_t max)
+{
+	if (!source) { target[0] = 0; return; }
+	std::strncpy(target, source, max);
+	target[max] = 0;
+}
+
+static size_t SLen(const char *text) { return text ? std::strlen(text) : 0; }
+
+// Verbatim from src/C4Version.h:28-32 and src/C4Scenario.h:47 at the pinned
+// commit. Values, not behaviour, so they are copied rather than lifted.
+#define C4XVER1 4
+#define C4XVER2 9
+#define C4XVER3 11
+#define C4XVER4 0
+#define C4XVERBUILD 362
+#define C4SGFXMODE_NEWGFX 1
+
+#include "get_trailing_number.inc"
+
+// Stands in for GetFilenameOnly. The real one is a basename plus an extension
+// strip through a static buffer (StdFile.cpp:51-65,279-283), which is four
+// more lifts for no behaviour this section tests; every group name in the
+// fixture is a plain `Name.c4s` with no directory and one extension, so the
+// two cannot disagree. GetTrailingNumber, which is where the icon ladder's
+// real semantics live, IS lifted.
+static const char *GetFilenameOnly(const char *path)
+{
+	static std::string buffer;
+	buffer = path ? path : "";
+	const size_t slash = buffer.find_last_of("/\\");
+	if (slash != std::string::npos) buffer.erase(0, slash + 1);
+	const size_t dot = buffer.find_last_of('.');
+	if (dot != std::string::npos) buffer.erase(dot);
+	return buffer.c_str();
+}
+
+// C4GameSaveRecord::AdjustCore formats its title with std::format's
+// `{:03} {} [{}]`; the equivalent printf form keeps the same zero padding.
+template <class Buf, class... Args>
+static void FormatWithNull(Buf &buffer, const char *, int number, const char *title, int build)
+{
+	std::snprintf(buffer.data(), buffer.size(), "%03d %s [%d]", number, title, build);
+}
 
 struct StringsStub
 {
@@ -5293,6 +5404,10 @@ struct PlayersStub
 
 struct GameStub
 {
+	C4Scenario C4S;
+	ParametersStub Parameters;
+	std::vector<std::string> DefinitionFilenames;
+	const char *ScenarioFilename = "/games/Melee.c4s";
 	ScriptEngineStub ScriptEngine;
 	ObjectsStub Objects;
 	RoundResultsStub RoundResults;
@@ -5334,6 +5449,10 @@ struct C4GameSave
 
 	bool SaveRuntimeData();
 
+	C4Scenario rC4S;
+	virtual void AdjustCore(C4Scenario &) {}
+	bool SaveCore();
+
 #include "game_save_base_queries.inc"
 };
 
@@ -5354,15 +5473,20 @@ struct C4GameSaveSavegame : C4GameSave
 {
 	C4GameSaveSavegame() : C4GameSave(false, SyncSavegame) {}
 
+	virtual void AdjustCore(C4Scenario &rC4S) override;
+
 #include "game_save_savegame_queries.inc"
 };
 
 struct C4GameSaveRecord : C4GameSave
 {
 	bool fCopyScenario;
+	int iNum = 7;
 
 	C4GameSaveRecord(bool fAInitial, bool fACopyScenario)
 		: C4GameSave(fAInitial, SyncSynchronized), fCopyScenario(fACopyScenario) {}
+
+	virtual void AdjustCore(C4Scenario &rC4S) override;
 
 #include "game_save_record_queries.inc"
 };
@@ -5371,10 +5495,16 @@ struct C4GameSaveNetwork : C4GameSave
 {
 	C4GameSaveNetwork(bool fAInitial) : C4GameSave(fAInitial, SyncSynchronized) {}
 
+	virtual void AdjustCore(C4Scenario &rC4S) override;
+
 #include "game_save_network_queries.inc"
 };
 
 #include "game_save_runtime_data.inc"
+#include "game_save_core.inc"
+#include "game_save_adjust_savegame.inc"
+#include "game_save_adjust_record.inc"
+#include "game_save_adjust_network.inc"
 
 // Read one variant's whole decision vector through the base pointer, so every
 // value goes through the same virtual dispatch the real Save() call uses.
@@ -8575,6 +8705,102 @@ int main()
             sep();
             printf("{\"char\":\"%c\",\"type\":\"%s\"}", probe, name);
         }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4GameSave::SaveCore with the AdjustCore override that runs at the end
+    // of it. The parity fact is the ORDER of the two: SaveCore zeroes
+    // NetworkGame for every save, and C4GameSaveNetwork::AdjustCore then sets
+    // it back, so the field's final value is decided by the sequence rather
+    // than by either function alone. Neither a test of SaveCore nor one of
+    // AdjustCore can show that.
+    //
+    // Three more rules ride along. NoInitialize and SaveGame are written only
+    // for a NON-initial save, so an initial one keeps the scenario's own
+    // values. The title is overwritten only when GetKeepTitle() is false --
+    // the same inversion the Title component has in save_runtime_sequence.
+    // And Origin uses `if (GetSaveOrigin()) ... else if (GetClearOrigin())`,
+    // so a save that keeps an existing origin never consults GetClearOrigin.
+    arr_begin("save_core");
+    {
+        using namespace game_save_policy;
+
+        struct Case
+        {
+            const char *name;
+            int variant;  // 0 scenario, 1 savegame, 2 record, 3 network
+            bool initial;
+            bool save_origin;     // C4GameSaveScenario's fSaveOrigin
+            const char *group;    // destination name, for the savegame icon
+            const char *origin;   // Game.C4S's existing Head.Origin
+        };
+        const Case cases[] = {
+            {"scenario", 0, false, false, "Melee.c4s", ""},
+            {"savegame_no_slot", 1, false, false, "Savegame.c4s", ""},
+            {"savegame_slot_1", 1, false, false, "Save1.c4s", ""},
+            {"savegame_slot_10", 1, false, false, "Save10.c4s", ""},
+            {"savegame_slot_11", 1, false, false, "Save11.c4s", ""},
+            {"record_runtime", 2, false, false, "Record.c4s", ""},
+            {"network_runtime", 3, false, false, "Network.c4s", ""},
+            {"network_initial", 3, true, false, "Network.c4s", ""},
+            // With SaveOrigin and no origin yet, the scenario filename is
+            // copied in and made relative.
+            {"origin_copied_when_empty", 0, false, true, "Melee.c4s", ""},
+            // With one already set, the first arm keeps it untouched -- and
+            // the `else if` means GetClearOrigin() is never consulted.
+            {"origin_kept_when_present", 0, false, true, "Melee.c4s", "Prior.c4s"},
+        };
+
+        for (const auto &c : cases)
+        {
+            g_trace.clear();
+            g_failing.clear();
+
+            C4GameSaveScenario scenario(false, c.save_origin);
+            C4GameSaveSavegame savegame;
+            C4GameSaveRecord record(c.initial, true);
+            C4GameSaveNetwork network(c.initial);
+            C4GameSave *save = &scenario;
+            if (c.variant == 1) save = &savegame;
+            else if (c.variant == 2) save = &record;
+            else if (c.variant == 3) save = &network;
+
+            game_save_policy::C4Group group;
+            group.name = c.group;
+            save->pSaveGroup = &group;
+
+            // SaveCore opens with `rC4S = Game.C4S`, so the values it must
+            // either keep or overwrite have to be seeded on the SOURCE core.
+            // The title differs from Game.Parameters.ScenarioTitle so the
+            // GetKeepTitle() branch is visible either way.
+            Game.C4S = C4Scenario{};
+            game_save_policy::SCopy("Scenario Core Title", Game.C4S.Head.Title, C4MaxTitle);
+            Game.C4S.Head.Origin.Copy(c.origin);
+
+            const bool ok = save->SaveCore();
+            const ScenarioHead &head = save->rC4S.Head;
+
+            sep();
+            printf("{\"case\":\"%s\",\"initial\":%s,\"ok\":%s,"
+                   "\"version\":\"%d,%d,%d,%d\",\"no_initialize\":%s,"
+                   "\"save_game\":%s,\"network_game\":%s,"
+                   "\"network_runtime_join\":%s,\"replay\":%s,\"icon\":%d,"
+                   "\"forced_gfx_mode\":%d,\"title\":\"%s\","
+                   "\"mission_access\":\"%s\",\"origin\":\"%s\","
+                   "\"modules_set\":%s}",
+                   c.name, c.initial ? "true" : "false", ok ? "true" : "false",
+                   head.C4XVer[0], head.C4XVer[1], head.C4XVer[2], head.C4XVer[3],
+                   head.NoInitialize ? "true" : "false",
+                   head.SaveGame ? "true" : "false",
+                   head.NetworkGame ? "true" : "false",
+                   head.NetworkRuntimeJoin ? "true" : "false",
+                   head.Replay ? "true" : "false", head.Icon,
+                   head.ForcedGfxMode, head.Title, head.MissionAccess,
+                   head.Origin.getData(),
+                   save->rC4S.Definitions.modules_set ? "true" : "false");
+        }
+        g_trace.clear();
     }
     arr_end();
     printf(",\n");
