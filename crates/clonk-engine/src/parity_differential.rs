@@ -7057,6 +7057,158 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b3. poof_arm: `mrfPoof`'s movement arm (C4Material.cpp:663-688).
+    //
+    //       `material_poof_reaction` pins the two Rnd3 draws, but it re-derives
+    //       them from the seed rather than running the reaction, and every one
+    //       of its rows is `handled: 1` — so the **unhandled** outcome and the
+    //       extraction itself were never compared against the port at all.
+    //
+    //       `meePXSMove` is where the unhandled outcome lives. A non-user
+    //       reaction runs `mrfInsertCheck` first, and a splash that prevents
+    //       the interaction returns having extracted nothing and drawn nothing:
+    //       both draws are downstream of the check, so a port that extracted or
+    //       drew before checking would desynchronise everything after it. A
+    //       user reaction runs that check in `mrfUserCheck` instead, at the top
+    //       of the function, and the body's own call is gated off — which the
+    //       draw count catches, because running it twice doubles the draws.
+    for case in golden["poof_arm"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("poof_arm[{name}]");
+
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            SplashRate=1
+            MaxSlide=4
+
+            [Material Lava]
+            Name=Lava
+            Density=25
+            Incindiary=1
+            MaxSlide=4
+
+            [Material Granite]
+            Name=Granite
+            Density=50
+            "#,
+        )
+        .expect("poof arm oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const GRANITE: u8 = 3;
+        const PX: i32 = 8;
+        const PY: i32 = 9;
+
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        for gy in 0..HGT as usize {
+            for gx in 0..WDT as usize {
+                if gx != PX as usize {
+                    bytes[gy * WDT as usize + gx] = GRANITE;
+                }
+            }
+        }
+        for gx in 0..WDT as usize {
+            bytes[10 * WDT as usize + gx] = GRANITE;
+        }
+        // The arm extracts at the LANDSCAPE position, which the oracle passes
+        // as (iLSPosX, iLSPosY) = the pixel's own cell. Put a material there so
+        // the extraction is observable as the pixel going empty.
+        bytes[PY as usize * WDT as usize + PX as usize] = GRANITE;
+
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 25;
+        densities[GRANITE as usize] = 50;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Water".to_string());
+        material_names[2] = Some("Lava".to_string());
+        material_names[GRANITE as usize] = Some("Granite".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+        engine.rng = LcgRng::new(i(case, "seed") as u32);
+        engine.rng.randomize3();
+        let draws_before = engine.rng.count;
+
+        let material_before = engine
+            .landscape()
+            .and_then(|landscape| landscape.border_material_at(PX, PY));
+
+        let reaction = crate::material::MaterialReaction {
+            kind: crate::material::MaterialReactionKind::Poof,
+            user_defined: case["user_defined"].as_bool().unwrap_or(false),
+            insertion_check: true,
+        };
+        let mut pixel = crate::pxs::Pxs {
+            mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
+                .expect("oracle pxs material"),
+            x: itofix(PX),
+            y: itofix(PY),
+            xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
+            ydir: C4Fixed::from_raw(i(case, "ydir0") as i32),
+        };
+        let (mut x, mut y) = (PX, PY);
+        let mut pos_changed = false;
+        let handled = engine.execute_pxs_reaction(
+            reaction,
+            &mut x,
+            &mut y,
+            PX,
+            PY,
+            &mut pixel,
+            crate::material::MaterialId::new(i(case, "ls_mat") as usize),
+            match i(case, "event") {
+                0 => MaterialInteractionEvent::PxsPos,
+                1 => MaterialInteractionEvent::PxsMove,
+                _ => MaterialInteractionEvent::MassMove,
+            },
+            &mut pos_changed,
+        );
+
+        // The extraction is observable as the landscape pixel going empty.
+        let material_after = engine
+            .landscape()
+            .and_then(|landscape| landscape.border_material_at(PX, PY));
+        let extracted = i64::from(material_before.is_some() && material_after != material_before);
+
+        expect_eq(
+            &label,
+            0,
+            "handled",
+            i64::from(case["handled"].as_bool().unwrap_or(false)),
+            i64::from(handled),
+        );
+        expect_eq(&label, 0, "extractions", i(case, "extractions"), extracted);
+        expect_eq(
+            &label,
+            0,
+            "draws",
+            i(case, "draws"),
+            i64::from(engine.rng.count - draws_before),
+        );
+        expect_eq(
+            &label,
+            0,
+            "pos_changed",
+            i64::from(case["pos_changed"].as_bool().unwrap_or(false)),
+            i64::from(pos_changed),
+        );
+    }
+
     // 16b2. incinerate_arm: `mrfIncinerate` (C4Material.cpp:747-771), whose
     //       three arms are asymmetric in ways a port is likely to flatten.
     //

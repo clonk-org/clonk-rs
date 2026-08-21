@@ -5594,6 +5594,10 @@ struct C4MaterialMap
                        int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
                        int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
                        bool *pfPosChanged);
+    bool mrfPoof(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
+                 int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
+                 int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
+                 bool *pfPosChanged);
 };
 
 // PXS creation is only reached by the MassMove arm; record it rather than
@@ -5628,6 +5632,12 @@ static int32_t g_incinerate_x = -1, g_incinerate_y = -1;
 static bool g_flam_already_here = false;
 static int32_t g_flams_created = 0;
 
+// mrfPoof's landscape side: it extracts the material it lands on. Recorded
+// rather than performed, the same way InsertMaterial is.
+static int32_t g_extractions = 0;
+static int32_t g_extract_x = -1, g_extract_y = -1;
+static int32_t g_sounds = 0;
+
 struct C4Landscape
 {
     C4Fixed Gravity{itofix(20, 100)};
@@ -5648,6 +5658,13 @@ struct C4Landscape
     // has to record that mrfIncinerate reached it, and answer what the case
     // says it answered.
     bool Incinerate(int32_t x, int32_t y);
+    int32_t ExtractMaterial(int32_t x, int32_t y)
+    {
+        g_extractions++;
+        g_extract_x = x;
+        g_extract_y = y;
+        return 0;
+    }
 };
 
 struct GameStub
@@ -5694,6 +5711,7 @@ bool C4Landscape::Incinerate(int32_t x, int32_t y)
 #include "find_mat_slide.inc"
 
 static void Smoke(int32_t, int32_t, int32_t) { g_smoke++; }
+static void StartSoundEffectAt(const char *, int32_t, int32_t) { g_sounds++; }
 static int32_t Sign(int32_t x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
 template <class T> static T Abs(T v) { return v < 0 ? -v : v; }
 
@@ -5704,6 +5722,7 @@ static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
 #include "mrf_convert.inc"
 #include "mrf_insert.inc"
 #include "mrf_incinerate.inc"
+#include "mrf_poof.inc"
 
 } // namespace insert_check
 
@@ -5801,6 +5820,105 @@ static void printInsertCases()
                pos_changed ? "true" : "false", RandomCount - draws_before,
                insert_check::g_inserted, insert_check::g_inserted_mat,
                insert_check::g_inserted_x, insert_check::g_inserted_y);
+    }
+    printf("]");
+}
+
+// --- mrfPoof's movement arm -------------------------------------------------
+//
+// `material_poof_reaction` above pins the two Rnd3 draws, but it covers only
+// the two non-movement events and never runs the reaction itself -- its rows
+// are all `handled: 1`, so the unhandled outcome has never been exercised.
+//
+// `meePXSMove` is where the unhandled outcome lives, and the existing section
+// deliberately avoids it because it walks the landscape. This scaffold already
+// has that landscape, so the arm can run here:
+//
+//   * a non-user reaction runs `mrfInsertCheck` FIRST, and a splash that
+//     prevents the interaction returns unhandled having extracted **nothing**
+//     and drawn **nothing** -- the draws are downstream of the check, so a port
+//     that extracted or drew before checking would desynchronise;
+//   * a user-defined reaction skips that check, because `mrfUserCheck` already
+//     ran it, and extracts anyway.
+static void printPoofMoveCases()
+{
+    printf("\"poof_arm\":[");
+    struct Case
+    {
+        const char *name;
+        bool user_defined;
+        int32_t event;
+        int32_t pxs_mat;
+        int32_t ydir_n, ydir_p;
+    };
+    const Case cases[] = {
+        // Smooth contact: the check passes, so the arm extracts and draws.
+        {"move_extracts_after_check", false, 1 /*meePXSMove*/, 2, 1, 2},
+        // Rough splashing contact: the check refuses BEFORE anything is
+        // extracted or drawn.
+        {"move_check_blocks_before_extracting", false, 1, 1, 3, 1},
+        // A user reaction runs the check in mrfUserCheck INSTEAD, at the top of
+        // the function, so the same rough contact is refused there and never
+        // reaches the body at all.
+        {"user_move_blocked_by_the_user_check", true, 1, 1, 3, 1},
+        // The same user reaction on a smooth contact: mrfUserCheck passes and
+        // the body's own call is gated off, so this spends ONE check's draws,
+        // not two. Two would mean the gate was lost.
+        {"user_move_checks_once", true, 1, 2, 1, 2},
+        // The non-movement arms for comparison: always handled.
+        {"pos_extracts", false, 0 /*meePXSPos*/, 2, 1, 2},
+        {"mass_move_extracts", false, 2 /*meeMassMove*/, 2, 1, 2},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        for (int32_t gy = 0; gy < insert_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+                insert_check::g_grid[gy][gx] = (gx == 8) ? 0 : 3;
+        for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+            insert_check::g_grid[10][gx] = 3;
+        insert_check::g_smoke = 0;
+        insert_check::g_sounds = 0;
+        insert_check::g_extractions = 0;
+        insert_check::g_extract_x = -1;
+        insert_check::g_extract_y = -1;
+        insert_check::g_inserted = 0;
+
+        const int32_t seed = 0x2222;
+        FixedRandom(seed);
+        Randomize3();
+        const int32_t draws_before = RandomCount;
+
+        insert_check::C4MaterialReaction reaction{};
+        reaction.fUserDefined = c.user_defined;
+        reaction.fInsertionCheck = true;
+        reaction.iExecMask = ~0;
+        reaction.iDepth = 0;
+        reaction.iConvertMat = 0;
+
+        const int32_t ls_mat = 3;
+        int32_t iX = 8, iY = 9;
+        C4Fixed xdir = itofix(0, 1), ydir = itofix(c.ydir_n, c.ydir_p);
+        int32_t pxs_mat = c.pxs_mat;
+        bool pos_changed = false;
+        const bool handled = insert_check::Game.Material.mrfPoof(
+            &reaction, iX, iY, iX, iY, xdir, ydir, pxs_mat, ls_mat,
+            static_cast<insert_check::MaterialInteractionEvent>(c.event), &pos_changed);
+
+        printf("{\"name\":\"%s\",\"user_defined\":%s,\"event\":%d,\"pxs_mat\":%d,"
+               "\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,\"xdir0\":%d,\"ydir0\":%d,"
+               "\"seed\":%d,\"handled\":%s,\"x\":%d,\"y\":%d,\"xdir\":%d,"
+               "\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,\"extractions\":%d,"
+               "\"extract_x\":%d,\"extract_y\":%d}",
+               c.name, c.user_defined ? "true" : "false", c.event, c.pxs_mat, ls_mat,
+               8, 9, itofix(0, 1).val, itofix(c.ydir_n, c.ydir_p).val, seed,
+               handled ? "true" : "false", iX, iY, xdir.val, ydir.val,
+               pos_changed ? "true" : "false", RandomCount - draws_before,
+               insert_check::g_extractions, insert_check::g_extract_x,
+               insert_check::g_extract_y);
     }
     printf("]");
 }
@@ -8770,6 +8888,11 @@ int main()
     //       report unhandled, which one checks insertion before burning, and
     //       which one inserts a pixel that failed to ignite.
     printIncinerateCases();
+    printf(",\n");
+
+    // 22e3. poof_arm: mrfPoof's movement arm, where the unhandled outcome lives
+    //       and where the insertion check gates the extraction and both draws.
+    printPoofMoveCases();
     printf(",\n");
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.
