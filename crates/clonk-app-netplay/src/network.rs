@@ -155,7 +155,8 @@ pub struct ClientSettings {
     /// Reference-backed joins use the host's advertised build so Rust release
     /// versioning does not prevent an otherwise compatible connection.
     pub compatibility_build: i32,
-    pub player_name: String,
+    pub client_name: String,
+    pub client_nick: String,
     pub observer: bool,
     pub group_maker: clonk_engine::LegacyCString,
     pub password: clonk_engine::LegacyCString,
@@ -182,9 +183,9 @@ pub struct ClientSettings {
 }
 
 impl ClientSettings {
-    pub fn new(server_addr: SocketAddr, player_name: impl Into<String>) -> Self {
-        let player_name = player_name.into();
-        let group_maker = clonk_engine::LegacyCString::from_bytes(player_name.as_bytes().to_vec())
+    pub fn new(server_addr: SocketAddr, client_name: impl Into<String>) -> Self {
+        let client_name = client_name.into();
+        let group_maker = clonk_engine::LegacyCString::from_bytes(client_name.as_bytes().to_vec())
             .unwrap_or_default();
         let wildcard = if server_addr.is_ipv4() {
             SocketAddr::from(([0, 0, 0, 0], 0))
@@ -199,7 +200,8 @@ impl ClientSettings {
             logical_server_addresses: logical_server_addresses.clone(),
             server_addresses: logical_server_addresses,
             compatibility_build: clonk_network::CURRENT_GAME_BUILD,
-            player_name,
+            client_nick: client_name.clone(),
+            client_name,
             observer: false,
             group_maker,
             password: clonk_engine::LegacyCString::default(),
@@ -7692,7 +7694,7 @@ async fn run_client_worker_with_voice_enabled(
     current_frame_source: Arc<AtomicI32>,
     startup_cancellation: Option<NetworkStartupCancellation>,
 ) -> Result<()> {
-    let player_name = settings.player_name.clone();
+    let client_name = settings.client_name.clone();
     let league_transport = settings.league_transport.clone();
     let tcp_enabled = settings.mesh_tcp_bind_address.is_some();
     let udp_enabled = settings.mesh_udp_bind_address.is_some();
@@ -7716,7 +7718,8 @@ async fn run_client_worker_with_voice_enabled(
     } else {
         ParticipantKind::Player
     };
-    let mut client_config = ClientConfig::new(player_name.clone(), participant_kind)
+    let mut client_config = ClientConfig::new(client_name.clone(), participant_kind)
+        .with_nick(settings.client_nick)
         .with_compatibility_build(settings.compatibility_build)
         .with_voice_enabled(voice_enabled)
         .with_group_maker(settings.group_maker)
@@ -7763,7 +7766,7 @@ async fn run_client_worker_with_voice_enabled(
         return Ok(());
     }
     let (client_id, initial_status, league_endpoint) =
-        announce_connected_client(&mut client, player_name, &event_tx, &local_id_tx)?;
+        announce_connected_client(&mut client, client_name, &event_tx, &local_id_tx)?;
     let league_runtime = league_endpoint.and_then(|endpoint| {
         match spawn_league_client(endpoint, league_transport, event_tx.clone()) {
             Ok(runtime) => Some(runtime),
@@ -8541,7 +8544,7 @@ async fn record_client_control(
 
 fn announce_connected_client(
     client: &mut ClientHandle,
-    player_name: String,
+    client_name: String,
     event_tx: &NetworkEventSender,
     local_id_tx: &mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
 ) -> Result<(ClientId, NetworkStatus, Option<String>)> {
@@ -8565,7 +8568,7 @@ fn announce_connected_client(
     let _ = event_tx.send(NetworkEvent::JoinData(join_data));
     let _ = event_tx.send(NetworkEvent::PeerConnected {
         client_id,
-        name: player_name,
+        name: client_name,
         kind: ParticipantKind::Player,
     });
     Ok((client_id, initial_status, league_endpoint))

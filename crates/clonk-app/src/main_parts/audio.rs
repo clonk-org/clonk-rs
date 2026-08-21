@@ -5768,7 +5768,7 @@ pub(crate) fn initial_control_clients(
     };
     let name = match network_mode {
         Some(NetworkMode::Host(settings)) => string_name(&settings.player_name),
-        Some(NetworkMode::Client(settings)) => string_name(&settings.player_name),
+        Some(NetworkMode::Client(settings)) => string_name(&settings.client_name),
         None => string_name("Local"),
     };
     clients.replace_snapshot([clonk_engine::ClientCoreControlData {

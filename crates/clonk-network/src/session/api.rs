@@ -439,6 +439,7 @@ pub struct ClientMeshPuncherConfig {
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     pub name: String,
+    pub nick: String,
     pub group_maker: clonk_engine::LegacyCString,
     pub kind: ParticipantKind,
     /// Build advertised during `PID_Conn` and expected from every peer in the
@@ -472,6 +473,7 @@ impl ClientConfig {
         let group_maker =
             clonk_engine::LegacyCString::from_bytes(name.as_bytes().to_vec()).unwrap_or_default();
         Self {
+            nick: name.clone(),
             name,
             group_maker,
             kind,
@@ -487,6 +489,11 @@ impl ClientConfig {
             mesh_punchers: Vec::new(),
             voice_enabled: true,
         }
+    }
+
+    pub fn with_nick(mut self, nick: impl Into<String>) -> Self {
+        self.nick = nick.into();
+        self
     }
 
     pub fn with_password(mut self, password: clonk_engine::LegacyCString) -> Self {

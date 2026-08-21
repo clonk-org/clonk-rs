@@ -2760,7 +2760,7 @@ impl GameApp {
             return Ok(());
         };
         let resource_directory = settings.resource_directory.clone();
-        let maker = settings.player_name.clone();
+        let maker = settings.client_name.clone();
         if self.client_combined_scenario_path.is_none() {
             let resources = match resolve_client_scenario_resources(&join_data, |core| {
                 self.admission_resources

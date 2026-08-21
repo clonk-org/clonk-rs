@@ -4635,7 +4635,7 @@ impl GameApp {
         let (resource_directory, maker) = match self.network_mode.as_ref() {
             Some(NetworkMode::Client(settings)) => (
                 settings.resource_directory.clone(),
-                settings.player_name.clone(),
+                settings.client_name.clone(),
             ),
             _ => return Err("lobby preload has no staged host or client scenario".to_string()),
         };

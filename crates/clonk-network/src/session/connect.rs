@@ -1129,6 +1129,7 @@ where
     let io_statistics = client_mesh.io_statistics.clone();
     let ClientConfig {
         name,
+        nick,
         group_maker,
         kind,
         compatibility_build,
@@ -1147,12 +1148,16 @@ where
         clonk_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
             ClientError::Handshake("client name contains an interior NUL".to_string())
         })?;
+    let wire_nick =
+        clonk_engine::LegacyCString::from_bytes(nick.into_bytes()).ok_or_else(|| {
+            ClientError::Handshake("client nick contains an interior NUL".to_string())
+        })?;
     let local_core = clonk_engine::ClientCoreControlData {
         client_id: -1,
         activated: matches!(kind, ParticipantKind::Player),
         observer: matches!(kind, ParticipantKind::Observer),
-        name: wire_name.clone(),
-        nick: wire_name,
+        name: wire_name,
+        nick: wire_nick,
         lobby_ready: false,
     };
     let primary_connection_id = 0;
