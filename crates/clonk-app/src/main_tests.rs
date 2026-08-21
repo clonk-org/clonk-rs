@@ -287,6 +287,21 @@ fn render_mouse_test_app(app: &mut GameApp) {
 
 fn mouse_test_object_point(app: &GameApp, owner: i32, object: ObjectId) -> GuiPoint {
     let viewport = app.graphics.viewport_rect(owner).test_value();
+    // Prefer the object's own origin when the target search already resolves
+    // there. Scanning for the first hit returns the TOP of the pick box, and
+    // FindVisObject expands a short object's box upward by addtop()
+    // (src/C4Game.cpp:1476-1477), so the scan can land above the object's real
+    // shape - on whatever lies behind it. Tests want a point on the object.
+    if let Some((origin_x, origin_y)) = app
+        .snapshot
+        .object(object)
+        .and_then(|snapshot| app.graphics.world_to_screen(owner, snapshot.position))
+    {
+        let origin = GuiPoint::new(origin_x, origin_y);
+        if app.graphics.object_at_point(&app.snapshot, owner, origin) == Some(object) {
+            return origin;
+        }
+    }
     (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)

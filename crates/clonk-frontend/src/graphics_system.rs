@@ -10611,13 +10611,7 @@ impl GraphicsSystem {
         let shape = self
             .object_sprites
             .get(object.definition_id.as_str())
-            .map(|sprite| {
-                Self::con_scaled_shape(
-                    Self::sprite_def_shape(sprite),
-                    object.construction.clamp(0, FULL_CON),
-                    sprite.stretch_growth,
-                )
-            })
+            .map(|sprite| self.live_object_shape(sprite, object))
             .filter(|shape| shape.width > 0 && shape.height > 0);
 
         let (world_left, world_top, world_right, world_bottom) = if let Some(shape) = shape {
@@ -10646,6 +10640,16 @@ impl GraphicsSystem {
                 object.position.y + max_y + 1,
             )
         };
+
+        // `FindVisObject`'s point search does not test the plain shape
+        // vertically: it tests `Shape.y - addtop()` over
+        // `Shape.Hgt + addtop() - 1` (src/C4Game.cpp:1476-1477), where
+        // `addtop()` is `max(18 - Shape.Hgt, 0)` (src/C4Object.h:340). Every
+        // object shorter than 18 pixels therefore has its click target
+        // extended upward to a full 18, while the horizontal extent is left
+        // alone. The name reads as a build-check concept, but FindVisObject
+        // applies it unconditionally, so it governs ordinary mouse targeting.
+        let world_top = world_top - (18 - (world_bottom - world_top)).max(0);
 
         let left = ((world_left as f32 - viewport.viewport_x) * zoom + base_x).floor() as i32;
         let top = ((world_top as f32 - viewport.viewport_y) * zoom + base_y).floor() as i32;

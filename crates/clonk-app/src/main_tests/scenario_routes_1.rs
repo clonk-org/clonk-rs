@@ -171,10 +171,16 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
     app.test_render(&mut frame);
     let rendered_mage = app.snapshot.object(mage).cloned().test_value();
     main_assert_ne!(rendered_mage.ocf => 0, "live MCLK carries a targetable cached OCF");
-    let (screen_x, screen_y) = app
-        .graphics
-        .world_to_screen(owner, app.engine.test_object_snapshot(mage).position)
-        .test_value();
+    // Aim at a point the target search actually resolves to the mage rather
+    // than at its raw origin. FindVisObject's point search expands a short
+    // object's box upward by addtop() = max(18 - Shape.Hgt, 0)
+    // (src/C4Game.cpp:1476-1477, src/C4Object.h:340), and the Alchemy bag
+    // lying beside the mage is 10 tall (ALC_ DefCore Height=10, Offset=-5,-5),
+    // so its expanded box reaches the mage's own origin and wins on render
+    // order. That is C++ behaviour, not a picking bug; this subcase is about
+    // the mage's context menu, so it needs a point that targets the mage.
+    let mage_point = mouse_test_object_point(&app, owner, mage);
+    let (screen_x, screen_y) = (mage_point.x, mage_point.y);
     app.test_cursor(PhysicalPosition::new(
         f64::from(screen_x),
         f64::from(screen_y),

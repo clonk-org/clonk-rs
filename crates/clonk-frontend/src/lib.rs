@@ -8855,6 +8855,75 @@ mod tests {
         };
     }
 
+    /// A short object is clickable above its shape, by `addtop()` pixels.
+    ///
+    /// `FindVisObject`'s point search does not test the plain shape
+    /// vertically. It tests
+    /// `Inside(iY - (iObjY + Shape.y - addtop()), 0, Shape.Hgt + addtop() - 1)`
+    /// (7d43b47b `src/C4Game.cpp:1476-1477`), and `addtop()` is
+    /// `max(18 - Shape.Hgt, 0)` (`src/C4Object.h:340`). So every object
+    /// shorter than 18 pixels gets its click target extended *upward* to a
+    /// full 18, while the horizontal test uses `Shape.Wdt` untouched
+    /// (`:1476`).
+    ///
+    /// That asymmetry is easy to miss because it reads as a build-check
+    /// concept — the header calls `addtop` the "minimum top action size for
+    /// build check" — but `FindVisObject` applies it unconditionally, so it
+    /// governs ordinary mouse targeting too. Without it the small objects a
+    /// player picks up most often (rocks, nuggets, arrows: all well under 18
+    /// tall) have a materially smaller click target than in C++.
+    #[test]
+    fn short_objects_are_clickable_above_their_shape_by_addtop() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        snapshot.objects[0].ocf = 1;
+        // A five-pixel-tall shape: addtop() is 18 - 5 = 13.
+        snapshot.objects[0].vertices = vec![
+            clonk_engine::ObjectVertex {
+                x: -4,
+                y: -2,
+                cnat: 0,
+                friction: 0,
+            },
+            clonk_engine::ObjectVertex {
+                x: 4,
+                y: 2,
+                cnat: 0,
+                friction: 0,
+            },
+        ];
+        let target = snapshot.objects[0].id;
+
+        let focus = snapshot.objects[0].clone();
+        let mut graphics = test_graphics((320, 180, 150), "Addtop Pick");
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(&focus)]);
+        let (screen_x, screen_y) = graphics.world_to_screen(1, focus.position).test_value();
+
+        // Inside the shape proper: hit in either engine.
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, GuiPoint::new(screen_x, screen_y)) => Some(target),
+            "the shape itself is always a hit"
+        };
+
+        // Ten pixels above the object origin is above the shape's top edge
+        // (origin - 2) but well inside the 13-pixel addtop expansion.
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, GuiPoint::new(screen_x, screen_y - 10.0)) => Some(target),
+            "addtop extends the click target upward to a full 18 pixels"
+        };
+
+        // The expansion is upward only and bounded: below the shape stays a
+        // miss, and so does a point above the expanded top.
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, GuiPoint::new(screen_x, screen_y + 10.0)) => None,
+            "addtop must not grow the shape downward"
+        };
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, GuiPoint::new(screen_x, screen_y - 20.0)) => None,
+            "nor beyond Shape.Hgt + addtop"
+        };
+    }
+
     #[test]
     fn object_visibility_matches_cpp_masks_layers_and_local_bits() {
         let mut snapshot = make_snapshot();
