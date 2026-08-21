@@ -4940,3 +4940,45 @@ fn explicit_launch_failures_exit_instead_of_reconstructing_startup() {
         "an ordinary fullscreen start keeps the startup lineage it came from"
     );
 }
+
+/// Startup text is rasterized at the scale it is drawn at, for every scale a
+/// real display hands over (clonk-org/clonk-rs#566).
+///
+/// C++ rebuilds its GUI faces whenever the application scale changes
+/// (`C4Startup::EnsureLoaded` -> `C4StartupGraphics::InitFonts`), so a glyph is
+/// always rendered at its final size. The port must never present startup text
+/// from an atlas built for a *different* scale, because upscaling a
+/// lower-resolution text bitmap is exactly the blur this issue is about.
+///
+/// The 2x/3x cases already looked sharp, which is what made the fractional
+/// scales easy to miss: nothing in the pipeline refuses a mismatched atlas, it
+/// simply resamples. So the check here is the identity of the atlas — its own
+/// reported scale — rather than anything about how it looks.
+#[test]
+fn startup_text_uses_a_native_atlas_at_every_supported_scale() {
+    // 50% and 300% are the documented extremes (`Config.Graphics.Scale=50`
+    // through 3x); 125/150/175 are the common fractional desktop scales.
+    for scale in [0.5_f32, 1.25, 1.5, 1.75, 2.0, 3.0] {
+        let mut app = new_menu_app(640, 480);
+        install_native_test_fonts(&mut app, scale);
+
+        let fonts = app
+            .native_startup_fonts
+            .as_ref()
+            .unwrap_or_else(|| panic!("scale {scale} must build a native font set"));
+        main_assert_eq!(
+            fonts.scale() => scale,
+            "the atlas must be rasterized for {scale}, not reused from another scale"
+        );
+        main_assert!(
+            app.can_present_ordered_native_text(scale),
+            "scale {scale} must present startup text natively"
+        );
+        // A neighbouring scale must be refused rather than resampled: this is
+        // the assertion that fails if the port ever accepts a mismatched atlas.
+        main_assert!(
+            !app.can_present_ordered_native_text(scale + 0.25),
+            "an atlas built for {scale} must not satisfy a different scale"
+        );
+    }
+}
