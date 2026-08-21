@@ -8,3 +8,5 @@ MenuUndo=Rückgängig: %s
 MenuChoose=%s für %s auswählen
 MarsOrderTooExpensive=Diese Bestellung kostet %d Clunker. Du hast %d.
 MarsOrderSent=Kapsel gerufen: %d Waren für %d Clunker.
+GatherTask=Einsammeln
+GatherRow=%s einsammeln (%d)

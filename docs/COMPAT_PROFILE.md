@@ -250,6 +250,7 @@ profile disables all eight and the shipped scripts run unmodified.
 | `content-append-sft-release` | `SF5B` | Completes the missing `Control*Released` pair for the Eke SFT's forwarded controls, so the airbike and the selected item learn that a steering key came up. |
 | `content-append-fow-reveal` | `_FOW` | Lifts Dragon Rock's map-authored shadow volume before a Clonk enters it; the shipped generator overrides the Clonk's own light and holds interior objects inactive until it removes itself. |
 | `content-append-mars-capsule` | `BASE` | Pays for a ClonkMars supply order atomically with an error report; the shipped commit spends one item at a time silently and abandons the rest when the first does not fit. |
+| `content-append-gather-order` | `CLNK` | Adds a "Gather" context row to an owned crew member, listing one entry per loose item type it can both walk to and carry home and queueing Get/Enter for each in one batch. LegacyClonk has no order of this shape, so a spare crew member is either driven by hand or left as a backup. It sits here rather than under port-only features because it reaches the control stream: the row issues ordinary player commands through the existing queue, exactly as if each had been given by hand. Owned by clonk-org/clonk-rs#334. |
 | `content-append-menu-range-row` | `MS4C` | Collapses a ClonkMars range choice from three rows into one row with primary/secondary stepping. Presentation only. |
 
 ## Port-only features
