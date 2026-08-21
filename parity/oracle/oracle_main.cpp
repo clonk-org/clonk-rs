@@ -5579,6 +5579,10 @@ struct C4MaterialMap
                     int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
                     int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
                     bool *pfPosChanged);
+    bool mrfInsert(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
+                   int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
+                   int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
+                   bool *pfPosChanged);
 };
 
 // PXS creation is only reached by the MassMove arm; record it rather than
@@ -5597,11 +5601,24 @@ struct PxsStub
     }
 };
 
+// InsertMaterial is a whole landscape mutation of its own and deserves its own
+// section; here it only has to record that mrfInsert reached it, and with what.
+static int32_t g_inserted = 0;
+static int32_t g_inserted_mat = -1, g_inserted_x = -1, g_inserted_y = -1;
+
 struct C4Landscape
 {
     C4Fixed Gravity{itofix(20, 100)};
     int32_t GetDensity(int32_t x, int32_t y);
     bool FindMatSlide(int32_t &fx, int32_t &fy, int32_t ydir, int32_t mdens, int32_t mslide);
+    bool InsertMaterial(int32_t mat, int32_t tx, int32_t ty)
+    {
+        g_inserted++;
+        g_inserted_mat = mat;
+        g_inserted_x = tx;
+        g_inserted_y = ty;
+        return true;
+    }
 };
 
 struct GameStub
@@ -5639,6 +5656,7 @@ static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
 #include "mrf_insert_check.inc"
 #include "mrf_user_check.inc"
 #include "mrf_convert.inc"
+#include "mrf_insert.inc"
 
 } // namespace insert_check
 
@@ -5649,6 +5667,97 @@ static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
 // into `meePXSPos` when the reaction is user-defined, and a *successful*
 // conversion returns false ("not handled") while a conversion to an unloaded or
 // sky target returns true and kills the pixel.
+// mrfInsert's splash/slide check is `!fUserDefined`-gated INSIDE the movement
+// case (C4Material.cpp:783-787), because a user-defined reaction already ran
+// the same check through mrfUserCheck. Dropping that gate runs the check twice
+// and doubles the synchronized draws on every inserting pixel, which is why the
+// draw count is emitted alongside the verdict.
+static void printInsertCases()
+{
+    printf("\"insert_arm\":[");
+    struct Case
+    {
+        const char *name;
+        bool user_defined;
+        bool insertion_check;  // CheckSlide=
+        int32_t event;
+        int32_t pxs_mat;
+        int32_t ydir_n, ydir_p;
+    };
+    const Case cases[] = {
+        // Only the movement event inserts; the other two break straight out.
+        {"pos_event_unhandled", false, true, 0 /*meePXSPos*/, 1, 1, 2},
+        {"mass_move_unhandled", false, true, 2 /*meeMassMove*/, 1, 1, 2},
+        // Rough contact on a splashing material: the check refuses, so the
+        // pixel keeps existing and nothing is inserted. Two draws.
+        {"hardcoded_splash_blocks_insert", false, true, 1 /*meePXSMove*/, 1, 3, 1},
+        // Incendiary contact passes the check but spends one draw on the way.
+        {"hardcoded_incendiary_inserts", false, true, 1, 2, 1, 2},
+        // The same incendiary insertion as a USER reaction: the check runs once,
+        // in mrfUserCheck, and the body's own call is gated off. Still one draw
+        // — two would mean the gate was lost.
+        {"user_insert_checks_once", true, true, 1, 2, 1, 2},
+        // CheckSlide=0 skips the check entirely, so a rough splash contact
+        // inserts anyway and spends nothing.
+        {"user_no_check_inserts", true, false, 1, 1, 3, 1},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        // Boxed in over a solid floor, so FindMatSlide has no target and the
+        // check's verdict is decided by the splash arm alone.
+        for (int32_t gy = 0; gy < insert_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+                insert_check::g_grid[gy][gx] = (gx == 8) ? 0 : 3;
+        for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+            insert_check::g_grid[10][gx] = 3;
+        insert_check::g_smoke = 0;
+        insert_check::g_inserted = 0;
+        insert_check::g_inserted_mat = -1;
+        insert_check::g_inserted_x = -1;
+        insert_check::g_inserted_y = -1;
+
+        const int32_t seed = 0x2222;
+        FixedRandom(seed);
+        Randomize3();
+        const int32_t draws_before = RandomCount;
+
+        insert_check::C4MaterialReaction reaction{};
+        reaction.fUserDefined = c.user_defined;
+        reaction.fInsertionCheck = c.insertion_check;
+        reaction.iExecMask = ~0;
+        reaction.iDepth = 0;
+        reaction.iConvertMat = 0;
+
+        const int32_t ls_mat = 3;
+        int32_t iX = 8, iY = 9;
+        C4Fixed xdir = itofix(0, 1), ydir = itofix(c.ydir_n, c.ydir_p);
+        int32_t pxs_mat = c.pxs_mat;
+        bool pos_changed = false;
+        const bool handled = insert_check::Game.Material.mrfInsert(
+            &reaction, iX, iY, iX, iY, xdir, ydir, pxs_mat, ls_mat,
+            static_cast<insert_check::MaterialInteractionEvent>(c.event), &pos_changed);
+
+        printf("{\"name\":\"%s\",\"user_defined\":%s,\"insertion_check\":%s,"
+               "\"event\":%d,\"pxs_mat\":%d,\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,"
+               "\"xdir0\":%d,\"ydir0\":%d,\"seed\":%d,\"handled\":%s,\"x\":%d,"
+               "\"y\":%d,\"xdir\":%d,\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,"
+               "\"inserted\":%d,\"inserted_mat\":%d,\"inserted_x\":%d,"
+               "\"inserted_y\":%d}",
+               c.name, c.user_defined ? "true" : "false",
+               c.insertion_check ? "true" : "false", c.event, c.pxs_mat, ls_mat,
+               8, 9, itofix(0, 1).val, itofix(c.ydir_n, c.ydir_p).val, seed,
+               handled ? "true" : "false", iX, iY, xdir.val, ydir.val,
+               pos_changed ? "true" : "false", RandomCount - draws_before,
+               insert_check::g_inserted, insert_check::g_inserted_mat,
+               insert_check::g_inserted_x, insert_check::g_inserted_y);
+    }
+    printf("]");
+}
+
 static void printConvertCases()
 {
     printf("\"convert_check\":[");
@@ -8164,6 +8273,10 @@ int main()
 
     // 22d. convert_check: mrfConvert's fallthrough and verdict rules.
     printConvertCases();
+    printf(",\n");
+
+    // 22e. insert_arm: mrfInsert's event gate and its once-only splash check.
+    printInsertCases();
     printf(",\n");
 
     // 23. DFA_FLOAT's raw C4Fixed bounds. C4DefCore's Physical member is

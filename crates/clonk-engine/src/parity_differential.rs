@@ -7368,6 +7368,175 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16e. insert_arm: `mrfInsert` (C4Material.cpp:773-798) — the arm a pixel
+    //      takes to stop being PXS and become landscape. Only `meePXSMove`
+    //      inserts; the other two events break straight out.
+    //
+    //      The rule worth an oracle is the placement of its splash/slide
+    //      check: it sits *inside* the movement case behind a `!fUserDefined`
+    //      gate, because a user-defined reaction already ran the same check on
+    //      the way in through `mrfUserCheck`. Lose that gate and every
+    //      inserting user pixel runs the check twice, spending twice the
+    //      synchronized draws — a desync that leaves the position untouched
+    //      and so hides from any comparison that only looks at where the pixel
+    //      ended up. The draw count is compared for exactly that reason.
+    for case in golden["insert_arm"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("insert_arm[{name}]");
+
+        // Indices match the oracle's Map: 0 Vacuum, 1 Water (SplashRate 1
+        // makes the roll certain), 2 Lava (incendiary), 3 Granite.
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            SplashRate=1
+            MaxSlide=4
+
+            [Material Lava]
+            Name=Lava
+            Density=25
+            Incindiary=1
+            MaxSlide=4
+
+            [Material Granite]
+            Name=Granite
+            Density=50
+            "#,
+        )
+        .expect("insert arm oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const GRANITE: u8 = 3;
+        const PX: i32 = 8;
+        const PY: i32 = 9;
+        // Boxed in over a solid floor, so `FindMatSlide` has no target and the
+        // check's verdict is decided by the splash arm alone.
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        for gy in 0..HGT as usize {
+            for gx in 0..WDT as usize {
+                if gx != PX as usize {
+                    bytes[gy * WDT as usize + gx] = GRANITE;
+                }
+            }
+        }
+        for gx in 0..WDT as usize {
+            bytes[10 * WDT as usize + gx] = GRANITE;
+        }
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 25;
+        densities[GRANITE as usize] = 50;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Water".to_string());
+        material_names[2] = Some("Lava".to_string());
+        material_names[GRANITE as usize] = Some("Granite".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+        engine.rng = LcgRng::new(i(case, "seed") as u32);
+        engine.rng.randomize3();
+        let draws_before = engine.rng.count;
+
+        let reaction = crate::material::MaterialReaction {
+            kind: crate::material::MaterialReactionKind::Insert,
+            user_defined: case["user_defined"].as_bool().unwrap_or(false),
+            insertion_check: case["insertion_check"].as_bool().unwrap_or(false),
+        };
+        let mut pixel = crate::pxs::Pxs {
+            mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
+                .expect("oracle pxs material"),
+            x: itofix(PX),
+            y: itofix(PY),
+            xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
+            ydir: C4Fixed::from_raw(i(case, "ydir0") as i32),
+        };
+        let (mut x, mut y) = (PX, PY);
+        let mut pos_changed = false;
+        let handled = engine.execute_pxs_reaction(
+            reaction,
+            &mut x,
+            &mut y,
+            PX,
+            PY,
+            &mut pixel,
+            crate::material::MaterialId::new(i(case, "ls_mat") as usize),
+            match i(case, "event") {
+                0 => MaterialInteractionEvent::PxsPos,
+                1 => MaterialInteractionEvent::PxsMove,
+                _ => MaterialInteractionEvent::MassMove,
+            },
+            &mut pos_changed,
+        );
+
+        expect_eq(
+            &label,
+            0,
+            "handled",
+            i64::from(case["handled"].as_bool().unwrap_or(false)),
+            i64::from(handled),
+        );
+        expect_eq(&label, 0, "x", i(case, "x"), i64::from(x));
+        expect_eq(&label, 0, "y", i(case, "y"), i64::from(y));
+        expect_eq(&label, 0, "xdir", i(case, "xdir"), pixel.xdir.val() as i64);
+        expect_eq(&label, 0, "ydir", i(case, "ydir"), pixel.ydir.val() as i64);
+        expect_eq(
+            &label,
+            0,
+            "pos_changed",
+            i64::from(case["pos_changed"].as_bool().unwrap_or(false)),
+            i64::from(pos_changed),
+        );
+        expect_eq(
+            &label,
+            0,
+            "draws",
+            i(case, "draws"),
+            i64::from(engine.rng.count - draws_before),
+        );
+        // The oracle stubs `InsertMaterial` to a recorder — that mutation is a
+        // whole landscape operation of its own and earns its own section — so
+        // what is compared here is that the port reached it with the same
+        // material at the same pixel. The port runs the real insertion, and
+        // this fixture's boxed-in column leaves the material exactly where it
+        // was placed.
+        let landed = engine
+            .landscape
+            .as_ref()
+            .and_then(|landscape| {
+                landscape.material_at(i(case, "inserted_x") as i32, i(case, "inserted_y") as i32)
+            })
+            .map(|id| id.index() as i64);
+        if i(case, "inserted") == 0 {
+            // Read the pixel itself, not the recorder's unset (-1, -1).
+            let at_pixel = engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(PX, PY));
+            expect_eq(&label, 0, "inserted", 0, i64::from(at_pixel.is_some()));
+        } else {
+            expect_eq(
+                &label,
+                0,
+                "inserted_mat",
+                i(case, "inserted_mat"),
+                landed.unwrap_or(-1),
+            );
+        }
+    }
+
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
     // including the zero default for a real resource without [Physical]
     // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance
