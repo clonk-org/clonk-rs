@@ -982,3 +982,106 @@ impl Drop for TestDirectory {
         let _ = fs::remove_dir_all(&self.path);
     }
 }
+
+/// A dynamic whose declared metadata disagrees with the bytes actually packed
+/// is refused rather than published (clonk-org/clonk-rs#526).
+///
+/// C++ recomputes the checksum after building the standalone and compares it to
+/// the core it is about to advertise (`C4Network2Res.cpp:676-688`):
+///
+/// ```cpp
+/// if (!C4Group_GetFileCRC(szStandalone, &iCRC32)) { … return false; }
+/// if (!fSetOfficial && iCRC32 != Core.getFileCRC())
+/// {
+///     if (!SEqual(szFile, szStandalone)) remove(szStandalone); szStandalone[0] = '\0';
+///     return false;
+/// }
+/// ```
+///
+/// The port's equivalent is `validate_dynamic_metadata`, which compares all
+/// three advertised fields. It was reachable but unasserted — nothing in the
+/// tree referenced `DynamicMetadataMismatch` — so a regression that advertised a
+/// resource under a checksum it does not have would have been silent, and every
+/// client that trusted the advertised CRC would reject the transfer it was
+/// handed.
+///
+/// Each field is perturbed on its own, so the check cannot pass by comparing
+/// only one of them.
+#[test]
+fn dynamic_metadata_that_disagrees_with_the_packed_bytes_is_refused() {
+    let honest = composed_dynamic();
+
+    for (label, corrupt) in [
+        (
+            "file_crc",
+            Box::new(|dynamic: &mut InitialNetworkDynamic| {
+                dynamic.file_crc = dynamic.file_crc.wrapping_add(1);
+            }) as Box<dyn Fn(&mut InitialNetworkDynamic)>,
+        ),
+        (
+            "file_size",
+            Box::new(|dynamic: &mut InitialNetworkDynamic| {
+                dynamic.file_size = dynamic.file_size.wrapping_add(1);
+            }),
+        ),
+        (
+            "contents_crc",
+            Box::new(|dynamic: &mut InitialNetworkDynamic| {
+                dynamic.contents_crc = dynamic.contents_crc.wrapping_add(1);
+            }),
+        ),
+    ] {
+        let directory = TestDirectory::new();
+        let sources = directory.path().join("sources");
+        fs::create_dir_all(&sources).unwrap();
+        let network = directory.path().join("network");
+
+        let scenario = packed_source(&sources, "Scenario.c4s", "OracleHost", b"scenario");
+        let system = packed_source(&sources, "System.c4g", "OracleHost", b"system");
+
+        let mut dynamic = composed_dynamic();
+        corrupt(&mut dynamic);
+
+        let error = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+            network_directory: network,
+            group_maker: crate::c4(b"OracleHost"),
+            max_load_file_size: 100 * 1024 * 1024,
+            scenario: source(scenario, b"Missions/Scenario.c4s"),
+            definitions: Vec::new(),
+            system: source(system, b"System.c4g"),
+            materials: Vec::new(),
+            players: Vec::new(),
+            dynamic,
+            dynamic_wire_name: crate::c4(b"Network/DynScenario.c4s"),
+            parameters: base_parameters(),
+            dynamic_tick: 7,
+        })
+        .expect_err("a dynamic advertising the wrong metadata must not publish");
+
+        match error {
+            clonk_network::HostInitialResourcePublicationError::DynamicMetadataMismatch {
+                expected_size,
+                expected_crc,
+                expected_contents_crc,
+                actual_size,
+                actual_crc,
+                actual_contents_crc,
+            } => {
+                // The actual side always reports what the packed bytes really are.
+                assert_eq!(actual_size, honest.file_size, "{label}: actual size");
+                assert_eq!(actual_crc, honest.file_crc, "{label}: actual crc");
+                assert_eq!(
+                    actual_contents_crc, honest.contents_crc,
+                    "{label}: actual contents crc"
+                );
+                // …and exactly the perturbed field differs from it, so the
+                // comparison covers all three rather than short-circuiting.
+                let differing = usize::from(expected_size != actual_size)
+                    + usize::from(expected_crc != actual_crc)
+                    + usize::from(expected_contents_crc != actual_contents_crc);
+                assert_eq!(differing, 1, "{label}: only the corrupted field differs");
+            }
+            other => panic!("{label}: expected a metadata mismatch, got {other:?}"),
+        }
+    }
+}
