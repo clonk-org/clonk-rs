@@ -784,6 +784,29 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/dig_free.inc"
 
+# 3q3g. Lift the builtin reaction-selection loop out of CrossMapMaterials.
+#       This is the decision every arm section above depends on: which builtin
+#       reaction a (PXS material, landscape material) pair gets in the first
+#       place. Only the first loop is lifted -- the rest of CrossMapMaterials
+#       initialises textures and PXS facets and would drag in the whole graphics
+#       layer -- following the same block-lift approach as
+#       script_direct_exec_scope.inc.
+#
+#       Two things make it worth pinning. The chain is an if/else-if LADDER, so
+#       its order is the behaviour: InMatConvert wins over everything, then
+#       poof, then incinerate, then corrode, then insert. And every branch but
+#       the convert one sits behind `MatDensity(PXS) <= MatDensity(LS)`, so a
+#       lighter material hitting a heavier one gets NO reaction at all -- a gate
+#       that is easy to lose when the ladder is rewritten as a match.
+awk '
+  /^void C4MaterialMap::CrossMapMaterials\(\)/ { p = 1 }
+  p { print }
+  p && /^[[:space:]]*SetMatReaction\(iMatPXS, iMatLS, pReaction\);$/ { tail = 1 }
+  tail && /^[[:space:]]*}$/ { closes++ }
+  tail && closes == 2 { print "}"; found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/cross_map_reactions.inc"
+
 # 3q3b. Lift mrfIncinerate. It is the one reaction whose arms are asymmetric in
 #       a way a port is likely to flatten: `meeMassMove` and `meePXSPos` try to
 #       incinerate and report **unhandled** when they cannot, while `meePXSMove`
