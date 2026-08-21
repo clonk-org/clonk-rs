@@ -715,6 +715,17 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Material.cpp" > "$gen/mrf_convert.inc"
 
+# 3q5. Lift mrfInsert. Its splash/slide check is `!fUserDefined`-gated INSIDE
+#      the movement case, because a user-defined reaction already ran the same
+#      check through mrfUserCheck. Losing that gate runs the check twice and
+#      doubles the synchronized draws on every inserting pixel.
+awk '
+  /^bool C4MaterialMap::mrfInsert\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/mrf_insert.inc"
+
 # 3r. Lift the container lifecycle: C4Object::Enter, Exit and Collect. These are
 #     ordered state machines whose SHAPE is the parity fact — which script call
 #     runs before which mutation, which rollback undoes a failed insert, and
