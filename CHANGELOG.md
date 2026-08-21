@@ -4,6 +4,37 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-08-21
+
+### Bug fixes
+
+- Pad font atlas cells and gutters with transparent white (#939)
+- Complete runtime joins through chase catch-up (#938)
+- Name the peer terminal reason in reliable-UDP write errors (#936)
+- Load savegame origin materials for network hosts (#925)
+
+### Features
+
+- Offer an idle clonk a gather order for reachable loose items (#920)
+
+### Testing
+
+- Differential-check the save core adjustments against the c++ golden (#935)
+- Pin that a horizontal contact discards the subpixel remainder (#930)
+- Differential-check the builtin material reaction map against C++ (#934)
+- Differential-check the dig-free circle walk against C++ (#933)
+- Differential-check landscape material extraction against C++ (#932)
+- Differential-check the c4value save type tags against the c++ golden (#931)
+- Differential-check landscape material insertion against C++ (#929)
+- Pin that a zero collection limit means unlimited (#928)
+- Differential-check the corrode movement arm against C++ (#927)
+- Differential-check the save runtime component sweep against the c++ golden (#926)
+- Pin that the damage chain replaces its value and stops at zero (#924)
+- Differential-check the poof movement arm against C++ (#923)
+- Differential-check the incinerate reaction arms against C++ (#922)
+- Pin the frontmost mouse candidate and the dead foreground pass (#921)
+- Pin that the console halt buttons follow the live halt count (#919)
+
 ## [0.18.0] - 2026-08-21
 
 ### Bug fixes
