@@ -5,6 +5,7 @@
 //! [`PortraitThumbnailRequest`] values one at a time and returns the decoded
 //! previews, matching `C4PortraitSelDlg::ImageLoader`'s incremental worklist.
 
+use crate::caption_scroll::{advance_caption_scroll, CaptionScrollState};
 use crate::classic_gui::{
     draw_3d_frame, draw_engine_box, draw_facet_nearest, draw_facet_stretch, with_surface_clip,
     ClassicButtonState, ClassicGuiSkin, IntRect,
@@ -14,10 +15,11 @@ use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
 use clonk_graphics::{GammaRamp, Rect as SurfaceRect, Surface};
 use clonk_gui::Rect as GuiRect;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const MIN_WIDTH: i32 = 300;
 const MAX_WIDTH: i32 = 600;
@@ -164,6 +166,14 @@ impl PortraitGridContentLayout {
         }
     }
 }
+
+/// `C4GUI_TitleAutoScrollTime` (`C4Gui.h:151`), installed on every dialog
+/// title by `C4GuiDialogs.cpp:411`.
+const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
+
+/// `WoodenLabel::DrawElement` offsets a left-aligned caption by 5px before
+/// scrolling (`C4GuiLabels.cpp:180`).
+const TITLE_LEFT_INDENT: i32 = 5;
 
 impl PortraitItem {
     fn none() -> Self {
@@ -312,6 +322,7 @@ pub struct PortraitSelController {
     /// `ComboBox::DoDropdown` seeds the menu with
     /// (`C4GuiComboBox.cpp:116`).
     location_caption_width: RefCell<Option<i32>>,
+    caption_scroll: Cell<CaptionScrollState>,
 }
 
 impl PortraitSelController {
@@ -336,6 +347,7 @@ impl PortraitSelController {
             scrollbar_pin: 0,
             grid_layout: RefCell::new(None),
             location_caption_width: RefCell::new(None),
+            caption_scroll: Cell::new(CaptionScrollState::default()),
             set_picture,
             set_big_icon,
             combo_open: false,
@@ -1434,14 +1446,21 @@ impl PortraitSelController {
         self.update_location_popup_width(&resources.fonts.text);
         let layout = self.layout_for(surface);
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
-        resources.skin.draw_caption_with_right_indent(
+        let right_indent = layout.close.w + 4;
+        let caption_scroll = self.caption_scroll_offset_at(
+            Instant::now(),
+            &resources.fonts.text,
+            layout.caption.w - right_indent,
+        );
+        resources.skin.draw_caption_scrolled(
             surface,
             layout.caption,
             &self.caption(),
             &resources.fonts.text,
             [255, 255, 255, 255],
             TextAlign::Left,
-            layout.close.w + 4,
+            right_indent,
+            caption_scroll,
             gamma,
         );
         let close_highlighted = self
@@ -1655,6 +1674,17 @@ impl PortraitSelController {
                 gamma,
             );
         }
+    }
+
+    /// One-pixel-per-draw title bounce after the three second dwell
+    /// (`C4GuiLabels.cpp:178-201`).
+    fn caption_scroll_offset_at(&self, now: Instant, font: &ClonkFont, width: i32) -> i32 {
+        let caption = self.caption();
+        if caption.is_empty() {
+            return 0;
+        }
+        let max_scroll = (font.measure(&caption, true).0 + TITLE_LEFT_INDENT - width).max(0);
+        advance_caption_scroll(&self.caption_scroll, now, max_scroll, TITLE_SCROLL_DELAY)
     }
 
     fn caption(&self) -> String {
@@ -4374,5 +4404,119 @@ mod tests {
         let escaped = controller.handle_key_down(KeyCode::Escape);
         assert!(!controller.combo_open);
         assert_eq!(sounds(&escaped), [PortraitSelSound::DoorClose]);
+    }
+
+    /// The selector title bounces after three seconds, one pixel per drawn
+    /// frame (clonk-org/clonk-rs#571).
+    ///
+    /// `C4GuiDialogs.cpp:411` gives every dialog title
+    /// `C4GUI_TitleAutoScrollTime` (3000ms), and `WoodenLabel::DrawElement`
+    /// (`C4GuiLabels.cpp:178-201`) implements the bounce. Three details decide
+    /// whether it feels right:
+    ///
+    /// * the step is one pixel **per draw**, not per unit of time — the same
+    ///   frame-driven cadence the scroll-bar arrows use, and there is no timer
+    ///   behind it;
+    /// * the dwell applies at the start *and again at every reversal*, because
+    ///   turning around resets `tLastChangeTime`;
+    /// * a title that fits never moves, since `iMaxScroll` clamps to 0.
+    ///
+    /// The portrait selector's title is exactly the case that needs it: it
+    /// carries the current location's full path, which is routinely longer
+    /// than the dialog.
+    #[test]
+    fn a_long_selector_title_bounces_one_pixel_per_draw_after_three_seconds() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let font = &fonts.text;
+        let base = Instant::now();
+        let controller = PortraitSelController::new(
+            vec![PortraitLocation::new(
+                "User",
+                "/a/very/long/portrait/directory/that/will/not/fit/in/the/caption",
+            )],
+            0,
+            Vec::new(),
+            true,
+            true,
+        );
+        let layout = controller.layout();
+        let width = layout.caption.w - (layout.close.w + 4);
+        assert!(
+            font.measure(&controller.caption(), true).0 > width,
+            "the fixture title must actually overflow for this to say anything"
+        );
+
+        let offset = |now: Instant| controller.caption_scroll_offset_at(now, font, width);
+
+        // The first draw only starts the clock.
+        assert_eq!(offset(base), 0);
+        assert_eq!(
+            offset(base + TITLE_SCROLL_DELAY - Duration::from_millis(1)),
+            0,
+            "nothing moves before the three second dwell elapses"
+        );
+
+        // Then one pixel per draw, regardless of how much time each draw spans.
+        let outbound = base + TITLE_SCROLL_DELAY;
+        assert_eq!(offset(outbound), 1);
+        assert_eq!(offset(outbound), 2, "the step is per draw, not per tick");
+        assert_eq!(offset(outbound + Duration::from_secs(9)), 3);
+
+        // Run to the far end. The turn is visible as the position ceasing to
+        // advance: reversing re-arms the dwell, so it parks until three more
+        // seconds pass rather than scrolling straight back.
+        let mut position = 3;
+        let mut draws = 0;
+        let far_end = loop {
+            let next = offset(outbound);
+            draws += 1;
+            if next <= position {
+                break position;
+            }
+            position = next;
+            assert!(draws < 10_000, "the bounce must reach its far end");
+        };
+        assert!(far_end > 3, "it travelled before turning");
+        // The turning draw is the one that already stepped back, so the
+        // position now holds for the whole second dwell.
+        assert_eq!(
+            offset(outbound),
+            far_end,
+            "further draws inside the dwell do not move it"
+        );
+        assert_eq!(offset(outbound), far_end);
+
+        // Once the second dwell elapses it walks back the way it came.
+        let inbound = outbound + TITLE_SCROLL_DELAY;
+        assert_eq!(offset(inbound), far_end - 1);
+        assert_eq!(offset(inbound), far_end - 2);
+    }
+
+    /// A title that fits never scrolls, however long the dialog is left open.
+    #[test]
+    fn a_short_selector_title_never_scrolls() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let font = &fonts.text;
+        let controller = PortraitSelController::new(
+            vec![PortraitLocation::new("User", "/u")],
+            0,
+            Vec::new(),
+            true,
+            true,
+        );
+        let layout = controller.layout();
+        let generous = layout.caption.w * 4;
+        let base = Instant::now();
+        for step in 0..50 {
+            assert_eq!(
+                controller.caption_scroll_offset_at(
+                    base + TITLE_SCROLL_DELAY * 2 + Duration::from_millis(step),
+                    font,
+                    generous,
+                ),
+                0,
+                "iMaxScroll clamps to zero for a caption that fits"
+            );
+        }
     }
 }
