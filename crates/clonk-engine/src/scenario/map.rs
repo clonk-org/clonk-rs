@@ -879,8 +879,8 @@ pub(in crate::scenario) fn load_legacy_landscape(
     post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
     prepared_map_creator: &mut Option<crate::map_creator_s2::MapCreatorS2State>,
 ) -> Result<Option<Landscape>, ScenarioError> {
-    *post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
-    let Some(mut landscape) = load_legacy_landscape_body(
+    let mut ignore_progress = |_: i32, _: &'static str| {};
+    load_legacy_landscape_with_progress(
         group,
         manifest,
         runtime,
@@ -891,6 +891,37 @@ pub(in crate::scenario) fn load_legacy_landscape(
         map_callback_functions,
         post_init_map_callbacks,
         prepared_map_creator,
+        &mut ignore_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::scenario) fn load_legacy_landscape_with_progress(
+    group: &Group,
+    manifest: &LegacyScenarioManifest,
+    runtime: Option<&LandscapeGameData>,
+    overload_current: bool,
+    classifier: Option<&mut MapPixelClassifier>,
+    random_seed: u64,
+    startup_player_count: i32,
+    map_callback_functions: &HashSet<String>,
+    post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
+    prepared_map_creator: &mut Option<crate::map_creator_s2::MapCreatorS2State>,
+    report_progress: &mut dyn FnMut(i32, &'static str),
+) -> Result<Option<Landscape>, ScenarioError> {
+    *post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
+    let Some(mut landscape) = load_legacy_landscape_body_with_progress(
+        group,
+        manifest,
+        runtime,
+        overload_current,
+        classifier,
+        random_seed,
+        startup_player_count,
+        map_callback_functions,
+        post_init_map_callbacks,
+        prepared_map_creator,
+        report_progress,
     )?
     else {
         return Ok(None);
@@ -946,6 +977,36 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
     map_callback_functions: &HashSet<String>,
     post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
     prepared_map_creator: &mut Option<crate::map_creator_s2::MapCreatorS2State>,
+) -> Result<Option<Landscape>, ScenarioError> {
+    let mut ignore_progress = |_: i32, _: &'static str| {};
+    load_legacy_landscape_body_with_progress(
+        group,
+        manifest,
+        runtime,
+        overload_current,
+        classifier,
+        random_seed,
+        startup_player_count,
+        map_callback_functions,
+        post_init_map_callbacks,
+        prepared_map_creator,
+        &mut ignore_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::scenario) fn load_legacy_landscape_body_with_progress(
+    group: &Group,
+    manifest: &LegacyScenarioManifest,
+    runtime: Option<&LandscapeGameData>,
+    overload_current: bool,
+    classifier: Option<&mut MapPixelClassifier>,
+    random_seed: u64,
+    startup_player_count: i32,
+    map_callback_functions: &HashSet<String>,
+    post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
+    prepared_map_creator: &mut Option<crate::map_creator_s2::MapCreatorS2State>,
+    report_progress: &mut dyn FnMut(i32, &'static str),
 ) -> Result<Option<Landscape>, ScenarioError> {
     *prepared_map_creator = None;
     let landscape_section = manifest.sections.get("landscape");
@@ -1016,14 +1077,22 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
         if let Some(classifier) = classifier.take() {
             if let Some((bitmap, source_palette)) = retained_indexed.as_ref() {
                 let mut landscape = if exact_landscape {
-                    exact_classified_landscape(
+                    let landscape = exact_classified_landscape(
                         bitmap,
                         classifier,
                         map_seed,
                         manifest.core.landscape.new_style_landscape,
                         exact_landscape_png.as_deref(),
-                    )?
+                    )?;
+                    // C4Landscape::Load validates the exact Surface8 before
+                    // its 70 checkpoint; Init reaches 80 only after Load
+                    // returns successfully (C4Landscape.cpp:1520-1608,658-674).
+                    report_progress(70, "Landscape source map prepared");
+                    report_progress(80, "Landscape pixel maps prepared");
+                    landscape
                 } else {
+                    report_progress(70, "Landscape source map prepared");
+                    report_progress(80, "Landscape pixel maps prepared");
                     let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
                     classified_landscape(bitmap, classifier, map_zoom_u32 as i32, map_seed)?
                 };
@@ -1047,6 +1116,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
                         .expect("classified landscapes carry raster state")
                         .set_map_changed();
                 }
+                report_progress(87, "Landscape raster constructed");
                 return Ok(Some(landscape));
             }
         }
@@ -1058,6 +1128,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
         if width == 0 || height == 0 {
             return Err(ScenarioError::LegacyMapEmpty);
         }
+        report_progress(70, "Landscape source map prepared");
 
         let map_zoom_u32 =
             map_zoom_override.unwrap_or_else(|| legacy_map_zoom(landscape_section, &mut map_rng));
@@ -1097,6 +1168,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
             surfaces.fill(surface);
         }
 
+        report_progress(80, "Landscape pixel maps prepared");
         let rendered_width = width.saturating_mul(map_zoom_u32);
         let final_width = if exact_landscape {
             rendered_width
@@ -1136,6 +1208,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
             raster_state.set_map_changed();
         }
         landscape.set_raster_state(raster_state);
+        report_progress(87, "Landscape raster constructed");
         return Ok(Some(landscape));
     }
 
@@ -1194,12 +1267,14 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
             let params = basic_map_params(landscape_core);
             crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
         };
+        report_progress(70, "Landscape source map prepared");
         let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
         post_init_map_callbacks.set_map_zoom(map_zoom_u32 as i32);
         if let Some(creator) = retained_creator.as_mut() {
             creator.set_callback_map_zoom(map_zoom_u32 as i32);
         }
         *prepared_map_creator = retained_creator.clone();
+        report_progress(80, "Landscape pixel maps prepared");
         let mut landscape =
             classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, map_seed)?;
         landscape
@@ -1207,6 +1282,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
             .expect("classified landscapes carry raster state")
             .set_map_creator(retained_creator);
         set_initial_mode(&mut landscape, LANDSCAPE_MODE_DYNAMIC);
+        report_progress(87, "Landscape raster constructed");
         return Ok(Some(landscape));
     }
 
@@ -1254,6 +1330,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
         );
     }
 
+    report_progress(70, "Landscape source map prepared");
     let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
     post_init_map_callbacks.set_map_zoom(map_zoom_u32 as i32);
     if let Some(creator) = discarded_creator.as_mut() {
@@ -1267,6 +1344,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
         .unwrap_or(u32::MAX)
         .max(100);
     let fallback_height = map_height_hint.saturating_mul(map_zoom_u32 as i32).max(100);
+    report_progress(80, "Landscape pixel maps prepared");
     let mut landscape = Landscape::flat(width_u32, fallback_height);
     landscape.set_world_height(fallback_height);
     if discarded_creator.is_some() {
@@ -1276,6 +1354,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
         landscape.set_raster_state(raster_state);
     }
     set_initial_mode(&mut landscape, LANDSCAPE_MODE_DYNAMIC);
+    report_progress(87, "Landscape raster constructed");
     Ok(Some(landscape))
 }
 

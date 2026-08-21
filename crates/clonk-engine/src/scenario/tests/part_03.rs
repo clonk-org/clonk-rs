@@ -1150,6 +1150,54 @@ global func Step(state, frame, random)
         (result, captured)
     }
 
+    #[test]
+    fn definition_warning_remains_before_its_subtree_progress() {
+        // C4DefList::Load emits a definition diagnostic at the point that
+        // child is visited, before the caller advances past the subtree
+        // (src/C4Def.cpp:930-958). Parallel replay must preserve that
+        // diagnostic/progress interleaving, not merely each stream's order.
+        let dir = test_tempdir();
+        let root = dir.path().join("Defs.c4d");
+        let child = root.join("Broken.c4d");
+        std::fs::create_dir_all(&child).test_value();
+        write_test_file(
+            child.join("DefCore.txt"),
+            "[DefCore]\nid=TOOLONG\nName=Broken\nCategory=0\n",
+        );
+        let group = Group::open_indexed(&root).test_value();
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(DefinitionWarningLayer {
+            warnings: Arc::clone(&warnings),
+        });
+        let mut warning_visible_at_first_progress = None;
+        let mut sound_effect_groups = Vec::new();
+        let mut collected = Vec::new();
+
+        subscriber::with_default(subscriber, || {
+            collect_definitions_from_group_with_progress(
+                &group,
+                false,
+                &HashSet::new(),
+                &["US"],
+                &LanguagePacks::default(),
+                &group,
+                None,
+                &mut sound_effect_groups,
+                &mut collected,
+                0,
+                16,
+                "complete",
+                &mut |_, _| {
+                    warning_visible_at_first_progress
+                        .get_or_insert_with(|| !warnings.lock().test_value().is_empty());
+                },
+            )
+        })
+        .test_value();
+
+        assert_eq!(warning_visible_at_first_progress, Some(true));
+    }
+
     fn load_legacy_landscape_body_for_test(
         group: &Group,
         manifest: &LegacyScenarioManifest,
@@ -1379,15 +1427,187 @@ global func Step(state, frame, random)
             .collect::<Vec<_>>();
         assert_eq!(
             checkpoints,
-            [4, 8, 40, 56, 57, 58, 60, 88, 89, 90, 91, 92, 93]
+            [
+                4, 8, 11, 35, 40, 56, 57, 58, 60, 70, 80, 87, 88, 89, 90, 91, 92, 93
+            ]
         );
         assert!(
             checkpoints.windows(2).all(|pair| pair[0] <= pair[1]),
             "loader progress must never regress: {checkpoints:?}"
         );
+        assert!(reported.iter().all(|(progress, log)| {
+            !log.trim().is_empty() || matches!(progress, 11 | 35)
+        }));
+    }
+
+    #[test]
+    fn legacy_group_loading_reports_landscape_work_boundaries() {
+        // C4Landscape::Init advances through map creation, sky/pixel-map
+        // preparation, and map-to-landscape conversion before C4Game reports
+        // the finished landscape (src/C4Landscape.cpp:588-707;
+        // src/C4Game.cpp:2654-2661).
+        let dir = test_tempdir();
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
+        let group = Group::open(&scenario_dir).test_value();
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+        let mut reported = Vec::new();
+
+        Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
+            &group,
+            &resolver,
+            &["US"],
+            &[] as &[String],
+            None,
+            None,
+            |progress, _| reported.push(progress),
+        )
+        .test_value();
+
+        assert_eq!(
+            reported
+                .into_iter()
+                .filter(|progress| (60..=88).contains(progress))
+                .collect::<Vec<_>>(),
+            [60, 70, 80, 87, 88]
+        );
+    }
+
+    #[test]
+    fn static_bitmap_scenario_does_not_build_a_scripted_map_callback_linker() {
+        // C4Landscape::Init accepts Map.bmp before it attempts CreateMapS2
+        // (src/C4Landscape.cpp:590-606), so a scenario without Landscape.txt
+        // or section groups cannot invoke scripted map callbacks.
+        let directory = test_tempdir();
+        let scenario_path = directory.path().join("StaticMap.c4s");
+        std::fs::create_dir(&scenario_path).test_value();
+        write_test_file(scenario_path.join("Map.bmp"), b"static map marker");
+        let group = Group::open_indexed(&scenario_path).test_value();
+
+        assert!(!scenario_may_need_map_callbacks(&group).test_value());
+    }
+
+    #[test]
+    fn corrupt_static_map_precedes_invalid_section_name_validation() {
+        // C4Landscape::Init decodes Map.bmp before InitScenarioSections scans
+        // section names (src/C4Game.cpp:2643-2694), so the callback-linker
+        // preflight must not validate a later scenario-section candidate.
+        let dir = test_tempdir();
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
+        write_test_file(scenario_dir.join("Map.bmp"), b"not a bitmap");
+        std::fs::create_dir(scenario_dir.join("Sect.c4g")).test_value();
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+
+        let error = Scenario::load_from_path_with(&scenario_dir, &resolver).unwrap_err();
+
+        assert!(matches!(error, ScenarioError::LegacyMapDecode { .. }));
+    }
+
+    #[test]
+    fn explicit_definition_error_precedes_folder_local_scan_failure() {
+        // InitDefs resolves the explicit definition vector before its
+        // folder-local pass (src/C4Game.cpp:2580-2586; src/C4Def.cpp:1013-1039),
+        // so progress pre-counting must not inspect a broken ancestor first.
+        let dir = test_tempdir();
+        let folder_path = dir.path().join("Broken.c4f");
+        write_test_file(&folder_path, b"not a group");
+        let mut scenario = clonk_resources::MutableGroup::new("Scenario.c4s");
+        scenario
+            .add_file(
+                "Scenario.txt",
+                b"[Head]\nTitle=Ordering\n\n[Definitions]\nDefinition1=Missing.c4d\n".to_vec(),
+            )
+            .test_value();
+        let group = Group::from_raw_memory(
+            folder_path.join("Scenario.c4s"),
+            scenario.pack_raw().test_value(),
+        )
+        .test_value();
+        let resolver = test_resolver(Vec::new());
+
         assert!(
-            reported.iter().all(|(_, log)| !log.trim().is_empty()),
-            "every reported phase must carry visible loader text: {reported:?}"
+            folder_local_definition_groups(&group)
+                .test_value()
+                .is_empty(),
+            "C4Game::FoldersWithLocalsDefs skips an ancestor C4Group that cannot open"
+        );
+
+        let error = Scenario::load_from_group_with_languages_and_definition_selection(
+            &group,
+            &resolver,
+            &["US"],
+            &[] as &[String],
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ScenarioError::LegacyDefinitionNotFound { .. }));
+    }
+
+    #[test]
+    fn failed_landscape_decode_does_not_report_a_prepared_source_map() {
+        let dir = test_tempdir();
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
+        write_test_file(scenario_dir.join("Map.bmp"), b"not a bitmap");
+        let group = Group::open(&scenario_dir).test_value();
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+        let mut reported = Vec::new();
+
+        let result =
+            Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
+                &group,
+                &resolver,
+                &["US"],
+                &[] as &[String],
+                None,
+                None,
+                |progress, _| reported.push(progress),
+            );
+
+        assert!(result.is_err());
+        assert!(
+            !reported.contains(&70),
+            "a failed source-map decode is not prepared: {reported:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_exact_landscape_material_precedes_progress_70_and_80() {
+        // C4Landscape::Load validates every exact Surface8 material byte before
+        // it reports 70, and Init reports 80 only after Load succeeds
+        // (src/C4Landscape.cpp:1520-1608,658-674).
+        let dir = test_tempdir();
+        let source = "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n";
+        let scenario_dir = scenario_test_group(dir.path(), "InvalidExact.c4s", source);
+        write_test_file(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[42]]),
+        );
+        let group = Group::open(&scenario_dir).test_value();
+        let manifest = parsed_scenario(source);
+        let mut classifier = map_classifier(&[(5, "Earth", 100, ChunkShape::Flat)]);
+        let mut callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
+        let mut creator = None;
+        let mut reported = Vec::new();
+
+        let result = load_legacy_landscape_body_with_progress(
+            &group,
+            &manifest,
+            None,
+            false,
+            Some(&mut classifier),
+            0,
+            1,
+            &HashSet::new(),
+            &mut callbacks,
+            &mut creator,
+            &mut |progress, _| reported.push(progress),
+        );
+
+        assert!(matches!(result, Err(ScenarioError::InvalidLandscape(_))));
+        assert!(
+            reported.iter().all(|progress| !matches!(progress, 70 | 80)),
+            "invalid exact material reported prepared phases: {reported:?}"
         );
     }
 
@@ -1419,9 +1639,13 @@ global func Step(state, frame, random)
                 .iter()
                 .map(|(progress, _)| *progress)
                 .collect::<Vec<_>>(),
-            [4, 8, 40, 56, 57, 58, 60, 88, 89, 90, 91, 92, 93]
+            [
+                4, 8, 11, 35, 40, 56, 57, 58, 60, 70, 80, 87, 88, 89, 90, 91, 92, 93
+            ]
         );
-        assert!(reported.iter().all(|(_, log)| !log.trim().is_empty()));
+        assert!(reported.iter().all(|(progress, log)| {
+            !log.trim().is_empty() || matches!(progress, 11 | 35)
+        }));
     }
 
     #[test]

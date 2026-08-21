@@ -4012,6 +4012,20 @@ pub fn load_system_scripts_with_components<S: AsRef<str>>(
     components: &ComponentGroups,
     languages: &[S],
 ) -> Result<Vec<(String, String)>, ScenarioError> {
+    load_system_scripts_with_components_and_diagnostics(
+        group,
+        components,
+        languages,
+        ResourceLoadDiagnostic::emit,
+    )
+}
+
+pub(in crate::scenario) fn load_system_scripts_with_components_and_diagnostics<S: AsRef<str>>(
+    group: &Group,
+    components: &ComponentGroups,
+    languages: &[S],
+    mut report_diagnostic: impl FnMut(ResourceLoadDiagnostic),
+) -> Result<Vec<(String, String)>, ScenarioError> {
     let mut sources = Vec::new();
     for entry in group.entries()? {
         if !legacy_group_wildcard_match(b"*.c", &entry.name_bytes) {
@@ -4028,7 +4042,12 @@ pub fn load_system_scripts_with_components<S: AsRef<str>>(
             }
         };
         let source = clonk_script::c4_string_from_bytes(&bytes);
-        let source = localize_script_source_with_components(components, &source, languages)?;
+        let source = localize_script_source_with_components_and_diagnostics(
+            components,
+            &source,
+            languages,
+            &mut report_diagnostic,
+        )?;
         sources.push((name, source));
     }
     Ok(sources)

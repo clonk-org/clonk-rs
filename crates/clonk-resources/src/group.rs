@@ -45,8 +45,20 @@ pub struct Group {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum GroupKind {
-    Directory(PathBuf),
+    Directory(DirectoryGroup),
     Packed(PackedGroup),
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryGroup {
+    root: PathBuf,
+    index: Option<Arc<DirectoryIndex>>,
+}
+
+#[derive(Debug)]
+struct DirectoryIndex {
+    entries: Vec<GroupEntry>,
+    first_by_name: HashMap<Vec<u8>, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +107,23 @@ enum PackedEntryNamePolicy {
 
 impl Group {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GroupError> {
-        let path = path.as_ref();
+        Self::open_with_directory_index(path.as_ref(), false)
+    }
+
+    /// Opens a resource group whose unpacked directory listings remain fixed
+    /// for this handle and its opened children. Scenario activation treats its
+    /// input tree as immutable, so retaining each native-order listing avoids
+    /// re-reading the same directory for every resource probe.
+    ///
+    /// Ordinary [`Self::open`] groups stay live and continue to observe later
+    /// filesystem changes. Each child handle snapshots its own direct listing
+    /// when opened; file bytes and recursive content CRCs remain live. Opening
+    /// a new indexed group is the refresh boundary.
+    pub fn open_indexed<P: AsRef<Path>>(path: P) -> Result<Self, GroupError> {
+        Self::open_with_directory_index(path.as_ref(), true)
+    }
+
+    fn open_with_directory_index(path: &Path, indexed: bool) -> Result<Self, GroupError> {
         // ENOENT and ENOTDIR mean the entity is absent, exactly as the
         // previous exists() probe classified them. Any other stat failure
         // (EMFILE, EACCES, EIO, ...) keeps its concrete io::Error.
@@ -112,7 +140,7 @@ impl Group {
                 // remainder as a child (C4Group.cpp:695-716) — which is how a
                 // packed scenario folder addresses its contents, as in
                 // `Pack.c4f/Scenario.c4s`.
-                return Self::open_below_mother(path)
+                return Self::open_below_mother(path, indexed)
                     .ok_or_else(|| GroupError::Missing(path.to_path_buf()));
             }
             Err(error) => return Err(GroupError::Io(error)),
@@ -127,7 +155,7 @@ impl Group {
                 )));
             }
             return Ok(Self {
-                kind: GroupKind::Directory(path.to_path_buf()),
+                kind: GroupKind::Directory(DirectoryGroup::new(path.to_path_buf(), indexed)?),
             });
         }
 
@@ -143,12 +171,12 @@ impl Group {
     /// the nearest real file or folder, open it, and reopen everything below
     /// it as a child chain. C++ reports one undifferentiated failure for every
     /// way this can go wrong, so the caller keeps its own `Missing` error.
-    fn open_below_mother(path: &Path) -> Option<Self> {
+    fn open_below_mother(path: &Path, indexed: bool) -> Option<Self> {
         let mut mother = path.parent()?;
         let mut child = PathBuf::from(path.file_name()?);
         while !mother.as_os_str().is_empty() {
             if fs::metadata(mother).is_ok() {
-                return Self::open(mother)
+                return Self::open_with_directory_index(mother, indexed)
                     .and_then(|group| group.open_child(&child))
                     .ok();
             }
@@ -160,14 +188,25 @@ impl Group {
 
     pub fn root(&self) -> &Path {
         match &self.kind {
-            GroupKind::Directory(path) => path,
+            GroupKind::Directory(directory) => &directory.root,
             GroupKind::Packed(packed) => &packed.path,
+        }
+    }
+
+    /// Returns an indexed view of this group. Packed groups are already
+    /// indexed; callers on a hot path can retain their original packed handle.
+    pub fn indexed(&self) -> Result<Self, GroupError> {
+        match &self.kind {
+            GroupKind::Directory(directory) => Ok(Self {
+                kind: GroupKind::Directory(directory.indexed()?),
+            }),
+            GroupKind::Packed(_) => Ok(self.clone()),
         }
     }
 
     pub fn entries(&self) -> Result<Vec<GroupEntry>, GroupError> {
         match &self.kind {
-            GroupKind::Directory(root) => directory_entries(root),
+            GroupKind::Directory(directory) => directory.entries(),
             GroupKind::Packed(packed) => Ok(packed
                 .entries
                 .iter()
@@ -187,8 +226,8 @@ impl Group {
 
     pub fn read_file<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
         match &self.kind {
-            GroupKind::Directory(root) => {
-                let full_path = resolve_directory_entry(root, relative.as_ref())?;
+            GroupKind::Directory(directory) => {
+                let full_path = directory.resolve_entry(relative.as_ref())?;
                 Ok(fs::read(full_path)?)
             }
             GroupKind::Packed(packed) => {
@@ -217,8 +256,8 @@ impl Group {
     /// byte-for-byte when another entry is deleted from the parent.
     pub fn read_entry_bytes<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
         match &self.kind {
-            GroupKind::Directory(root) => {
-                let full_path = resolve_directory_entry(root, relative.as_ref())?;
+            GroupKind::Directory(directory) => {
+                let full_path = directory.resolve_entry(relative.as_ref())?;
                 if full_path.is_dir() {
                     return Err(GroupError::InvalidGroup(format!(
                         "entry '{}' is an unpacked directory",
@@ -239,7 +278,9 @@ impl Group {
     /// C4Group contains names written in a legacy single-byte charset.
     pub fn read_entry_bytes_exact(&self, entry: &GroupEntry) -> Result<Vec<u8>, GroupError> {
         match &self.kind {
-            GroupKind::Directory(root) => Ok(fs::read(root.join(&entry.relative_path))?),
+            GroupKind::Directory(directory) => {
+                Ok(fs::read(directory.root.join(&entry.relative_path))?)
+            }
             GroupKind::Packed(packed) => packed.read_entry_bytes_by_name(&entry.name_bytes),
         }
     }
@@ -248,9 +289,9 @@ impl Group {
     /// stored in this raw form even when the outer file is gzip wrapped.
     pub fn raw_image(&self) -> Result<Vec<u8>, GroupError> {
         match &self.kind {
-            GroupKind::Directory(path) => Err(GroupError::InvalidGroup(format!(
+            GroupKind::Directory(directory) => Err(GroupError::InvalidGroup(format!(
                 "'{}' is an unpacked directory",
-                path.display()
+                directory.root.display()
             ))),
             GroupKind::Packed(packed) => packed.raw_image(),
         }
@@ -268,7 +309,7 @@ impl Group {
 
     pub fn exists<P: AsRef<Path>>(&self, relative: P) -> bool {
         match &self.kind {
-            GroupKind::Directory(root) => resolve_directory_entry(root, relative.as_ref()).is_ok(),
+            GroupKind::Directory(directory) => directory.resolve_entry(relative.as_ref()).is_ok(),
             GroupKind::Packed(packed) => {
                 let relative = normalize_path(relative.as_ref());
                 packed.index.contains_key(&case_fold_group_path(&relative))
@@ -364,10 +405,10 @@ impl Group {
             ));
         }
         match &self.kind {
-            GroupKind::Directory(root) => {
-                let path = root.join(&entry.relative_path);
+            GroupKind::Directory(directory) => {
+                let path = directory.root.join(&entry.relative_path);
                 if path.is_dir() {
-                    Self::open(path)
+                    Self::open_with_directory_index(&path, directory.is_indexed())
                 } else {
                     Self::from_child_bytes(path.clone(), fs::read(path)?)
                 }
@@ -378,10 +419,10 @@ impl Group {
 
     fn open_direct_child(&self, relative: &Path) -> Result<Self, GroupError> {
         match &self.kind {
-            GroupKind::Directory(root) => {
-                let path = resolve_directory_child_entry(root, relative)?;
+            GroupKind::Directory(directory) => {
+                let path = directory.resolve_child_entry(relative)?;
                 if path.is_dir() {
-                    Self::open(path)
+                    Self::open_with_directory_index(&path, directory.is_indexed())
                 } else {
                     Self::from_child_bytes(path.clone(), fs::read(path)?)
                 }
@@ -394,7 +435,7 @@ impl Group {
     /// rules for old and new packed entry cores.
     pub fn contents_crc(&self) -> Result<u32, GroupError> {
         match &self.kind {
-            GroupKind::Directory(root) => directory_contents_crc(root),
+            GroupKind::Directory(directory) => directory_contents_crc(&directory.root),
             GroupKind::Packed(packed) => packed.contents_crc(),
         }
     }
@@ -425,7 +466,9 @@ impl Group {
     /// group's zero result as that child's CRC and continues its own XOR.
     pub fn contents_crc_or_zero(&self) -> u32 {
         match &self.kind {
-            GroupKind::Directory(root) => directory_contents_crc_or_zero(root).unwrap_or(0),
+            GroupKind::Directory(directory) => {
+                directory_contents_crc_or_zero(&directory.root).unwrap_or(0)
+            }
             GroupKind::Packed(packed) => packed.contents_crc_or_zero().unwrap_or(0),
         }
     }
@@ -902,6 +945,97 @@ impl PackedGroup {
                 .join(path_component_from_name_bytes(&entry.name_bytes)),
             data,
         )
+    }
+}
+
+impl DirectoryGroup {
+    fn new(root: PathBuf, indexed: bool) -> Result<Self, GroupError> {
+        let index = indexed
+            .then(|| DirectoryIndex::read(&root))
+            .transpose()?
+            .map(Arc::new);
+        Ok(Self { root, index })
+    }
+
+    fn indexed(&self) -> Result<Self, GroupError> {
+        match &self.index {
+            Some(_) => Ok(self.clone()),
+            None => Self::new(self.root.clone(), true),
+        }
+    }
+
+    fn is_indexed(&self) -> bool {
+        self.index.is_some()
+    }
+
+    fn entries(&self) -> Result<Vec<GroupEntry>, GroupError> {
+        self.index
+            .as_ref()
+            .map(|index| index.entries.clone())
+            .map_or_else(|| directory_entries(&self.root), Ok)
+    }
+
+    fn resolve_entry(&self, relative: &Path) -> Result<PathBuf, GroupError> {
+        let Some(index) = &self.index else {
+            return resolve_directory_entry(&self.root, relative);
+        };
+        let missing = || GroupError::EntryNotFound(relative.to_path_buf());
+        let mut components = relative.components().peekable();
+        let mut current_root = self.root.clone();
+        let mut current_index = Arc::clone(index);
+        let mut resolved_any = false;
+
+        while let Some(component) = components.next() {
+            let Component::Normal(requested) = component else {
+                return Err(missing());
+            };
+            let requested = crate::path_to_legacy_bytes(Path::new(requested));
+            let entry = current_index
+                .first_by_name
+                .get(&case_fold_group_name(&requested))
+                .and_then(|index| current_index.entries.get(*index))
+                .ok_or_else(&missing)?;
+            current_root = current_root.join(&entry.relative_path);
+            resolved_any = true;
+
+            if components.peek().is_some() {
+                if !current_root.is_dir() {
+                    return Err(missing());
+                }
+                current_index = Arc::new(DirectoryIndex::read(&current_root)?);
+            }
+        }
+
+        resolved_any.then_some(current_root).ok_or_else(missing)
+    }
+
+    fn resolve_child_entry(&self, relative: &Path) -> Result<PathBuf, GroupError> {
+        let Some(index) = &self.index else {
+            return resolve_directory_child_entry(&self.root, relative);
+        };
+        let pattern = crate::path_to_legacy_bytes(relative);
+        index
+            .entries
+            .iter()
+            .find(|entry| group_name_wildcard_match(&pattern, &entry.name_bytes))
+            .map(|entry| self.root.join(&entry.relative_path))
+            .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))
+    }
+}
+
+impl DirectoryIndex {
+    fn read(root: &Path) -> Result<Self, GroupError> {
+        let entries = directory_entries(root)?;
+        let mut first_by_name = HashMap::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            first_by_name
+                .entry(case_fold_group_name(&entry.name_bytes))
+                .or_insert(index);
+        }
+        Ok(Self {
+            entries,
+            first_by_name,
+        })
     }
 }
 
@@ -1479,6 +1613,83 @@ mod tests {
 
         let data = group.read_file("sub/file.txt").unwrap();
         assert_eq!(data, b"hello");
+    }
+
+    #[test]
+    fn indexed_directory_group_holds_a_stable_listing_while_live_group_stays_fresh() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Early.txt"), b"early").unwrap();
+
+        let live = Group::open(dir.path()).unwrap();
+        let indexed = Group::open_indexed(dir.path()).unwrap();
+        fs::write(dir.path().join("Late.txt"), b"late").unwrap();
+
+        assert!(!indexed.exists("Late.txt"));
+        assert!(!indexed
+            .entries()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.relative_path == Path::new("Late.txt")));
+        assert!(live.exists("Late.txt"));
+        assert_eq!(live.read_file("Late.txt").unwrap(), b"late");
+
+        let refreshed = Group::open_indexed(dir.path()).unwrap();
+        assert!(refreshed.exists("Late.txt"));
+        assert_eq!(refreshed.read_file("Late.txt").unwrap(), b"late");
+    }
+
+    #[test]
+    fn indexed_directory_children_inherit_the_listing_mode() {
+        let dir = tempdir().unwrap();
+        let child_path = dir.path().join("Child.c4d");
+        fs::create_dir(&child_path).unwrap();
+        fs::write(child_path.join("Early.txt"), b"early").unwrap();
+
+        let indexed_root = Group::open_indexed(dir.path()).unwrap();
+        let indexed_child = indexed_root.open_child("Child.c4d").unwrap();
+        fs::write(child_path.join("Late.txt"), b"late").unwrap();
+
+        assert!(!indexed_child.exists("Late.txt"));
+        assert!(Group::open(dir.path())
+            .unwrap()
+            .open_child("Child.c4d")
+            .unwrap()
+            .exists("Late.txt"));
+        assert!(Group::open_indexed(dir.path())
+            .unwrap()
+            .open_child("Child.c4d")
+            .unwrap()
+            .exists("Late.txt"));
+    }
+
+    #[test]
+    fn indexed_directory_preserves_casefold_and_question_wildcard_resolution() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("teams.txt"), b"teams").unwrap();
+        let first = packed_group_image_with_entry("marker.txt", false, b"first");
+        let second = packed_group_image_with_entry("marker.txt", false, b"second");
+        fs::write(dir.path().join("ChoiceA.c4g"), &first).unwrap();
+        fs::write(dir.path().join("ChoiceB.c4g"), &second).unwrap();
+        let expected = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| {
+                matches!(
+                    entry.file_name().as_encoded_bytes(),
+                    b"ChoiceA.c4g" | b"ChoiceB.c4g"
+                )
+            })
+            .unwrap();
+        let expected_marker = if expected.file_name().as_encoded_bytes() == b"ChoiceA.c4g" {
+            &b"first"[..]
+        } else {
+            &b"second"[..]
+        };
+
+        let indexed = Group::open_indexed(dir.path()).unwrap();
+        assert_eq!(indexed.read_file("TeAmS.TxT").unwrap(), b"teams");
+        let selected = indexed.open_child("cHOICE?.C4G").unwrap();
+        assert_eq!(selected.read_file("marker.txt").unwrap(), expected_marker);
     }
 
     #[test]

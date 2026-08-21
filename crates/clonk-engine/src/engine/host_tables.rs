@@ -1552,4 +1552,50 @@ mod tests {
 
         assert_eq!(HOST_SOLID_MASK_BAKE_VECTOR_CLONES.with(Cell::get), 0);
     }
+
+    #[test]
+    fn repeated_script_resolution_reuses_definition_order() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition(
+                "ZZZZ",
+                "Last definition",
+                "global func SharedResolution() { return 1; }",
+            )
+            .expect("last definition registers");
+        engine
+            .register_script_definition(
+                "AAAA",
+                "First definition",
+                "global func SharedResolution() { return 2; }",
+            )
+            .expect("first definition registers");
+
+        let world = engine.host_world_context();
+        let (_, resolution) = world
+            .resolve_engine_global_script("SharedResolution")
+            .expect("global function resolves");
+        let (name, definition, _) = world
+            .script_for_host_identity(resolution.host_identity)
+            .expect("resolved host identity remains addressable");
+        assert_eq!(name, "AAAA");
+        assert_eq!(definition.as_deref(), Some("AAAA"));
+        HOST_SCRIPT_ORDER_MATERIALIZATIONS.with(|count| count.set(0));
+
+        for _ in 0..2 {
+            assert!(world
+                .resolve_engine_global_script("SharedResolution")
+                .is_some());
+            assert!(world
+                .script_for_host_identity(resolution.host_identity)
+                .is_some());
+            assert!(world.resolve_engine_host_script("Random").is_some());
+        }
+
+        assert_eq!(
+            HOST_SCRIPT_ORDER_MATERIALIZATIONS.with(Cell::get),
+            0,
+            "hot script resolution must not collect and sort every loaded definition"
+        );
+    }
 }

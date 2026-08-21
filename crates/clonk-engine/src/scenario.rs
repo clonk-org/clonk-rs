@@ -12,10 +12,11 @@ use clonk_resources::definition::{
 };
 use clonk_resources::{
     decode_legacy_script_text, load_image_from_memory, localize_script_source_with_components,
+    localize_script_source_with_components_and_diagnostics,
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     ComponentGroups, DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
     LanguagePacks, ParticleDefinition as ResourceParticleDefinition, RankNameTable,
-    ResourceDefinition as ResourceDefinitionData,
+    ResourceDefinition as ResourceDefinitionData, ResourceLoadDiagnostic,
 };
 use image::{ImageError, ImageFormat};
 use serde::de::Error as _;

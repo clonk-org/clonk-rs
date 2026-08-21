@@ -1,7 +1,7 @@
 use crate::{
     bitmap::IndexedBitmap, decode_legacy_script_text, graphics::blacken_fully_transparent_rgba,
     language::component_language_string, ComponentGroups, GraphicsImage, Group, GroupEntry,
-    GroupError, LoadedComponent,
+    GroupError, LoadedComponent, ResourceLoadDiagnostic,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -1245,6 +1245,13 @@ pub struct TargetRect {
 
 impl DefCore {
     pub fn load(group: &Group) -> Result<Self, DefinitionError> {
+        Self::load_with_diagnostics(group, ResourceLoadDiagnostic::emit)
+    }
+
+    pub fn load_with_diagnostics(
+        group: &Group,
+        mut report_diagnostic: impl FnMut(ResourceLoadDiagnostic),
+    ) -> Result<Self, DefinitionError> {
         let bytes = group
             .load_entry_string("DefCore.txt")
             .map_err(|err| match err {
@@ -1256,7 +1263,7 @@ impl DefCore {
                 }
                 other => DefinitionError::Resources(other),
             })?;
-        let mut core = parse_def_core(&bytes)?;
+        let mut core = parse_def_core_with_diagnostics(&bytes, &mut report_diagnostic)?;
 
         // C4DefCore::Load adjusts the compiled Category in this order: a
         // signed nonzero CrewMember adds C4D_CrewMember, then a category with
@@ -1675,7 +1682,15 @@ fn parse_followed_physical(nodes: &[IniNameNode<'_>]) -> PhysicalInfo {
     physical
 }
 
+#[cfg(test)]
 fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
+    parse_def_core_with_diagnostics(bytes, &mut ResourceLoadDiagnostic::emit)
+}
+
+fn parse_def_core_with_diagnostics(
+    bytes: &[u8],
+    report_diagnostic: &mut impl FnMut(ResourceLoadDiagnostic),
+) -> Result<DefCore, DefinitionError> {
     // C4DefCore::Compile passes a native C string to StdCompilerINIRead.
     // Preserve every pre-NUL byte through the script string projection.
     let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
@@ -1866,7 +1881,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 drag_image_picture = parse_i32(value).unwrap_or(0);
             }
             "Category" => {
-                category = parse_category(value);
+                category = parse_category(value, report_diagnostic);
                 category_set = true;
             }
             "CrewMember" => {
@@ -1900,6 +1915,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                         ("APS_Name", APS_NAME),
                         ("APS_Overlay", APS_OVERLAY),
                     ],
+                    report_diagnostic,
                 );
             }
             "Scale" => {
@@ -1998,7 +2014,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 smoke_rate = parse_i32(value).unwrap_or(100);
             }
             "Line" => {
-                line_type = parse_line_type(value);
+                line_type = parse_line_type(value, report_diagnostic);
             }
             "LineIntersect" => {
                 line_intersect = parse_i32(value).unwrap_or(0);
@@ -2016,8 +2032,11 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "GrabPutGet" => {
                 // StdBitfieldAdapt over C4D_GrabPut/C4D_GrabGet tokens
                 // (src/C4Def.cpp:364-373); numeric values pass through.
-                grab_put_get =
-                    parse_named_bitfield(value, &[("C4D_GrabGet", 2), ("C4D_GrabPut", 1)]);
+                grab_put_get = parse_named_bitfield(
+                    value,
+                    &[("C4D_GrabGet", 2), ("C4D_GrabPut", 1)],
+                    report_diagnostic,
+                );
             }
             "NoBurnDamage" => {
                 no_burn_damage = reflected_int!("NoBurnDamage", parse_reflected_int(value)) != 0;
@@ -2098,6 +2117,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 hide_hud_bars = parse_named_bitfield(
                     value,
                     &[("Energy", 1), ("MagicEnergy", 2), ("Breath", 4), ("All", 7)],
+                    report_diagnostic,
                 );
             }
             "HideHUDElements" => {
@@ -2112,6 +2132,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                         ("Inventory", 32),
                         ("All", 63),
                     ],
+                    report_diagnostic,
                 );
             }
             "Timer" => {
@@ -2126,7 +2147,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 components = parse_components(raw_value);
             }
             "LineConnect" => {
-                line_connect = parse_line_connect(value);
+                line_connect = parse_line_connect(value, report_diagnostic);
             }
             // C4Object::SetOCF DefCore inputs (C4Def.cpp:309-413).
             "Entrance" => {
@@ -2352,7 +2373,11 @@ fn skip_c4id_list_whitespace(bytes: &[u8], cursor: &mut usize) {
     }
 }
 
-fn parse_named_bitfield(value: &str, names: &[(&str, i32)]) -> i32 {
+fn parse_named_bitfield(
+    value: &str,
+    names: &[(&str, i32)],
+    report_diagnostic: &mut impl FnMut(ResourceLoadDiagnostic),
+) -> i32 {
     // StdBitfieldAdapt first tries an int32 value, then an RCT_Idtf name.
     // Unknown names only warn and contribute no bits. The outer naming
     // adaptor defaults the whole field to zero if either reader cannot
@@ -2387,10 +2412,9 @@ fn parse_named_bitfield(value: &str, names: &[(&str, i32)]) -> i32 {
             {
                 flags |= bit;
             } else {
-                tracing::warn!(
-                    bit_name = %clonk_script::c4_string_from_bytes(&bytes[start..cursor]),
-                    "unknown definition bit name"
-                );
+                report_diagnostic(ResourceLoadDiagnostic::UnknownDefinitionBitName {
+                    bit_name: clonk_script::c4_string_from_bytes(&bytes[start..cursor]),
+                });
             }
         }
         while bytes
@@ -2407,10 +2431,14 @@ fn parse_named_bitfield(value: &str, names: &[(&str, i32)]) -> i32 {
     flags
 }
 
+pub(crate) fn emit_unknown_definition_bit_name(bit_name: &str) {
+    tracing::warn!(%bit_name, "unknown definition bit name");
+}
+
 /// `mkBitfieldAdapt(Line, LineTypes)` (C4Def.cpp:319-333): named values
 /// separated by `|` are ORed. In particular, legacy DPIP spells the drain
 /// value as `C4D_LinePower|C4D_LineSource` (1 | 2 = 3).
-fn parse_line_type(value: &str) -> i32 {
+fn parse_line_type(value: &str, report_diagnostic: &mut impl FnMut(ResourceLoadDiagnostic)) -> i32 {
     parse_named_bitfield(
         value,
         &[
@@ -2423,10 +2451,14 @@ fn parse_line_type(value: &str) -> i32 {
             ("C4D_LineColored", 7),
             ("C4D_LineVertex", 8),
         ],
+        report_diagnostic,
     )
 }
 
-fn parse_line_connect(value: &str) -> u32 {
+fn parse_line_connect(
+    value: &str,
+    report_diagnostic: &mut impl FnMut(ResourceLoadDiagnostic),
+) -> u32 {
     parse_named_bitfield(
         value,
         &[
@@ -2440,6 +2472,7 @@ fn parse_line_connect(value: &str) -> u32 {
             ("C4D_ConnectRope", 1 << 7),
             ("C4D_EnergyHolder", 1 << 8),
         ],
+        report_diagnostic,
     ) as u32
 }
 
@@ -3366,8 +3399,8 @@ fn extract_rgba_bytes(
     output
 }
 
-fn parse_category(value: &str) -> i32 {
-    parse_named_bitfield(value, CATEGORY_FLAGS)
+fn parse_category(value: &str, report_diagnostic: &mut impl FnMut(ResourceLoadDiagnostic)) -> i32 {
+    parse_named_bitfield(value, CATEGORY_FLAGS, report_diagnostic)
 }
 
 pub(crate) fn parse_bool(value: &str) -> Option<bool> {
@@ -5556,6 +5589,28 @@ HideHUDElements=Portrait|Bogus|Inventory
         let malformed = parse_def_core(b"[DefCore]\nid=ZERO\nCategory=C4D_Structure||C4D_Goal\n")
             .expect("the outer default adaptor handles malformed bitfields");
         check_eq! { malformed.category => 0 }
+    }
+
+    #[test]
+    fn def_core_reports_unknown_bit_diagnostics_in_source_order() {
+        let mut diagnostics = Vec::new();
+        parse_def_core_with_diagnostics(
+            b"[DefCore]\nid=BITS\nCategory=First|C4D_Object\nLineConnect=Second\n",
+            &mut |diagnostic| diagnostics.push(diagnostic),
+        )
+        .expect("unknown bit names remain non-fatal");
+
+        assert_eq!(
+            diagnostics,
+            [
+                ResourceLoadDiagnostic::UnknownDefinitionBitName {
+                    bit_name: "First".to_string(),
+                },
+                ResourceLoadDiagnostic::UnknownDefinitionBitName {
+                    bit_name: "Second".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

@@ -741,6 +741,11 @@ pub(crate) struct GameApp {
     pub(crate) object_sprites: HashMap<String, DefinitionSprite>,
     pub(crate) sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     pub(crate) loading_state: Option<ScenarioLoadingState>,
+    /// Successful activation leaves its 100% loader frame pending until one
+    /// real window presentation accepts it. The game is already Running; this
+    /// latch affects presentation only and never delays simulation or network
+    /// readiness.
+    pub(crate) terminal_loader_frame_pending: bool,
     pub(crate) boot_loading: Option<BootLoadingState>,
     /// When set, boot straight into the sandbox scenario once boot loading
     /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared

@@ -1938,6 +1938,9 @@ impl GameApp {
             AppMode::Loading => self
                 .render_loading(frame, defer_native_loader_text, defer_monitor_gamma)
                 .map(|()| true),
+            AppMode::Running if self.terminal_loader_frame_pending => self
+                .render_loading(frame, defer_native_loader_text, defer_monitor_gamma)
+                .map(|()| true),
             AppMode::Running => self
                 .render_running_for_presentation(
                     frame,
@@ -2422,6 +2425,9 @@ impl GameApp {
     }
 
     fn retained_gpu_frame_gamma(&self) -> clonk_graphics::GammaRamp {
+        if self.loader_presentation_active() {
+            return self.startup_active_gamma();
+        }
         match self.mode {
             AppMode::Menu | AppMode::Loading => self.startup_active_gamma(),
             AppMode::Running => self

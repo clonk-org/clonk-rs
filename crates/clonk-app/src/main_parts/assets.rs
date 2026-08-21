@@ -8023,6 +8023,7 @@ pub(crate) fn run_sandbox_dump(
     if !booted {
         anyhow::bail!("sandbox did not reach running mode for frame dump");
     }
+    app.discard_terminal_loader_frame_for_headless_render();
 
     // Advance the simulation so the scene has settled.
     for _ in 0..test_frames {
@@ -8390,6 +8391,7 @@ pub(crate) fn run_integration_test(
     // Optional visual check: render the final frame to a PNG
     // (rendering-parity forensics vs the C++ engine's F9 shots).
     if let Ok(dump) = std::env::var("LC_APP_DUMP_FRAME") {
+        app.discard_terminal_loader_frame_for_headless_render();
         let (w, h) = {
             let s = app.graphics.surface();
             (s.width(), s.height())

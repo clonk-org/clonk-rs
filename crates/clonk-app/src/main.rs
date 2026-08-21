@@ -1638,7 +1638,12 @@ fn run() -> Result<()> {
                         ) {
                             Ok(RetainedGpuProfiledOutcome::Presented(profile)) => {
                                 surface_rebuild.note_presented();
-                                if app.mode == AppMode::Running && !app.console_mode {
+                                let presented_terminal_loader =
+                                    app.finish_terminal_loader_frame_presentation();
+                                if app.mode == AppMode::Running
+                                    && !presented_terminal_loader
+                                    && !app.console_mode
+                                {
                                     app.finish_rendered_object_audibility_pass();
                                 }
                                 let graphics_duration = graphics_started.elapsed();
@@ -1783,6 +1788,8 @@ fn run() -> Result<()> {
                         && app.can_defer_native_game_messages(presenter.scale());
                     let presentation_monitor_gamma = if ordered_native_text {
                         None
+                    } else if app.loader_presentation_active() {
+                        app.startup_monitor_gamma()
                     } else {
                         match app.mode {
                             AppMode::Menu | AppMode::Loading => app.startup_monitor_gamma(),
@@ -1872,6 +1879,8 @@ fn run() -> Result<()> {
                     match pixels.present().map(retained_gpu_present_outcome) {
                         Ok(RetainedGpuPresentOutcome::Presented) => {
                             surface_rebuild.note_presented();
+                            let presented_terminal_loader =
+                                app.finish_terminal_loader_frame_presentation();
                             while !app.pending_screenshots.is_empty() {
                                 let (width, height) = presenter.physical_size();
                                 let result = app.save_next_screenshot(
@@ -1884,7 +1893,11 @@ fn run() -> Result<()> {
                             }
                             // Console presentation returns before render_running
                             // and leaves the prior world call list untouched.
-                            if refreshed && app.mode == AppMode::Running && !app.console_mode {
+                            if refreshed
+                                && app.mode == AppMode::Running
+                                && !presented_terminal_loader
+                                && !app.console_mode
+                            {
                                 app.finish_rendered_object_audibility_pass();
                             }
                             let graphics_duration = graphics_started.elapsed();
@@ -2807,6 +2820,7 @@ impl GameApp {
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
+            terminal_loader_frame_pending: false,
             boot_loading,
             auto_start_sandbox: false,
             auto_start_classic_command_line_scenario: false,
@@ -3044,7 +3058,7 @@ impl GameApp {
     }
 
     fn can_present_ordered_native_text(&self, scale: f32) -> bool {
-        let ordered_loading_overlay = self.mode == AppMode::Loading
+        let ordered_loading_overlay = self.loader_presentation_active()
             && (!self.message_dialogs.is_empty()
                 || self
                     .network_start_wait
@@ -4677,6 +4691,7 @@ impl GameApp {
             return Ok(false);
         }
         self.advance_scenario_loader(100, "Scenario activation complete");
+        self.arm_terminal_loader_frame_presentation();
         self.loading_state = None;
         self.pending_client_start_status = None;
         self.running_gui_mouse_owned = false;
@@ -7720,6 +7735,7 @@ impl GameApp {
                         self.mode = AppMode::Loading;
                     } else {
                         self.advance_scenario_loader(100, "Scenario activation complete");
+                        self.arm_terminal_loader_frame_presentation();
                         self.loading_state = None;
                     }
                 }
@@ -8748,6 +8764,7 @@ impl GameApp {
     }
 
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
+        self.terminal_loader_frame_pending = false;
         let retain_prepared_client_queues =
             matches!(self.network_mode, Some(NetworkMode::Client(_)))
                 && self

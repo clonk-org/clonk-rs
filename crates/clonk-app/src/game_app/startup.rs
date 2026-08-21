@@ -7,6 +7,23 @@
 use super::*;
 
 impl GameApp {
+    pub(crate) fn loader_presentation_active(&self) -> bool {
+        self.mode == AppMode::Loading
+            || (self.mode == AppMode::Running && self.terminal_loader_frame_pending)
+    }
+
+    pub(crate) fn finish_terminal_loader_frame_presentation(&mut self) -> bool {
+        std::mem::take(&mut self.terminal_loader_frame_pending)
+    }
+
+    pub(crate) fn arm_terminal_loader_frame_presentation(&mut self) {
+        self.terminal_loader_frame_pending = !self.console_mode && self.loader_screen.is_some();
+    }
+
+    pub(crate) fn discard_terminal_loader_frame_for_headless_render(&mut self) -> bool {
+        std::mem::take(&mut self.terminal_loader_frame_pending)
+    }
+
     /// Hold a rebuilt `General.Participants` for the shutdown save.
     ///
     /// It is a `CFG_MaxString` escaped-string field, so the flush has to hand
@@ -94,7 +111,7 @@ impl GameApp {
     }
 
     pub(crate) fn can_defer_native_loader_text(&self, scale: f32) -> bool {
-        self.mode == AppMode::Loading
+        self.loader_presentation_active()
             && self.message_dialogs.is_empty()
             && !self
                 .network_start_wait
@@ -5766,7 +5783,7 @@ impl GameApp {
     }
 
     pub(crate) fn loader_boundary(&self, detail: impl Into<String>) -> anyhow::Error {
-        let context = if self.loading_state.is_some() {
+        let context = if self.loading_state.is_some() || self.terminal_loader_frame_pending {
             "scenario loading"
         } else {
             "startup loading"

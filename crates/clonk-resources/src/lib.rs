@@ -1,5 +1,6 @@
 pub mod bitmap;
 pub mod definition;
+mod diagnostic;
 pub mod font;
 pub mod graphics;
 pub mod group;
@@ -20,6 +21,7 @@ pub use definition::{
     Definition as ResourceDefinition, DefinitionError, DefinitionScript, DefinitionScriptFile,
     PhysicalInfo, PictureRect, RankExtensionFormatError, RankNameTable, C4_MAX_PHYSICAL,
 };
+pub use diagnostic::ResourceLoadDiagnostic;
 pub use font::{
     load_endeavour_font, load_font_definitions, load_ttf, select_font_definition, FontCatalog,
     FontDefinition, FontResource, FontResourceError, FontRole, ResolvedFontSpec,
@@ -54,4 +56,5 @@ pub use scenario::{
 pub use script_strings::{
     decode_legacy_script_text, decode_legacy_system_text, encode_legacy_script_text,
     localize_script_source, localize_script_source_with_components,
+    localize_script_source_with_components_and_diagnostics,
 };
