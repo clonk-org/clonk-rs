@@ -1743,29 +1743,6 @@ impl GameApp {
         changed
     }
 
-    pub(crate) fn persist_fair_crew_preference(&mut self, enabled: bool) {
-        let Some(paths) = self.app_paths.as_ref() else {
-            return;
-        };
-        let section = "General";
-        let key = "NoCrew";
-        if let Err(error) = persist_native_config_values(
-            paths,
-            section,
-            &[(
-                key,
-                clonk_app_netplay::NativeConfigValue::RawAscii(if enabled {
-                    "true"
-                } else {
-                    "false"
-                }),
-            )],
-        ) {
-            tracing::error!(%error, section, key, "failed to persist game option");
-            self.status_text = format!("Unable to save game option: {error}");
-        }
-    }
-
     pub(crate) fn player_selection_tooltip_target_at(
         &self,
         point: GuiPoint,

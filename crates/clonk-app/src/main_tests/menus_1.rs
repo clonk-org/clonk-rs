@@ -1127,6 +1127,18 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
 
     app.process_game_option_actions(vec![GameOptionAction::FairCrewPreferenceChanged(false)])
         .test_value();
+    // `C4GameOptionButtons::OnBtnFairCrew` "simply changes config setting"
+    // outside the lobby — an in-memory flip with no `Config.Save()`, exactly
+    // like the `OnBtnRecord` immediately below it
+    // (7d43b47b src/C4Network2Dialogs.cpp:704-710,713-715). The toggle
+    // therefore sits in the deferred store, and the file still holds the
+    // previous value until a save surface runs.
+    main_assert_eq!(
+        app.deferred_config.get("General", "NoCrew") => Some("false"),
+        "the fair-crew flip is pending rather than written"
+    );
+    main_assert!(!app.scenario_game_option_values().fair_crew);
+    app.flush_deferred_config();
     let native_config = fs::read(paths.config_file()).test_value();
     main_assert!(native_config.split(|byte| matches!(*byte, b'\r' | b'\n')).any(|line| line == b"NoCrew=false"));
     main_assert!(!native_config.windows(b"FairCrew=".len()).any(|window| window == b"FairCrew="));
@@ -1158,6 +1170,7 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
 
     app.process_game_option_actions(vec![GameOptionAction::FairCrewPreferenceChanged(true)])
         .test_value();
+    app.flush_deferred_config();
     let config = Config::load(paths.config_file()).test_value();
     main_assert_eq!(config.get_in(Some("General"), "NoCrew") => Some("true"));
     main_assert_eq!(config.get_in(Some("General"), "FairCrew") => None);
