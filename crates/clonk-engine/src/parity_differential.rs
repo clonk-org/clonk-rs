@@ -8379,6 +8379,51 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         );
     }
 
+    // 16i. c4value_type_tags: `GetC4VID` / `GetC4VFromID` (C4Value.cpp:368-420)
+    //      and the substitution `C4Value::CompileFunc` applies over them
+    //      (C4Value.cpp:722-729). This is the character every saved script
+    //      value leads with.
+    //
+    //      Three of the pairs differ only by **case** — `i`/`I` is Int vs
+    //      C4ID, `o`/`O` is object vs enumerated object, `a`/`A` is array vs
+    //      any — so a slip does not fail a load, it silently changes the
+    //      value's type on the way back in. And the tag a live object is
+    //      written with is **not** its own: `CompileFunc` substitutes the
+    //      *enumerated* tag, because the object number rather than the pointer
+    //      is what goes to disk. `compile_char` carries that, and it is what
+    //      the port's encoder has to agree with.
+    for row in golden["c4value_type_tags"].as_array().unwrap() {
+        let kind = row["type"].as_str().unwrap_or("?");
+        let label = format!("c4value_type_tags[{kind}]");
+        // `Reference` and `ObjectEnum` are C4Aul-internal: the port's `Value`
+        // has no variant that can hold either, so there is nothing to encode.
+        // Their rows stay in the golden as the C++ record of the tag space.
+        let value = match kind {
+            "Nil" => ScriptValue::Nil,
+            "Int" => ScriptValue::Int(7),
+            "Bool" => ScriptValue::Bool(true),
+            "Object" => ScriptValue::Object(12),
+            "C4Id" => ScriptValue::C4Id("GOLD".to_owned()),
+            "String" => ScriptValue::String("x".to_owned().into()),
+            "Array" => ScriptValue::Array(Vec::new()),
+            "Proplist" => ScriptValue::Proplist(Default::default()),
+            _ => continue,
+        };
+        let encoded = crate::live_c4_save::encode_value_with_current_string_ids(&value);
+        let leading = encoded.chars().next().unwrap_or('?');
+        // Compared as characters rather than through `expect_eq`: the whole
+        // point of this section is that `o` and `O` look alike, and a
+        // divergence printed as 111 against 79 hides exactly that.
+        let expected = row["compile_char"]
+            .as_str()
+            .and_then(|tag| tag.chars().next())
+            .unwrap_or('?');
+        assert_eq!(
+            leading, expected,
+            "PARITY DIVERGENCE in `{label}` field `compile_char`: C++ golden = '{expected}', Rust = '{leading}' (encoded {encoded:?})"
+        );
+    }
+
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
     // including the zero default for a real resource without [Physical]
     // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance

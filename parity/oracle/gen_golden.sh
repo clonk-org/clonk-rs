@@ -997,6 +997,26 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Value.cpp" > "$gen/c4value_operator_equal.inc"
 
+# 3u. Lift the C4Value type-character map, both directions. It is what every
+#     saved script value leads with, and three of its pairs differ only by
+#     CASE — i/I is Int vs C4ID, o/O is object vs enumerated object, a/A is
+#     array vs any — so a slip silently changes a value's type on reload
+#     rather than failing. The reverse direction answers C4V_Any for anything
+#     it does not know, so a corrupted tag is read as nil, never rejected.
+awk '
+  /^char GetC4VID\(const C4V_Type Type\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Value.cpp" > "$gen/c4value_get_id.inc"
+
+awk '
+  /^C4V_Type GetC4VFromID\(const char C4VID\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Value.cpp" > "$gen/c4value_from_id.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
