@@ -5395,6 +5395,205 @@ inline C4Value array_value(C4ValueArray *array)
 
 } // namespace c4value_equal
 
+// ---------------------------------------------------------------------------
+// C4PXS::Execute (src/C4PXS.cpp:28-135), the per-tick movement of one
+// synchronized loose pixel. `pxs_allocation` covers only the allocator; this
+// pins the step itself, which is on the bit-exact list: the raw C4Fixed
+// position/velocity, the gravity accumulation, the airborne wind branch with
+// its exact pair of Random(1200) draws, and the _PathFree fast path.
+//
+// Every case runs at zero wind. GBackWind is a constant here but the port
+// answers it from the weather model (environment.wind_force(frame)), so a
+// nonzero case would compare a stub against a simulation rather than the
+// arithmetic under test. The draws and the WindDrift friction are exercised
+// either way; a wind case belongs with a weather fixture.
+//
+// The fixture deliberately defines no material reactions, so
+// GetReactionUnsafe answers nullptr and both reaction arms short-circuit. That
+// isolates the movement and RNG rules from the reaction table.
+//
+// It also bounds what the section may cover: every case keeps the pixel in
+// open sky. A pixel touching landscape material is exactly where the real
+// reaction map decides — a liquid meeting denser ground is absorbed by the
+// builtin Insert arm — so a stubbed lookup cannot model it. The contact arm
+// needs a fixture carrying the reaction table and belongs in its own section.
+namespace pxs_exec
+{
+const int32_t GridWdt = 16;
+const int32_t GridHgt = 12;
+const int32_t MNone = -1;
+
+// 0 sky, 1 earth (solid), 2 water. Density/WindDrift mirror C4Material.h's
+// C4M_Solid=50 and the shipped liquid values closely enough to drive the
+// branch; the parity fact is the arithmetic, not the material table.
+struct MaterialCore
+{
+    int32_t Density;
+    int32_t WindDrift;
+};
+
+enum MaterialInteractionEvent
+{
+    meePXSPos = 0,
+    meePXSMove = 1,
+    meeMassMove = 2,
+};
+
+struct C4MaterialReaction;
+using ReactionFunc = bool (*)(C4MaterialReaction *, int32_t &, int32_t &, int32_t,
+                              int32_t, C4Fixed &, C4Fixed &, int32_t, int32_t,
+                              MaterialInteractionEvent, bool *);
+struct C4MaterialReaction
+{
+    ReactionFunc pFunc;
+};
+
+static int32_t g_grid[GridHgt][GridWdt];
+static int32_t g_pix_cnt[GridWdt][GridHgt];
+static int32_t g_wind = 0;
+
+const int32_t GBackWdt = GridWdt;
+const int32_t GBackHgt = GridHgt;
+
+struct C4MaterialMap
+{
+    MaterialCore Map[3] = {{0, 0}, {50, 0}, {25, 40}};
+    // No reaction is defined for this fixture, so every lookup answers null and
+    // the lifted body takes its non-destructive paths.
+    C4MaterialReaction *GetReactionUnsafe(int32_t, int32_t) { return nullptr; }
+};
+
+struct LandscapeStub
+{
+    C4Fixed Gravity{itofix(20, 100)};
+    // C4Landscape::_PathFree is exactly C4LandscapePath::IsFree over PixCnt
+    // (C4Landscape.cpp:891-897).
+    bool _PathFree(int32_t x, int32_t y, int32_t x2, int32_t y2)
+    {
+        return C4LandscapePath::IsFree(x, y, x2, y2, [](int32_t cellX, int32_t cellY)
+        {
+            return g_pix_cnt[cellX][cellY] != 0;
+        });
+    }
+};
+
+struct GameStub
+{
+    int32_t FrameCounter = 0;
+    C4MaterialMap Material;
+    LandscapeStub Landscape;
+};
+
+static GameStub Game;
+
+#define GravAccel (Game.Landscape.Gravity)
+static const C4Fixed WindDrift_Factor = itofix(1, 800);
+
+static FILE *LcRngTraceFile() { return nullptr; }
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 3; }
+static int32_t Sign(int32_t x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
+
+static int32_t GBackMat(int32_t x, int32_t y)
+{
+    if (x < 0 || x >= GridWdt || y < 0 || y >= GridHgt) return MNone;
+    const int32_t mat = g_grid[y][x];
+    return mat ? mat : MNone;
+}
+
+static int32_t GBackDensity(int32_t x, int32_t y)
+{
+    const int32_t mat = GBackMat(x, y);
+    return mat < 0 ? 0 : Game.Material.Map[mat].Density;
+}
+
+static int32_t GBackWind(int32_t, int32_t) { return g_wind; }
+
+struct C4PXS
+{
+    int32_t Mat{MNone};
+    C4Fixed x, y, xdir, ydir;
+    bool deactivated{false};
+
+    void Execute();
+    void Deactivate() { deactivated = true; Mat = MNone; }
+};
+
+#include "pxs_execute.inc"
+
+} // namespace pxs_exec
+
+// Steps one pixel for a fixed number of frames, recording the raw fixed state
+// after every frame together with the RNG ledger, so a wrong draw count shows
+// up even when the position happens to agree.
+static void printPxsExecuteCases()
+{
+    printf("\"pxs_execute\":[");
+    struct Case
+    {
+        const char *name;
+        int32_t mat;
+        int32_t x_n, x_p, y_n, y_p;
+        int32_t xdir_n, xdir_p, ydir_n, ydir_p;
+        int32_t wind;
+        int32_t seed;
+        int32_t frames;
+        bool floor;
+    };
+    const Case cases[] = {
+        // Free fall in still air: gravity only, two draws per frame.
+        {"fall_still_air", 2, 4, 1, 1, 1, 0, 1, 0, 1, 0, 0x1234, 6, false},
+        // Invalid material deactivates before anything else runs.
+        {"invalid_material", 7, 4, 1, 1, 1, 0, 1, 0, 1, 0, 0x1234, 1, false},
+        // Out of bounds below the map deactivates on the bounds check.
+        {"out_of_bounds", 2, 4, 1, 40, 1, 0, 1, 0, 1, 0, 0x1234, 1, false},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        for (int32_t gy = 0; gy < pxs_exec::GridHgt; gy++)
+            for (int32_t gx = 0; gx < pxs_exec::GridWdt; gx++)
+                pxs_exec::g_grid[gy][gx] = 0;
+        for (int32_t gx = 0; gx < pxs_exec::GridWdt; gx++)
+            for (int32_t gy = 0; gy < pxs_exec::GridHgt; gy++)
+                pxs_exec::g_pix_cnt[gx][gy] = 0;
+        if (c.floor)
+            for (int32_t gx = 0; gx < pxs_exec::GridWdt; gx++)
+            {
+                pxs_exec::g_grid[10][gx] = 1;
+                pxs_exec::g_pix_cnt[gx][10] = 1;
+            }
+        pxs_exec::g_wind = c.wind;
+
+        FixedRandom(c.seed);
+        pxs_exec::C4PXS pix;
+        pix.Mat = c.mat;
+        pix.x = itofix(c.x_n, c.x_p);
+        pix.y = itofix(c.y_n, c.y_p);
+        pix.xdir = itofix(c.xdir_n, c.xdir_p);
+        pix.ydir = itofix(c.ydir_n, c.ydir_p);
+
+        printf("{\"name\":\"%s\",\"mat\":%d,\"wind\":%d,\"seed\":%d,"
+               "\"x0\":%d,\"y0\":%d,\"xdir0\":%d,\"ydir0\":%d,\"frames\":[",
+               c.name, c.mat, c.wind, c.seed,
+               pix.x.val, pix.y.val, pix.xdir.val, pix.ydir.val);
+        for (int32_t f = 0; f < c.frames; f++)
+        {
+            pix.Execute();
+            if (f) printf(",");
+            printf("{\"x\":%d,\"y\":%d,\"xdir\":%d,\"ydir\":%d,\"mat\":%d,"
+                   "\"deactivated\":%s,\"random_count\":%d}",
+                   pix.x.val, pix.y.val, pix.xdir.val, pix.ydir.val, pix.Mat,
+                   pix.deactivated ? "true" : "false", RandomCount);
+        }
+        printf("]}");
+    }
+    printf("]");
+}
+
+
 
 
 
@@ -7670,6 +7869,12 @@ int main()
         printf("]}");
     }
     arr_end();
+    printf(",\n");
+
+    // 22b. pxs_execute: the per-tick PXS step (C4PXS.cpp:28-135), which
+    //      `movement` above deliberately excludes and `pxs_allocation` does not
+    //      reach.
+    printPxsExecuteCases();
     printf(",\n");
 
     // 23. DFA_FLOAT's raw C4Fixed bounds. C4DefCore's Physical member is

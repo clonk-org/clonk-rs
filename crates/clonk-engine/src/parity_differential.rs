@@ -6949,6 +6949,112 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b. pxs_execute: the per-tick PXS step itself (C4PXS.cpp:28-135), which
+    //      `movement` above deliberately excludes and `pxs_allocation` does not
+    //      reach. This drives the port's real `execute_pxs` rather than a
+    //      re-implementation, and compares raw C4Fixed alongside the RNG
+    //      ledger — a wrong draw count shows up even when the position agrees.
+    for scn in golden["pxs_execute"].as_array().unwrap() {
+        let name = scn["name"].as_str().unwrap_or("?");
+        let label = format!("pxs_execute[{name}]");
+
+        // Densities and WindDrift mirror the oracle's material map exactly.
+        // MaterialId is the 0-based library index (MaterialSet::from_resource_
+        // library), and C++'s Map[0] is a real entry, so the leading Vacuum
+        // keeps Earth at 1 and Water at 2 on both sides.
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Earth]
+            Name=Earth
+            Density=50
+
+            [Material Water]
+            Name=Water
+            Density=25
+            WindDrift=40
+            "#,
+        )
+        .expect("pxs execute oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const EARTH_BYTE: u8 = 1;
+        let bytes = vec![0u8; WDT as usize * HGT as usize];
+        let mut densities = vec![0; 128];
+        densities[EARTH_BYTE as usize] = 50;
+        let mut material_names = vec![None; 128];
+        material_names[EARTH_BYTE as usize] = Some("Earth".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        // `gravity_as_c4fixed` is `fixed100(gravity) / 5`, so 100 yields the
+        // oracle's `Gravity = FIXED100(20)` (raw 13107).
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        // `estimated_height` is the port's GBackHgt, but it only answers the
+        // real height once pinned; otherwise it estimates from surface depths,
+        // which an empty grid reports as zero and the bounds check then reads
+        // as out-of-world.
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+        engine.rng = LcgRng::new(i(scn, "seed") as u32);
+
+        let mut pixel = crate::pxs::Pxs {
+            mat: crate::material::MaterialId::new(i(scn, "mat") as usize)
+                .expect("oracle pxs material"),
+            x: C4Fixed::from_raw(i(scn, "x0") as i32),
+            y: C4Fixed::from_raw(i(scn, "y0") as i32),
+            xdir: C4Fixed::from_raw(i(scn, "xdir0") as i32),
+            ydir: C4Fixed::from_raw(i(scn, "ydir0") as i32),
+        };
+        let mut deactivated = false;
+
+        for (frame, fr) in scn["frames"].as_array().unwrap().iter().enumerate() {
+            if !deactivated {
+                match engine.execute_pxs(pixel) {
+                    Some(next) => pixel = next,
+                    None => deactivated = true,
+                }
+            }
+            expect_eq(&label, frame, "x", i(fr, "x"), pixel.x.val() as i64);
+            expect_eq(&label, frame, "y", i(fr, "y"), pixel.y.val() as i64);
+            expect_eq(
+                &label,
+                frame,
+                "xdir",
+                i(fr, "xdir"),
+                pixel.xdir.val() as i64,
+            );
+            expect_eq(
+                &label,
+                frame,
+                "ydir",
+                i(fr, "ydir"),
+                pixel.ydir.val() as i64,
+            );
+            expect_eq(
+                &label,
+                frame,
+                "deactivated",
+                i64::from(fr["deactivated"].as_bool().unwrap_or(false)),
+                i64::from(deactivated),
+            );
+            expect_eq(
+                &label,
+                frame,
+                "random_count",
+                i(fr, "random_count"),
+                i64::from(engine.rng.count),
+            );
+        }
+    }
+
     // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
     // including the zero default for a real resource without [Physical]
     // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance
