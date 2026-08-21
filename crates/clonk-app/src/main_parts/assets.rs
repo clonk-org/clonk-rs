@@ -1423,7 +1423,7 @@ pub(crate) enum LobbyPreloadJobSource {
         scenario_resources: Option<ClientScenarioResources>,
         game_resources: Vec<ResolvedClientStartResource>,
         resource_directory: PathBuf,
-        maker: String,
+        maker: LegacyCString,
         scenario_path: PathBuf,
         staging_path: Option<PathBuf>,
     },
@@ -7748,7 +7748,7 @@ pub(crate) fn client_settings_for_paths(
     server_addr: SocketAddr,
     player_name: String,
     paths: Option<&AppPaths>,
-) -> ClientSettings {
+) -> Result<ClientSettings> {
     let mut settings = ClientSettings::new(server_addr, player_name);
     let query = load_reference_query_settings(paths);
     settings.league_transport = clonk_network::LeagueHttpTransportConfig {
@@ -7758,6 +7758,9 @@ pub(crate) fn client_settings_for_paths(
     };
     settings.league_auth = load_league_auth_settings(paths);
     if let Some(paths) = paths {
+        let (client_name, client_nick) = load_classic_network_identity(paths)?;
+        settings.client_name = client_name;
+        settings.client_nick = client_nick;
         if let Ok(selection) = snapshot_configured_client_player_selection(paths) {
             settings.group_maker = selection.group_maker().clone();
         }
@@ -7781,7 +7784,7 @@ pub(crate) fn client_settings_for_paths(
         // (C4Network2Res.cpp:460-490).
         settings.max_resource_search_recursion = load_max_resource_search_recursion(Some(paths));
     }
-    settings
+    Ok(settings)
 }
 
 fn apply_classic_client_settings(
@@ -7814,7 +7817,7 @@ pub(crate) fn classic_client_settings_for_reference(
     group_maker: Option<LegacyCString>,
     classic: &ClassicCommandLine,
 ) -> Result<ClientSettings> {
-    let mut settings = client_settings_for_paths(reference.source_address, player_name, paths)
+    let mut settings = client_settings_for_paths(reference.source_address, player_name, paths)?
         .with_compatibility_build(reference.build)
         .with_join_route_plan(reference.join_route_plan_for_local_host())
         .with_netpuncher(
@@ -7863,7 +7866,7 @@ pub(crate) fn resolve_network_mode(
     }
     if let Some(ref join_addr) = cli.join {
         let server_addr = parse_socket_addr(join_addr, "join")?;
-        let mut settings = client_settings_for_paths(server_addr, cli.player_name.clone(), paths);
+        let mut settings = client_settings_for_paths(server_addr, cli.player_name.clone(), paths)?;
         apply_classic_client_settings(&mut settings, classic)?;
         return Ok(Some(NetworkMode::Client(settings)));
     }

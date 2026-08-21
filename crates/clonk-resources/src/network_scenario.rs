@@ -34,6 +34,17 @@ pub fn combine_network_scenario(
     output_filename: &str,
     maker: &str,
 ) -> Result<Vec<u8>, NetworkScenarioError> {
+    combine_network_scenario_with_maker_bytes(scenario, dynamic, output_filename, maker.as_bytes())
+}
+
+/// Builds the locally packed scenario while preserving the native maker bytes
+/// copied by C4Group's process-global maker.
+pub fn combine_network_scenario_with_maker_bytes(
+    scenario: &Group,
+    dynamic: &Group,
+    output_filename: &str,
+    maker: &[u8],
+) -> Result<Vec<u8>, NetworkScenarioError> {
     let scenario_entries = scenario.entries()?;
     let dynamic_entries = dynamic.entries()?;
     let scenario_material = material_entry(&scenario_entries);
@@ -55,7 +66,9 @@ pub fn combine_network_scenario(
         .map(|entry| case_fold(&entry.name_bytes))
         .collect::<HashSet<_>>();
     let mut combined = MutableGroup::new(output_filename);
-    combined.set_maker(maker);
+    if !maker.is_empty() {
+        combined.set_maker_bytes(maker);
+    }
     for entry in scenario_entries
         .iter()
         .filter(|entry| !overwritten.contains(&case_fold(&entry.name_bytes)))
@@ -183,12 +196,14 @@ fn rebuild_material_entry(
     target: &mut MutableGroup,
     source: &Group,
     entry: &GroupEntry,
-    maker: &str,
+    maker: &[u8],
 ) -> Result<(), NetworkScenarioError> {
     let source = open_child_entry_exact(source, entry)
         .map_err(|_| NetworkScenarioError::InvalidMaterialGroup)?;
     let mut rebuilt = MutableGroup::new_bytes(entry.name_bytes.clone());
-    rebuilt.set_maker(maker);
+    if !maker.is_empty() {
+        rebuilt.set_maker_bytes(maker);
+    }
     for child_entry in source.entries()? {
         copy_entry(&mut rebuilt, &source, &child_entry)?;
     }

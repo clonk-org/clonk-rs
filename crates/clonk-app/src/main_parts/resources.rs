@@ -4632,6 +4632,11 @@ pub(crate) fn load_classic_lobby_identity(paths: &AppPaths) -> Result<(String, S
     load_classic_lobby_identity_with_hostname_provider(paths, system_hostname_bytes)
 }
 
+pub(crate) fn load_classic_network_identity(paths: &AppPaths) -> Result<(String, String)> {
+    let config = load_classic_lobby_config(paths)?;
+    classic_network_identity_from_config(&config, system_hostname_bytes)
+}
+
 pub(crate) fn load_classic_lobby_identity_with_hostname(
     paths: &AppPaths,
     hostname: &[u8],
@@ -4643,17 +4648,35 @@ pub(crate) fn load_classic_lobby_identity_with_hostname_provider(
     paths: &AppPaths,
     hostname: impl FnOnce() -> Vec<u8>,
 ) -> Result<(String, String, i32)> {
-    let config = match fs::read(paths.config_file()) {
-        Ok(config) => config,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error).context("cannot read lobby configuration"),
-    };
-    let value = |section, key| {
-        clonk_app_netplay::configured_native_value(&config, section, key)
+    let config = load_classic_lobby_config(paths)?;
+    let (local_name, nick) = classic_network_identity_from_config(&config, hostname)?;
+    let countdown =
+        match clonk_app_netplay::configured_native_value(&config, "Lobby", "CountdownTime")
             .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
-    };
+        {
+            Some(value) => value
+                .trim()
+                .parse::<i32>()
+                .context("Lobby.CountdownTime is not a C++ int32")?,
+            None => 5,
+        };
+    Ok((local_name, nick, countdown))
+}
+
+fn load_classic_lobby_config(paths: &AppPaths) -> Result<Vec<u8>> {
+    match fs::read(paths.config_file()) {
+        Ok(config) => Ok(config),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error).context("cannot read lobby configuration"),
+    }
+}
+
+fn classic_network_identity_from_config(
+    config: &[u8],
+    hostname: impl FnOnce() -> Vec<u8>,
+) -> Result<(String, String)> {
     let network_name = |key| {
-        clonk_app_netplay::configured_native_dynamic_value(&config, "Network", key)
+        clonk_app_netplay::configured_native_dynamic_value(config, "Network", key)
             .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
     };
     let configured_local_name = sanitize_classic_lobby_name(
@@ -4678,14 +4701,7 @@ pub(crate) fn load_classic_lobby_identity_with_hostname_provider(
     } else {
         sanitize_classic_lobby_name(&configured_nick, "Network.Nick", false)?
     };
-    let countdown = match value("Lobby", "CountdownTime") {
-        Some(value) => value
-            .trim()
-            .parse::<i32>()
-            .context("Lobby.CountdownTime is not a C++ int32")?,
-        None => 5,
-    };
-    Ok((local_name, nick, countdown))
+    Ok((local_name, nick))
 }
 
 pub(crate) fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValues {

@@ -155,7 +155,8 @@ pub struct ClientSettings {
     /// Reference-backed joins use the host's advertised build so Rust release
     /// versioning does not prevent an otherwise compatible connection.
     pub compatibility_build: i32,
-    pub player_name: String,
+    pub client_name: String,
+    pub client_nick: String,
     pub observer: bool,
     pub group_maker: clonk_engine::LegacyCString,
     pub password: clonk_engine::LegacyCString,
@@ -182,9 +183,10 @@ pub struct ClientSettings {
 }
 
 impl ClientSettings {
-    pub fn new(server_addr: SocketAddr, player_name: impl Into<String>) -> Self {
-        let player_name = player_name.into();
-        let group_maker = clonk_engine::LegacyCString::from_bytes(player_name.as_bytes().to_vec())
+    pub fn new(server_addr: SocketAddr, client_name: impl Into<String>) -> Self {
+        let client_name = client_name.into();
+        let group_maker = clonk_resources::encode_legacy_script_text(&client_name)
+            .and_then(clonk_engine::LegacyCString::from_bytes)
             .unwrap_or_default();
         let wildcard = if server_addr.is_ipv4() {
             SocketAddr::from(([0, 0, 0, 0], 0))
@@ -199,7 +201,8 @@ impl ClientSettings {
             logical_server_addresses: logical_server_addresses.clone(),
             server_addresses: logical_server_addresses,
             compatibility_build: clonk_network::CURRENT_GAME_BUILD,
-            player_name,
+            client_nick: client_name.clone(),
+            client_name,
             observer: false,
             group_maker,
             password: clonk_engine::LegacyCString::default(),
@@ -7692,7 +7695,7 @@ async fn run_client_worker_with_voice_enabled(
     current_frame_source: Arc<AtomicI32>,
     startup_cancellation: Option<NetworkStartupCancellation>,
 ) -> Result<()> {
-    let player_name = settings.player_name.clone();
+    let client_name = settings.client_name.clone();
     let league_transport = settings.league_transport.clone();
     let tcp_enabled = settings.mesh_tcp_bind_address.is_some();
     let udp_enabled = settings.mesh_udp_bind_address.is_some();
@@ -7716,7 +7719,8 @@ async fn run_client_worker_with_voice_enabled(
     } else {
         ParticipantKind::Player
     };
-    let mut client_config = ClientConfig::new(player_name.clone(), participant_kind)
+    let mut client_config = ClientConfig::new(client_name.clone(), participant_kind)
+        .with_nick(settings.client_nick)
         .with_compatibility_build(settings.compatibility_build)
         .with_voice_enabled(voice_enabled)
         .with_group_maker(settings.group_maker)
@@ -7763,7 +7767,7 @@ async fn run_client_worker_with_voice_enabled(
         return Ok(());
     }
     let (client_id, initial_status, league_endpoint) =
-        announce_connected_client(&mut client, player_name, &event_tx, &local_id_tx)?;
+        announce_connected_client(&mut client, client_name, &event_tx, &local_id_tx)?;
     let league_runtime = league_endpoint.and_then(|endpoint| {
         match spawn_league_client(endpoint, league_transport, event_tx.clone()) {
             Ok(runtime) => Some(runtime),
@@ -8541,7 +8545,7 @@ async fn record_client_control(
 
 fn announce_connected_client(
     client: &mut ClientHandle,
-    player_name: String,
+    client_name: String,
     event_tx: &NetworkEventSender,
     local_id_tx: &mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
 ) -> Result<(ClientId, NetworkStatus, Option<String>)> {
@@ -8561,11 +8565,19 @@ fn announce_connected_client(
             .to_string_lossy()
             .into_owned()
     });
+    let assigned_client_name = join_data
+        .parameters
+        .clients
+        .clients
+        .iter()
+        .find(|core| core.client_id == join_data.client_id)
+        .map(|core| clonk_resources::decode_legacy_system_text(core.name.as_bytes()))
+        .unwrap_or(client_name);
     let client_id = client.client_id();
     let _ = event_tx.send(NetworkEvent::JoinData(join_data));
     let _ = event_tx.send(NetworkEvent::PeerConnected {
         client_id,
-        name: player_name,
+        name: assigned_client_name,
         kind: ParticipantKind::Player,
     });
     Ok((client_id, initial_status, league_endpoint))
@@ -9345,6 +9357,28 @@ mod tests {
                 .with_compatibility_build(clonk_network::CURRENT_GAME_BUILD + 2)
                 .compatibility_build,
             clonk_network::CURRENT_GAME_BUILD + 2
+        );
+    }
+
+    #[test]
+    fn client_defaults_preserve_native_name_bytes_in_the_group_maker() {
+        // C4Group::SetMaker retains the native process-name bytes used by
+        // later resource publication (src/C4Application.cpp:95-120;
+        // src/C4Group.cpp:104-108).
+        let address = SocketAddr::from(([127, 0, 0, 1], 11_112));
+        let name = clonk_script::c4_string_from_bytes(b"Alic\xe9");
+
+        assert_eq!(
+            ClientSettings::new(address, name.clone())
+                .group_maker
+                .as_bytes(),
+            b"Alic\xe9"
+        );
+        assert_eq!(
+            ClientConfig::new(name, ParticipantKind::Player)
+                .group_maker
+                .as_bytes(),
+            b"Alic\xe9"
         );
     }
 
@@ -11351,24 +11385,38 @@ Message=Server says Andr\xe9\r\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn connected_client_emits_exact_join_data_before_peer_events() {
         // HandleJoinData applies the complete packet during client bootstrap,
-        // before the client announces addresses or processes ordinary traffic
-        // (src/C4Network2.cpp:1574-1623).
+        // before the client announces addresses or processes ordinary traffic;
+        // Join resolves client-name collisions before producing that packet
+        // (src/C4Network2.cpp:1406-1432,1574-1623).
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let address = listener.local_addr().test_value();
-        let host_config = HostConfig::default();
+        let native_text = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| clonk_script::c4_string_from_bytes(std::slice::from_ref(byte)))
+                .collect::<String>()
+        };
+        let mut host_config = HostConfig::default();
+        host_config.local_core.name = legacy_string(b"Alic\xc3\xa4");
+        host_config.local_core.nick = legacy_string(b"Alic\xc3\xa4");
         let host_core = host_config.local_core.clone();
         let host_status = host_config.initial_status;
         let snapshot = host_config.initial_join_snapshot.clone().test_value();
         let host = start_host(listener, host_config).await.test_value();
         let mut client = clonk_network::connect_client(
             address,
-            ClientConfig::new("Alice", ParticipantKind::Player),
+            // SetLocal copies Network.Nick independently of Network.LocalName
+            // before PID_Conn is sent (src/C4Client.cpp:43-55;
+            // src/C4Network2.cpp:347-357).
+            ClientConfig::new(native_text(b"Alic\xc3\xa4"), ParticipantKind::Player)
+                .with_nick(native_text(b"alli\xc3\xa4")),
         )
         .await
         .test_value();
         let client_id = client.client_id();
         let wire_client_id = i32::try_from(client_id).test_value();
-        let name = legacy_string(b"Alice");
+        let name = legacy_string(b"Alic\xc3\xa42");
+        let nick = legacy_string(b"alli\xc3\xa4");
         let mut parameters = snapshot.parameters;
         parameters.clients = clonk_network::JoinClientRegistrySnapshot {
             clients: vec![
@@ -11380,8 +11428,8 @@ Message=Server says Andr\xe9\r\n\
                     // (src/C4Network2.cpp:1395-1406).
                     activated: false,
                     observer: false,
-                    name: name.clone(),
-                    nick: name,
+                    name,
+                    nick,
                     lobby_ready: false,
                 },
             ],
@@ -11397,9 +11445,13 @@ Message=Server says Andr\xe9\r\n\
         let (event_tx, event_rx) = NetworkEventSender::channel();
         let (local_id_tx, local_id_rx) = mpsc::channel();
 
-        let announced =
-            announce_connected_client(&mut client, "Alice".to_string(), &event_tx, &local_id_tx)
-                .test_value();
+        let announced = announce_connected_client(
+            &mut client,
+            native_text(b"Alic\xc3\xa4"),
+            &event_tx,
+            &local_id_tx,
+        )
+        .test_value();
 
         assert_eq!(
             announced,
@@ -11421,7 +11473,7 @@ Message=Server says Andr\xe9\r\n\
             event_rx.recv().expect("peer event"),
             NetworkEvent::PeerConnected {
                 client_id,
-                name: "Alice".to_string(),
+                name: "AlicÃ¤2".to_string(),
                 kind: ParticipantKind::Player,
             }
         );

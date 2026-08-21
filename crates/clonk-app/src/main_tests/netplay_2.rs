@@ -1386,11 +1386,36 @@ fn client_network_settings_preserve_configured_ports_and_zero_disables_protocol(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client".to_string(),
         Some(&paths),
-    );
+    )
+    .test_value();
 
     main_assert_eq!(settings.mesh_tcp_bind_address => None);
     main_assert_eq!(settings.group_maker.as_bytes() => b"Exact maker");
     main_assert_eq!(settings.mesh_udp_bind_address => Some(SocketAddr::from(([0_u16; 8], 22_113))));
+}
+
+#[test]
+fn client_join_uses_the_configured_network_identity_instead_of_the_player_name() {
+    // C4ClientCore::SetLocal copies Network.LocalName and Network.Nick into the
+    // joining client core independently of any player profile
+    // (src/C4Client.cpp:43-55).
+    let (_user_data, _guard, paths) = n2_repository_paths();
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        b"[Network]\nLocalName=H\xe4st\nNick=N\xe4ck\n[Lobby]\nCountdownTime=invalid\n",
+    )
+    .test_value();
+
+    let settings = client_settings_for_paths(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Player".to_string(),
+        Some(&paths),
+    )
+    .test_value();
+
+    main_assert_eq!(clonk_script::c4_string_bytes(&settings.client_name) => b"H\xe4st");
+    main_assert_eq!(clonk_script::c4_string_bytes(&settings.client_nick) => b"N\xe4ck");
 }
 
 #[test]
@@ -1479,7 +1504,8 @@ fn zero_ports_flow_to_disabled_app_network_services() {
         SocketAddr::from(([127, 0, 0, 1], DEFAULT_NETWORK_TCP_PORT)),
         "Client".to_string(),
         Some(&paths),
-    );
+    )
+    .test_value();
     main_assert_eq!(settings.mesh_tcp_bind_address => None);
     main_assert_eq!(settings.mesh_udp_bind_address => None);
 }
@@ -1810,7 +1836,7 @@ fn command_line_definition_selection_is_published_to_network_clients() {
             scenario_resources: Some(scenario_resources),
             game_resources,
             resource_directory: client_directory.path().to_path_buf(),
-            maker: "Exact Host".to_string(),
+            maker: LegacyCString::from_bytes(b"Exact Host".to_vec()).test_value(),
             scenario_path: combined_path,
             staging_path: None,
         },
@@ -9717,8 +9743,25 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     app.network_control_clock = Some(NetworkControlClock::new(31, 4));
-    app.control_clients.register(0, true, false);
-    app.control_clients.register(local_client, true, false);
+    let native = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).test_value();
+    app.player_name = "Player".to_string();
+    app.control_clients.replace_snapshot([
+        n2_fixture!(client {
+            client_id: 0,
+            activated: true,
+            name: native(b"Exact host"),
+        }),
+        n2_fixture!(client {
+            client_id: local_client,
+            activated: true,
+            name: native(b"Assigned local"),
+        }),
+        n2_fixture!(client {
+            client_id: 9,
+            activated: true,
+            name: native(b"Retained peer"),
+        }),
+    ]);
 
     n2_send_event(&event_tx, NetworkEvent::HostRestartLobby);
     app.test_network_events();
@@ -9728,6 +9771,11 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
     main_assert!(app.startup_network_connection.is_none(), "nothing is re-dialled: that is the whole point of the notice");
     main_assert!(app.pending_host_rejoin.is_none(), "a preserved session has no reconnect to arm");
     main_assert!(app.network_lobby.is_some(), "the client lands in the lobby rather than the game list");
+    let participants = &app.network_lobby.test_ref().participants;
+    main_assert_eq!(participants.keys().copied().collect::<Vec<_>>() => [0, 7, 9]);
+    main_assert_eq!(participants[&0].name => "Exact host");
+    main_assert_eq!(participants[&7].name => "Assigned local");
+    main_assert_eq!(participants[&9].name => "Retained peer");
     main_assert!(
         app.network_lobby
             .test_ref()
@@ -10483,6 +10531,19 @@ fn initial_network_client_registry_keeps_the_local_client_name() {
 
     main_assert_eq!(clients.state(0).expect("local host client is registered").name.to_string_lossy() => "Named Host");
     main_assert_eq!(initial_control_clients(None, None).state(0).expect("offline local client is registered").name.to_string_lossy() => "Local");
+
+    // AddLocal calls SetLocal before the connection request, so both native
+    // Network.LocalName and Network.Nick already exist on the unknown-ID local
+    // core (src/C4Client.cpp:43-55,268-280;
+    // src/C4Network2.cpp:347-357).
+    let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(7);
+    let mut settings = n2_client_settings();
+    settings.client_name = "Häst".to_string();
+    settings.client_nick = "Näck".to_string();
+    let clients = initial_control_clients(Some(&manager), Some(&NetworkMode::Client(settings)));
+    let client = clients.state(7).test_value();
+    main_assert_eq!(client.name.as_bytes() => b"H\xe4st");
+    main_assert_eq!(client.nick.as_bytes() => b"N\xe4ck");
 }
 
 #[test]
@@ -13954,6 +14015,7 @@ fn configured_max_resource_search_recursion_reaches_client_candidates() {
                 "Depth tester".to_string(),
                 Some(&paths),
             )
+            .test_value()
             .max_resource_search_recursion,
         )
     };
@@ -14003,6 +14065,7 @@ fn configured_network_work_path_controls_resource_staging_directory() {
             "Work-path tester".to_string(),
             Some(&paths),
         )
+        .test_value()
         .resource_directory;
         // Host and client staging agree, and both stay inside the cache.
         main_assert_eq!(directory => cache.join(&name));

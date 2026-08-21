@@ -37,7 +37,8 @@ pub use legacy_paths::{
 };
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
 pub use network_scenario::{
-    combine_network_scenario, merge_extracted_group_entries, NetworkScenarioError,
+    combine_network_scenario, combine_network_scenario_with_maker_bytes,
+    merge_extracted_group_entries, NetworkScenarioError,
 };
 pub use particle::{
     ParticleDefinition, ParticleDefinitionCore, ParticleDefinitionError, ParticleFacet,

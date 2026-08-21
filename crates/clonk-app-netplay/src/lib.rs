@@ -17,9 +17,10 @@ mod host_game_resource_sources_tests;
 mod prepared_host_bootstrap_tests;
 
 pub use client_network_scenario::{
-    compose_client_network_scenario, resolve_client_game_resources,
-    resolve_client_scenario_resources, ClientNetworkScenarioError, ClientScenarioResources,
-    ClientStartResourceRole, PendingClientStartResource, ResolvedClientStartResource,
+    compose_client_network_scenario, compose_client_network_scenario_with_maker_bytes,
+    resolve_client_game_resources, resolve_client_scenario_resources, ClientNetworkScenarioError,
+    ClientScenarioResources, ClientStartResourceRole, PendingClientStartResource,
+    ResolvedClientStartResource,
 };
 pub use client_start_barrier::ClientStartBarrier;
 pub use configured_client_players::{

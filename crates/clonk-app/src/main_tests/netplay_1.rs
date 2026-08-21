@@ -4542,7 +4542,7 @@ fn network_join_applies_active_scenario_gui_overrides() {
                 scenario_resources: Some(scenario_resources.clone()),
                 game_resources,
                 resource_directory: client_directory.path().to_path_buf(),
-                maker: "Exact Host".to_string(),
+                maker: LegacyCString::from_bytes(b"Exact Host".to_vec()).test_value(),
                 scenario_path: combined_path.clone(),
                 staging_path: None,
             },

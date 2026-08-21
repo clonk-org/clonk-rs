@@ -1,6 +1,52 @@
 use std::path::PathBuf;
 
-use clonk_resources::{combine_network_scenario, Group, MutableGroup};
+use clonk_resources::{
+    combine_network_scenario, combine_network_scenario_with_maker_bytes, Group, MutableGroup,
+};
+
+#[test]
+fn retrieve_scenario_preserves_native_maker_bytes() {
+    // C4Group::SetMaker copies the process-global native General.Name bytes
+    // into each rewritten group header (src/C4Application.cpp:95-120;
+    // src/C4Group.cpp:104-108,938-945).
+    let scenario = MutableGroup::new("Scenario.c4s");
+    let dynamic = MutableGroup::new("Dynamic.c4s");
+    let scenario =
+        Group::from_memory(PathBuf::from("Scenario.c4s"), scenario.pack().unwrap()).unwrap();
+    let dynamic =
+        Group::from_memory(PathBuf::from("Dynamic.c4s"), dynamic.pack().unwrap()).unwrap();
+
+    let packed = combine_network_scenario_with_maker_bytes(
+        &scenario,
+        &dynamic,
+        "Combined1.c4s",
+        b"M\x81ker",
+    )
+    .unwrap();
+    let combined = Group::from_memory(PathBuf::from("Combined1.c4s"), packed).unwrap();
+
+    assert_eq!(combined.maker_bytes(), Some(&b"M\x81ker"[..]));
+}
+
+#[test]
+fn retrieve_scenario_keeps_the_default_group_maker_when_process_maker_is_empty() {
+    // C4Group::Close stamps the process maker only when it is nonempty, so a
+    // fresh packed directory retains the default header maker
+    // (src/C4Group.cpp:546-552,938-945).
+    let scenario = MutableGroup::new("Scenario.c4s");
+    let dynamic = MutableGroup::new("Dynamic.c4s");
+    let scenario =
+        Group::from_memory(PathBuf::from("Scenario.c4s"), scenario.pack().unwrap()).unwrap();
+    let dynamic =
+        Group::from_memory(PathBuf::from("Dynamic.c4s"), dynamic.pack().unwrap()).unwrap();
+
+    let packed =
+        combine_network_scenario_with_maker_bytes(&scenario, &dynamic, "Combined1.c4s", b"")
+            .unwrap();
+    let combined = Group::from_memory(PathBuf::from("Combined1.c4s"), packed).unwrap();
+
+    assert_eq!(combined.maker_bytes(), Some(&b"New C4Group"[..]));
+}
 
 #[test]
 fn cpp_retrieve_scenario_overlays_dynamic_top_level_and_keeps_existing_material_group() {
