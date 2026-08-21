@@ -64,6 +64,18 @@ pub fn to_mutable(group: &Group, filename: &str) -> Result<MutableGroup, EditErr
     Ok(mutable)
 }
 
+/// A C4Group entry name as C++ compares it: the stored bytes are Windows-1252
+/// and every comparison in `C4Group::Sort` runs over them directly, so decode
+/// one byte to one code point.
+///
+/// Lossy UTF-8 is wrong here and silently destructive: a lone high byte is not
+/// valid UTF-8, so `Überladungen.c4d` and `Ärger.c4d` would both decode to the
+/// same `U+FFFD` prefix and become indistinguishable to the sort. The shipped
+/// content tree has 70 such names.
+pub fn entry_name_for_sort(name_bytes: &[u8]) -> String {
+    name_bytes.iter().map(|byte| *byte as char).collect()
+}
+
 /// `C4Group::SortRank` (`C4Group.cpp:2290-2303`): the first `|`-separated
 /// segment matching `name` gives rank `(segments) - index`; no match is 0.
 /// A higher rank sorts earlier.
@@ -82,10 +94,14 @@ pub fn sorted_entry_order(names: &[String], sort_list: &str) -> Vec<usize> {
     let mut order: Vec<usize> = (0..names.len()).collect();
     order.sort_by(|left, right| {
         let ranks = sort_rank(&names[*right], sort_list).cmp(&sort_rank(&names[*left], sort_list));
+        // `stricmp` is `strcasecmp` off Windows (src/C4Strings.h:37-41), which
+        // folds only ASCII in the C locale: two distinct high bytes stay
+        // distinct. Unicode lowercasing would fold 0xDC onto 0xFC and lose
+        // that ordering.
         ranks.then_with(|| {
             names[*left]
-                .to_lowercase()
-                .cmp(&names[*right].to_lowercase())
+                .to_ascii_lowercase()
+                .cmp(&names[*right].to_ascii_lowercase())
         })
     });
     order
@@ -252,6 +268,49 @@ mod tests {
     }
 
     // C4Group.cpp:2290-2340 — rank descending, then case-insensitive name.
+    /// Entry names are Windows-1252 bytes, and `C4Group::Sort`'s secondary key
+    /// is `stricmp` over those bytes — `strcasecmp` off Windows
+    /// (7d43b47b src/C4Strings.h:37-41), which folds only ASCII in the C
+    /// locale. Two distinct high bytes therefore stay distinct and order by
+    /// byte value.
+    ///
+    /// Decoding those names as lossy UTF-8 instead collapses **every**
+    /// non-ASCII byte to a single U+FFFD, so `Überladungen.c4d` and
+    /// `Ärger.c4d` become the same sort key. 70 files in the shipped content
+    /// tree have non-ASCII names, so this is reachable rather than theoretical.
+    #[test]
+    fn secondary_sort_orders_high_bytes_like_native_stricmp() {
+        // 0xC4 'Ä' and 0xDC 'Ü' in Windows-1252, decoded byte-for-byte.
+        let names = vec![
+            entry_name_for_sort(b"\xdcberladungen.c4d"),
+            entry_name_for_sort(b"\xc4rger.c4d"),
+        ];
+        assert_eq!(
+            sorted_entry_order(&names, "Scenario.txt"),
+            vec![1, 0],
+            "0xC4 sorts before 0xDC, so the two names must stay distinguishable"
+        );
+
+        // ASCII case still folds, exactly as `strcasecmp` does.
+        let cased = vec![
+            entry_name_for_sort(b"beta.txt"),
+            entry_name_for_sort(b"ALPHA.txt"),
+        ];
+        assert_eq!(sorted_entry_order(&cased, "Scenario.txt"), vec![1, 0]);
+
+        // A high byte is *not* folded: 0xDC and 0xFC are separate keys, where
+        // Unicode lowercasing would make 'Ü' and 'ü' compare equal.
+        let umlauts = vec![
+            entry_name_for_sort(b"\xfc.txt"),
+            entry_name_for_sort(b"\xdc.txt"),
+        ];
+        assert_eq!(
+            sorted_entry_order(&umlauts, "Scenario.txt"),
+            vec![1, 0],
+            "0xDC precedes 0xFC; ASCII-only folding leaves both in place"
+        );
+    }
+
     #[test]
     fn sort_ranks_and_orders_like_the_native_bubble_sort() {
         // Earlier segments rank higher, so they sort first.
