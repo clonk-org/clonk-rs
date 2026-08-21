@@ -59,6 +59,7 @@ fn snapshotless_tick_matches_a_discarded_snapshot_and_drains_frame_output(
 ) -> Result<(), Box<dyn Error>> {
     let (mut snapshot_engine, snapshot_crew) = fixture()?;
     let (mut snapshotless_engine, snapshotless_crew) = fixture()?;
+    // The call is attached to the crew, so the tick stamps where it stood.
     let audio = |target| AudioCommand::PlaySound {
         name: "SnapshotlessTick".to_owned(),
         target: Some(target),
@@ -66,6 +67,7 @@ fn snapshotless_tick_matches_a_discarded_snapshot_and_drains_frame_output(
         looped: false,
         multiple: false,
         custom_falloff: None,
+        target_position: Some(clonk_engine::Vector2::new(0, 0)),
     };
     let menu = |crew_id| MenuRequest {
         crew_id,

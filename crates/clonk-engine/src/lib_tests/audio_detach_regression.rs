@@ -10,7 +10,7 @@ fn sound_source_engine() -> (Engine, ObjectId, Vector2) {
     (engine, object, position)
 }
 
-fn impact_command(object: ObjectId) -> AudioCommand {
+fn impact_command(object: ObjectId, position: Vector2) -> AudioCommand {
     AudioCommand::PlaySound {
         name: "Impact".into(),
         target: Some(object),
@@ -18,10 +18,11 @@ fn impact_command(object: ObjectId) -> AudioCommand {
         looped: false,
         multiple: false,
         custom_falloff: None,
+        target_position: Some(position),
     }
 }
 
-fn fire_loop_command(object: ObjectId) -> AudioCommand {
+fn fire_loop_command(object: ObjectId, position: Vector2) -> AudioCommand {
     AudioCommand::PlaySound {
         name: "Fire".into(),
         target: Some(object),
@@ -29,6 +30,7 @@ fn fire_loop_command(object: ObjectId) -> AudioCommand {
         looped: true,
         multiple: false,
         custom_falloff: None,
+        target_position: Some(position),
     }
 }
 
@@ -69,7 +71,7 @@ fn native_destroy_without_object_audio_emits_no_detach_command() {
 #[test]
 fn same_frame_direct_one_shot_detaches_once_in_command_order() {
     let (mut engine, object, position) = sound_source_engine();
-    let play = impact_command(object);
+    let play = impact_command(object, position);
     engine.pending_audio.push(play.clone());
     let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
@@ -93,7 +95,7 @@ fn same_frame_direct_one_shot_detaches_once_in_command_order() {
 #[test]
 fn same_frame_direct_loop_detaches_once_in_command_order() {
     let (mut engine, object, position) = sound_source_engine();
-    let play = fire_loop_command(object);
+    let play = fire_loop_command(object, position);
     engine.pending_audio.push(play.clone());
     let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
@@ -115,7 +117,7 @@ fn same_frame_direct_loop_detaches_once_in_command_order() {
 #[test]
 fn delivered_one_shot_target_is_remembered_until_later_removal() {
     let (mut engine, object, position) = sound_source_engine();
-    let play = impact_command(object);
+    let play = impact_command(object, position);
     engine.pending_audio.push(play.clone());
     assert_eq!(
         engine.tick().expect("delivery frame succeeds").audio,
@@ -136,7 +138,7 @@ fn delivered_one_shot_target_is_remembered_until_later_removal() {
 #[test]
 fn delivered_loop_target_is_remembered_until_later_removal() {
     let (mut engine, object, position) = sound_source_engine();
-    let play = fire_loop_command(object);
+    let play = fire_loop_command(object, position);
     engine.pending_audio.push(play.clone());
     assert_eq!(
         engine.tick().expect("delivery frame succeeds").audio,

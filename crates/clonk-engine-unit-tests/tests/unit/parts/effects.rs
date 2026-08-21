@@ -1901,6 +1901,7 @@ func FxGlobalErrorCommitTimer(target, number, time)
                 looped: false,
                 multiple: false,
                 custom_falloff: None,
+                target_position: Some(Vector2::new(31, 37)),
             }],
         ),
         "the nil carrier does not detach command-target position or sound writes"

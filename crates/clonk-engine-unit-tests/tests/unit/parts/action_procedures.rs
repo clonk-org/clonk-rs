@@ -5382,6 +5382,7 @@ fn actmap_sound_reconciles_an_intra_frame_action_round_trip() {
                 looped: true,
                 multiple: true,
                 custom_falloff: None,
+                target_position: Some(clonk_engine::Vector2::new(0, 0)),
             },
             AudioCommand::StopSound {
                 name: "B_Sound".to_string(),
@@ -5394,6 +5395,7 @@ fn actmap_sound_reconciles_an_intra_frame_action_round_trip() {
                 looped: true,
                 multiple: true,
                 custom_falloff: None,
+                target_position: Some(clonk_engine::Vector2::new(0, 0)),
             },
         ],
         "the reconciler preserves every A-to-B-to-A transition in order"

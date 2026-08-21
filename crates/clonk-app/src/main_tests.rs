@@ -1339,6 +1339,7 @@ fn test_sound_command(looped: bool) -> AudioCommand {
         looped,
         multiple: false,
         custom_falloff: None,
+        target_position: None,
     }
 }
 

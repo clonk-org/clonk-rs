@@ -7018,6 +7018,17 @@ pub enum AudioCommand {
         multiple: bool,
         #[serde(default)]
         custom_falloff: Option<i32>,
+        /// Where `target` stood when the call was made.
+        ///
+        /// `NewInstance`'s "already playing near" gate reads the position off
+        /// the live `C4Object` (`C4SoundSystem.cpp:341-348`), and a script that
+        /// calls `Sound` and then `RemoveObject` is still live at that moment —
+        /// C++ processes the removal later. The presentation layer applies this
+        /// command against the snapshot the tick produced, in which the object
+        /// is already gone, so the position it needs has to travel with the
+        /// command.
+        #[serde(default)]
+        target_position: Option<Vector2>,
     },
     /// `Message`/`PlayerMessage`/`PlrMessage` speech. Unlike `Sound`, these
     /// calls suppress text only if the frontend creates the logical instance.
