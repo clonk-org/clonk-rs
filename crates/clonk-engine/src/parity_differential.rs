@@ -7057,6 +7057,162 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b4. corrode_arm: `mrfCorrode`'s movement arm (C4Material.cpp:691-745),
+    //       whose draw ledger is conditional in three separate places.
+    //
+    //       A non-user reaction rolls `Random(100) < Corrosive` and only then
+    //       `Random(100) < Corrode` — C++'s `&&` short-circuits, so a failed
+    //       first roll spends ONE draw, not two. A user reaction spends one
+    //       draw against its own CorrosionRate instead. And `!Random(5)` opens
+    //       the smoke, with `Random(3)` for its level drawn ONLY when it does,
+    //       before `!Random(20)` decides the sound.
+    //
+    //       A port that evaluated both halves eagerly, or drew the smoke level
+    //       unconditionally, would clear the same pixel and desynchronise every
+    //       draw after it. That is why the count is compared beside the
+    //       verdict, and why the short-circuit row is the one to watch.
+    for case in golden["corrode_arm"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("corrode_arm[{name}]");
+
+        // Lava is the corrosive (Corrosive 100 makes its half certain), Granite
+        // the corrodible floor (Corrode 100 makes the second half certain), and
+        // Water's Corrosive 0 fails the FIRST half so the second is never
+        // reached.
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            SplashRate=1
+            MaxSlide=4
+
+            [Material Lava]
+            Name=Lava
+            Density=25
+            Incindiary=1
+            Corrosive=100
+            MaxSlide=4
+
+            [Material Granite]
+            Name=Granite
+            Density=50
+            Corrode=100
+            "#,
+        )
+        .expect("corrode arm oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const GRANITE: u8 = 3;
+        const PX: i32 = 8;
+        const PY: i32 = 9;
+
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        for gy in 0..HGT as usize {
+            for gx in 0..WDT as usize {
+                if gx != PX as usize {
+                    bytes[gy * WDT as usize + gx] = GRANITE;
+                }
+            }
+        }
+        for gx in 0..WDT as usize {
+            bytes[10 * WDT as usize + gx] = GRANITE;
+        }
+        // The corroded pixel is the landscape cell the arm clears, so it has to
+        // hold a material for the clear to be observable.
+        bytes[PY as usize * WDT as usize + PX as usize] = GRANITE;
+
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 25;
+        densities[GRANITE as usize] = 50;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Water".to_string());
+        material_names[2] = Some("Lava".to_string());
+        material_names[GRANITE as usize] = Some("Granite".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+        engine.rng = LcgRng::new(i(case, "seed") as u32);
+        engine.rng.randomize3();
+        let draws_before = engine.rng.count;
+
+        let material_before = engine
+            .landscape()
+            .and_then(|landscape| landscape.border_material_at(PX, PY));
+
+        let user_defined = case["user_defined"].as_bool().unwrap_or(false);
+        let pxs_mat = i(case, "pxs_mat") as i32;
+        let reaction = crate::material::MaterialReaction {
+            kind: crate::material::MaterialReactionKind::Corrode {
+                // The non-user roll reads the two material properties; the user
+                // roll ignores them for its own rate.
+                corrosive_strength: if pxs_mat == 2 { 100 } else { 0 },
+                corrode_resistance: 100,
+                corrosion_probability: user_defined.then(|| i(case, "corrosion_rate") as i32),
+            },
+            user_defined,
+            insertion_check: true,
+        };
+        let mut pixel = crate::pxs::Pxs {
+            mat: crate::material::MaterialId::new(pxs_mat as usize).expect("oracle pxs material"),
+            x: itofix(PX),
+            y: itofix(PY),
+            xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
+            ydir: C4Fixed::from_raw(i(case, "ydir0") as i32),
+        };
+        let (mut x, mut y) = (PX, PY);
+        let mut pos_changed = false;
+        let handled = engine.execute_pxs_reaction(
+            reaction,
+            &mut x,
+            &mut y,
+            PX,
+            PY,
+            &mut pixel,
+            crate::material::MaterialId::new(i(case, "ls_mat") as usize),
+            match i(case, "event") {
+                0 => MaterialInteractionEvent::PxsPos,
+                1 => MaterialInteractionEvent::PxsMove,
+                _ => MaterialInteractionEvent::MassMove,
+            },
+            &mut pos_changed,
+        );
+
+        // The clear is observable as the landscape pixel going empty.
+        let material_after = engine
+            .landscape()
+            .and_then(|landscape| landscape.border_material_at(PX, PY));
+        let cleared = i64::from(material_before.is_some() && material_after != material_before);
+
+        expect_eq(
+            &label,
+            0,
+            "handled",
+            i64::from(case["handled"].as_bool().unwrap_or(false)),
+            i64::from(handled),
+        );
+        expect_eq(&label, 0, "cleared", i(case, "cleared"), cleared);
+        expect_eq(
+            &label,
+            0,
+            "draws",
+            i(case, "draws"),
+            i64::from(engine.rng.count - draws_before),
+        );
+    }
+
     // 16b3. poof_arm: `mrfPoof`'s movement arm (C4Material.cpp:663-688).
     //
     //       `material_poof_reaction` pins the two Rnd3 draws, but it re-derives
