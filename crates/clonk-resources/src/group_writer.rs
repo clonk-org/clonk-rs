@@ -1037,7 +1037,10 @@ fn entry_sort_order(
     })
 }
 
-fn standard_sort_list_for_filename(filename: &[u8]) -> Option<&'static str> {
+/// The stock sort list native `C4Group::Sort` selects for a group of this
+/// filename, mirroring `C4GameSave::GetSortOrder` picking `C4FLS_Scenario`
+/// for a saved scenario (`C4GameSave.h:63`).
+pub fn standard_sort_list_for_filename(filename: &[u8]) -> Option<&'static str> {
     let filename = filename
         .rsplit(|byte| matches!(byte, b'/' | b'\\'))
         .next()

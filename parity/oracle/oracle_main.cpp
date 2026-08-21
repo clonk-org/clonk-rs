@@ -103,6 +103,7 @@
 #include <C4ScriptKiller.h> // real production script-host helper
 #include <C4SolidMaskBitmap.h> // real production active-bitmap mask sampling
 #include <C4Rect.h>            // real production rect, incl. the Scaled() decl
+#include <C4Components.h>     // real C4FLS_Scenario group sort order
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
 
@@ -5161,6 +5162,108 @@ static int32_t run(
 }
 } // namespace mouse_cursor
 
+// C4GameSave's save-policy matrix. The extracted query functions read only
+// Sync, fInitial and the ctor flags, so the scaffold reproduces exactly those
+// members: the out-of-line virtuals the real class also declares
+// (AdjustCore/WriteDesc/SaveComponents/OnSaving) are never reached from a
+// query, which is what lets this compile without linking the engine.
+namespace game_save_policy
+{
+
+struct C4GameSave
+{
+	bool fInitial;
+
+	enum SyncState
+	{
+		SyncNONE = 0,
+		SyncScenario = 1,
+		SyncSavegame = 2,
+		SyncSynchronized = 3,
+	} Sync;
+
+	C4GameSave(bool fAInitial, SyncState ASync) : fInitial(fAInitial), Sync(ASync) {}
+	virtual ~C4GameSave() = default;
+
+	bool IsExact() { return Sync >= SyncSavegame; }
+	bool IsSynced() { return Sync >= SyncSynchronized; }
+
+#include "game_save_base_queries.inc"
+};
+
+struct C4GameSaveScenario : C4GameSave
+{
+	bool fForceExactLandscape;
+	bool fSaveOrigin;
+
+	C4GameSaveScenario(bool fForceExactLandscape, bool fSaveOrigin)
+		: C4GameSave(false, SyncScenario),
+		  fForceExactLandscape(fForceExactLandscape),
+		  fSaveOrigin(fSaveOrigin) {}
+
+#include "game_save_scenario_queries.inc"
+};
+
+struct C4GameSaveSavegame : C4GameSave
+{
+	C4GameSaveSavegame() : C4GameSave(false, SyncSavegame) {}
+
+#include "game_save_savegame_queries.inc"
+};
+
+struct C4GameSaveRecord : C4GameSave
+{
+	bool fCopyScenario;
+
+	C4GameSaveRecord(bool fAInitial, bool fACopyScenario)
+		: C4GameSave(fAInitial, SyncSynchronized), fCopyScenario(fACopyScenario) {}
+
+#include "game_save_record_queries.inc"
+};
+
+struct C4GameSaveNetwork : C4GameSave
+{
+	C4GameSaveNetwork(bool fAInitial) : C4GameSave(fAInitial, SyncSynchronized) {}
+
+#include "game_save_network_queries.inc"
+};
+
+// Read one variant's whole decision vector through the base pointer, so every
+// value goes through the same virtual dispatch the real Save() call uses.
+struct Vector
+{
+	bool save_runtime_data, keep_title, save_desc, copy_scenario, create_small_file;
+	bool force_exact_landscape, save_origin, clear_origin;
+	bool save_user_players, save_script_players;
+	bool save_user_player_files, save_script_player_files;
+	bool is_exact, is_synced;
+	const char *sort_order;
+};
+
+inline Vector read(C4GameSave &save)
+{
+	Vector v;
+	v.save_runtime_data = save.GetSaveRuntimeData();
+	v.keep_title = save.GetKeepTitle();
+	v.save_desc = save.GetSaveDesc();
+	v.copy_scenario = save.GetCopyScenario();
+	v.create_small_file = save.GetCreateSmallFile();
+	v.force_exact_landscape = save.GetForceExactLandscape();
+	v.save_origin = save.GetSaveOrigin();
+	v.clear_origin = save.GetClearOrigin();
+	v.save_user_players = save.GetSaveUserPlayers();
+	v.save_script_players = save.GetSaveScriptPlayers();
+	v.save_user_player_files = save.GetSaveUserPlayerFiles();
+	v.save_script_player_files = save.GetSaveScriptPlayerFiles();
+	v.is_exact = save.IsExact();
+	v.is_synced = save.IsSynced();
+	v.sort_order = save.GetSortOrder();
+	return v;
+}
+
+} // namespace game_save_policy
+
+
 int main()
 {
     printf("{\n");
@@ -5902,6 +6005,71 @@ int main()
                    c.hostile ? 1 : 0, c.in_crew ? 1 : 0, c.pushing_target ? 1 : 0, c.player,
                    c.x - ObjX, result);
         }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("game_save_policy");
+    {
+        using namespace game_save_policy;
+
+        C4GameSaveScenario scenario_plain(false, false);
+        C4GameSaveScenario scenario_exact_origin(true, true);
+        C4GameSaveSavegame savegame;
+        C4GameSaveRecord record_initial(true, true);
+        C4GameSaveRecord record_runtime(false, true);
+        C4GameSaveRecord record_streaming(false, false);
+        C4GameSaveNetwork network_initial(true);
+        C4GameSaveNetwork network_runtime(false);
+
+        struct Case
+        {
+            const char *name;
+            C4GameSave *save;
+        };
+
+        const Case cases[] = {
+            {"scenario", &scenario_plain},
+            {"scenario_exact_landscape_and_origin", &scenario_exact_origin},
+            {"savegame", &savegame},
+            {"record_initial", &record_initial},
+            {"record_runtime", &record_runtime},
+            {"record_streaming_no_scenario_copy", &record_streaming},
+            {"network_initial", &network_initial},
+            {"network_runtime", &network_runtime},
+        };
+
+        for (const Case &c : cases)
+        {
+            const Vector v = read(*c.save);
+            sep();
+            printf("{\"case\":\"%s\",\"save_runtime_data\":%d,\"keep_title\":%d,"
+                   "\"save_desc\":%d,\"copy_scenario\":%d,\"create_small_file\":%d,"
+                   "\"force_exact_landscape\":%d,\"save_origin\":%d,\"clear_origin\":%d,"
+                   "\"save_user_players\":%d,\"save_script_players\":%d,"
+                   "\"save_user_player_files\":%d,\"save_script_player_files\":%d,"
+                   "\"is_exact\":%d,\"is_synced\":%d,\"sorts\":%d}",
+                   c.name, v.save_runtime_data ? 1 : 0, v.keep_title ? 1 : 0,
+                   v.save_desc ? 1 : 0, v.copy_scenario ? 1 : 0, v.create_small_file ? 1 : 0,
+                   v.force_exact_landscape ? 1 : 0, v.save_origin ? 1 : 0,
+                   v.clear_origin ? 1 : 0, v.save_user_players ? 1 : 0,
+                   v.save_script_players ? 1 : 0, v.save_user_player_files ? 1 : 0,
+                   v.save_script_player_files ? 1 : 0, v.is_exact ? 1 : 0, v.is_synced ? 1 : 0,
+                   v.sort_order ? 1 : 0);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // The group sort order is one shared constant rather than a per-variant
+    // decision, so it is pinned once. It is the component ORDER a saved group
+    // is written in, which is what a reader depends on.
+    arr_begin("game_save_sort_order");
+    {
+        game_save_policy::C4GameSaveSavegame savegame;
+        sep();
+        printf("{\"case\":\"scenario_sort_order\",\"order\":\"%s\"}",
+               savegame.GetSortOrder());
     }
     arr_end();
     printf(",\n");

@@ -3630,6 +3630,138 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // 0q. C4GameSave's save-policy matrix: the base query functions
+    //     (C4GameSave.h:59-72) and each specialization's overrides
+    //     (:117-188). Every one is a pure function of Sync, fInitial and the
+    //     constructor flags, and together they decide what a written save
+    //     actually contains -- which components survive, whose player files
+    //     are embedded, and whether the landscape is stored exactly.
+    //
+    //     Several entries invert in ways a port is likely to get backwards.
+    //     `GetKeepTitle` is `!IsExact()`, so the SCENARIO save is the one that
+    //     keeps the localized title, image and icon while a savegame deletes
+    //     them. `GetSaveUserPlayerFiles` is `IsExact()` for every variant
+    //     except the savegame, which overrides it to false because resuming
+    //     players bring their own files. And C4GameSaveScenario overrides
+    //     `GetSaveScriptPlayers`/`GetSaveScriptPlayerFiles` to a flat true
+    //     while leaving the user-player pair at `IsExact()`, so a saved
+    //     scenario keeps script players and drops user ones.
+    //
+    //     The port models the four non-initial variants. `record_initial`,
+    //     `network_initial` (fInitial, which suppresses runtime data) and the
+    //     streaming record (fCopyScenario = false) have no `LiveC4SavePolicy`
+    //     counterpart, so their rows are skipped rather than approximated;
+    //     the same goes for the origin pair, which the port applies through
+    //     the scenario-core writers instead of a policy predicate.
+    {
+        use crate::live_c4_save::LiveC4SavePolicy;
+
+        let mut compared = 0;
+        for (idx, case) in golden["game_save_policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let name = case["case"].as_str().unwrap_or_default();
+            let policy = match name {
+                "scenario" => LiveC4SavePolicy::Scenario {
+                    force_exact_landscape: false,
+                },
+                "scenario_exact_landscape_and_origin" => LiveC4SavePolicy::Scenario {
+                    force_exact_landscape: true,
+                },
+                "savegame" => LiveC4SavePolicy::Savegame {
+                    target_group_name: "Savegame.c4s",
+                },
+                "record_runtime" => LiveC4SavePolicy::Record,
+                "network_runtime" => LiveC4SavePolicy::RuntimeNetwork,
+                _ => continue,
+            };
+            compared += 1;
+
+            let players = policy.player_policy();
+            for (field, expected, actual) in [
+                (
+                    "keep_title",
+                    i(case, "keep_title"),
+                    policy.keeps_title_components(),
+                ),
+                (
+                    "save_desc",
+                    i(case, "save_desc"),
+                    policy.saves_description(),
+                ),
+                (
+                    "copy_scenario",
+                    i(case, "copy_scenario"),
+                    policy.copies_source_scenario(),
+                ),
+                (
+                    "create_small_file",
+                    i(case, "create_small_file"),
+                    policy.creates_small_player_files(),
+                ),
+                (
+                    "force_exact_landscape",
+                    i(case, "force_exact_landscape"),
+                    policy.forces_runtime_landscape(),
+                ),
+                (
+                    "save_user_players",
+                    i(case, "save_user_players"),
+                    players.save_user_players,
+                ),
+                (
+                    "save_script_players",
+                    i(case, "save_script_players"),
+                    players.save_script_players,
+                ),
+                (
+                    "save_user_player_files",
+                    i(case, "save_user_player_files"),
+                    players.embed_user_player_files,
+                ),
+                (
+                    "save_script_player_files",
+                    i(case, "save_script_player_files"),
+                    players.embed_script_player_files,
+                ),
+                ("is_exact", i(case, "is_exact"), policy.is_exact()),
+                ("is_synced", i(case, "is_synced"), policy.is_synchronized()),
+            ] {
+                expect_eq("game_save_policy", idx, field, expected, i64::from(actual));
+            }
+        }
+        assert_eq!(
+            compared, 5,
+            "every modelled save variant must be compared; the golden's case \
+             names changed if this trips"
+        );
+    }
+
+    // 0r. `C4GameSave::GetSortOrder` returns C4FLS_Scenario for every
+    //     specialization (C4GameSave.h:63, no override), and `Close()` applies
+    //     it to the finished group (C4GameSave.cpp:508-510). That single string
+    //     IS the component order a saved scenario is written in, so a reader
+    //     walking the group sees Scenario.txt before Game.txt before Objects.txt
+    //     only because of it.
+    for (idx, case) in golden["game_save_sort_order"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let expected = case["order"].as_str().unwrap();
+        let actual =
+            clonk_resources::group_writer::standard_sort_list_for_filename(b"Savegame.c4s")
+                .expect("a .c4s group selects the stock scenario sort list");
+        assert_eq!(
+            expected, actual,
+            "game_save_sort_order[{idx}]: group sort order diverges from C++"
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
