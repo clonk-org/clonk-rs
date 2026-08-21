@@ -1831,6 +1831,111 @@ func ChangeAndProbe()
         );
     }
 
+    /// A hook that answers zero ends the damage walk, and each hook
+    /// *replaces* the running value rather than adding to it
+    /// (clonk-org/clonk-rs#519).
+    ///
+    /// `C4Effect::DoDamage` is a chain, not a sum
+    /// (oracle-src-pinned src/C4Effect.cpp:427-436):
+    ///
+    /// ```cpp
+    /// do {
+    ///     if (!pEff->IsDead() && pEff->pFnDamage)
+    ///         riDamage = pEff->pFnDamage->Exec(...).getInt();
+    ///     if (pObj && !pObj->Status) return;
+    /// } while ((pEff = pEff->pNext) && riDamage);
+    /// ```
+    ///
+    /// `riDamage` is assigned, so a hook returning a constant discards
+    /// whatever the hooks before it decided; and the loop condition tests it,
+    /// so a hook that answers zero means every later effect never sees the
+    /// damage at all. An implementation that accumulated, or that kept walking
+    /// past zero, would leave a shielding effect leaking damage to the effects
+    /// behind it.
+    #[test]
+    fn do_energy_damage_walk_replaces_the_value_and_stops_at_zero() {
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let third_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_second = Arc::clone(&second_calls);
+        let observed_third = Arc::clone(&third_calls);
+        let mut target_definition = test_definition(
+            "TARG",
+            "Target",
+            r#"#strict
+        public func Setup()
+        {
+            AddEffect("First", this, 10, 0, this);
+            AddEffect("Second", this, 20, 0, this);
+            AddEffect("Third", this, 30, 0, this);
+        }
+        public func Trigger()
+        {
+            return DoEnergy(-1, this, true);
+        }
+        // Answers a value unrelated to `change`, so an implementation that
+        // accumulated would carry a different number into the next hook.
+        protected func FxFirstDamage(target, number, change, cause, caused_by)
+        {
+            return -7;
+        }
+        // Shields: answering zero must end the walk here.
+        protected func FxSecondDamage(target, number, change, cause, caused_by)
+        {
+            SetSecondSaw(change);
+            return 0;
+        }
+        protected func FxThirdDamage(target, number, change, cause, caused_by)
+        {
+            return change;
+        }
+        public func SetSecondSaw(value) { SecondSaw = value; return(1); }
+        public func ReadSecondSaw() { return(SecondSaw); }
+        local SecondSaw;
+        "#,
+        );
+        target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| match name {
+                "FxSecondDamage" => {
+                    observed_second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                "FxThirdDamage" => {
+                    observed_third.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            },
+        ));
+
+        let mut engine = engine_with_definitions([target_definition]);
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
+        let target_index = engine.find_object_index(target).test_value();
+        engine
+            .call_object_function(target_index, "Setup", Vec::new())
+            .test_value();
+        engine
+            .call_object_function(target_index, "Trigger", Vec::new())
+            .expect("DoEnergy returns");
+
+        assert_eq!(
+            second_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second hook runs"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "ReadSecondSaw", Vec::new())
+                .expect("the observed value reads"),
+            Value::Int(-7),
+            "riDamage is assigned by each hook, so the second sees the first's \
+             return rather than the original change"
+        );
+        assert_eq!(
+            third_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "`while (... && riDamage)` ends the walk on zero, so the third \
+             effect never sees the damage"
+        );
+    }
+
     #[test]
     fn do_energy_damage_walk_follows_live_next_after_callback_additions() {
         // C4Effect::DoDamage advances through the current node's live pNext
