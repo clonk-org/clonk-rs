@@ -15,7 +15,7 @@ use clonk_frontend::startup_options_advanced::{
 };
 
 use crate::input::advanced_config_default_raw_keyboard_keys;
-use crate::settings::{VoiceActivationMode, MAX_VOICE_VOLUME_PERCENT};
+use crate::settings::{CompatProfile, VoiceActivationMode, MAX_VOICE_VOLUME_PERCENT};
 
 const I32_MIN: i128 = i32::MIN as i128;
 const I32_MAX: i128 = i32::MAX as i128;
@@ -32,6 +32,11 @@ const VOICE_ACTIVATION_MODE_VALUES: &[(&str, i32)] = &[
     (VoiceActivationMode::PUSH_TO_TALK, 0),
     (VoiceActivationMode::VOICE_ACTIVATED, 1),
 ];
+/// The operating-mode switch. `legacy-clonk` is the profile `id` in
+/// `compat/profile.json`; the tokens are spelled identically so the stored
+/// value and the manifest cannot drift apart.
+const COMPAT_PROFILE_VALUES: &[(&str, i32)] =
+    &[(CompatProfile::NORMAL, 0), (CompatProfile::LEGACY_CLONK, 1)];
 const SCRIPT_STRICTNESS_VALUES: &[(&str, i32)] = &[
     ("NonStrict", 0),
     ("Strict1", 1),
@@ -161,6 +166,7 @@ fn enum_values(section: &str, key: &str) -> Option<&'static [(&'static str, i32)
         ("Developer", "ConsoleScriptStrictness") => Some(SCRIPT_STRICTNESS_VALUES),
         ("Logging", "LogLevelStdout") => Some(LOG_LEVEL_VALUES),
         ("Voice", "ActivationMode") => Some(VOICE_ACTIVATION_MODE_VALUES),
+        ("General", "CompatProfile") => Some(COMPAT_PROFILE_VALUES),
         _ => None,
     }
 }
@@ -330,6 +336,16 @@ fn general(config: &Config) -> AdvancedConfigSection {
         text_row(config, section, "SaveGameFolder", "Savegames.c4f"),
         text_row(config, section, "SaveDemoFolder", "Records.c4f"),
         text_row(config, section, "MissionAccess", ""),
+        // Port-only: the operating mode this run promises to reproduce
+        // (docs/COMPAT_PROFILE.md). Opt-in, because the profile narrows what
+        // the engine will do rather than adding to it.
+        enum_row(
+            config,
+            section,
+            "CompatProfile",
+            CompatProfile::NORMAL,
+            COMPAT_PROFILE_VALUES,
+        ),
         bool_row(config, section, "FPS", false),
         bool_row(config, section, "Record", false),
         text_row(config, section, "ScreenshotFolder", "Screenshots"),

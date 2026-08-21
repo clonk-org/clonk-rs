@@ -4,6 +4,7 @@
 //! the same binary crate, re-exported from `main.rs` so every path resolves.
 
 use super::*;
+use crate::settings::CompatProfile;
 use clonk_frontend::clonk_fonts::NativeFontSizes;
 
 const PLAYER_OWNER: i32 = 1;
@@ -357,6 +358,13 @@ pub(crate) struct ClassicCommandLine {
     pub(crate) observe: bool,
     pub(crate) runtime_join: Option<bool>,
     pub(crate) update_requested: bool,
+    /// `/compatprofile:<token>`: the operating mode for **this run only**.
+    ///
+    /// Kept apart from the persisted `General.CompatProfile` key on purpose —
+    /// a launch override is a property of the run and is never written back,
+    /// so launching once in compatibility mode does not change what the player
+    /// finds in their configuration afterwards.
+    pub(crate) compat_profile: Option<CompatProfile>,
     pub(crate) fair_crew: Option<bool>,
     pub(crate) record_dump: Option<String>,
     pub(crate) startup_screen: Option<String>,
@@ -513,6 +521,11 @@ pub(crate) fn parse_classic_command_line(arguments: &[OsString]) -> ClassicComma
             parsed.runtime_join = Some(false);
         } else if argument.eq_ignore_ascii_case("/update") {
             parsed.update_requested = true;
+        } else if let Some(value) = classic_argument_value(argument, "/compatprofile:") {
+            // An unrecognised token leaves the override unset rather than
+            // guessing, so a typo cannot enrol the run in a promise the port
+            // would then have to keep.
+            parsed.compat_profile = CompatProfile::parse(value);
         } else if argument.eq_ignore_ascii_case("/faircrew")
             || argument.eq_ignore_ascii_case("/ncrw")
         {

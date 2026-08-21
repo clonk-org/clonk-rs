@@ -46,6 +46,110 @@ impl VoiceActivationMode {
     }
 }
 
+/// Which operating mode the engine runs in.
+///
+/// Port-only: LegacyClonk has no such switch, because it *is* the thing being
+/// reproduced. [`CompatProfile::LegacyClonk`] names the promise written down in
+/// `docs/COMPAT_PROFILE.md` and `compat/profile.json` — what this port
+/// reproduces from the pinned C++ engine and what it deliberately does not.
+///
+/// The default is [`CompatProfile::Normal`], and it stays the default. The
+/// profile is opt-in because it is a *narrowing*: it forces port-only
+/// presentation features off and refuses combinations the promise does not
+/// cover, so a player who never asked for it must never be silently placed in
+/// it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompatProfile {
+    #[default]
+    Normal,
+    LegacyClonk,
+}
+
+impl CompatProfile {
+    /// The stored token. `legacy-clonk` is the profile `id` in
+    /// `compat/profile.json`, spelled identically so the config value and the
+    /// manifest cannot drift apart.
+    pub const NORMAL: &'static str = "Normal";
+    pub const LEGACY_CLONK: &'static str = "legacy-clonk";
+
+    /// Accepts exactly what `advanced_config`'s enum row accepts: the canonical
+    /// token or the index stored alongside it. Anything else is `None`, which
+    /// leaves the normal profile in place — an unrecognised value must not
+    /// enrol a session in a promise it cannot keep.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            Self::NORMAL | "0" => Some(Self::Normal),
+            Self::LEGACY_CLONK | "1" => Some(Self::LegacyClonk),
+            _ => None,
+        }
+    }
+
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Normal => Self::NORMAL,
+            Self::LegacyClonk => Self::LEGACY_CLONK,
+        }
+    }
+
+    /// What a host/join confirmation shows. `Normal` deliberately reads as an
+    /// absence rather than a second named mode, because it promises nothing.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Normal => "No compatibility profile",
+            Self::LegacyClonk => "LegacyClonk compatibility",
+        }
+    }
+}
+
+/// Resolve the one profile a session runs under.
+///
+/// A launch-only override wins over the persisted key and is **never** written
+/// back: `--compat-profile` is a property of this run, so a player who launches
+/// once in compatibility mode does not find their saved configuration changed
+/// afterwards. With no override the persisted value decides, and an
+/// unrecognised or absent value is [`CompatProfile::Normal`].
+pub fn resolve_compat_profile(
+    config: Option<&Config>,
+    launch_override: Option<CompatProfile>,
+) -> CompatProfile {
+    if let Some(profile) = launch_override {
+        return profile;
+    }
+    config
+        .and_then(|config| {
+            config
+                .get_in(Some("General"), "CompatProfile")
+                .or_else(|| config.get("CompatProfile"))
+        })
+        .and_then(CompatProfile::parse)
+        .unwrap_or_default()
+}
+
+/// `CNM_Decentral`, C++'s `Network.ControlMode` default
+/// (`C4GameControlNetwork.h:51`, `C4Config.cpp:540` — "0 is the standard mode
+/// set in config").
+pub const CPP_CONTROL_MODE_DECENTRAL: i32 = 0;
+
+/// Resolve `Network.ControlMode` for a session that is about to be constructed.
+///
+/// This is a **non-persistent overlay**, which is the whole point: under the
+/// compatibility profile the C++ default wins, and the player's saved
+/// `Network.ControlMode` is neither read into the session nor written back. A
+/// normal-profile session is untouched and keeps the port's measured async
+/// default.
+///
+/// It is resolved once, at session construction, and the resolved value travels
+/// in the prepared host parameters. A configuration edit mid-round therefore
+/// cannot move a running session between control modes — which matters because
+/// `ControlMode` is synchronized: two peers disagreeing about it is a desync,
+/// not a preference.
+pub fn session_control_mode(profile: CompatProfile, configured: i32) -> i32 {
+    match profile {
+        CompatProfile::LegacyClonk => CPP_CONTROL_MODE_DECENTRAL,
+        CompatProfile::Normal => configured,
+    }
+}
+
 /// The two tuning values a voice-activated capture needs, resolved into the
 /// units the gate compares against: a level threshold on the same `0.0..=1.0`
 /// scale as [`clonk_audio::voice_activation_level`], and a release tail counted

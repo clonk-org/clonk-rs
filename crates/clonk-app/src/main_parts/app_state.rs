@@ -758,6 +758,12 @@ pub(crate) struct GameApp {
     pub(crate) incoming_update: Option<PathBuf>,
     /// A one-shot update check requested by `/update` or `clonk:update`.
     pub(crate) update_check_requested: bool,
+    /// The one operating mode this run resolved to, from the launch override
+    /// or the persisted `General.CompatProfile` key
+    /// (`crate::settings::resolve_compat_profile`). Held as state rather than
+    /// re-read per use so a host and the clients it admits cannot disagree
+    /// about it mid-session.
+    pub(crate) compat_profile: crate::settings::CompatProfile,
     /// The update query in flight, if any (`C4UpdateDlg::CheckForUpdates`
     /// waiting on its `C4Network2VersionInfoClient`, cpp:280-300).
     pub(crate) update_check: Option<PendingUpdateCheck>,

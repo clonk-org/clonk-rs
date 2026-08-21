@@ -195,6 +195,7 @@ Everything else determinism-critical is either reverted or blocked.
 
 | Id | Action | Disposition |
 | --- | --- | --- |
+| `ctrl-async-default` | reverted | `Network.ControlMode` defaults to `CNM_Async` (2) rather than C++'s `CNM_Decentral` (0), which `C4Config.cpp:540` calls the standard mode and `C4GameOptions.cpp:93` labels experimental. Only the default differs — the mechanism is a faithful port — but the value is **synchronized**, so it decides whether the host bounds its wait for a straggler and drops that client's input for the tick instead of pacing every participant on the slowest peer. The profile applies C++'s value as a non-persistent overlay at session construction; the saved key is never rewritten, and a mid-round edit cannot move a running session between modes. |
 | `ctrl-keyup-release` | reverted | Outside the profile, classic (non-AutoStop) control sets emit a synchronized `Control*Released` on key-up so scripts can latch steering. `C4Game::LocalControlKeyUp` routes a key-up only for AutoStop players, so C++ never delivers a release in classic style. The profile suppresses the emission. |
 | `ctrl-onmenustep-coms` | kept | Before a menu selection move the port offers the horizontal `COM_MenuLeft`/`COM_MenuRight` pair to the object's script through `OnMenuStep`. In C++'s single-column menu the horizontal pair carries nothing the vertical pair does not, and the callback is inert for content that does not implement it and answer true. |
 

@@ -4279,7 +4279,13 @@ pub(crate) fn build_network_host_preparation(
             // `AsyncMaxWait` must stay above ordinary delivery time rather than
             // being tuned down to chase the tail: at 1 it dropped on nearly every
             // tick against a 250 ms peer without PreSend.
-            control_mode: integer("Network", "ControlMode", 2),
+            // Synchronized, so the compatibility profile overlays C++'s
+            // CNM_Decentral over this default without touching the saved key
+            // (`crate::settings::session_control_mode`).
+            control_mode: crate::settings::session_control_mode(
+                app.compat_profile,
+                integer("Network", "ControlMode", 2),
+            ),
             control_rate: integer("Network", "ControlRate", 2),
             async_max_wait: integer("Network", "AsyncMaxWait", 2),
             fair_crew: app.startup_view_flags.fair_crew,
