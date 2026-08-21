@@ -11555,6 +11555,11 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     // clonk-org/clonk-rs#488 network tests (C4Network2.cpp:1574-1623,1820-1850,
     // 2017-2059;
     // C4Game.cpp:455-483,2805-2863).
+    //
+    // Deliberately no StatusRequested event: a host that is already running
+    // never calls ChangeGameStatus, so no PID_Status reaches a runtime joiner.
+    // The JoinData status is its only barrier. Feeding one here is what let
+    // this test pass while clonk-org/clonk-rs#895 froze every real join.
     let directory = tempdir();
     let combined_path = directory.path().join("Combined7.c4s");
     let player_path = directory.path().join("Late.c4p");
@@ -11698,7 +11703,6 @@ fn runtime_network_client_join_loading_reaches_running_render() {
         false,
     )
     .test_value();
-    n2_send_event(&event_tx, NetworkEvent::StatusRequested(go));
     app.process_network_events().test_value();
     app.poll_loading().test_value();
     main_assert!(matches!(app.mode, AppMode::Loading));
