@@ -3015,6 +3015,104 @@ fn failed_local_scenario_load_reinitializes_the_startup_loader_screen() {
 }
 
 #[test]
+fn missing_explicit_definition_during_scenario_start_returns_to_startup() {
+    // C4Game::OpenScenario loads every explicit definition before the loader
+    // screen (C4Game.cpp:181-239; C4GameParameters.cpp:192-207). A missing
+    // definition is therefore an ordinary failed OpenGame, which
+    // C4Application::Execute recovers through QuitGame instead of propagating
+    // a click-handler error (C4Application.cpp:442-450).
+    let _lock = env_lock().lock();
+    let install = tempdir();
+    install_global_gui_and_loader_test_root(install.path());
+    let user_data = tempdir();
+    let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
+    let scenario_path = install.path().join("content/MissingDefinition.c4s");
+    fs::create_dir_all(&scenario_path).test_value();
+    fs::write(
+        scenario_path.join("Scenario.txt"),
+        "[Head]\nTitle=Missing definition\nLoader=LoaderGoldmine1*\n",
+    )
+    .test_value();
+
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    app.last_startup_dialog = StartupDialog::ScenarioBrowser(ScenarioSelectorMode::Local);
+    let mut scenario = FrontendScenario::fallback();
+    scenario.identifier = "MissingDefinition.c4s".to_string();
+    scenario.title = "Missing definition".to_string();
+    scenario.kind = ScenarioKind::Scenario;
+    scenario.path = Some(scenario_path);
+
+    let result = app.start_scenario_with_definition_load(
+        scenario,
+        ScenarioDefinitionLoad::Fixed {
+            modules: vec!["Missing.c4d".to_string()],
+            definition_root: None,
+        },
+    );
+    main_assert!(
+        result.is_ok(),
+        "a missing explicit definition must return through startup recovery: {result:?}"
+    );
+    main_assert_eq!(app.mode => AppMode::Menu);
+    main_assert!(!app.take_exit_request());
+    main_assert!(app.loader_screen.is_some());
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::Local);
+    main_assert!(
+        app.message_dialogs
+            .iter()
+            .any(|dialog| dialog.state.message().contains("Missing.c4d")),
+        "the missing definition is presented through startup diagnostics"
+    );
+}
+
+#[test]
+fn missing_explicit_definition_under_definition_path_returns_to_startup() {
+    let _lock = env_lock().lock();
+    let install = tempdir();
+    install_global_gui_and_loader_test_root(install.path());
+    let user_data = tempdir();
+    let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
+    let scenario_path = install.path().join("content/MissingDefinition.c4s");
+    fs::create_dir_all(&scenario_path).test_value();
+    fs::write(
+        scenario_path.join("Scenario.txt"),
+        "[Head]\nTitle=Missing definition\nLoader=LoaderGoldmine1*\n",
+    )
+    .test_value();
+
+    let definition_root = tempdir();
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    app.last_startup_dialog = StartupDialog::ScenarioBrowser(ScenarioSelectorMode::Local);
+    let mut scenario = FrontendScenario::fallback();
+    scenario.identifier = "MissingDefinition.c4s".to_string();
+    scenario.title = "Missing definition".to_string();
+    scenario.kind = ScenarioKind::Scenario;
+    scenario.path = Some(scenario_path);
+
+    let result = app.start_scenario_with_definition_load(
+        scenario,
+        ScenarioDefinitionLoad::Fixed {
+            modules: vec!["Missing.c4d".to_string()],
+            definition_root: Some(path_with_trailing_native_separator(definition_root.path())),
+        },
+    );
+    main_assert!(
+        result.is_ok(),
+        "a missing rooted explicit definition must return through startup recovery: {result:?}"
+    );
+    main_assert_eq!(app.mode => AppMode::Menu);
+    main_assert!(!app.take_exit_request());
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert!(
+        app.message_dialogs
+            .iter()
+            .any(|dialog| dialog.state.message().contains("Missing.c4d")),
+        "the missing rooted definition is presented through startup diagnostics"
+    );
+}
+
+#[test]
 fn a_command_line_scenario_that_fails_to_load_ends_the_process() {
     // `ParseCommandLine` clears `UseStartupDialog` for an explicit scenario
     // (C4Game.cpp:3299), so the failed `OpenGame` unwinds `QuitGame` into

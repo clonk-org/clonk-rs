@@ -3368,11 +3368,27 @@ pub(crate) fn resolve_classic_global_gui_sheet_overrides(
 
 fn open_loader_group_with_prefix(prefix: &Path, specification: &str) -> Result<Group> {
     let candidate = concatenate_legacy_path(prefix, &clonk_script::c4_string_bytes(specification));
-    open_group_path_for_folder_map(&candidate).with_context(|| {
-        format!(
+    open_group_path_for_folder_map(&candidate).map_err(|error| {
+        let context = format!(
             "definition group `{specification}` is unavailable at {}",
             candidate.display()
-        )
+        );
+        match error {
+            error
+                if matches!(
+                    &error,
+                    GroupError::Missing(_)
+                        | GroupError::NotDirectory(_)
+                        | GroupError::EntryNotFound(_)
+                ) || matches!(&error, GroupError::Io(error) if error.kind() == io::ErrorKind::NotFound) =>
+            {
+                anyhow::Error::new(ScenarioError::LegacyDefinitionNotFound {
+                    path: candidate.display().to_string(),
+                })
+                .context(context)
+            }
+            error => anyhow::Error::new(error).context(context),
+        }
     })
 }
 
