@@ -393,12 +393,9 @@ impl GameApp {
             (progress, terminal)
         };
         if let Some((downloaded, total)) = progress {
-            let percent = if total == 0 {
-                0
-            } else {
-                ((u128::from(downloaded) * 100) / u128::from(total)).min(100) as u8
-            };
-            self.update_update_download_progress(percent);
+            self.update_update_download_progress(update_download_progress_percent(
+                downloaded, total,
+            ));
         }
         let Some(terminal) = terminal else {
             return Ok(());
@@ -439,14 +436,17 @@ impl GameApp {
         Ok(())
     }
 
-    fn update_update_download_progress(&mut self, percent: u8) {
+    pub(crate) fn update_update_download_progress(&mut self, percent: Option<u8>) {
         if let Some(dialog) = self.message_dialogs.iter_mut().find(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::UpdateDownloadWait
             )
         }) {
-            dialog.state.set_progress(percent);
+            match percent {
+                Some(percent) => dialog.state.set_progress(percent),
+                None => dialog.state.hide_progress(),
+            }
         }
     }
 
@@ -533,4 +533,14 @@ impl GameApp {
         let message = self.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.");
         self.show_update_notice(message, caption)
     }
+}
+
+/// The percentage `C4DownloadDlg::OnIdle` would show for one transfer sample.
+///
+/// `None` is C++'s `iProgress = -1`: a transfer whose header announced no
+/// length has no percentage, and `SetStatus` deletes the bar rather than
+/// drawing one that cannot move (`C4DownloadDlg.cpp:60-74,104-124`). Division
+/// is widened so a malformed over-total sample clamps instead of overflowing.
+pub(crate) fn update_download_progress_percent(downloaded: u64, total: u64) -> Option<u8> {
+    (total != 0).then(|| ((u128::from(downloaded) * 100) / u128::from(total)).min(100) as u8)
 }

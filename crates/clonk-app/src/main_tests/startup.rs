@@ -986,6 +986,53 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
 }
 
 #[test]
+fn an_unknown_update_length_suppresses_the_download_bar() {
+    // `C4DownloadDlg::OnIdle` leaves iProgress at -1 whenever getTotalSize()
+    // is 0, and `SetStatus` deletes the progress bar outright for a negative
+    // percentage rather than drawing one that cannot move
+    // (7d43b47b src/C4DownloadDlg.cpp:60-74,104-124).
+    //
+    // The reusable frontend controller already honours this
+    // (clonk-org/clonk-rs#857), but the update download is a second,
+    // independent implementation of the same rule and still reported a
+    // stuck 0% for a transfer that never announces a length.
+    use crate::game_app_update::update_download_progress_percent;
+    use crate::update_check::test_support::{manifest_for, FakeTransport, OFFERED_VERSION};
+
+    main_assert_eq!(
+        update_download_progress_percent(30, 0) => None,
+        "a transfer with no announced length has no percentage to show"
+    );
+    main_assert_eq!(update_download_progress_percent(25, 100) => Some(25));
+
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let mut app = new_classic_menu_app(640, 480);
+    app.app_paths = Some(paths);
+    let transport = FakeTransport::serving(&manifest_for(
+        OFFERED_VERSION,
+        clonk_core::version::ENGINE_VERSION,
+    ));
+    app.check_for_updates_with(false, &transport).test_value();
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
+        .test_value();
+
+    app.update_update_download_progress(update_download_progress_percent(25, 100));
+    main_assert_eq!(update_result_dialog(&app).state.progress() => Some(25));
+
+    app.update_update_download_progress(update_download_progress_percent(30, 0));
+    main_assert_eq!(
+        update_result_dialog(&app).state.progress() => None,
+        "the bar is dropped rather than frozen at its last real percentage"
+    );
+
+    // Matching the frontend controller, a suppressed bar stays suppressed:
+    // the layout has stopped reserving space for it.
+    app.update_update_download_progress(update_download_progress_percent(60, 100));
+    main_assert_eq!(update_result_dialog(&app).state.progress() => None);
+}
+
+#[test]
 fn only_a_manual_check_reports_that_there_is_no_update() {
     // `C4UpdateDlg.cpp:396-400`: the "no update" message is suppressed for
     // an automatic check, so a daily background check is silent.
