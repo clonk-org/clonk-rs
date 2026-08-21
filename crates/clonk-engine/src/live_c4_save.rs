@@ -1445,7 +1445,10 @@ fn serialize_scenario_for_policy(
     }
 }
 
-fn savegame_icon(target_group_name: &str) -> i32 {
+/// `C4GameSaveSavegame::AdjustCore`'s trailing-slot icon ladder
+/// (C4GameSave.cpp:541-551). `pub(crate)` so the parity differential can drive
+/// it directly; the full save that normally reaches it needs a landscape.
+pub(crate) fn savegame_icon(target_group_name: &str) -> i32 {
     let file_name = target_group_name
         .rsplit(['/', '\\'])
         .next()

@@ -1072,6 +1072,36 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4GameSave.cpp" > "$gen/game_save_runtime_data.inc"
 
+# 3v. Lift C4GameSave::SaveCore and the three AdjustCore overrides that run at
+#     the end of it. The parity fact is the ORDER of the two: SaveCore zeroes
+#     NetworkGame for every save, and C4GameSaveNetwork::AdjustCore then sets
+#     it back — so the field's final value is decided by the sequence, not by
+#     either function alone. SaveCore also leaves NoInitialize and SaveGame
+#     untouched for an INITIAL save, and rewrites the title only when
+#     GetKeepTitle() is false.
+awk '
+  /^bool C4GameSave::SaveCore\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4GameSave.cpp" > "$gen/game_save_core.inc"
+
+awk '
+  /^int GetTrailingNumber\(const char \*strString\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/StdFile.cpp" > "$gen/get_trailing_number.inc"
+
+for cls in Savegame Record Network; do
+  awk -v cls="$cls" '
+    $0 ~ ("^void C4GameSave" cls "::AdjustCore\\(C4Scenario &rC4S\\)$") { p = 1 }
+    p { print }
+    p && /^}$/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$src/C4GameSave.cpp" > "$gen/game_save_adjust_$(echo "$cls" | tr 'A-Z' 'a-z').inc"
+done
+
 # 3r. Lift C4Value::operator== whole. It is a nested switch on the LEFT tag and
 #     then the right, which is what makes it asymmetric: the object arm demands
 #     an equal tag as well as an equal payload, so `nil == object_zero` is true
