@@ -695,6 +695,21 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/find_mat_slide.inc"
 
+# 3q3b. Lift mrfIncinerate. It is the one reaction whose arms are asymmetric in
+#       a way a port is likely to flatten: `meeMassMove` and `meePXSPos` try to
+#       incinerate and report **unhandled** when they cannot, while `meePXSMove`
+#       runs the insertion check FIRST -- a splash or slide that prevents the
+#       interaction returns unhandled before anything burns -- and then, if the
+#       pixel fails to ignite, inserts it rather than dropping it. Any event
+#       outside those three never reaches `C4Landscape::Incinerate` at all,
+#       because the switch has no default arm.
+awk '
+  /^bool C4MaterialMap::mrfIncinerate\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/mrf_incinerate.inc"
+
 # 3q4. Lift mrfUserCheck and mrfConvert. Convert carries two rules that a port
 #      can silently lose: C++'s `case meePXSMove:` falls **through** into
 #      `meePXSPos` for user-defined reactions (Rust has no implicit
