@@ -2615,6 +2615,7 @@ impl GameApp {
                         } else {
                             self.menu_state.leave_folder();
                             self.configure_current_folder_map();
+                            self.refresh_scenario_entry_enabled();
                             updated_label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }

@@ -112,6 +112,29 @@ fn scensel_definition_checkbox_resets_only_on_selection_change() {
     main_assert_eq!(scenario_fixed_definition_modules(state.selected_scenario().unwrap()) => ["Objects.c4d"]);
 }
 
+// C4StartupScenSelDlg::UpdateList only evaluates the entries in the current
+// folder (C4StartupScenSelDlg.cpp:1511-1537). Hidden descendants must not make
+// opening the root selector perform loader-head work before the first frame.
+#[test]
+fn scenario_selector_openability_cache_only_covers_visible_entries() {
+    scensel_fixture!(frontend_scenario: hidden, "pack/hidden".to_string(), "Hidden".to_string());
+    scensel_fixture!(frontend_scenario: pack, "pack".to_string(), "Pack".to_string());
+    pack.kind = ScenarioKind::Folder;
+    pack.is_playable = false;
+    pack.children = vec![hidden];
+
+    let mut app = scensel_app(&[pack]);
+    main_assert!(app.scenario_entry_enabled.contains_key("pack"));
+    main_assert!(!app.scenario_entry_enabled.contains_key("pack/hidden"));
+
+    app.enter_scenario_folder("pack");
+    main_assert_eq!(app.scenario_entry_enabled.get("pack/hidden") => Some(&true));
+
+    app.scensel_do_back().test_value();
+    main_assert!(app.scenario_entry_enabled.contains_key("pack"));
+    main_assert!(!app.scenario_entry_enabled.contains_key("pack/hidden"));
+}
+
 #[test]
 fn checked_definition_checkbox_intercepts_start_even_when_local_only_disables_it() {
     let mut app = new_menu_app(640, 480);

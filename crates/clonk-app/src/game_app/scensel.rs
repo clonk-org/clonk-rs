@@ -851,7 +851,6 @@ impl GameApp {
             );
         }
         self.scenario_catalog = build_scenario_catalog(&entries);
-        self.refresh_scenario_entry_enabled();
         self.handle_menu_input(move |menu| {
             menu.replace_discovered_entries(
                 entries,
@@ -860,6 +859,7 @@ impl GameApp {
                 apply_live_search,
             )
         })?;
+        self.refresh_scenario_entry_enabled();
         // Rebuilding the folder stack creates Book layers. Restore the
         // active folder's configured map style before syncing selection-
         // dependent controls so F5 does not silently leave FolderMap view.
@@ -1271,6 +1271,7 @@ impl GameApp {
             self.play_ui_sound("DoorClose");
             self.menu_state.leave_folder();
             self.configure_current_folder_map();
+            self.refresh_scenario_entry_enabled();
             self.set_scensel_dialog_focus(ScenselDialogFocus::List);
             self.scenario_label = self.menu_state.label_path();
             self.handle_menu_input(|menu| menu.select_default_entry())?;

@@ -472,6 +472,7 @@ impl GameApp {
         // That programmatic selection must stay silent while the user types;
         // dependent controls are synchronized explicitly below.
         let _ = self.menu_state.apply_enhanced_search();
+        self.refresh_scenario_entry_enabled();
         // An empty result emits no SelectionChanged action. Explicitly clear
         // selection-derived checkbox/ForcedNoCrew state in that case rather
         // than retaining the previously selected scenario's constraint.
@@ -531,11 +532,11 @@ impl GameApp {
             return Ok(());
         }
         self.scenario_catalog = build_scenario_catalog(&entries);
-        self.refresh_scenario_entry_enabled();
         let identifier = identifier.to_string();
         self.handle_menu_input(move |menu| {
             menu.replace_discovered_entries(entries, Some(&identifier), true, false)
         })?;
+        self.refresh_scenario_entry_enabled();
         self.configure_current_folder_map();
         self.menu_state.sync_definition_checkbox_to_selection();
         self.sync_scenario_game_option_constraint();
@@ -700,6 +701,7 @@ impl GameApp {
     pub(crate) fn enter_scenario_folder(&mut self, identifier: &str) {
         self.menu_state.enter_folder(identifier);
         self.configure_current_folder_map();
+        self.refresh_scenario_entry_enabled();
     }
 
     pub(crate) fn close_scenario_browser(&mut self) {
@@ -796,8 +798,8 @@ impl GameApp {
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
         self.menu_state.set_include_back(false);
-        self.refresh_scenario_entry_enabled();
         self.menu_state.refresh_menu_entries();
+        self.refresh_scenario_entry_enabled();
         let width = self.graphics.surface().width() as f32;
         let height = self.graphics.surface().height() as f32;
         self.menu_state.menu().resize(width, height);
@@ -982,15 +984,18 @@ impl GameApp {
         self.start_scenario_with_definition_load(scenario, definition_load)
     }
 
-    /// Rebuilds the label-color cache when the selector is opened or local
-    /// MissionAccess/player configuration changes. A failed inspection is a
-    /// fail-closed disabled row, while activation still reports the boundary.
+    /// Rebuilds the label-color cache for the rows currently shown by the
+    /// selector. A failed inspection is a fail-closed disabled row, while
+    /// activation still reports the boundary. The catalog is recursive, but
+    /// hidden descendants must not block opening their parent folder.
     pub(crate) fn refresh_scenario_entry_enabled(&mut self) {
         let selector_mode = self.scenario_selector_mode;
         self.scenario_entry_enabled = self
-            .scenario_catalog
+            .menu_state
+            .visible_entries()
             .iter()
-            .map(|(identifier, scenario)| {
+            .map(|scenario| {
+                let identifier = scenario.identifier.clone();
                 let enabled = match self.scenario_selector_open_error(scenario, selector_mode) {
                     Ok(error) => error.is_none(),
                     Err(error) => {
@@ -998,7 +1003,7 @@ impl GameApp {
                         false
                     }
                 };
-                (identifier.clone(), enabled)
+                (identifier, enabled)
             })
             .collect();
     }
