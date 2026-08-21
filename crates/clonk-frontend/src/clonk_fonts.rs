@@ -2446,6 +2446,98 @@ mod tests {
         }
     }
 
+    /// The font atlas is 512 or 128 - never 256, even though C++ appears to
+    /// offer it.
+    ///
+    /// `CStdFont::Init` picks the surface size with three branches
+    /// (`src/StdFont.cpp:332-337`):
+    ///
+    /// ```text
+    /// if (dwHeight * iFontZoom > 40)            iSfcSizes = 512;
+    /// else if (dwDefFontHeight * iFontZoom > 20) iSfcSizes = 256;
+    /// else                                       iSfcSizes = 128;
+    /// ```
+    ///
+    /// The middle branch is dead. `dwDefFontHeight` is not assigned until the
+    /// line *after* the chain (`src/StdFont.cpp:338`), and `Init` opens with
+    /// `Clear()` (`src/StdFont.cpp:321`), which resets it to 10
+    /// (`src/StdFont.cpp:556`). So the test is always `10 * 1 > 20` - false -
+    /// and every font lands on 512 or 128.
+    ///
+    /// Reproducing only the two reachable sizes is therefore faithful, not an
+    /// omission. Adding the 256 case to "complete" the chain would make the
+    /// port's atlas geometry diverge from every font C++ has ever built.
+    /// Cumulative italic at a nondefault, anisotropic scale: the lean
+    /// compounds per tag, but the projection correction is applied **once**.
+    ///
+    /// `native_italics_shear_cumulatively_at_scale_one` covers the isotropic
+    /// scale-1 case, where `scale_x / scale_y` is 1 and cannot distinguish
+    /// "corrected once" from "corrected per tag". This is that missing half.
+    ///
+    /// C++ builds one transform per character from the whole open tag stack
+    /// (`CMarkup::Apply`, reached at `src/StdFont.cpp:906`), then shears about
+    /// the centre of the *destination* quad - `fOffX = w2 / 2 + x` with `w2`
+    /// already multiplied by the zoom (`src/StdFont.cpp:917-921`). The stack
+    /// contributes the lean and the projection contributes the aspect, and the
+    /// two are independent: nesting a tag must not re-apply the aspect.
+    #[test]
+    fn native_italics_compound_once_per_tag_at_fractional_scale() {
+        // Deliberately anisotropic and non-integer, so scale_x / scale_y is
+        // neither 1 nor a round number.
+        let projection = NativeDrawProjection {
+            scale_x: 1.5,
+            scale_y: 2.25,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        };
+
+        let single = native_physical_shear(&[NativeMarkupTag::Italic], projection);
+        let nested = native_physical_shear(
+            &[NativeMarkupTag::Italic, NativeMarkupTag::Italic],
+            projection,
+        );
+
+        // Mirror the implementation's association exactly: it multiplies by
+        // scale_x and then divides by scale_y, which is not bit-identical to
+        // multiplying by a precomputed ratio.
+        assert_eq!(single, f64::from(-0.3_f32) * 1.5 / 2.25);
+        assert_eq!(nested, f64::from(-0.3_f32 - 0.3) * 1.5 / 2.25);
+
+        // The load-bearing part: doubling the tag doubles the lean exactly.
+        // Folding the correction in per tag would square it here, and the
+        // scale-1 case cannot catch that because 1 squared is still 1.
+        assert_eq!(
+            nested,
+            2.0 * single,
+            "a nested tag leans exactly twice as far; the aspect correction is not re-applied"
+        );
+
+        // Guard that this projection actually exercises the correction, so
+        // the assertions above are not accidentally the identity case.
+        assert_ne!(
+            single,
+            f64::from(-0.3_f32),
+            "an uncorrected shear would make this test vacuous"
+        );
+    }
+
+    #[test]
+    fn the_font_atlas_never_takes_the_dead_256_branch() {
+        // The boundary is strict: > 40, not >= 40.
+        assert_eq!(vector_font_texture_size(41), 512);
+        assert_eq!(vector_font_texture_size(40), 128);
+
+        // Every height C++ could route to 256 lands on 128 instead, because
+        // the branch guarding 256 reads the pre-Clear() height, not this one.
+        for raster_height in 21..=40 {
+            assert_eq!(
+                vector_font_texture_size(raster_height),
+                128,
+                "height {raster_height} must not reach the dead 256 branch"
+            );
+        }
+    }
+
     #[test]
     fn configured_font_size_recipe_rasterizes_every_native_role() {
         // C4FontLoader::InitFont derives one FreeType height per role from
