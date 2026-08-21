@@ -2193,6 +2193,87 @@ mod tests {
         );
     }
 
+    /// `CrossMapMaterials` gates the whole builtin ladder on density:
+    /// InMatConvert wins first, then "**the rest is happening for same/higher
+    /// densities only**" — `MatDensity(iMatPXS) <= MatDensity(iMatLS)` — and
+    /// only inside that gate does it try Poof, Incinerate, Corrode and finally
+    /// Insert "when hitting same or higher density"
+    /// (7d43b47b src/C4Material.cpp:317-343).
+    ///
+    /// The gate is the load-bearing part and the easy thing to get backwards.
+    /// A denser pixel falling into thinner landscape gets **no reaction at
+    /// all** — it keeps moving — and that holds even when the pair would
+    /// otherwise corrode, because the density test runs before the ladder. It
+    /// is also what decides whether a falling pixel is absorbed on landing, so
+    /// getting it wrong changes where every loose pixel comes to rest.
+    #[test]
+    fn builtin_reactions_apply_only_at_same_or_higher_density() {
+        let set = build_material_set(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+
+            [Material Earth]
+            Name=Earth
+            Density=50
+
+            [Material Slush]
+            Name=Slush
+            Density=25
+
+            [Material Acid]
+            Name=Acid
+            Density=80
+            Corrosive=75
+
+            [Material Rust]
+            Name=Rust
+            Density=30
+            Corrode=50
+        "#,
+        );
+        let water = set.id_of("Water").expect("water exists");
+        let earth = set.id_of("Earth").expect("earth exists");
+        let slush = set.id_of("Slush").expect("slush exists");
+        let acid = set.id_of("Acid").expect("acid exists");
+        let rust = set.id_of("Rust").expect("rust exists");
+
+        // Lighter into heavier: inside the gate, and no special pairing, so the
+        // fallback applies.
+        assert_eq!(
+            set.reaction(Some(water), Some(earth)).kind,
+            MaterialReactionKind::Insert,
+            "a lighter pixel entering denser ground is inserted"
+        );
+        // Equal densities are inside the gate too — C++ compares with `<=`.
+        assert_eq!(
+            set.reaction(Some(water), Some(slush)).kind,
+            MaterialReactionKind::Insert,
+            "equal density is `<=`, so the ladder still runs"
+        );
+        // Heavier into lighter: outside the gate entirely.
+        assert_eq!(
+            set.reaction(Some(earth), Some(water)).kind,
+            MaterialReactionKind::None,
+            "a denser pixel keeps moving through thinner landscape"
+        );
+        // No landscape material at all is `pMatLS == nullptr`, which never
+        // reaches the ladder regardless of density.
+        assert_eq!(
+            set.reaction(Some(earth), None).kind,
+            MaterialReactionKind::None,
+            "sky is not a reaction target"
+        );
+        // The sharp one: the density gate precedes the Corrode arm, so a
+        // corrosive pixel that is *denser* than what it hits does not corrode.
+        assert_eq!(
+            set.reaction(Some(acid), Some(rust)).kind,
+            MaterialReactionKind::None,
+            "density is tested before the corrosive pairing, not after"
+        );
+    }
+
     #[test]
     fn temperature_conversion_resolves_target_material() {
         let set = build_material_set(
