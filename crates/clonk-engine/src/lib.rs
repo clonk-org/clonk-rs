@@ -13625,6 +13625,10 @@ mod missing_include_regression;
 mod gather_task_script;
 
 #[cfg(test)]
+#[path = "lib_tests/movement_contact_snap.rs"]
+mod movement_contact_snap;
+
+#[cfg(test)]
 #[path = "lib_tests/goal_rule_activate_families.rs"]
 mod goal_rule_activate_families;
 
