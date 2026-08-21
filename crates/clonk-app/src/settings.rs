@@ -150,6 +150,26 @@ pub fn session_control_mode(profile: CompatProfile, configured: i32) -> i32 {
     }
 }
 
+/// C++'s `Network.MaxLoadFileSize` default (`C4Config.cpp:543`).
+pub const CPP_MAX_LOAD_FILE_SIZE: u32 = 100 * 1024 * 1024;
+
+/// The normal-profile default is large enough for classic compilation folders
+/// that C++'s 100 MiB ceiling leaves non-loadable, while remaining below the
+/// signed config field's limit.
+pub const DEFAULT_MAX_LOAD_FILE_SIZE: u32 = 256 * 1024 * 1024;
+
+/// Resolve the definition-publication ceiling for a host session.
+///
+/// A saved value is an explicit host transfer policy and always wins. With no
+/// saved value, normal mode uses the port's larger default and the compatibility
+/// profile retains the C++ default.
+pub fn session_max_load_file_size(profile: CompatProfile, configured: Option<u32>) -> u32 {
+    configured.unwrap_or(match profile {
+        CompatProfile::Normal => DEFAULT_MAX_LOAD_FILE_SIZE,
+        CompatProfile::LegacyClonk => CPP_MAX_LOAD_FILE_SIZE,
+    })
+}
+
 /// The two tuning values a voice-activated capture needs, resolved into the
 /// units the gate compares against: a level threshold on the same `0.0..=1.0`
 /// scale as [`clonk_audio::voice_activation_level`], and a release tail counted

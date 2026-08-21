@@ -351,6 +351,19 @@
       "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
     },
     {
+      "id": "transport-definition-transfer-limit",
+      "area": "transport",
+      "summary": "Network.MaxLoadFileSize defaults to 256 MiB in normal mode rather than C++'s 100 MiB so large classic definition families remain transferable; the LegacyClonk profile restores 100 MiB, and any explicitly configured host limit wins in either profile.",
+      "cited_in": [
+        "crates/clonk-app/src/settings.rs:153"
+      ],
+      "cpp_reference": "C4Config.cpp:543",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "clonk-org/clonk-rs#945"
+    },
+    {
       "id": "transport-presend-envelope",
       "area": "transport",
       "summary": "The host sizes the control PreSend horizon from a decaying delivery-time envelope instead of C++'s 1/150 EWMA of the mean control-send time, so a jittery link no longer stalls every participant on about half its ticks. Host-local: it changes which horizon the host picks, never which data is synchronized.",

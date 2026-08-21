@@ -4215,9 +4215,10 @@ pub(crate) fn build_network_host_preparation(
         )?;
         (name, nick)
     };
-    let max_load_file_size = value("Network", "MaxLoadFileSize")
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(100 * 1024 * 1024);
+    let max_load_file_size = crate::settings::session_max_load_file_size(
+        app.compat_profile,
+        value("Network", "MaxLoadFileSize").and_then(|value| value.parse::<u32>().ok()),
+    );
     let configured_players = app
         .app_paths
         .as_ref()

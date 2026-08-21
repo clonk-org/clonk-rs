@@ -597,6 +597,11 @@ fn voice(config: &Config, input_devices: &[VoiceInputDevice]) -> AdvancedConfigS
 
 fn network(config: &Config) -> AdvancedConfigSection {
     let section = "Network";
+    let max_load_file_size = i32::try_from(crate::settings::session_max_load_file_size(
+        crate::settings::resolve_compat_profile(Some(config), None),
+        None,
+    ))
+    .expect("profile defaults fit C++'s signed MaxLoadFileSize config field");
     AdvancedConfigSection::new(
         section,
         vec![
@@ -642,7 +647,7 @@ fn network(config: &Config) -> AdvancedConfigSection {
             validated_text_row(config, section, "Nick", "", |value| {
                 validate_network_name(value, true)
             }),
-            i32_row(config, section, "MaxLoadFileSize", 100 * 1024 * 1024),
+            i32_row(config, section, "MaxLoadFileSize", max_load_file_size),
             bool_row(config, section, "MasterServerSignUp", true),
             i32_row(config, section, "MasterReferencePeriod", 120),
             bool_row(config, section, "LeagueServerSignUp", false),
