@@ -739,6 +739,12 @@ impl PreparedHostBootstrap {
                 .filter(|address| address.protocol == NetworkProtocol::Tcp)
                 .map(|address| address.endpoint)
                 .collect(),
+            // The reference can carry the host's compatibility profile, and a
+            // peer reads it back, but nothing supplies the value yet: the
+            // setting itself is clonk-org/clonk-rs#582. Until it is threaded
+            // through here a host advertises no profile, which is the same
+            // silence a stock C++ host emits.
+            compat_profile: None,
         };
         let metadata = HostGameReferenceMetadata {
             icon: self.reference_icon,

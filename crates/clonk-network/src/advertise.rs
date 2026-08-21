@@ -124,6 +124,16 @@ PasswordNeeded={}\r\n",
         reference.join_allowed,
         reference.password_needed,
     );
+    // Only a host that actually runs a profile says so, so the ordinary
+    // reference is byte-identical to what it was. Placed before `Address=`,
+    // which opens the address list that everything after it belongs to.
+    if let Some(profile) = reference
+        .compat_profile
+        .as_deref()
+        .filter(|profile| !profile.is_empty())
+    {
+        let _ = write!(output, "CompatProfile={profile}\r\n");
+    }
     output.push_str("Address=");
     if reference.addresses.is_empty() {
         for (index, address) in reference.tcp_addresses.iter().enumerate() {
