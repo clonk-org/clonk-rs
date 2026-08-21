@@ -817,6 +817,38 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/StdFile.cpp" > "$gen/wildcard_match.inc"
 
+# 3q. Lift C4ConfigGeneral::GetLanguageSequence and the C4Strings helpers it is
+#     built from. The condensing rule is entirely in those helpers, so lifting
+#     only the caller would pin nothing: SCopySegment does the comma split, the
+#     whitespace skip and -- crucially -- the TRUNCATION to two characters, so
+#     `English` becomes `En` rather than being rejected, and an empty segment is
+#     dropped instead of producing an empty entry.
+#
+#     The whole span from SLen through SCopySegment is taken in one piece: it is
+#     nothing but pure string code, and the individual functions call each other
+#     (SAppend -> SCopy -> SCopyL, SCopySegment -> SCharPos/SAdvanceSpace/
+#     SCopyUntil), so splitting it up would only add anchors that can drift.
+awk '
+  /^char CharCapital\(char cChar\)$/ { p = 1 }
+  /^bool SCopySegmentEx\(/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Strings.cpp" > "$gen/c4strings_helpers.inc"
+
+awk '
+  /^const char \*SAdvanceSpace\(const char \*szSPos\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Strings.cpp" > "$gen/c4strings_advance_space.inc"
+
+awk '
+  /^int C4ConfigGeneral::GetLanguageSequence\(const char \*strSource, char \*strTarget\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Config.cpp" > "$gen/config_language_sequence.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

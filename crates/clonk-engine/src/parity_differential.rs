@@ -3789,6 +3789,40 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0t. C4ConfigGeneral::GetLanguageSequence (C4Config.cpp:1492-1507), the
+    //     condensing pass that derives `LanguageEx` from `Language`
+    //     (`:1471-1473`) and appends a scenario's fallback list
+    //     (C4StartupOptionsDlg.cpp:1219).
+    //
+    //     The condensing is not a validation pass, which is the part a rewrite
+    //     tends to get wrong: a segment is TRUNCATED to its first two bytes
+    //     rather than rejected, so `DE - Deutsch` becomes `DE` and `English`
+    //     becomes `En`. Case is preserved, a one-character code stays one
+    //     character, duplicates are kept, and only a segment that is empty
+    //     after the leading-whitespace skip is dropped -- which is why
+    //     `DE,,US` yields two entries and `,,,` yields none.
+    for (idx, case) in golden["config_language_sequence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let source = case["source"].as_str().unwrap();
+        let sequence = clonk_core::std_config::language_sequence(source);
+        expect_eq(
+            "config_language_sequence",
+            idx,
+            "count",
+            i(case, "count"),
+            sequence.len() as i64,
+        );
+        assert_eq!(
+            case["target"].as_str().unwrap(),
+            sequence.join(","),
+            "config_language_sequence[{idx}]: condensed sequence diverges from C++"
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
