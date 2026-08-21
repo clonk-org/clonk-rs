@@ -7057,6 +7057,195 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b2. incinerate_arm: `mrfIncinerate` (C4Material.cpp:747-771), whose
+    //       three arms are asymmetric in ways a port is likely to flatten.
+    //
+    //       `meeMassMove` and `meePXSPos` report **unhandled** when the pixel
+    //       does not ignite — unhandled means the caller keeps looking, so
+    //       answering "handled" there silently swallows the pixel. `meePXSMove`
+    //       runs the insertion check FIRST, so a splash that prevents the
+    //       interaction returns before anything burns; and it is the only arm
+    //       that inserts a pixel which failed to ignite rather than dropping it.
+    //
+    //       Ignition is derived from the fixture on both sides, never dictated:
+    //       the target pixel is inflammable or it is not, and the separate input
+    //       is whether a FLAM already stands in the 8x20 rect at (x-4, y-1) that
+    //       suppresses a second one (C4Landscape.cpp:1478-1488).
+    for case in golden["incinerate_arm"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("incinerate_arm[{name}]");
+
+        // Same Map as the insert arm, with Lava additionally Inflammable —
+        // Incindiary is the PXS's own smoke property, Inflammable is whether
+        // the landscape material catches, and the two are read for different
+        // reasons.
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            SplashRate=1
+            MaxSlide=4
+
+            [Material Lava]
+            Name=Lava
+            Density=25
+            Incindiary=1
+            Inflammable=1
+            MaxSlide=4
+
+            [Material Granite]
+            Name=Granite
+            Density=50
+            "#,
+        )
+        .expect("incinerate arm oracle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const GRANITE: u8 = 3;
+        const PX: i32 = 8;
+        const PY: i32 = 9;
+
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        for gy in 0..HGT as usize {
+            for gx in 0..WDT as usize {
+                if gx != PX as usize {
+                    bytes[gy * WDT as usize + gx] = GRANITE;
+                }
+            }
+        }
+        for gx in 0..WDT as usize {
+            bytes[10 * WDT as usize + gx] = GRANITE;
+        }
+        // The target pixel is whatever this row is about.
+        bytes[PY as usize * WDT as usize + PX as usize] = i(case, "target_mat") as u8;
+
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 25;
+        densities[GRANITE as usize] = 50;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Water".to_string());
+        material_names[2] = Some("Lava".to_string());
+        material_names[GRANITE as usize] = Some("Granite".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        // `C4Landscape::Incinerate` creates a FLAM, so the definition has to
+        // exist for ignition to be possible at all.
+        engine
+            .register_definition(
+                crate::Definition::from_script(crate::FIRE_DEFINITION_ID, "Fire", "#strict\n")
+                    .expect("FLAM definition compiles"),
+            )
+            .expect("FLAM definition registers");
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+
+        if case["flam_here"].as_bool().unwrap_or(false) {
+            // Inside the 8x20 rect at (x-4, y-1) that C++ tests with FindObject.
+            engine
+                .spawn_object(
+                    crate::SpawnConfig::new(crate::FIRE_DEFINITION_ID)
+                        .with_position(crate::Vector2::new(PX, PY)),
+                )
+                .expect("the suppressing FLAM spawns");
+        }
+
+        engine.rng = LcgRng::new(i(case, "seed") as u32);
+        engine.rng.randomize3();
+        let draws_before = engine.rng.count;
+        let flams_before = engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == crate::FIRE_DEFINITION_ID)
+            .count();
+
+        // mrfIncinerate is not available as a user reaction (C++ asserts it),
+        // so there is no user-defined row.
+        let reaction = crate::material::MaterialReaction {
+            kind: crate::material::MaterialReactionKind::Incinerate,
+            user_defined: false,
+            insertion_check: true,
+        };
+        let mut pixel = crate::pxs::Pxs {
+            mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
+                .expect("oracle pxs material"),
+            x: itofix(PX),
+            y: itofix(PY),
+            xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
+            ydir: C4Fixed::from_raw(i(case, "ydir0") as i32),
+        };
+        let (mut x, mut y) = (PX, PY);
+        let mut pos_changed = false;
+        let handled = engine.execute_pxs_reaction(
+            reaction,
+            &mut x,
+            &mut y,
+            PX,
+            PY,
+            &mut pixel,
+            crate::material::MaterialId::new(i(case, "ls_mat") as usize),
+            match i(case, "event") {
+                0 => MaterialInteractionEvent::PxsPos,
+                1 => MaterialInteractionEvent::PxsMove,
+                _ => MaterialInteractionEvent::MassMove,
+            },
+            &mut pos_changed,
+        );
+
+        let flams_created = engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == crate::FIRE_DEFINITION_ID)
+            .count()
+            - flams_before;
+
+        expect_eq(
+            &label,
+            0,
+            "handled",
+            i64::from(case["handled"].as_bool().unwrap_or(false)),
+            i64::from(handled),
+        );
+        expect_eq(
+            &label,
+            0,
+            "flams_created",
+            i(case, "flams_created"),
+            flams_created as i64,
+        );
+        expect_eq(&label, 0, "x", i(case, "x"), i64::from(x));
+        expect_eq(&label, 0, "y", i(case, "y"), i64::from(y));
+        expect_eq(&label, 0, "xdir", i(case, "xdir"), pixel.xdir.val() as i64);
+        expect_eq(&label, 0, "ydir", i(case, "ydir"), pixel.ydir.val() as i64);
+        expect_eq(
+            &label,
+            0,
+            "pos_changed",
+            i64::from(case["pos_changed"].as_bool().unwrap_or(false)),
+            i64::from(pos_changed),
+        );
+        expect_eq(
+            &label,
+            0,
+            "draws",
+            i(case, "draws"),
+            i64::from(engine.rng.count - draws_before),
+        );
+    }
+
     // 16c. insert_check: `mrfInsertCheck` (C4Material.cpp:567-609) with the
     //      `FindMatSlide` it calls (C4Landscape.cpp:1247-1277) — the arm every
     //      falling pixel takes on landing, which `pxs_execute` deliberately

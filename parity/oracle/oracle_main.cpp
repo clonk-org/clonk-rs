@@ -5544,6 +5544,10 @@ struct MaterialCore
     int32_t MaxSlide;
     int32_t InMatConvertDepth;
     int32_t InMatConvertTo;
+    // `C4Landscape::Incinerate` reads this, not Incindiary: Incindiary is the
+    // PXS's own smoke property, Inflammable is whether the landscape material
+    // catches (C4Landscape.cpp:1478-1488).
+    int32_t Inflammable;
 };
 
 enum MaterialInteractionEvent
@@ -5569,10 +5573,13 @@ struct C4MaterialMap
 {
     // 0 vacuum, 1 water (splashes), 2 lava (incendiary), 3 granite (the floor).
     MaterialCore Map[4] = {
-        {0, 0, 0, 0, 0, -1},
-        {25, 1, 0, 4, 0, -1},  // Water: SplashRate 1 makes `!Random(1)` certain
-        {25, 0, 1, 4, 2, 3},   // Lava: incendiary; converts to Granite at depth 2
-        {50, 0, 0, 0, 0, -1},  // Granite floor
+        {0, 0, 0, 0, 0, -1, 0},
+        {25, 1, 0, 4, 0, -1, 0},  // Water: SplashRate 1 makes `!Random(1)` certain
+        // Lava: incendiary (its own smoke) AND inflammable (the landscape
+        // material catches), which are separate fields C4Landscape::Incinerate
+        // and mrfInsertCheck read for different reasons.
+        {25, 0, 1, 4, 2, 3, 1},
+        {50, 0, 0, 0, 0, -1, 0},  // Granite floor
     };
 
     bool mrfConvert(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
@@ -5583,6 +5590,10 @@ struct C4MaterialMap
                    int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
                    int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
                    bool *pfPosChanged);
+    bool mrfIncinerate(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
+                       int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir,
+                       int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent,
+                       bool *pfPosChanged);
 };
 
 // PXS creation is only reached by the MassMove arm; record it rather than
@@ -5606,6 +5617,17 @@ struct PxsStub
 static int32_t g_inserted = 0;
 static int32_t g_inserted_mat = -1, g_inserted_x = -1, g_inserted_y = -1;
 
+// `C4Landscape::Incinerate` derives its answer from the landscape both engines
+// read, so it is modelled rather than stubbed to a dictated result: a case that
+// forced "it ignited" over a sky pixel would describe a state neither engine
+// can reach. The one genuine input is whether a FLAM already stands in the
+// 8x20 rect at (x-4, y-1), which C++ tests with FindObject and which suppresses
+// the ignition (C4Landscape.cpp:1478-1488).
+static int32_t g_incinerate_calls = 0;
+static int32_t g_incinerate_x = -1, g_incinerate_y = -1;
+static bool g_flam_already_here = false;
+static int32_t g_flams_created = 0;
+
 struct C4Landscape
 {
     C4Fixed Gravity{itofix(20, 100)};
@@ -5619,6 +5641,13 @@ struct C4Landscape
         g_inserted_y = ty;
         return true;
     }
+    // `C4Landscape::Incinerate` (C4Landscape.cpp:1478-1488) is a landscape
+    // mutation of its own -- it reads GetMat, checks Inflammable, refuses when
+    // a FLAM already stands in an 8x20 rect at (x-4, y-1), and only then
+    // creates one. Its own decisions deserve their own section; here it only
+    // has to record that mrfIncinerate reached it, and answer what the case
+    // says it answered.
+    bool Incinerate(int32_t x, int32_t y);
 };
 
 struct GameStub
@@ -5645,6 +5674,23 @@ int32_t C4Landscape::GetDensity(int32_t x, int32_t y)
     return mat < 0 ? 0 : Game.Material.Map[mat].Density;
 }
 
+// `C4Landscape::Incinerate` (C4Landscape.cpp:1478-1488) in the shape
+// mrfIncinerate depends on: the material at the pixel must be valid and
+// inflammable, no FLAM may already stand in the rect, and the creation must
+// succeed. It returns true only when it actually created one.
+bool C4Landscape::Incinerate(int32_t x, int32_t y)
+{
+    g_incinerate_calls++;
+    g_incinerate_x = x;
+    g_incinerate_y = y;
+    const int32_t mat = GBackMat(x, y);
+    if (!MatValid(mat)) return false;
+    if (!Game.Material.Map[mat].Inflammable) return false;
+    if (g_flam_already_here) return false;
+    g_flams_created++;
+    return true;
+}
+
 #include "find_mat_slide.inc"
 
 static void Smoke(int32_t, int32_t, int32_t) { g_smoke++; }
@@ -5657,6 +5703,7 @@ static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
 #include "mrf_user_check.inc"
 #include "mrf_convert.inc"
 #include "mrf_insert.inc"
+#include "mrf_incinerate.inc"
 
 } // namespace insert_check
 
@@ -5754,6 +5801,121 @@ static void printInsertCases()
                pos_changed ? "true" : "false", RandomCount - draws_before,
                insert_check::g_inserted, insert_check::g_inserted_mat,
                insert_check::g_inserted_x, insert_check::g_inserted_y);
+    }
+    printf("]");
+}
+
+// --- mrfIncinerate ----------------------------------------------------------
+//
+// The three arms are asymmetric, and flattening them is the likely port error:
+//
+//   * `meeMassMove` and `meePXSPos` try to incinerate and report **unhandled**
+//     when the pixel does not ignite. Unhandled means the caller keeps looking,
+//     so answering "handled" there silently swallows the pixel.
+//   * `meePXSMove` runs the insertion check FIRST. A splash or slide that
+//     prevents the interaction returns unhandled *before anything burns*, so a
+//     port that incinerates first would ignite pixels C++ never touches.
+//   * Only `meePXSMove` inserts the pixel when it fails to ignite. The other
+//     two drop it.
+//
+// The switch has no default arm, so any event outside those three never reaches
+// `C4Landscape::Incinerate` at all -- the call count pins that.
+//
+// Every row's ignition is DERIVED from the fixture, never dictated: the target
+// pixel is inflammable or it is not, and the one separate input is whether a
+// FLAM already stands in the 8x20 rect at (x-4, y-1) that suppresses a second
+// one. A row that forced "it ignited" over a sky pixel would describe a state
+// neither engine can reach.
+static void printIncinerateCases()
+{
+    printf("\"incinerate_arm\":[");
+    struct Case
+    {
+        const char *name;
+        int32_t event;
+        int32_t target_mat;   // what sits at the target pixel
+        bool flam_here;       // a FLAM already occupies the rect
+        int32_t pxs_mat;
+        int32_t ydir_n, ydir_p;
+    };
+    const Case cases[] = {
+        // The two non-movement arms never run the insertion check, so the
+        // target may be any material without disturbing anything else.
+        {"pos_ignites_inflammable", 0 /*meePXSPos*/, 2, false, 1, 1, 2},
+        {"pos_sky_does_not_ignite", 0, 0, false, 1, 1, 2},
+        {"pos_suppressed_by_existing_flam", 0, 2, true, 1, 1, 2},
+        {"mass_move_ignites_inflammable", 2 /*meeMassMove*/, 2, false, 1, 1, 2},
+        {"mass_move_sky_does_not_ignite", 2, 0, false, 1, 1, 2},
+        // Movement over sky: the check passes, nothing ignites, and the pixel
+        // is INSERTED rather than dropped.
+        {"move_dead_inserts", 1 /*meePXSMove*/, 0, false, 1, 1, 2},
+        // Movement on a rough splashing contact: the check refuses, so the
+        // landscape is never asked to incinerate at all.
+        {"move_check_blocks_before_burning", 1, 0, false, 1, 3, 1},
+    };
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        // Same boxed-in fixture the insert arm uses, so the insertion check's
+        // verdict is decided by the splash arm alone; the target pixel is then
+        // set to whatever this row is about.
+        for (int32_t gy = 0; gy < insert_check::GridHgt; gy++)
+            for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+                insert_check::g_grid[gy][gx] = (gx == 8) ? 0 : 3;
+        for (int32_t gx = 0; gx < insert_check::GridWdt; gx++)
+            insert_check::g_grid[10][gx] = 3;
+        insert_check::g_grid[9][8] = c.target_mat;
+        insert_check::g_smoke = 0;
+        insert_check::g_inserted = 0;
+        insert_check::g_inserted_mat = -1;
+        insert_check::g_inserted_x = -1;
+        insert_check::g_inserted_y = -1;
+        insert_check::g_incinerate_calls = 0;
+        insert_check::g_incinerate_x = -1;
+        insert_check::g_incinerate_y = -1;
+        insert_check::g_flam_already_here = c.flam_here;
+        insert_check::g_flams_created = 0;
+
+        const int32_t seed = 0x2222;
+        FixedRandom(seed);
+        Randomize3();
+        const int32_t draws_before = RandomCount;
+
+        // mrfIncinerate asserts !fUserDefined: it is not available as a user
+        // reaction, so there is no user-defined row to record.
+        insert_check::C4MaterialReaction reaction{};
+        reaction.fUserDefined = false;
+        reaction.fInsertionCheck = true;
+        reaction.iExecMask = ~0;
+        reaction.iDepth = 0;
+        reaction.iConvertMat = 0;
+
+        const int32_t ls_mat = 3;
+        int32_t iX = 8, iY = 9;
+        C4Fixed xdir = itofix(0, 1), ydir = itofix(c.ydir_n, c.ydir_p);
+        int32_t pxs_mat = c.pxs_mat;
+        bool pos_changed = false;
+        const bool handled = insert_check::Game.Material.mrfIncinerate(
+            &reaction, iX, iY, iX, iY, xdir, ydir, pxs_mat, ls_mat,
+            static_cast<insert_check::MaterialInteractionEvent>(c.event), &pos_changed);
+
+        printf("{\"name\":\"%s\",\"event\":%d,\"target_mat\":%d,\"flam_here\":%s,"
+               "\"pxs_mat\":%d,\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,\"xdir0\":%d,"
+               "\"ydir0\":%d,\"seed\":%d,\"handled\":%s,\"x\":%d,\"y\":%d,"
+               "\"xdir\":%d,\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,"
+               "\"incinerate_calls\":%d,\"flams_created\":%d,\"inserted\":%d,"
+               "\"inserted_mat\":%d,\"inserted_x\":%d,\"inserted_y\":%d}",
+               c.name, c.event, c.target_mat, c.flam_here ? "true" : "false",
+               c.pxs_mat, ls_mat, 8, 9, itofix(0, 1).val,
+               itofix(c.ydir_n, c.ydir_p).val, seed, handled ? "true" : "false",
+               iX, iY, xdir.val, ydir.val, pos_changed ? "true" : "false",
+               RandomCount - draws_before, insert_check::g_incinerate_calls,
+               insert_check::g_flams_created, insert_check::g_inserted,
+               insert_check::g_inserted_mat, insert_check::g_inserted_x,
+               insert_check::g_inserted_y);
     }
     printf("]");
 }
@@ -8602,6 +8764,12 @@ int main()
 
     // 22e. insert_arm: mrfInsert's event gate and its once-only splash check.
     printInsertCases();
+    printf(",\n");
+
+    // 22e2. incinerate_arm: mrfIncinerate's asymmetric arms — which events can
+    //       report unhandled, which one checks insertion before burning, and
+    //       which one inserts a pixel that failed to ignite.
+    printIncinerateCases();
     printf(",\n");
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.
