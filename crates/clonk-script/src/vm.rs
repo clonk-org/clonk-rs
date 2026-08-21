@@ -3150,6 +3150,19 @@ impl HostCallArg {
 /// asymmetry of `C4Value::operator==` (notably Bool versus C4ID), while
 /// STRICT3 checks only the outer type before container content recurses
 /// through that same operator.
+impl Value {
+    /// `C4Value::operator==` (C4Value.cpp:862-919) applied directly to two
+    /// values.
+    ///
+    /// This is the STRICT2 arm of [`c4_values_equal`] without the backing
+    /// identity the NONSTRICT/STRICT1 arm needs, so it is the operator itself
+    /// rather than the script `==`. Use `HostCallArg::c4_equals` when the
+    /// comparison has to honour a lower strict level's raw provenance.
+    pub fn c4_operator_equals(&self, other: &Self) -> bool {
+        c4_operator_equal(self, other)
+    }
+}
+
 fn c4_values_equal(
     left: &Value,
     right: &Value,
@@ -3218,20 +3231,26 @@ fn c4_scalar_payload(value: &Value) -> Option<u64> {
     }
 }
 
-fn c4_effective_nil(value: &Value) -> bool {
-    matches!(value, Value::Nil | Value::Object(0))
-}
-
 fn c4_operator_equal(left: &Value, right: &Value) -> bool {
-    if c4_effective_nil(left) {
-        // Null object constructors collapse to C4V_Any in C++. A C4ID zero
-        // that reaches this comparator retained its C4V_C4ID tag and must use
-        // the asymmetric type table below (notably, neither operand order
-        // compares equal to C4V_Bool(false)).
+    // Only a genuine C4V_Any short-circuits here. `C4Value(C4Object *)`
+    // collapses a null pointer to C4V_Any (C4Value.h:119), but `SetObject`
+    // does not (`:195`): it tags C4V_C4Object whatever the pointer is, and
+    // `C4Object::Incinerate` takes `pIncineratingObject = nullptr` by default,
+    // so a fire effect's `EffectVars[3]` really does hold a C4V_C4Object with a
+    // null payload (C4Effect.cpp:631). That value must take the object arm
+    // below, where an equal tag is required as well as an equal payload --
+    // treating it as C4V_Any made `EffectVar(3, ...) == 0` true for an
+    // uncaused fire, where C++ reports false.
+    //
+    // A C4ID zero likewise retains its C4V_C4ID tag and must use the
+    // asymmetric type table below (notably, neither operand order compares
+    // equal to C4V_Bool(false)).
+    // A right-hand C4V_Any gets no short-circuit of its own: C++ handles it
+    // inside each left arm, and the object, string, array and map arms have no
+    // such case, so they compare tags and report false. The scalar arms below
+    // already list `Value::Nil` among their accepted right operands.
+    if matches!(left, Value::Nil) {
         return c4_scalar_payload(right) == Some(0);
-    }
-    if c4_effective_nil(right) {
-        return c4_scalar_payload(left) == Some(0);
     }
     match left {
         // C4V_Any has Data == 0 and compares that union payload without a

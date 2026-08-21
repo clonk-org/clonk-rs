@@ -3823,6 +3823,72 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0u. C4Value::operator== (C4Value.cpp:862-919) over the full ordered
+    //     cross-type matrix.
+    //
+    //     The operator is a nested switch on the LEFT tag and then the right,
+    //     so it is not obliged to be symmetric -- and generating every ordered
+    //     pair shows it is asymmetric in exactly ONE place: the object arm
+    //     demands an equal tag as well as an equal payload, which makes
+    //     `nil == object_zero` true while `object_zero == nil` is false. That
+    //     is worth pinning precisely because the differing arms look like they
+    //     should produce more asymmetry than they do.
+    //
+    //     The other rules the matrix fixes: Any, Int and C4ID interconvert on
+    //     the raw payload, and Bool joins them EXCEPT against a C4ID -- a Bool
+    //     and a C4ID carrying the same word stay unequal in both directions.
+    //     Strings and arrays compare by CONTENT, not by backing pointer, so two
+    //     distinct allocations of `abc` are equal and the array arm recurses
+    //     back through this operator element-wise (C4ValueList.h:49,:67).
+    //
+    //     C4IDs here carry only payloads the port can also build: an all-digit
+    //     id of four or more characters parses numerically, which is what lets
+    //     a Bool and a C4ID share a word on both sides. Maps are not covered.
+    {
+        use clonk_script::Value;
+
+        fn named(name: &str) -> Value {
+            match name {
+                "nil" => Value::Nil,
+                "int_zero" => Value::Int(0),
+                "int_one" => Value::Int(1),
+                "int_minus_one" => Value::Int(-1),
+                "bool_false" => Value::Bool(false),
+                "bool_true" => Value::Bool(true),
+                "c4id_zero" => Value::C4Id("0000".to_string()),
+                "c4id_one" => Value::C4Id("0001".to_string()),
+                "object_zero" => Value::Object(0),
+                "object_five" => Value::Object(5),
+                // Two independent allocations of the same text, so a
+                // pointer-identity comparison would report them unequal.
+                "string_abc" | "string_abc_other_allocation" => Value::String("abc".into()),
+                "string_xyz" => Value::String("xyz".into()),
+                "array_one_two" | "array_one_two_other_allocation" => {
+                    Value::Array(vec![Value::Int(1), Value::Int(2)])
+                }
+                "array_one_three" => Value::Array(vec![Value::Int(1), Value::Int(3)]),
+                other => panic!("unknown c4value_operator_equal operand `{other}`"),
+            }
+        }
+
+        for (idx, case) in golden["c4value_operator_equal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let left = named(case["left"].as_str().unwrap());
+            let right = named(case["right"].as_str().unwrap());
+            expect_eq(
+                "c4value_operator_equal",
+                idx,
+                "equal",
+                i(case, "equal"),
+                i64::from(left.c4_operator_equals(&right)),
+            );
+        }
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
