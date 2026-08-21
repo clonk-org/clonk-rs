@@ -13679,6 +13679,10 @@ mod gather_task_script;
 mod movement_contact_snap;
 
 #[cfg(test)]
+#[path = "lib_tests/effect_deny_number_reservation.rs"]
+mod effect_deny_number_reservation;
+
+#[cfg(test)]
 #[path = "lib_tests/goal_rule_activate_families.rs"]
 mod goal_rule_activate_families;
 
