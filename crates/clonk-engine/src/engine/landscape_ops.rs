@@ -1244,7 +1244,7 @@ impl Engine {
 
     /// `C4PXS::Execute` (C4PXS.cpp:28-127). Returns the surviving PXS, or
     /// `None` when it deactivates.
-    fn execute_pxs(&mut self, mut pixel: pxs::Pxs) -> Option<pxs::Pxs> {
+    pub(crate) fn execute_pxs(&mut self, mut pixel: pxs::Pxs) -> Option<pxs::Pxs> {
         // Frame first: this runs once per live PXS, and `env::var` takes a
         // global lock and allocates before it can answer.
         if (17..=19).contains(&self.frame) && std::env::var("LC_RUST_RNG_TRACE").is_ok() {
