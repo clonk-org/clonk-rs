@@ -7057,6 +7057,175 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b9. do_movement: the unattached half of `C4Object::DoMovement`
+    //       (C4Movement.cpp:253-321) — the per-pixel collision loop.
+    //
+    //       Each axis accumulates its fixed target, clamps it through
+    //       Side/VerticalBounds, and then walks ONE PIXEL AT A TIME with a
+    //       ContactCheck per step. Three properties are pinned:
+    //
+    //       * on contact the loop rewrites the fixed coordinate back to the
+    //         whole pixel (`fix_x = itofix(x)`), DISCARDING the sub-pixel
+    //         remainder — invisible to `fixtoi()` and exactly the "stops one
+    //         subpixel earlier" desync the issue names, which is why the raw
+    //         `C4Fixed` is compared here and not the whole coordinate;
+    //       * the axes respond ASYMMETRICALLY. A horizontal contact redirects
+    //         xdir into ydir and rubs friction off *ydir*; a vertical contact
+    //         rubs friction off *xdir* first, then picks from the contact
+    //         vertices' CNAT — slide left, else slide right, else bleed ydir
+    //         into rdir (rotatable, non-living, single contact only), else zero
+    //         ydir;
+    //       * horizontal runs to completion BEFORE vertical begins, so a
+    //         diagonal move is two independent walks rather than one.
+    //
+    //       The fixture drives `exec_object_movement`, the port's `DoMovement`,
+    //       with an idle action and no script — matching the oracle's
+    //       `Action.Act = ActIdle`, `t_attach = 0` object, so the arms this
+    //       section does not cover (DigFree, ContactAction, the Hit callbacks)
+    //       are inert on both sides rather than silently differing.
+    for case in golden["do_movement"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("do_movement[{name}]");
+
+        const WDT: u32 = 24;
+        const HGT: i32 = 16;
+        const SOLID: u8 = 1;
+
+        let floor_y = i(case, "floor_y") as i32;
+        let wall_x = i(case, "wall_x") as i32;
+
+        let mut definition = Definition::from_script("MOVP", "Mover", "#strict\n")
+            .expect("oracle movement fixture compiles");
+        // The same three vertices the oracle fixture carries: one bottom, one
+        // left, one right, so either axis can contact independently.
+        // ContactVtxFriction returns the FIRST contacted vertex's value
+        // (C4Movement.cpp:89-97), so the per-vertex friction is part of the
+        // fixture on both sides — without it the friction arms are vacuous.
+        let friction = i(case, "vtx_friction") as i32;
+        let vertex = |x: i32, y: i32, cnat: u32| crate::ObjectVertex {
+            friction,
+            ..crate::ObjectVertex::new(x, y).with_cnat(cnat)
+        };
+        definition.set_shape_vertices(vec![
+            vertex(0, 1, crate::CNAT_BOTTOM),
+            vertex(-1, 0, crate::CNAT_LEFT),
+            vertex(1, 0, crate::CNAT_RIGHT),
+        ]);
+        definition.set_shape_rect(Some(crate::DefinitionRect::new(-1, -1, 3, 3)));
+        // DefCore defaults this to 0 (C4Def.cpp:162,384), so the landscape
+        // clamp only runs where a case asks for it.
+        definition.set_border_bound(i(case, "border_bound") as i32);
+
+        let mut engine = Engine::with_seed(0);
+        let mut bytes = vec![0u8; WDT as usize * HGT as usize];
+        if floor_y >= 0 {
+            for gy in floor_y..HGT {
+                for gx in 0..WDT as usize {
+                    bytes[gy as usize * WDT as usize + gx] = SOLID;
+                }
+            }
+        }
+        if wall_x >= 0 {
+            for gy in 0..HGT {
+                bytes[gy as usize * WDT as usize + wall_x as usize] = SOLID;
+            }
+        }
+        let mut landscape = Landscape::flat(WDT, HGT);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WDT,
+            HGT as u32,
+            bytes,
+            vec![0, 50],
+            vec![None, Some("Granite".to_owned())],
+            vec![None; 2],
+        ));
+        landscape.set_world_height(HGT);
+        engine.set_landscape(landscape);
+        // Gravity would add to ydir before the loop runs; the oracle block has
+        // no such term, so the fixture removes it rather than modelling it.
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("oracle movement fixture registers");
+
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("MOVP")
+                    .with_position(crate::Vector2::new(
+                        i(case, "x0") as i32,
+                        i(case, "y0") as i32,
+                    ))
+                    .with_fixed_position(FixedVec2::new(
+                        itofix(i(case, "x0") as i32),
+                        itofix(i(case, "y0") as i32),
+                    ))
+                    .with_fixed_velocity(FixedVec2::new(
+                        itofix_prec(i(case, "xdir_n") as i32, i(case, "xdir_d") as i32),
+                        itofix_prec(i(case, "ydir_n") as i32, i(case, "ydir_d") as i32),
+                    )),
+            )
+            .expect("oracle movement fixture spawns");
+        let index = engine
+            .find_object_index(object)
+            .expect("oracle movement fixture index");
+        engine.objects[index].state.alive = case["alive"].as_bool().unwrap_or(false);
+
+        let definition_id = engine.objects[index].definition_id.clone();
+        let action_library = engine
+            .definitions
+            .get(&definition_id)
+            .expect("movement fixture definition")
+            .action_library()
+            .clone();
+        engine
+            .exec_object_movement(index, &action_library, &definition_id, &[])
+            .expect("movement fixture step");
+
+        let object = &engine.objects[index];
+        expect_eq(
+            &label,
+            0,
+            "x",
+            i(case, "x"),
+            i64::from(object.state.position.x),
+        );
+        expect_eq(
+            &label,
+            0,
+            "y",
+            i(case, "y"),
+            i64::from(object.state.position.y),
+        );
+        expect_eq(
+            &label,
+            0,
+            "fix_x",
+            i(case, "fix_x"),
+            i64::from(object.fixed_position.x.val()),
+        );
+        expect_eq(
+            &label,
+            0,
+            "fix_y",
+            i(case, "fix_y"),
+            i64::from(object.fixed_position.y.val()),
+        );
+        expect_eq(
+            &label,
+            0,
+            "xdir",
+            i(case, "xdir"),
+            i64::from(object.fixed_velocity.x.val()),
+        );
+        expect_eq(
+            &label,
+            0,
+            "ydir",
+            i(case, "ydir"),
+            i64::from(object.fixed_velocity.y.val()),
+        );
+    }
+
     // 16b8. cross_map_reactions: which builtin reaction each (PXS material,
     //       landscape material) pair gets, from the selection loop in
     //       `C4MaterialMap::CrossMapMaterials` (C4Material.cpp:311-346).

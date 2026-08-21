@@ -4135,12 +4135,22 @@ const int32_t MaxVertex = 8;
 
 struct C4Shape
 {
+    // The shape rect, which SideBounds/VerticalBounds clamp the movement target
+    // against: the landscape limits are `0 - Shape.x` and `GBackWdt + Shape.x`
+    // (C4Movement.cpp:195-196,211-213), so a wider shape stops sooner.
+    int32_t x{};
+    int32_t y{};
+    int32_t Wdt{};
+    int32_t Hgt{};
     int32_t VtxNum{};
     int32_t VtxX[MaxVertex]{};
     int32_t VtxY[MaxVertex]{};
     int32_t VtxCNAT[MaxVertex]{};
     int32_t VtxContactCNAT[MaxVertex]{};
     int32_t VtxContactMat[MaxVertex]{};
+    // ContactVtxFriction returns the FIRST contacted vertex's value
+    // (C4Movement.cpp:89-97), so per-vertex friction is part of the fixture.
+    int32_t VtxFriction[MaxVertex]{};
     int32_t ContactDensity{SolidDensity};
     int32_t ContactCNAT{};
     int32_t ContactCount{};
@@ -4162,12 +4172,69 @@ struct C4Shape
 // VerticalBounds run the movement target through. It decides which velocity
 // component is zeroed and fires a Contact call per bound crossed — and when the
 // two limits cross each other, BOTH fire, in low-then-high order.
+// The DefCore border bits (C4Def.h:83-86) and the two action constants the
+// bound wrappers' layer branch tests (C4Def.h:139,444).
+const int32_t C4D_Border_Sides = 1;
+const int32_t C4D_Border_Top = 2;
+const int32_t C4D_Border_Bottom = 4;
+const int32_t C4D_Border_Layer = 8;
+const int32_t C4D_StaticBack = 1 << 0;
+const int32_t ActIdle = -1;
+const int32_t DFA_ATTACH = 14;
+
+// OCF_Rotate, which the vertical contact cascade consults before bleeding ydir
+// into rdir (C4Movement.cpp:305-311).
+const uint32_t OCF_Rotate = 1u << 17;
+
+struct C4ActMapEntry
+{
+    int32_t Procedure{DFA_ATTACH};
+};
+
+struct C4DefLike
+{
+    // `C4Def::Default` sets this to 0 and `CompileFunc` defaults it to 0
+    // (C4Def.cpp:162,384), so by default NEITHER landscape bound applies. Each
+    // case says which it wants; inventing a default here would have made the
+    // clamp fire in the oracle and not in the port.
+    int32_t BorderBound{0};
+    C4ActMapEntry ActMap[1]{};
+};
+
+struct C4ActionLike
+{
+    int32_t Act{ActIdle};
+    int32_t t_attach{0};
+};
+
 struct C4Object
 {
     C4Fixed xdir{Fix0};
     C4Fixed ydir{Fix0};
     int32_t ContactCalls[4]{};
     int32_t ContactCallCount{};
+
+    // Movement state. `x`/`y` are the whole-pixel position the loop steps, and
+    // `fix_x`/`fix_y` the fixed accumulator it rewrites on contact.
+    int32_t x{};
+    int32_t y{};
+    C4Fixed fix_x{Fix0};
+    C4Fixed fix_y{Fix0};
+    C4Fixed rdir{Fix0};
+    int32_t motion_x{};
+    int32_t motion_y{};
+    uint32_t OCF{};
+    bool Alive{false};
+    C4Shape Shape{};
+    int32_t Category{0};
+    C4DefLike DefStorage{};
+    C4DefLike *Def{&DefStorage};
+    C4ActionLike Action{};
+    // The layer clamp is never taken here: `pLayer` stays null, so only the
+    // landscape clamp runs. A layered object's bounds are a separate concern
+    // with their own inputs, and the branch is lifted rather than removed so
+    // this fixture cannot silently disagree about which clamp applies.
+    C4Object *pLayer{nullptr};
 
     bool Contact(int32_t cnat)
     {
@@ -4176,11 +4243,70 @@ struct C4Object
         return false;
     }
 
+    // The shape's own check, reached through the object the same way
+    // C4Object::ContactCheck does (C4Movement.cpp:167-183 calls
+    // Shape.ContactCheck after positioning the shape).
+    int32_t ContactCheck(int32_t cx, int32_t cy)
+    {
+        Shape.ContactCheck(cx, cy);
+        t_contact = Shape.ContactCNAT;
+        return Shape.ContactCount;
+    }
+    int32_t t_contact{};
+    bool AnyContact{false};
+    uint32_t Contacts{};
+    bool RedirectYR{false};
+
     void TargetBounds(
         int32_t &ctco, int32_t limit_low, int32_t limit_hi, int32_t cnat_low, int32_t cnat_hi);
+    void SideBounds(int32_t &ctcox);
+    void VerticalBounds(int32_t &ctcoy);
+    void DoMotion(int32_t mx, int32_t my)
+    {
+        x += mx;
+        y += my;
+        motion_x += mx;
+        motion_y += my;
+    }
+    void DoUnattachedMovement();
 };
 
 #include "target_bounds.inc"
+
+#define GBackHgt GridHgt
+
+#include "movement_constants.inc"
+#include "redirect_force.inc"
+#include "apply_friction.inc"
+#include "contact_vtx_cnat.inc"
+#include "contact_vtx_weight.inc"
+#include "contact_vtx_friction.inc"
+#include "side_bounds.inc"
+#include "vertical_bounds.inc"
+
+// The unattached half of C4Object::DoMovement (C4Movement.cpp:253-321), lifted
+// as the statement it is. The locals it opens with are DoMovement's own; the
+// attached branch, the DigFree preamble and the ContactAction tail are out of
+// this section's scope and are not lifted.
+void C4Object::DoUnattachedMovement()
+{
+    int32_t ctcox, ctcoy, ctx, cty, iContact = 0;
+    bool fAnyContact = false;
+    uint32_t iContacts = 0;
+    bool fRedirectYR = false;
+#include "do_movement_unattached.inc"
+    // Keep the aggregates the tail would have read.
+    AnyContact = fAnyContact;
+    Contacts = iContacts;
+    RedirectYR = fRedirectYR;
+    (void)iContact;
+    (void)ctcox;
+    (void)ctcoy;
+    (void)ctx;
+    (void)cty;
+}
+
+#undef GBackHgt
 } // namespace shape_contact
 
 
@@ -8252,6 +8378,119 @@ int main()
     // pillar, and every case probes one shape at one position: the vertex loop
     // order, the four neighbour probes per contacting vertex, the
     // CNAT_NoCollision skip, and the closed-border MCVehic answer.
+    arr_begin("do_movement");
+    {
+        using shape_contact::g_grid;
+        using shape_contact::GridHgt;
+        using shape_contact::GridWdt;
+        using shape_contact::OCF_Rotate;
+        // The unattached collision loop (C4Movement.cpp:253-321).
+        //
+        // Each axis accumulates its fixed target first, clamps it, and then
+        // walks ONE PIXEL AT A TIME with a ContactCheck per step. Three things
+        // in that make it worth pinning:
+        //
+        //   * on contact the loop rewrites the fixed coordinate back to the
+        //     whole pixel (`fix_x = itofix(x)`), DISCARDING the sub-pixel
+        //     remainder. A port that kept it drifts a subpixel per contact.
+        //   * the two axes respond asymmetrically. Horizontal contact redirects
+        //     xdir into ydir and rubs friction off YDIR; vertical contact rubs
+        //     friction off XDIR first, then picks from the contact vertices'
+        //     CNAT — slide left, else slide right, else rotate, else zero ydir.
+        //   * horizontal runs to completion BEFORE vertical starts, so a
+        //     diagonal move is two independent walks, not one.
+        struct Case
+        {
+            const char *name;
+            int32_t x, y;
+            int32_t xdir_n, xdir_d;
+            int32_t ydir_n, ydir_d;
+            // Floor row, or -1 for none; and an optional wall column.
+            int32_t floor_y, wall_x;
+            int32_t vtx_friction;
+            bool alive, rotatable;
+            int32_t border_bound;
+        };
+        const Case cases[] = {
+            // Free flight: both walks run to their targets, nothing is clamped.
+            {"free_diagonal_step", 8, 6, 3, 1, 2, 1, -1, -1, 0, false, false, 0},
+            // A sub-pixel step moves no whole pixel but still accumulates.
+            {"subpixel_move_keeps_its_remainder", 8, 6, 1, 4, 0, 1, -1, -1, 0, false, false, 0},
+            // Falling onto a floor: the vertical walk stops on contact, and the
+            // fixed coordinate is snapped back to the whole pixel.
+            {"landing_snaps_the_fixed_coordinate", 8, 6, 0, 1, 4, 1, 11, -1, 0, false, false, 0},
+            // The same landing with friction on the contact vertex rubs XDIR,
+            // not ydir.
+            {"vertical_contact_rubs_horizontal_speed", 8, 6, 3, 1, 4, 1, 11, -1, 100, false, false, 0},
+            // Running into a wall: the horizontal walk stops and redirects into
+            // ydir, and friction is rubbed off YDIR.
+            {"wall_contact_redirects_into_vertical", 8, 6, 4, 1, 0, 1, -1, 12, 100, false, false, 0},
+            // A rotatable, non-living object on a single vertical contact bleeds
+            // ydir into rdir instead of zeroing it.
+            {"single_contact_rotates_instead_of_stopping", 8, 6, 0, 1, 4, 1, 11, -1, 0, false, true, 0},
+            // ...and a living one never does, however rotatable.
+            {"a_living_object_keeps_its_rotation", 8, 6, 0, 1, 4, 1, 11, -1, 0, true, true, 0},
+            // The landscape clamp fires before any contact: the side bound stops
+            // the target at the border and calls Contact once.
+            {"side_bound_clamps_before_stepping", 20, 6, 8, 1, 0, 1, -1, -1, 0, false, false, shape_contact::C4D_Border_Sides},
+        };
+        for (const auto &c : cases)
+        {
+            sep();
+
+            for (int32_t gy = 0; gy < GridHgt; gy++)
+                for (int32_t gx = 0; gx < GridWdt; gx++)
+                    g_grid[gy][gx] = 0;
+            if (c.floor_y >= 0)
+                for (int32_t gx = 0; gx < GridWdt; gx++)
+                    for (int32_t gy = c.floor_y; gy < GridHgt; gy++) g_grid[gy][gx] = 1;
+            if (c.wall_x >= 0)
+                for (int32_t gy = 0; gy < GridHgt; gy++) g_grid[gy][c.wall_x] = 1;
+
+            shape_contact::C4Object obj;
+            obj.x = c.x;
+            obj.y = c.y;
+            obj.fix_x = itofix(c.x);
+            obj.fix_y = itofix(c.y);
+            obj.xdir = itofix(c.xdir_n, c.xdir_d);
+            obj.ydir = itofix(c.ydir_n, c.ydir_d);
+            obj.Alive = c.alive;
+            obj.OCF = c.rotatable ? OCF_Rotate : 0u;
+            obj.DefStorage.BorderBound = c.border_bound;
+            // A one-pixel-tall, three-wide shape with a bottom and two side
+            // vertices, which is the smallest body that can contact on either
+            // axis independently.
+            obj.Shape.x = -1;
+            obj.Shape.y = -1;
+            obj.Shape.Wdt = 3;
+            obj.Shape.Hgt = 3;
+            obj.Shape.VtxNum = 3;
+            obj.Shape.VtxX[0] = 0;  obj.Shape.VtxY[0] = 1;  obj.Shape.VtxCNAT[0] = CNAT_Bottom;
+            obj.Shape.VtxX[1] = -1; obj.Shape.VtxY[1] = 0;  obj.Shape.VtxCNAT[1] = CNAT_Left;
+            obj.Shape.VtxX[2] = 1;  obj.Shape.VtxY[2] = 0;  obj.Shape.VtxCNAT[2] = CNAT_Right;
+            for (int32_t v = 0; v < obj.Shape.VtxNum; v++) obj.Shape.VtxFriction[v] = c.vtx_friction;
+
+            obj.DoUnattachedMovement();
+
+            printf("{\"name\":\"%s\",\"x0\":%d,\"y0\":%d,\"xdir_n\":%d,\"xdir_d\":%d,"
+                   "\"ydir_n\":%d,\"ydir_d\":%d,\"floor_y\":%d,\"wall_x\":%d,"
+                   "\"vtx_friction\":%d,\"alive\":%s,\"rotatable\":%s,"
+                   "\"border_bound\":%d,"
+                   "\"x\":%d,\"y\":%d,\"fix_x\":%d,\"fix_y\":%d,"
+                   "\"xdir\":%d,\"ydir\":%d,\"rdir\":%d,"
+                   "\"motion_x\":%d,\"motion_y\":%d,\"any_contact\":%s,"
+                   "\"contacts\":%u,\"redirect_yr\":%s,\"contact_calls\":%d}",
+                   c.name, c.x, c.y, c.xdir_n, c.xdir_d, c.ydir_n, c.ydir_d, c.floor_y,
+                   c.wall_x, c.vtx_friction, c.alive ? "true" : "false",
+                   c.rotatable ? "true" : "false", c.border_bound, obj.x, obj.y, obj.fix_x.val, obj.fix_y.val,
+                   obj.xdir.val, obj.ydir.val, obj.rdir.val, obj.motion_x, obj.motion_y,
+                   obj.AnyContact ? "true" : "false", obj.Contacts,
+                   obj.RedirectYR ? "true" : "false", obj.ContactCallCount);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("shape_contact_check");
     {
         using namespace shape_contact;
