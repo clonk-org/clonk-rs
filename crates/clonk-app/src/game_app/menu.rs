@@ -613,8 +613,9 @@ impl GameApp {
                 .runtime_resource_text("IDS_TEXT_PLAYERIMAGE", &defaults.player_image),
             lobby_icon: self.runtime_resource_text("IDS_TEXT_LOBBYICON", &defaults.lobby_icon),
             no_portrait: self.runtime_resource_text("IDS_MSG_NOPORTRAIT", &defaults.no_portrait),
-            ok: self.runtime_resource_text("IDS_BTN_OK", &defaults.ok),
-            cancel: self.runtime_resource_text("IDS_BTN_CANCEL", &defaults.cancel),
+            loading: self.runtime_resource_text("IDS_PRC_INITIALIZE", &defaults.loading),
+            ok: self.runtime_resource_text("IDS_DLG_OK", &defaults.ok),
+            cancel: self.runtime_resource_text("IDS_DLG_CANCEL", &defaults.cancel),
         }
     }
 

@@ -60,7 +60,7 @@ macro_rules! input_fixture {
 
 use clonk_frontend::startup_plrproperties::PlayerPropertiesController;
 use clonk_frontend::startup_portraitsel::{
-    PortraitFileEntry, PortraitLocation, PortraitSelController,
+    PortraitFileEntry, PortraitLocation, PortraitSelController, PortraitSelMetrics,
 };
 
 #[test]
@@ -172,6 +172,23 @@ fn portrait_selector<'a>(app: &'a GameApp, _expectation: &str) -> &'a PortraitSe
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .test_value()
+}
+
+fn portrait_capture_text<'a>(
+    plan: &'a NativePresentationPlan,
+    needle: &str,
+) -> (usize, &'a clonk_graphics::clonk_font::CapturedClonkText) {
+    plan.batches
+        .iter()
+        .enumerate()
+        .find_map(|(index, batch)| {
+            batch
+                .text
+                .iter()
+                .find(|command| command.text == needle)
+                .map(|command| (index, command))
+        })
+        .unwrap_or_else(|| panic!("captured portrait-selector text `{needle}`"))
 }
 
 fn physical_left_drag(app: &mut GameApp, start: GuiPoint, end: GuiPoint) {
@@ -3052,6 +3069,414 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
 }
 
 #[test]
+fn portrait_selector_window_leave_forwards_captured_button_sounds() {
+    // CursorLeft delivers Button::MouseLeave through the owning dialog, and
+    // re-entry restores the pressed state only while the physical button is
+    // still held (`C4GuiButton.cpp:169-200`).
+    let mut app = new_classic_menu_app(640, 480);
+    open_default_portrait_selector(&mut app, "new player properties");
+    let ok = clonk_frontend::startup_portraitsel::portrait_sel_layout(640, 480, 1).ok;
+    let point = GuiPoint::new((ok.x + ok.w / 2) as f32, (ok.y + ok.h / 2) as f32);
+    move_cursor(&mut app, point, "hover selector OK");
+
+    app.test_left_button(ElementState::Pressed);
+    app.pointer_left().test_value();
+    move_cursor(&mut app, point, "re-enter selector OK while held");
+    app.pointer_left().test_value();
+    main_assert_eq!(app.ui_sound_log => vec!["ArrowHit", "ArrowHit", "ArrowHit", "ArrowHit"]);
+
+    app.test_left_button(ElementState::Released);
+    move_cursor(&mut app, point, "re-enter selector OK after outside release");
+    main_assert_eq!(app.ui_sound_log => vec!["ArrowHit", "ArrowHit", "ArrowHit", "ArrowHit"]);
+}
+
+#[test]
+fn portrait_selector_focus_loss_prevents_late_button_release() {
+    // A hard interaction reset follows CMouse::ReleaseElements: MouseLeave
+    // raises Button::SetUp(false), then the drag owner is forgotten so a late
+    // LeftUp cannot press the button (`C4Gui.cpp:480-492`;
+    // `C4GuiButton.cpp:147-175,193-200`).
+    let mut app = new_classic_menu_app(640, 480);
+    open_default_portrait_selector(&mut app, "new player properties");
+    let ok = clonk_frontend::startup_portraitsel::portrait_sel_layout(640, 480, 1).ok;
+    let point = GuiPoint::new((ok.x + ok.w / 2) as f32, (ok.y + ok.h / 2) as f32);
+    move_cursor(&mut app, point, "hover selector OK");
+
+    app.test_left_button(ElementState::Pressed);
+    app.handle_focus_lost().test_value();
+    let actions = app
+        .startup_player_properties_dialog
+        .test_mut()
+        .controller
+        .handle_pointer_up(point);
+
+    main_assert!(actions.is_empty(), "focus loss must discard the captured press");
+    main_assert!(
+        app.startup_player_properties_dialog
+            .test_ref()
+            .controller
+            .portrait_selector()
+            .is_some(),
+        "the release after focus loss must not accept and close the selector"
+    );
+    main_assert_eq!(app.ui_sound_log => vec!["ArrowHit", "ArrowHit"]);
+}
+
+#[test]
+fn portrait_selector_semantics_cover_locales_sizes_and_high_dpi() {
+    // This product matrix covers C4FileSelDlg's measured localized controls,
+    // C4GUI's flipped ContextMenu and title dragging, and the native menu
+    // sounds/access keys without storing six full-screen pixel goldens
+    // (`C4FileSelDlg.cpp:142-143,535,568-571`; `C4Gui.cpp:243-253,877-892`;
+    // `C4GuiMenu.cpp:333-358,412-421,465,518-529`).
+    const US: &[(&str, &str)] = &[
+        ("IDS_MSG_SELECT", "Select %s"),
+        ("IDS_TYPE_PORTRAIT", "Portrait"),
+        ("IDS_TEXT_LOCATION", "Location:"),
+        ("IDS_CTL_IMPORTIMAGEAS", "Import image as:"),
+        ("IDS_TEXT_PLAYERIMAGE", "Player image"),
+        ("IDS_TEXT_LOBBYICON", "Lobby-Icon"),
+        ("IDS_MSG_NOPORTRAIT", "No Portrait"),
+        ("IDS_PRC_INITIALIZE", "Loading..."),
+        ("IDS_DLG_OK", "&OK"),
+        ("IDS_DLG_CANCEL", "Cancel"),
+    ];
+    const DE: &[(&str, &str)] = &[
+        ("IDS_MSG_SELECT", "%s auswählen"),
+        ("IDS_TYPE_PORTRAIT", "Portrait"),
+        ("IDS_TEXT_LOCATION", "Suchen in:"),
+        ("IDS_CTL_IMPORTIMAGEAS", "Bild importieren als:"),
+        ("IDS_TEXT_PLAYERIMAGE", "Spielerbild"),
+        ("IDS_TEXT_LOBBYICON", "Lobby-Icon"),
+        ("IDS_MSG_NOPORTRAIT", "Kein Portrait"),
+        ("IDS_PRC_INITIALIZE", "Laden..."),
+        ("IDS_DLG_OK", "&OK"),
+        ("IDS_DLG_CANCEL", "&Abbrechen"),
+    ];
+    let rect_center = |rect: clonk_frontend::classic_gui::IntRect| {
+        GuiPoint::new(
+            (rect.x + rect.w / 2) as f32,
+            (rect.y + rect.h / 2) as f32,
+        )
+    };
+    let left_click = |app: &mut GameApp, point: GuiPoint, expectation: &str| {
+        app.last_application_left_press = None;
+        move_cursor(app, point, expectation);
+        app.test_left_button(ElementState::Pressed);
+        app.test_left_button(ElementState::Released);
+    };
+
+    for (language, resources, long_prefix, cancel_has_a_hotkey) in [
+        ("US", US, "Home Folder — ", false),
+        ("DE", DE, "Persönlicher Ordner — ", true),
+    ] {
+        for (size_name, width, height, scale, physical_width, physical_height) in [
+            ("small", 640_u32, 480_u32, 1.0_f32, 640_u32, 480_u32),
+            ("default", 800, 600, 1.0, 800, 600),
+            ("2x", 800, 600, 2.0, 1600, 1200),
+        ] {
+            let case = format!("{language}/{size_name}");
+            let mut app = new_real_classic_menu_app(width, height);
+            install_native_test_fonts(&mut app, scale);
+            for &(key, value) in resources {
+                app.startup_tooltip_resources
+                    .insert(key.to_string(), value.to_string());
+            }
+            let labels = app.portrait_sel_labels();
+            let fonts = app.assets.clonk_fonts.clone().test_value();
+            let text_line_height = fonts.text.line_height;
+
+            // Keep the widest entry inside the viewport while making it wide
+            // enough that Screen::DoContext must flip the popup to the left.
+            let max_caption_width = width as i32 - text_line_height - 12;
+            let target_caption_width = max_caption_width - 32;
+            let mut long_caption = long_prefix.to_string();
+            while fonts.text.measure(&long_caption, true).0 < target_caption_width {
+                long_caption.push('i');
+            }
+            main_assert!(
+                fonts.text.measure(&long_caption, true).0 <= max_caption_width,
+                "{case}: long-caption fixture must fit the viewport"
+            );
+
+            // n * line-height + (n - 1) row gaps + 10px menu margins fits,
+            // but is tall enough that the combo cannot open below itself.
+            let location_count =
+                ((height as i32 - 9) / (text_line_height + 1)).max(2) as usize;
+            let long_path = PathBuf::from(format!(
+                "/portrait-matrix/{language}/{size_name}/{}",
+                "portrait-directory/".repeat(12)
+            ));
+            let mut locations = vec![PortraitLocation::new(
+                long_caption.clone(),
+                long_path.clone(),
+            )];
+            locations.extend((1..location_count).map(|index| {
+                PortraitLocation::new(
+                    format!("{language} portrait location {index}"),
+                    PathBuf::from(format!(
+                        "/missing-portrait-matrix/{language}/{size_name}/{index}"
+                    )),
+                )
+            }));
+            // GameApp advances one thumbnail before rendering. Two pending
+            // files guarantee the localized Loading caption still renders
+            // when the first nonexistent file is consumed immediately.
+            let entries = ["Pending-A.png", "Pending-B.png"]
+                .into_iter()
+                .map(|filename| {
+                    PortraitFileEntry::from_path(PathBuf::from(format!(
+                        "/missing-portrait-matrix/{language}/{size_name}/{filename}"
+                    )))
+                    .test_value()
+                })
+                .collect();
+            open_player_properties(&mut app, "matrix player properties")
+                .open_portrait_selector_with_labels(
+                    locations.clone(),
+                    0,
+                    entries,
+                    labels.clone(),
+                );
+
+            // The first draw replaces fallback geometry with active-font
+            // metrics. Open through the real app input path before that draw.
+            let fallback_combo = clonk_frontend::startup_portraitsel::portrait_sel_layout(
+                width as i32,
+                height as i32,
+                locations.len(),
+            )
+            .location_combo;
+            left_click(
+                &mut app,
+                rect_center(fallback_combo),
+                "open matrix location popup",
+            );
+            let (_, _, before) = render_ordered_test_frame(
+                &mut app,
+                scale,
+                physical_width,
+                physical_height,
+            );
+
+            let widest_caption = locations
+                .iter()
+                .map(|location| fonts.text.measure(&location.label, true).0)
+                .max()
+                .test_value();
+            let metrics = PortraitSelMetrics {
+                caption_width: Some(widest_caption),
+                ..PortraitSelMetrics::measured(&fonts, &labels)
+            };
+            let layout = clonk_frontend::startup_portraitsel::portrait_sel_layout_with_metrics(
+                width as i32,
+                height as i32,
+                locations.len(),
+                metrics,
+            );
+
+            let parent_batch = portrait_capture_text(&before, "New player").0;
+            let selector_batch = portrait_capture_text(&before, &labels.location).0;
+            let popup_batch = portrait_capture_text(&before, &locations[1].label).0;
+            main_assert!(
+                parent_batch < selector_batch && selector_batch < popup_batch,
+                "{case}: parent, selector and popup keep C++ painter order: \
+                 {parent_batch}, {selector_batch}, {popup_batch}"
+            );
+
+            let title = format!("{} [{}]", labels.select_portrait, long_path.display());
+            let player_image = clonk_frontend::expand_hotkey_markup(&labels.player_image).0;
+            let lobby_icon = clonk_frontend::expand_hotkey_markup(&labels.lobby_icon).0;
+            let ok = clonk_frontend::expand_hotkey_markup(&labels.ok).0;
+            let cancel = clonk_frontend::expand_hotkey_markup(&labels.cancel).0;
+            for expected in [
+                title.as_str(),
+                labels.location.as_str(),
+                locations[0].label.as_str(),
+                labels.import_image_as.as_str(),
+                player_image.as_str(),
+                lobby_icon.as_str(),
+                labels.loading.as_str(),
+                labels.no_portrait.as_str(),
+                ok.as_str(),
+                cancel.as_str(),
+            ] {
+                main_assert_eq!(portrait_capture_text(&before, expected).0 => selector_batch, "{case}: `{expected}` belongs to the selector layer");
+            }
+            main_assert!(
+                before.batches[selector_batch]
+                    .text
+                    .iter()
+                    .all(|command| !command.text.contains('&')),
+                "{case}: access-key markup is expanded before font capture"
+            );
+            if language == "DE" {
+                main_assert!(
+                    !before.batches[selector_batch]
+                        .text
+                        .iter()
+                        .any(|command| command.text.starts_with("Select Portrait")),
+                    "{case}: selector title must not leak its English fallback"
+                );
+                for english in [
+                    "Location:",
+                    "Import image as:",
+                    "Player image",
+                    "No Portrait",
+                    "Loading...",
+                    "Cancel",
+                ] {
+                    main_assert!(
+                        !before.batches[selector_batch]
+                            .text
+                            .iter()
+                            .any(|command| command.text == english),
+                        "{case}: `{english}` must not leak into the German selector"
+                    );
+                }
+            }
+            main_assert_eq!(layout.location_label.w => fonts.text.measure(&labels.location, true).0, "{case}: Location box follows localized text width");
+            main_assert_eq!(layout.import_label.w => fonts.text.measure(&labels.import_image_as, true).0, "{case}: import box follows localized text width");
+            main_assert_eq!(layout.location_combo.x => layout.location_label.x + layout.location_label.w + 20, "{case}: localized Location text pushes the combo aside");
+            let location_command = portrait_capture_text(&before, &labels.location).1;
+            let import_command = portrait_capture_text(&before, &labels.import_image_as).1;
+            main_assert_eq!((location_command.x, location_command.y) => (layout.location_label.x, layout.location_label.y), "{case}: Location text uses its measured rect anchor");
+            main_assert_eq!((import_command.x, import_command.y) => (layout.import_label.x, layout.import_label.y), "{case}: import text uses its measured rect anchor");
+
+            let popup = layout.location_popup;
+            main_assert!(popup.w > layout.location_combo.w, "{case}: long text widens popup");
+            main_assert!(
+                popup.x < layout.location_combo.x && popup.y < layout.location_combo.y,
+                "{case}: wide, tall popup flips left and above"
+            );
+            main_assert!(
+                popup.x >= 0
+                    && popup.y >= 0
+                    && popup.x + popup.w <= width as i32
+                    && popup.y + popup.h <= height as i32,
+                "{case}: flipped popup remains wholly on-screen"
+            );
+            let long_popup_command = before.batches[popup_batch]
+                .text
+                .iter()
+                .find(|command| command.text == long_caption)
+                .unwrap_or_else(|| panic!("{case}: longest popup row is captured"));
+            main_assert!(
+                long_popup_command.x + fonts.text.measure(&long_caption, true).0
+                    <= popup.x + popup.w - 5,
+                "{case}: widest popup caption is not clipped"
+            );
+
+            let tracked_positions = [
+                labels.location.as_str(),
+                labels.import_image_as.as_str(),
+                labels.no_portrait.as_str(),
+                cancel.as_str(),
+            ]
+            .into_iter()
+            .map(|text| {
+                let command = portrait_capture_text(&before, text).1;
+                (text.to_string(), (command.x, command.y))
+            })
+            .collect::<Vec<_>>();
+            app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+            let drag_delta = (13_i32, 7_i32);
+            let drag_start = GuiPoint::new(
+                (layout.caption.x + layout.caption.w / 2) as f32 + 0.5,
+                (layout.caption.y + layout.caption.h / 2) as f32 + 0.5,
+            );
+            app.last_application_left_press = None;
+            physical_left_drag(
+                &mut app,
+                drag_start,
+                GuiPoint::new(
+                    drag_start.x + drag_delta.0 as f32,
+                    drag_start.y + drag_delta.1 as f32,
+                ),
+            );
+            let (_, _, after_drag) = render_ordered_test_frame(
+                &mut app,
+                scale,
+                physical_width,
+                physical_height,
+            );
+            for (text, (before_x, before_y)) in tracked_positions {
+                let command = portrait_capture_text(&after_drag, &text).1;
+                main_assert_eq!((command.x - before_x, command.y - before_y) => drag_delta, "{case}: `{text}` follows title drag");
+            }
+            let moved_layout =
+                clonk_frontend::startup_portraitsel::portrait_sel_layout_with_metrics_at(
+                    width as i32,
+                    height as i32,
+                    locations.len(),
+                    metrics,
+                    Some((
+                        layout.bounds.x + drag_delta.0,
+                        layout.bounds.y + drag_delta.1,
+                    )),
+            );
+
+            app.ui_sound_log.clear();
+            // Shift+Tab moves Grid focus back to Location. Keyboard opening
+            // avoids an opening LeftUp selecting a row where this deliberately
+            // oversized, edge-clamped popup overlaps its own ComboBox.
+            app.test_modifiers(ModifiersState::SHIFT);
+            app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::Tab, ElementState::Released);
+            app.test_modifiers(ModifiersState::empty());
+            main_assert_eq!(portrait_selector(&app, "Location receives reverse Tab").focus() => clonk_frontend::startup_portraitsel::PortraitSelControl::Location);
+            app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
+            let second_row = rect_center(moved_layout.location_options[1]);
+            move_cursor(&mut app, second_row, "highlight second popup row");
+            left_click(&mut app, second_row, "activate second popup row");
+            main_assert_eq!(portrait_selector(&app, "selector survives missing location").current_location_index() => 1, "{case}: popup activation changes location");
+            app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
+            left_click(
+                &mut app,
+                GuiPoint::new(0.0, 0.0),
+                "dismiss popup outside",
+            );
+            let sounds = app
+                .ui_sound_log
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            main_assert_eq!(sounds => vec!["DoorOpen", "Command", "Click", "DoorOpen", "DoorClose"], "{case}: popup sounds retain native conditions and order");
+
+            // Intentionally repair C++'s ineffective visible null item: End
+            // followed by OK must really clear artwork. Access keys still
+            // come from the localized captions.
+            app.test_modifiers(ModifiersState::empty());
+            app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::Tab, ElementState::Released);
+            main_assert_eq!(portrait_selector(&app, "Grid receives forward Tab").focus() => clonk_frontend::startup_portraitsel::PortraitSelControl::Grid);
+            app.test_key(VirtualKeyCode::End, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::End, ElementState::Released);
+            main_assert_eq!(portrait_selector(&app, "None is keyboard-selectable").selected_item().map(|item| item.choice()) => Some(&clonk_frontend::startup_portraitsel::PortraitChoice::None));
+            app.ui_sound_log.clear();
+            app.test_modifiers(ModifiersState::ALT);
+            app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::KeyA, ElementState::Released);
+            if cancel_has_a_hotkey {
+                main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none(), "{case}: German Alt+A activates Abbrechen");
+            } else {
+                main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some(), "{case}: US Alt+A has no invented Cancel mnemonic");
+                app.test_key(VirtualKeyCode::KeyO, ElementState::Pressed);
+                app.test_key(VirtualKeyCode::KeyO, ElementState::Released);
+                main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none(), "{case}: US Alt+O accepts the null portrait");
+            }
+            app.test_modifiers(ModifiersState::empty());
+            main_assert!(app.startup_player_properties_dialog.is_some(), "{case}: closing selector retains parent properties dialog");
+            main_assert!(app.message_dialogs.is_empty(), "{case}: semantic flow opens no error modal");
+            main_assert!(app.ui_sound_log.is_empty(), "{case}: access keys synthesize no pointer sounds");
+        }
+    }
+}
+
+#[test]
 fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon() {
     let _lock = env_lock().lock();
     let program_data = tempdir();
@@ -3171,13 +3596,31 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     // C4GuiDialogs.cpp:386-421 and C4FileSelDlg.cpp:162-169,564-572
     // place Location after the wrapped dialog controls. ComboBox Down
     // opens its ContextMenu; two menu Downs highlight index one.
-    for key in [KeyCode::Down, KeyCode::Down, KeyCode::Down] {
+    // ContextMenu::Open and SelectionChanged raise DoorOpen once and Command
+    // for each user-selected row (`C4GuiMenu.cpp:418,465`).
+    for (key, sound) in [
+        (
+            KeyCode::Down,
+            clonk_frontend::startup_portraitsel::PortraitSelSound::DoorOpen,
+        ),
+        (
+            KeyCode::Down,
+            clonk_frontend::startup_portraitsel::PortraitSelSound::Command,
+        ),
+        (
+            KeyCode::Down,
+            clonk_frontend::startup_portraitsel::PortraitSelSound::Command,
+        ),
+    ] {
         let actions = app
             .startup_player_properties_dialog
             .test_mut()
             .controller
             .handle_key_down(key);
-        main_assert!(actions.is_empty());
+        main_assert_eq!(
+            actions =>
+            vec![clonk_frontend::startup_plrproperties::PlayerPropertiesAction::GuiSound(sound)]
+        );
     }
     let actions = app
         .startup_player_properties_dialog
@@ -3233,6 +3676,73 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     main_assert!(controller.portrait_selector().is_none());
     main_assert_eq!(controller.portrait_update() => &before_portrait);
     main_assert_eq!(controller.big_icon_update() => &before_icon);
+    reset_cached_app_paths();
+}
+
+#[test]
+fn portrait_selector_locations_follow_the_active_language_table() {
+    // C4PortraitSelDlg builds each shell/path row from the active resource
+    // table before passing it to C4FileSelDlg (`C4FileSelDlg.cpp:541-556`).
+    let _lock = env_lock().lock();
+    let program_data = tempdir();
+    let user_data = tempdir();
+    let home = tempdir();
+    fs::create_dir(home.path().join("Desktop")).test_value();
+    fs::create_dir_all(program_data.path().join("planet/System.c4g")).test_value();
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(program_data.path())),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ("HOME", Some(home.path())),
+    ]);
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+
+    let mut app = new_classic_menu_app(640, 480);
+    app.app_paths = Some(paths);
+    for (key, value) in [
+        ("IDS_TEXT_USERPATH", "Benutzerpfad"),
+        ("IDS_TEXT_PROGRAMDIRECTORY", "Programmverzeichnis"),
+        ("IDS_TEXT_MYDOCUMENTS", "Eigene Dateien"),
+        ("IDS_TEXT_MYPICTURES", "Eigene Bilder"),
+        ("IDS_TEXT_DESKTOP", "Arbeitsfläche"),
+        ("IDS_TEXT_HOME", "Privat"),
+        ("IDS_TEXT_HOMEFOLDER", "Persönlicher Ordner"),
+    ] {
+        app.startup_tooltip_resources
+            .insert(key.to_string(), value.to_string());
+    }
+    app.open_new_startup_player_properties();
+    app.process_startup_player_properties_actions(vec![
+        clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
+    ]);
+
+    let locations = portrait_selector(&app, "localized selector opens").locations();
+    main_assert_eq!(locations[0].label => format!("{} Benutzerpfad", clonk_platform::ENGINE_CAPTION));
+    main_assert_eq!(locations[1].label => format!("{} Programmverzeichnis", clonk_platform::ENGINE_CAPTION));
+    #[cfg(target_os = "macos")]
+    main_assert!(locations.iter().any(|location| location.label == "Privat"));
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    main_assert!(locations
+        .iter()
+        .any(|location| location.label == "Persönlicher Ordner"));
+    #[cfg(not(target_os = "windows"))]
+    main_assert!(locations
+        .iter()
+        .any(|location| location.label == "Arbeitsfläche"));
+    #[cfg(target_os = "windows")]
+    {
+        main_assert!(locations
+            .iter()
+            .any(|location| location.label == "Persönlicher Ordner"));
+        let shell_labels = locations
+            .iter()
+            .skip(2)
+            .map(|location| location.label.as_str())
+            .collect::<Vec<_>>();
+        main_assert!(!shell_labels.contains(&"My Documents"));
+        main_assert!(!shell_labels.contains(&"My Pictures"));
+        main_assert!(!shell_labels.contains(&"Desktop"));
+    }
     reset_cached_app_paths();
 }
 
@@ -3294,7 +3804,14 @@ fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
         ImageData::new(1, 1, vec![4, 5, 6, 255]),
     );
     open_default_portrait_selector_on(pending);
-    main_assert!(pending.handle_key_down(KeyCode::Down).is_empty());
+    main_assert_eq!(
+        pending.handle_key_down(KeyCode::Down) =>
+        vec![clonk_frontend::startup_plrproperties::PlayerPropertiesAction::GuiSound(
+            clonk_frontend::startup_portraitsel::PortraitSelSound::Command,
+        )],
+        "C4GUI::ListBox::SelectionChanged sounds Command for a user grid selection \
+         (`C4GuiListBox.cpp:237-253,571-580`)"
+    );
     main_assert_eq!(pending.portrait_selector().and_then(|selector| selector.selected_index()) => Some(0));
 
     let slot = GamepadSlot::new(0);
@@ -3392,6 +3909,35 @@ fn portrait_selector_alt_o_activates_the_native_ok_hotkey() {
 
     main_assert_eq!(app.message_dialogs.len() => 1);
     main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
+}
+
+#[test]
+fn portrait_selector_cancel_hotkey_follows_the_active_language() {
+    // `newCancelButton` loads IDS_DLG_CANCEL, whose German caption marks A in
+    // `&Abbrechen`; Dialog::KeyHotkey dispatches that caption-derived letter
+    // rather than a hardcoded English mnemonic (`C4Gui.h:1574-1575`,
+    // `C4GuiDialogs.cpp:569-580`).
+    let mut app = new_classic_menu_app(640, 480);
+    app.startup_tooltip_resources
+        .insert("IDS_DLG_CANCEL".to_string(), "&Abbrechen".to_string());
+    let labels = app.portrait_sel_labels();
+    open_player_properties(&mut app, "new player properties").open_portrait_selector_with_labels(
+        vec![PortraitLocation::new("Benutzer", ".")],
+        0,
+        Vec::new(),
+        labels,
+    );
+
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
+
+    main_assert!(app.startup_player_properties_dialog.is_some());
+    main_assert!(app
+        .startup_player_properties_dialog
+        .as_ref()
+        .and_then(|pending| pending.controller.portrait_selector())
+        .is_none());
+    main_assert!(app.message_dialogs.is_empty());
 }
 
 #[test]
@@ -3518,14 +4064,16 @@ fn portrait_selector_errors_use_screen_owned_modals() {
     broken.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(broken.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none());
     main_assert_eq!(broken.message_dialogs.len() => 1);
+    let message = broken.message_dialogs[0].state.message();
+    let prefix = format!("Error at graphics file {}: ", corrupt.display());
     main_assert!(
-        broken.message_dialogs[0]
-            .state
-            .message()
-            .starts_with(&format!("Error at graphics file {}: ", corrupt.display())),
+        message.starts_with(&prefix),
         "C4StartupPlrPropertiesDlg formats loader errors through IDS_PRC_NOGFXFILE \
              (`C4StartupPlrSelDlg.cpp:1484-1503`)"
     );
+    let detail = message.strip_prefix(&prefix).test_value();
+    main_assert!(!detail.is_empty());
+    main_assert_ne!(detail => "No Error", "Rust preserves the decoder's useful PNG diagnostic");
 }
 
 #[test]

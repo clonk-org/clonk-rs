@@ -1032,21 +1032,49 @@ impl PlayerPropertiesController {
                 Some(point) => {
                     selector.handle_pointer_move(point);
                 }
-                None => selector.pointer_left(),
+                None => {
+                    let _ = selector.cancel_interaction();
+                }
             }
             return;
         }
         self.hovered = position.and_then(|point| self.hit_control(point));
     }
 
-    pub fn pointer_left(&mut self) {
-        self.set_pointer_position(None);
+    pub fn pointer_left(&mut self) -> Vec<PlayerPropertiesAction> {
+        self.pointer_position = None;
+        self.pointer_pressed = None;
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.pointer_left();
+            return self.finish_portrait_selector_actions(actions);
+        }
+        self.hovered = None;
+        Vec::new()
+    }
+
+    pub fn cancel_interaction(&mut self) -> Vec<PlayerPropertiesAction> {
+        self.pointer_position = None;
+        self.pointer_pressed = None;
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.cancel_interaction();
+            return self.finish_portrait_selector_actions(actions);
+        }
+        self.hovered = None;
+        Vec::new()
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<PlayerPropertiesAction> {
+        self.handle_pointer_move_with_left_down(position, true)
+    }
+
+    pub fn handle_pointer_move_with_left_down(
+        &mut self,
+        position: GuiPoint,
+        left_down: bool,
+    ) -> Vec<PlayerPropertiesAction> {
         self.pointer_position = Some(position);
         if let Some(selector) = self.portrait_selector.as_mut() {
-            let actions = selector.handle_pointer_move(position);
+            let actions = selector.handle_pointer_move_with_left_down(position, left_down);
             return self.finish_portrait_selector_actions(actions);
         }
         self.hovered = self.hit_control(position);
@@ -1215,6 +1243,14 @@ impl PlayerPropertiesController {
             return self.finish_portrait_selector_actions(actions);
         }
         Vec::new()
+    }
+
+    pub fn handle_portrait_hotkey(
+        &mut self,
+        character: char,
+    ) -> Option<Vec<PlayerPropertiesAction>> {
+        let actions = self.portrait_selector.as_mut()?.handle_hotkey(character)?;
+        Some(self.finish_portrait_selector_actions(actions))
     }
 
     pub fn handle_wheel(&mut self, native_delta: i32) -> bool {
@@ -2440,7 +2476,10 @@ mod tests {
         state.handle_pointer_down(closing_point);
         assert_eq!(
             state.handle_pointer_up(closing_point),
-            vec![PlayerPropertiesAction::PortraitSelectorClosed { location_index: 0 }]
+            vec![
+                PlayerPropertiesAction::GuiSound(PortraitSelSound::Click),
+                PlayerPropertiesAction::PortraitSelectorClosed { location_index: 0 },
+            ]
         );
         assert!(state.portrait_selector().is_none());
         assert_eq!(state.pointer_position(), Some(closing_point));

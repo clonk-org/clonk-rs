@@ -3811,15 +3811,24 @@ impl GameApp {
             let gui_key = (key != VirtualKeyCode::NumpadEnter)
                 .then(|| map_key_code(key))
                 .flatten();
-            let portrait_ok_hotkey = state == ElementState::Pressed
-                && key == VirtualKeyCode::KeyO
+            let portrait_hotkey_actions = (state == ElementState::Pressed
                 && (c4_modifiers == ModifiersState::ALT
-                    || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT))
-                && self
-                    .startup_player_properties_dialog
-                    .as_ref()
-                    .and_then(|pending| pending.controller.portrait_selector())
-                    .is_some_and(|selector| !selector.is_location_popup_open());
+                    || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT)))
+                .then(|| context_menu_hotkey(key))
+                .flatten()
+                .and_then(|character| {
+                    self.startup_player_properties_dialog
+                        .as_mut()
+                        .and_then(|pending| {
+                            let selector_owns_hotkey = pending
+                                .controller
+                                .portrait_selector()
+                                .is_some_and(|selector| !selector.is_location_popup_open());
+                            selector_owns_hotkey
+                                .then(|| pending.controller.handle_portrait_hotkey(character))
+                                .flatten()
+                        })
+                });
             let exact_tab = gui_key == Some(KeyCode::Tab)
                 && (c4_modifiers.is_empty() || c4_modifiers == ModifiersState::SHIFT);
             let alt_control_binding = c4_modifiers == ModifiersState::ALT
@@ -3850,11 +3859,8 @@ impl GameApp {
                     pending.controller.delete_name_char();
                 }
                 Vec::new()
-            } else if portrait_ok_hotkey {
-                self.startup_player_properties_dialog
-                    .as_mut()
-                    .map(|pending| pending.controller.handle_key_down(KeyCode::Enter))
-                    .unwrap_or_default()
+            } else if let Some(actions) = portrait_hotkey_actions {
+                actions
             } else if exact_tab {
                 self.startup_player_properties_dialog
                     .as_mut()
@@ -5848,7 +5854,8 @@ impl GameApp {
                 } else if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
                     pending.controller.cancel_interaction();
                 } else if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
-                    pending.controller.pointer_left();
+                    let actions = pending.controller.cancel_interaction();
+                    self.process_startup_player_properties_actions(actions);
                 } else if self.mode == AppMode::Menu
                     && self.startup_view == StartupView::NetworkLobby
                     && (self.classic_host_lobby.is_some() || self.network_lobby.is_some())
@@ -7090,10 +7097,15 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
+            let left_down = self.primary_pointer_left_down;
             let actions = self
                 .startup_player_properties_dialog
                 .as_mut()
-                .map(|pending| pending.controller.handle_pointer_move(point))
+                .map(|pending| {
+                    pending
+                        .controller
+                        .handle_pointer_move_with_left_down(point, left_down)
+                })
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(actions);
             self.suspend_ingame_pointer_for_gui();
@@ -11343,10 +11355,7 @@ impl GameApp {
                     TouchPhase::Started => pending.controller.handle_pointer_down(position),
                     TouchPhase::Moved => pending.controller.handle_pointer_move(position),
                     TouchPhase::Ended => pending.controller.handle_pointer_up(position),
-                    TouchPhase::Cancelled => {
-                        pending.controller.pointer_left();
-                        Vec::new()
-                    }
+                    TouchPhase::Cancelled => pending.controller.cancel_interaction(),
                 })
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(actions);
@@ -12000,7 +12009,8 @@ impl GameApp {
             return;
         }
         if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
-            pending.controller.pointer_left();
+            let actions = pending.controller.pointer_left();
+            self.process_startup_player_properties_actions(actions);
             return;
         }
         if self.definition_selector.is_some() {
