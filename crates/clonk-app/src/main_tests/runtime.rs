@@ -3166,13 +3166,27 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
     // C4GuiDialogs.cpp:386-421 and C4FileSelDlg.cpp:162-169,564-572
     // put Location after six forward focus steps. C4GuiComboBox.cpp:66-86
     // and C4GuiMenu.cpp:240-299 then open, highlight, and choose row zero.
-    for key in [KeyCode::Down, KeyCode::Down] {
+    // ContextMenu::Open and SelectionChanged raise DoorOpen followed by
+    // Command (`C4GuiMenu.cpp:418,465`).
+    for (key, sound) in [
+        (
+            KeyCode::Down,
+            clonk_frontend::startup_portraitsel::PortraitSelSound::DoorOpen,
+        ),
+        (
+            KeyCode::Down,
+            clonk_frontend::startup_portraitsel::PortraitSelSound::Command,
+        ),
+    ] {
         let actions = app
             .startup_player_properties_dialog
             .test_mut()
             .controller
             .handle_key_down(key);
-        assert!(actions.is_empty());
+        assert_eq!(
+            actions,
+            vec![clonk_frontend::startup_plrproperties::PlayerPropertiesAction::GuiSound(sound)]
+        );
     }
     let actions = app
         .startup_player_properties_dialog

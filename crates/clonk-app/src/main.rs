@@ -3382,10 +3382,16 @@ impl GameApp {
                 }
                 dialog.pointer_left();
             }
-            if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
-                pending.controller.resize(width as i32, height as i32);
-                pending.controller.pointer_left();
-            }
+            let portrait_actions = self
+                .startup_player_properties_dialog
+                .as_mut()
+                .map(|pending| {
+                    let actions = pending.controller.cancel_interaction();
+                    pending.controller.resize(width as i32, height as i32);
+                    actions
+                })
+                .unwrap_or_default();
+            self.process_startup_player_properties_actions(portrait_actions);
             if let (Some(dialog), Some(fonts), Some(book)) = (
                 self.startup_options_dialog.as_mut(),
                 self.assets.clonk_fonts.as_deref(),
@@ -4229,6 +4235,12 @@ impl GameApp {
             rename.last_click = None;
             rename.ignore_pointer_up = false;
         }
+        let portrait_actions = self
+            .startup_player_properties_dialog
+            .as_mut()
+            .map(|pending| pending.controller.cancel_interaction())
+            .unwrap_or_default();
+        self.process_startup_player_properties_actions(portrait_actions);
         self.pointer_left_unchecked();
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -6231,6 +6243,12 @@ impl GameApp {
     }
 
     fn cancel_underlying_interaction(&mut self) {
+        let portrait_actions = self
+            .startup_player_properties_dialog
+            .as_mut()
+            .map(|pending| pending.controller.cancel_interaction())
+            .unwrap_or_default();
+        self.process_startup_player_properties_actions(portrait_actions);
         self.pointer_left_unchecked();
         if self.game_over_dialog.is_some() {
             return;

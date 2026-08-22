@@ -28,10 +28,11 @@ fn add_existing_portrait_location(
     }
 }
 
-fn add_optional_portrait_locations(
+fn add_optional_portrait_locations<'a>(
     locations: &mut Vec<clonk_frontend::startup_portraitsel::PortraitLocation>,
-    platform_locations: impl IntoIterator<Item = (&'static str, Option<PathBuf>)>,
-    home: Option<(&'static str, PathBuf)>,
+    platform_locations: impl IntoIterator<Item = (&'a str, Option<PathBuf>)>,
+    home: Option<(&'a str, PathBuf)>,
+    desktop_label: &str,
     add_desktop_from_home: bool,
 ) {
     platform_locations
@@ -41,7 +42,33 @@ fn add_optional_portrait_locations(
     if let Some((label, home)) = home {
         add_existing_portrait_location(locations, label, home.clone());
         if add_desktop_from_home {
-            add_existing_portrait_location(locations, "Desktop", home.join("Desktop"));
+            add_existing_portrait_location(locations, desktop_label, home.join("Desktop"));
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortraitLocationLabels {
+    user_path: String,
+    program_directory: String,
+    my_documents: String,
+    my_pictures: String,
+    desktop: String,
+    home: String,
+    home_folder: String,
+}
+
+impl PortraitLocationLabels {
+    fn from_resources(resources: &HashMap<String, String>) -> Self {
+        let text = |key, fallback| runtime_resource_text_from_table(resources, key, fallback);
+        Self {
+            user_path: text("IDS_TEXT_USERPATH", "User Path"),
+            program_directory: text("IDS_TEXT_PROGRAMDIRECTORY", "Program Directory"),
+            my_documents: text("IDS_TEXT_MYDOCUMENTS", "My Documents"),
+            my_pictures: text("IDS_TEXT_MYPICTURES", "My Pictures"),
+            desktop: text("IDS_TEXT_DESKTOP", "Desktop"),
+            home: text("IDS_TEXT_HOME", "Home"),
+            home_folder: text("IDS_TEXT_HOMEFOLDER", "Home Folder"),
         }
     }
 }
@@ -69,9 +96,10 @@ fn windows_special_folder(csidl: u32) -> Option<PathBuf> {
 
 fn startup_player_portrait_locations(
     paths: &AppPaths,
+    labels: &PortraitLocationLabels,
 ) -> Vec<clonk_frontend::startup_portraitsel::PortraitLocation> {
     let mut locations = vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-        "LegacyClonk User Path",
+        format!("{} {}", clonk_platform::ENGINE_CAPTION, labels.user_path),
         paths.user_data_dir(),
     )];
     let mut program_path = paths.install_root().as_os_str().to_os_string();
@@ -83,7 +111,11 @@ fn startup_player_portrait_locations(
     }
     add_existing_portrait_location(
         &mut locations,
-        "LegacyClonk Program Directory",
+        &format!(
+            "{} {}",
+            clonk_platform::ENGINE_CAPTION,
+            labels.program_directory
+        ),
         PathBuf::from(program_path),
     );
 
@@ -95,17 +127,26 @@ fn startup_player_portrait_locations(
         use windows::Win32::UI::Shell::{CSIDL_DESKTOPDIRECTORY, CSIDL_MYPICTURES, CSIDL_PERSONAL};
 
         [
-            ("My Documents", windows_special_folder(CSIDL_PERSONAL)),
-            ("My Pictures", windows_special_folder(CSIDL_MYPICTURES)),
-            ("Desktop", windows_special_folder(CSIDL_DESKTOPDIRECTORY)),
+            (
+                labels.my_documents.as_str(),
+                windows_special_folder(CSIDL_PERSONAL),
+            ),
+            (
+                labels.my_pictures.as_str(),
+                windows_special_folder(CSIDL_MYPICTURES),
+            ),
+            (
+                labels.desktop.as_str(),
+                windows_special_folder(CSIDL_DESKTOPDIRECTORY),
+            ),
         ]
     };
     #[cfg(not(target_os = "windows"))]
     let platform_locations: [(&str, Option<PathBuf>); 0] = [];
     #[cfg(target_os = "macos")]
-    let home_label = "Home";
+    let home_label = labels.home.as_str();
     #[cfg(not(target_os = "macos"))]
-    let home_label = "Home Folder";
+    let home_label = labels.home_folder.as_str();
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|path| (home_label, path));
@@ -113,6 +154,7 @@ fn startup_player_portrait_locations(
         &mut locations,
         platform_locations,
         home,
+        &labels.desktop,
         !cfg!(target_os = "windows"),
     );
 
@@ -1231,7 +1273,9 @@ impl GameApp {
             self.startup_user_portraits_written = true;
             extract_default_startup_portraits_once(paths);
         }
-        let locations = startup_player_portrait_locations(paths);
+        let location_labels =
+            PortraitLocationLabels::from_resources(&self.startup_tooltip_resources);
+        let locations = startup_player_portrait_locations(paths, &location_labels);
         let current_location = self
             .startup_last_portrait_folder_index
             .or_else(|| load_startup_last_portrait_folder_index(Some(paths)))
@@ -1820,6 +1864,7 @@ mod portrait_location_tests {
                 ("Desktop", Some(desktop.clone())),
             ],
             Some(("Home Folder", home.clone())),
+            "Desktop",
             false,
         );
 
@@ -1851,6 +1896,7 @@ mod portrait_location_tests {
             &mut locations,
             [],
             Some(("Home Folder", home.clone())),
+            "Desktop",
             true,
         );
 

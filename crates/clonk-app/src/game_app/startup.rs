@@ -3453,6 +3453,7 @@ impl GameApp {
                 PlayerPropertiesAction::GuiSound(sound) => {
                     use clonk_frontend::startup_portraitsel::PortraitSelSound;
                     self.play_ui_sound(match sound {
+                        PortraitSelSound::ArrowHit => "ArrowHit",
                         PortraitSelSound::DoorOpen => "DoorOpen",
                         PortraitSelSound::DoorClose => "DoorClose",
                         PortraitSelSound::Command => "Command",

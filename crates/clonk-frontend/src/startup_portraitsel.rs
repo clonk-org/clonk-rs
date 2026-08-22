@@ -31,8 +31,8 @@ const CAPTION_HEIGHT: i32 = 23;
 const TEXT_LINE_HEIGHT: i32 = 22;
 const MINI_LINE_HEIGHT: i32 = 18;
 const PREVIEW_SIZE: i32 = 100;
+#[cfg(test)]
 const TILE_HEIGHT: i32 = PREVIEW_SIZE + MINI_LINE_HEIGHT;
-const CONTROL_HEIGHT: i32 = 26;
 const BUTTON_WIDTH: i32 = 120;
 const BUTTON_HEIGHT: i32 = 32;
 const SCROLLBAR_WIDTH: i32 = 16;
@@ -258,9 +258,11 @@ pub struct PortraitSelLabels {
     pub lobby_icon: String,
     /// `IDS_MSG_NOPORTRAIT`, the trailing null tile.
     pub no_portrait: String,
-    /// `IDS_BTN_OK`.
+    /// `IDS_PRC_INITIALIZE`, drawn while a thumbnail is pending.
+    pub loading: String,
+    /// `IDS_DLG_OK`, used by `newOKButton`.
     pub ok: String,
-    /// `IDS_BTN_CANCEL`.
+    /// `IDS_DLG_CANCEL`, used by `newCancelButton`.
     pub cancel: String,
 }
 
@@ -273,7 +275,8 @@ impl Default for PortraitSelLabels {
             player_image: "Player image".to_string(),
             lobby_icon: "Lobby-Icon".to_string(),
             no_portrait: "No Portrait".to_string(),
-            ok: "OK".to_string(),
+            loading: "Loading...".to_string(),
+            ok: "&OK".to_string(),
             cancel: "Cancel".to_string(),
         }
     }
@@ -291,13 +294,24 @@ pub struct PortraitSelMetrics {
     /// Width of the Location label, which `C4FileSelDlg.cpp:143` takes from
     /// `pUseFont->GetTextWidth`.
     pub location_label_width: Option<i32>,
+    /// Width of IDS_CTL_IMPORTIMAGEAS after Label::SetText autosizes it.
+    pub import_label_width: Option<i32>,
+    /// Active TextFont line height.
+    pub text_line_height: Option<i32>,
+    /// Active MiniFont line height used by the portrait item base height.
+    pub mini_line_height: Option<i32>,
 }
 
 impl PortraitSelMetrics {
-    pub fn measured(font: &ClonkFont, labels: &PortraitSelLabels) -> Self {
+    pub fn measured(fonts: &ClonkFontSet, labels: &PortraitSelLabels) -> Self {
+        let location = expand_hotkey_markup(&labels.location).0;
+        let import_image_as = expand_hotkey_markup(&labels.import_image_as).0;
         Self {
             caption_width: None,
-            location_label_width: Some(font.measure(&labels.location, true).0),
+            location_label_width: Some(fonts.text.measure(&location, true).0),
+            import_label_width: Some(fonts.text.measure(&import_image_as, true).0),
+            text_line_height: Some(fonts.text.line_height),
+            mini_line_height: Some(fonts.mini.line_height),
         }
     }
 }
@@ -315,6 +329,8 @@ pub enum PortraitSelAction {
 /// (`C4GuiMenu.cpp:172,418,465,528`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortraitSelSound {
+    /// CheckBox, Button and ScrollBar state transitions.
+    ArrowHit,
     /// `ContextMenu::Open` — unconditional.
     DoorOpen,
     /// `ContextMenu::Abort(fByUser)` — a user dismissal only. Activation
@@ -410,6 +426,9 @@ pub struct PortraitSelController {
     /// Measured Location-label width, cached during render and read by layout,
     /// the same way `grid_layout` caches measured item geometry.
     location_label_width: RefCell<Option<i32>>,
+    import_label_width: RefCell<Option<i32>>,
+    text_line_height: Cell<Option<i32>>,
+    mini_line_height: Cell<Option<i32>>,
     /// Absolute top-left installed by title dragging, `None` while centered.
     location: Option<(i32, i32)>,
     /// Pointer offset inside the window while a title drag is live.
@@ -459,6 +478,9 @@ impl PortraitSelController {
             caption_scroll: Cell::new(CaptionScrollState::default()),
             labels,
             location_label_width: RefCell::new(None),
+            import_label_width: RefCell::new(None),
+            text_line_height: Cell::new(None),
+            mini_line_height: Cell::new(None),
             location: None,
             title_drag: None,
             set_picture,
@@ -539,8 +561,7 @@ impl PortraitSelController {
     ///
     /// `ExpandHotkeyMarkup` uppercases the letter it registers (`C4Gui.cpp:55`),
     /// so the comparison is case-insensitive on the caller's character. A
-    /// caption that marks nothing registers nothing, which is what every
-    /// shipped translation of these two captions does today.
+    /// caption that marks nothing registers nothing.
     pub fn handle_hotkey(&mut self, character: char) -> Option<Vec<PortraitSelAction>> {
         let wanted = character.to_ascii_uppercase();
         for control in [
@@ -554,7 +575,17 @@ impl PortraitSelController {
                 PortraitSelControl::SetBigIcon => self.set_big_icon = !self.set_big_icon,
                 _ => self.set_picture = !self.set_picture,
             }
-            return Some(Vec::new());
+            return Some(vec![PortraitSelAction::GuiSound(
+                PortraitSelSound::ArrowHit,
+            )]);
+        }
+        let ok_hotkey = expand_hotkey_markup(&self.labels.ok).1;
+        let cancel_hotkey = expand_hotkey_markup(&self.labels.cancel).1;
+        if ok_hotkey == Some(wanted) {
+            return Some(self.try_accept());
+        }
+        if cancel_hotkey == Some(wanted) {
+            return Some(vec![PortraitSelAction::Cancel]);
         }
         None
     }
@@ -614,13 +645,41 @@ impl PortraitSelController {
             .then(|| StartupTooltip::resource("IDS_DESC_CHANGESTHEIMAGEYOUSEEINTH2"))
     }
 
-    pub fn pointer_left(&mut self) {
+    pub fn pointer_left(&mut self) -> Vec<PortraitSelAction> {
+        let button_was_down = self.button_rect(self.pressed).is_some_and(|rect| {
+            self.pointer
+                .is_some_and(|previous| contains(rect, previous))
+        });
+        self.pointer = None;
+        self.scrollbar_arrow = 0;
+        self.combo_highlight = None;
+        button_was_down
+            .then_some(PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit))
+            .into_iter()
+            .collect()
+    }
+
+    pub fn cancel_interaction(&mut self) -> Vec<PortraitSelAction> {
+        let pointer_button_was_down = self.button_rect(self.pressed).is_some_and(|rect| {
+            self.pointer
+                .is_some_and(|previous| contains(rect, previous))
+        });
+        let key_button_was_down = matches!(
+            self.key_pressed,
+            Some(PortraitSelControl::Close | PortraitSelControl::Ok | PortraitSelControl::Cancel)
+        );
         self.pointer = None;
         self.pressed = HitTarget::None;
+        self.key_pressed = None;
+        self.title_drag = None;
         self.scrollbar_dragging = false;
         self.scrollbar_arrow_captured = false;
         self.scrollbar_arrow = 0;
         self.combo_highlight = None;
+        (pointer_button_was_down || key_button_was_down)
+            .then_some(PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit))
+            .into_iter()
+            .collect()
     }
 
     pub fn replace_location_entries(
@@ -728,21 +787,56 @@ impl PortraitSelController {
     }
 
     pub fn handle_pointer_move(&mut self, point: GuiPoint) -> Vec<PortraitSelAction> {
+        self.handle_pointer_move_with_left_down(point, true)
+    }
+
+    pub fn handle_pointer_move_with_left_down(
+        &mut self,
+        point: GuiPoint,
+        left_down: bool,
+    ) -> Vec<PortraitSelAction> {
+        if !left_down {
+            self.pressed = HitTarget::None;
+            self.title_drag = None;
+            self.scrollbar_dragging = false;
+            self.scrollbar_arrow_captured = false;
+            self.scrollbar_arrow = 0;
+        }
+        let pressed_button = self.button_rect(self.pressed);
+        let button_was_down = pressed_button.is_some_and(|rect| {
+            self.pointer
+                .is_some_and(|previous| contains(rect, previous))
+        });
         self.pointer = Some(point);
+        if pressed_button.is_some_and(|rect| contains(rect, point)) != button_was_down
+            && pressed_button.is_some()
+        {
+            return vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)];
+        }
         if self.scrollbar_dragging {
             self.set_scroll_from_scrollbar_pointer(point);
             return Vec::new();
         }
         if self.scrollbar_arrow_captured {
+            let previous_active = self.scrollbar_arrow != 0;
             let arrow = self.scrollbar_arrow_at(point);
             if arrow != 0 {
                 self.scrollbar_arrow = arrow;
+                return (!previous_active)
+                    .then_some(PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit))
+                    .into_iter()
+                    .collect();
             } else if contains(self.layout().grid_scrollbar, point) && self.max_scrollbar_pin() > 0
             {
                 self.scrollbar_arrow_captured = false;
                 self.scrollbar_arrow = 0;
                 self.set_scroll_from_scrollbar_pointer(point);
                 self.scrollbar_dragging = true;
+                let mut actions = vec![PortraitSelAction::GuiSound(PortraitSelSound::Command)];
+                if previous_active {
+                    actions.push(PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit));
+                }
+                return actions;
             } else {
                 self.scrollbar_arrow = 0;
             }
@@ -776,7 +870,12 @@ impl PortraitSelController {
             match self.hit_target(point) {
                 HitTarget::LocationOption(index) => {
                     self.pressed = HitTarget::None;
-                    return self.choose_location(index);
+                    let mut actions = (self.combo_highlight != Some(index))
+                        .then_some(PortraitSelAction::GuiSound(PortraitSelSound::Command))
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    actions.extend(self.choose_location(index));
+                    return actions;
                 }
                 HitTarget::LocationPopup => {
                     self.pressed = HitTarget::LocationPopup;
@@ -796,7 +895,11 @@ impl PortraitSelController {
                 _ => {
                     self.combo_open = false;
                     self.combo_highlight = None;
-                    return vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)];
+                    self.pressed = HitTarget::None;
+                    let mut actions =
+                        vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)];
+                    actions.extend(self.handle_pointer_down(point));
+                    return actions;
                 }
             }
         }
@@ -808,7 +911,7 @@ impl PortraitSelController {
                 self.focused_item = None;
             }
             if self.max_scroll_y() > 0 {
-                self.begin_scrollbar_pointer(point);
+                return self.begin_scrollbar_pointer(point);
             }
             return Vec::new();
         }
@@ -837,6 +940,7 @@ impl PortraitSelController {
             self.validation_error = None;
             if self.selected.is_some() && self.selected != previous {
                 self.ensure_selected_visible();
+                return vec![PortraitSelAction::GuiSound(PortraitSelSound::Command)];
             }
             return Vec::new();
         }
@@ -857,22 +961,31 @@ impl PortraitSelController {
             | HitTarget::LocationOption(_) => {}
             HitTarget::None => self.combo_open = false,
         }
-        Vec::new()
+        matches!(target, HitTarget::Close | HitTarget::Ok | HitTarget::Cancel)
+            .then_some(PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit))
+            .into_iter()
+            .collect()
     }
 
     pub fn handle_pointer_right_down(&mut self, point: GuiPoint) -> Vec<PortraitSelAction> {
         self.pointer = Some(point);
         if self.combo_open {
             if contains(self.layout().location_popup, point) {
+                let previous = self.combo_highlight;
                 self.combo_highlight = match self.hit_target(point) {
                     HitTarget::LocationOption(index) => Some(index),
                     _ => None,
                 };
+                return (self.combo_highlight.is_some() && self.combo_highlight != previous)
+                    .then_some(PortraitSelAction::GuiSound(PortraitSelSound::Command))
+                    .into_iter()
+                    .collect();
             } else {
                 self.combo_open = false;
                 self.combo_highlight = None;
                 self.pressed = HitTarget::None;
                 self.key_pressed = None;
+                return vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)];
             }
         }
         Vec::new()
@@ -880,9 +993,21 @@ impl PortraitSelController {
 
     pub fn handle_pointer_up(&mut self, point: GuiPoint) -> Vec<PortraitSelAction> {
         self.pointer = Some(point);
-        if self.title_drag.take().is_some() {
+        let mut actions = Vec::new();
+        if self.combo_open && contains(self.layout().location_popup, point) {
+            let previous = self.combo_highlight;
+            self.combo_highlight = match self.hit_target(point) {
+                HitTarget::LocationOption(index) => Some(index),
+                _ => None,
+            };
+            if self.combo_highlight.is_some() && self.combo_highlight != previous {
+                actions.push(PortraitSelAction::GuiSound(PortraitSelSound::Command));
+            }
+        }
+        if let Some((offset_x, offset_y)) = self.title_drag.take() {
             // `StopDragging` applies one last motion and ends the drag; the
             // window keeps the position it was dropped at.
+            self.location = Some((point.x as i32 - offset_x, point.y as i32 - offset_y));
             self.pressed = HitTarget::None;
             return Vec::new();
         }
@@ -892,47 +1017,67 @@ impl PortraitSelController {
             self.pressed = HitTarget::None;
         }
         if self.scrollbar_arrow_captured {
+            let active = self.scrollbar_arrow != 0;
+            let inside = contains(self.layout().grid_scrollbar, point);
             self.scrollbar_arrow_captured = false;
             self.scrollbar_arrow = 0;
             self.pressed = HitTarget::None;
+            if active && inside {
+                actions.push(PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit));
+            }
         }
         let released = self.hit_target(point);
         let pressed = std::mem::replace(&mut self.pressed, HitTarget::None);
         match released {
             HitTarget::SetPicture => {
                 self.set_picture = !self.set_picture;
-                return Vec::new();
+                actions.push(PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit));
+                return actions;
             }
             HitTarget::SetBigIcon => {
                 self.set_big_icon = !self.set_big_icon;
-                return Vec::new();
+                actions.push(PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit));
+                return actions;
             }
             _ => {}
         }
         if pressed != released {
-            return Vec::new();
+            return actions;
         }
-        match released {
-            HitTarget::Close | HitTarget::Cancel => vec![PortraitSelAction::Cancel],
+        let release_actions = match released {
+            HitTarget::Close | HitTarget::Cancel => vec![
+                PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                PortraitSelAction::Cancel,
+            ],
             HitTarget::Location => Vec::new(),
             HitTarget::LocationPopup
             | HitTarget::LocationOption(_)
             | HitTarget::SetPicture
             | HitTarget::SetBigIcon => Vec::new(),
-            HitTarget::Ok => self.try_accept(),
+            HitTarget::Ok => {
+                let mut actions = vec![PortraitSelAction::GuiSound(PortraitSelSound::Click)];
+                actions.extend(self.try_accept());
+                actions
+            }
             HitTarget::Tile(_) | HitTarget::None => Vec::new(),
-        }
+        };
+        actions.extend(release_actions);
+        actions
     }
 
     pub fn handle_pointer_double_click(&mut self, point: GuiPoint) -> Vec<PortraitSelAction> {
         self.pointer = Some(point);
         let layout = self.layout();
         if self.combo_open && contains(layout.location_popup, point) {
+            let previous = self.combo_highlight;
             self.combo_highlight = match self.hit_target(point) {
                 HitTarget::LocationOption(index) => Some(index),
                 _ => None,
             };
-            return Vec::new();
+            return (self.combo_highlight.is_some() && self.combo_highlight != previous)
+                .then_some(PortraitSelAction::GuiSound(PortraitSelSound::Command))
+                .into_iter()
+                .collect();
         }
         if !contains(layout.grid, point) {
             return Vec::new();
@@ -941,6 +1086,7 @@ impl PortraitSelController {
         if !contains(list_selection_hitbox(&layout), point) {
             return Vec::new();
         }
+        let previous = self.selected;
         self.selected = match self.hit_target(point) {
             HitTarget::Tile(index) => Some(index),
             _ => None,
@@ -948,7 +1094,12 @@ impl PortraitSelController {
         self.validation_error = None;
         if self.selected.is_some() {
             self.ensure_selected_visible();
-            return self.try_accept();
+            let mut actions = (self.selected != previous)
+                .then_some(PortraitSelAction::GuiSound(PortraitSelSound::Command))
+                .into_iter()
+                .collect::<Vec<_>>();
+            actions.extend(self.try_accept());
+            return actions;
         }
         Vec::new()
     }
@@ -971,22 +1122,30 @@ impl PortraitSelController {
                     return vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)];
                 }
                 KeyCode::Up => {
+                    let previous = self.combo_highlight;
                     if !self.locations.is_empty() {
                         self.combo_highlight = Some(self.combo_highlight.map_or_else(
                             || self.locations.len() - 1,
                             |index| (index + self.locations.len() - 1) % self.locations.len(),
                         ));
                     }
-                    return Vec::new();
+                    return (self.combo_highlight.is_some() && self.combo_highlight != previous)
+                        .then_some(PortraitSelAction::GuiSound(PortraitSelSound::Command))
+                        .into_iter()
+                        .collect();
                 }
                 KeyCode::Down => {
+                    let previous = self.combo_highlight;
                     if !self.locations.is_empty() {
                         self.combo_highlight = Some(
                             self.combo_highlight
                                 .map_or(0, |index| (index + 1) % self.locations.len()),
                         );
                     }
-                    return Vec::new();
+                    return (self.combo_highlight.is_some() && self.combo_highlight != previous)
+                        .then_some(PortraitSelAction::GuiSound(PortraitSelSound::Command))
+                        .into_iter()
+                        .collect();
                 }
                 KeyCode::Enter => {
                     return self
@@ -1012,41 +1171,33 @@ impl PortraitSelController {
                 Vec::new()
             }
             KeyCode::Up if self.focus == PortraitSelControl::Grid => {
-                self.move_grid(GridMove::Up);
-                Vec::new()
+                self.move_grid_sound(GridMove::Up)
             }
             KeyCode::Down if self.focus == PortraitSelControl::Location => {
                 self.combo_open = true;
                 self.combo_highlight = None;
-                Vec::new()
+                vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorOpen)]
             }
             KeyCode::Down if self.focus == PortraitSelControl::Grid => {
-                self.move_grid(GridMove::Down);
-                Vec::new()
+                self.move_grid_sound(GridMove::Down)
             }
             KeyCode::Left if self.focus == PortraitSelControl::Grid => {
-                self.move_grid(GridMove::Left);
-                Vec::new()
+                self.move_grid_sound(GridMove::Left)
             }
             KeyCode::Right if self.focus == PortraitSelControl::Grid => {
-                self.move_grid(GridMove::Right);
-                Vec::new()
+                self.move_grid_sound(GridMove::Right)
             }
             KeyCode::Home if self.focus == PortraitSelControl::Grid => {
-                self.move_grid(GridMove::Home);
-                Vec::new()
+                self.move_grid_sound(GridMove::Home)
             }
             KeyCode::End if self.focus == PortraitSelControl::Grid => {
-                self.move_grid(GridMove::End);
-                Vec::new()
+                self.move_grid_sound(GridMove::End)
             }
             KeyCode::PageUp if self.focus == PortraitSelControl::Grid => {
-                self.move_grid(GridMove::PageUp);
-                Vec::new()
+                self.move_grid_sound(GridMove::PageUp)
             }
             KeyCode::PageDown if self.focus == PortraitSelControl::Grid => {
-                self.move_grid(GridMove::PageDown);
-                Vec::new()
+                self.move_grid_sound(GridMove::PageDown)
             }
             KeyCode::Space => self.activate_focus(),
             KeyCode::Up
@@ -1076,9 +1227,16 @@ impl PortraitSelController {
         }
         match pressed {
             PortraitSelControl::Close | PortraitSelControl::Cancel => {
-                vec![PortraitSelAction::Cancel]
+                vec![
+                    PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                    PortraitSelAction::Cancel,
+                ]
             }
-            PortraitSelControl::Ok => self.try_accept(),
+            PortraitSelControl::Ok => {
+                let mut actions = vec![PortraitSelAction::GuiSound(PortraitSelSound::Click)];
+                actions.extend(self.try_accept());
+                actions
+            }
             PortraitSelControl::NoControl
             | PortraitSelControl::Location
             | PortraitSelControl::Grid
@@ -1113,7 +1271,7 @@ impl PortraitSelController {
         if self.combo_open {
             self.combo_open = false;
             self.combo_highlight = None;
-            Vec::new()
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)]
         } else {
             vec![PortraitSelAction::Cancel]
         }
@@ -1191,24 +1349,31 @@ impl PortraitSelController {
     fn activate_focus(&mut self) -> Vec<PortraitSelAction> {
         match self.focus {
             PortraitSelControl::Close | PortraitSelControl::Ok | PortraitSelControl::Cancel => {
-                self.key_pressed = Some(self.focus);
-                Vec::new()
+                if self.key_pressed.replace(self.focus) == Some(self.focus) {
+                    Vec::new()
+                } else {
+                    vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)]
+                }
             }
             PortraitSelControl::Location => {
                 self.combo_open = !self.combo_open;
                 self.combo_highlight = None;
-                Vec::new()
+                vec![PortraitSelAction::GuiSound(if self.combo_open {
+                    PortraitSelSound::DoorOpen
+                } else {
+                    PortraitSelSound::DoorClose
+                })]
             }
             PortraitSelControl::NoControl
             | PortraitSelControl::Grid
             | PortraitSelControl::SelectedItem => Vec::new(),
             PortraitSelControl::SetPicture => {
                 self.set_picture = !self.set_picture;
-                Vec::new()
+                vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)]
             }
             PortraitSelControl::SetBigIcon => {
                 self.set_big_icon = !self.set_big_icon;
-                Vec::new()
+                vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)]
             }
         }
     }
@@ -1300,10 +1465,17 @@ impl PortraitSelController {
         }
     }
 
-    fn move_grid(&mut self, movement: GridMove) {
+    fn move_grid_sound(&mut self, movement: GridMove) -> Vec<PortraitSelAction> {
+        self.move_grid(movement)
+            .then_some(PortraitSelAction::GuiSound(PortraitSelSound::Command))
+            .into_iter()
+            .collect()
+    }
+
+    fn move_grid(&mut self, movement: GridMove) -> bool {
         if self.items.is_empty() {
             self.selected = None;
-            return;
+            return false;
         }
         let layout = self.layout();
         let columns = layout.columns.max(1);
@@ -1314,8 +1486,9 @@ impl PortraitSelController {
                 self.selected = next;
                 self.validation_error = None;
                 self.ensure_selected_visible();
+                return self.selected.is_some();
             }
-            return;
+            return false;
         }
         let Some(current) = self.selected else {
             self.selected = Some(
@@ -1327,7 +1500,7 @@ impl PortraitSelController {
             );
             self.validation_error = None;
             self.ensure_selected_visible();
-            return;
+            return true;
         };
         let next = match movement {
             GridMove::Left => current.saturating_sub(1),
@@ -1342,11 +1515,12 @@ impl PortraitSelController {
             GridMove::PageUp | GridMove::PageDown => unreachable!("handled above"),
         };
         if next == current {
-            return;
+            return false;
         }
         self.selected = Some(next);
         self.validation_error = None;
         self.ensure_selected_visible();
+        true
     }
 
     fn move_grid_page(&mut self, down: bool) -> Option<usize> {
@@ -1480,16 +1654,19 @@ impl PortraitSelController {
         }
     }
 
-    fn begin_scrollbar_pointer(&mut self, point: GuiPoint) {
+    fn begin_scrollbar_pointer(&mut self, point: GuiPoint) -> Vec<PortraitSelAction> {
         let arrow = self.scrollbar_arrow_at(point);
         if arrow != 0 {
             self.scrollbar_arrow_captured = true;
             self.scrollbar_arrow = arrow;
+            return vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)];
         } else if self.max_scrollbar_pin() > 0 {
             self.scrollbar_arrow_captured = false;
             self.set_scroll_from_scrollbar_pointer(point);
             self.scrollbar_dragging = true;
+            return vec![PortraitSelAction::GuiSound(PortraitSelSound::Command)];
         }
+        Vec::new()
     }
 
     fn grid_content_layout(&self, columns: usize) -> PortraitGridContentLayout {
@@ -1500,7 +1677,14 @@ impl PortraitSelController {
                 layout.columns == columns.max(1) && layout.items.len() == self.items.len()
             })
             .cloned()
-            .unwrap_or_else(|| portrait_grid_content_layout(&self.items, columns, None))
+            .unwrap_or_else(|| {
+                portrait_grid_content_layout(
+                    &self.items,
+                    columns,
+                    None,
+                    self.mini_line_height.get().unwrap_or(MINI_LINE_HEIGHT),
+                )
+            })
     }
 
     fn update_grid_content_layout(
@@ -1508,7 +1692,8 @@ impl PortraitSelController {
         columns: usize,
         font: &ClonkFont,
     ) -> PortraitGridContentLayout {
-        let layout = portrait_grid_content_layout(&self.items, columns, Some(font));
+        let layout =
+            portrait_grid_content_layout(&self.items, columns, Some(font), font.line_height);
         let changed = self.grid_layout.borrow().as_ref() != Some(&layout);
         if changed {
             self.grid_layout.replace(Some(layout.clone()));
@@ -1545,6 +1730,9 @@ impl PortraitSelController {
         PortraitSelMetrics {
             caption_width: *self.location_caption_width.borrow(),
             location_label_width: *self.location_label_width.borrow(),
+            import_label_width: *self.import_label_width.borrow(),
+            text_line_height: self.text_line_height.get(),
+            mini_line_height: self.mini_line_height.get(),
         }
     }
 
@@ -1558,10 +1746,16 @@ impl PortraitSelController {
         self.location_caption_width.replace(widest);
     }
 
-    fn update_label_metrics(&self, font: &ClonkFont) {
-        self.update_location_popup_width(font);
+    fn update_label_metrics(&self, fonts: &ClonkFontSet) {
+        self.update_location_popup_width(&fonts.text);
+        let location = expand_hotkey_markup(&self.labels.location).0;
+        let import_image_as = expand_hotkey_markup(&self.labels.import_image_as).0;
         self.location_label_width
-            .replace(Some(font.measure(&self.labels.location, true).0));
+            .replace(Some(fonts.text.measure(&location, true).0));
+        self.import_label_width
+            .replace(Some(fonts.text.measure(&import_image_as, true).0));
+        self.text_line_height.set(Some(fonts.text.line_height));
+        self.mini_line_height.set(Some(fonts.mini.line_height));
     }
 
     fn hit_target(&self, point: GuiPoint) -> HitTarget {
@@ -1615,6 +1809,16 @@ impl PortraitSelController {
         HitTarget::None
     }
 
+    fn button_rect(&self, target: HitTarget) -> Option<IntRect> {
+        let layout = self.layout();
+        match target {
+            HitTarget::Close => Some(layout.close),
+            HitTarget::Ok => Some(layout.ok),
+            HitTarget::Cancel => Some(layout.cancel),
+            _ => None,
+        }
+    }
+
     pub fn render(
         &mut self,
         surface: &mut Surface,
@@ -1631,7 +1835,7 @@ impl PortraitSelController {
         resources: PortraitSelResources<'_>,
         gamma: Option<&GammaRamp>,
     ) {
-        self.update_label_metrics(&resources.fonts.text);
+        self.update_label_metrics(resources.fonts);
         let layout = self.layout_for(surface);
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
         let right_indent = layout.close.w + 4;
@@ -1665,14 +1869,15 @@ impl PortraitSelController {
             draw_highlight(surface, layout.close, resources.button_highlight, gamma);
         }
 
+        let location_label = expand_hotkey_markup(&self.labels.location).0;
         resources.fonts.text.draw_with_gamma(
             surface,
             layout.location_label.x,
             layout.location_label.y,
-            &self.labels.location,
+            &location_label,
             [255, 255, 255, 255],
             TextAlign::Left,
-            false,
+            true,
             gamma,
         );
         let location_text = self
@@ -1741,14 +1946,15 @@ impl PortraitSelController {
             gamma,
         );
 
+        let import_label = expand_hotkey_markup(&self.labels.import_image_as).0;
         resources.fonts.text.draw_with_gamma(
             surface,
             layout.import_label.x,
             layout.import_label.y,
-            &self.labels.import_image_as,
+            &import_label,
             [255, 255, 255, 255],
             TextAlign::Left,
-            false,
+            true,
             gamma,
         );
         for (control, rect, selected, label) in [
@@ -1832,7 +2038,7 @@ impl PortraitSelController {
         if !self.combo_open {
             return;
         }
-        self.update_label_metrics(&resources.fonts.text);
+        self.update_label_metrics(resources.fonts);
         let layout = self.layout_for(surface);
         draw_engine_box(
             surface,
@@ -1954,7 +2160,7 @@ impl PortraitSelController {
                     surface,
                     picture.x + picture.w / 2,
                     picture.y + (picture.h - resources.fonts.mini.line_height) / 2,
-                    "Loading...",
+                    &self.labels.loading,
                     [255, 255, 255, 255],
                     TextAlign::Center,
                     false,
@@ -1997,6 +2203,7 @@ fn portrait_grid_content_layout(
     items: &[PortraitItem],
     columns: usize,
     font: Option<&ClonkFont>,
+    fallback_line_height: i32,
 ) -> PortraitGridContentLayout {
     let columns = columns.max(1);
     let mut layouts = Vec::with_capacity(items.len());
@@ -2022,7 +2229,7 @@ fn portrait_grid_content_layout(
                 )
             },
         );
-        let label_height = font.map_or(MINI_LINE_HEIGHT, |font| {
+        let label_height = font.map_or(fallback_line_height.max(1), |font| {
             font.measure(&wrapped_label, false).1.max(1)
         });
         let item_height = PREVIEW_SIZE.saturating_add(label_height);
@@ -2170,6 +2377,11 @@ pub fn portrait_sel_layout_with_metrics_at(
     metrics: PortraitSelMetrics,
     origin: Option<(i32, i32)>,
 ) -> PortraitSelLayout {
+    let text_line_height = metrics.text_line_height.unwrap_or(TEXT_LINE_HEIGHT).max(1);
+    let mini_line_height = metrics.mini_line_height.unwrap_or(MINI_LINE_HEIGHT).max(1);
+    let caption_height = text_line_height.max(CAPTION_HEIGHT);
+    let control_height = text_line_height.saturating_add(4);
+    let tile_height = PREVIEW_SIZE.saturating_add(mini_line_height);
     let width = (i64::from(screen_width) * 2 / 3 + 10)
         .clamp(i64::from(MIN_WIDTH), i64::from(MAX_WIDTH)) as i32;
     let height = (i64::from(screen_height) * 2 / 3 + 10)
@@ -2180,9 +2392,9 @@ pub fn portrait_sel_layout_with_metrics_at(
     );
     let (origin_x, origin_y) = origin.unwrap_or((default_x, default_y));
     let bounds = IntRect::new(origin_x, origin_y, width, height);
-    let caption = IntRect::new(bounds.x, bounds.y, bounds.w, CAPTION_HEIGHT);
+    let caption = IntRect::new(bounds.x, bounds.y, bounds.w, caption_height);
     let close = IntRect::new(bounds.x + bounds.w - 20, bounds.y + 4, 16, 16);
-    let location_y = bounds.y + CAPTION_HEIGHT + 14;
+    let location_y = bounds.y.saturating_add(caption_height).saturating_add(14);
     // `C4FileSelDlg.cpp:143` sizes the label box with
     // `pUseFont->GetTextWidth(sText)`; 57 is the English width the pinned C++
     // capture was taken at, kept as the unmeasured fallback.
@@ -2190,19 +2402,27 @@ pub fn portrait_sel_layout_with_metrics_at(
         bounds.x + 20,
         location_y,
         metrics.location_label_width.unwrap_or(57),
-        TEXT_LINE_HEIGHT,
+        text_line_height,
     );
     let location_combo = IntRect::new(
         location_label.x + location_label.w + 20,
         location_y,
         bounds.x + bounds.w - 20 - (location_label.x + location_label.w + 20),
-        CONTROL_HEIGHT,
+        control_height,
     );
     let grid = IntRect::new(
         bounds.x + 10,
-        bounds.y + CAPTION_HEIGHT + TEXT_LINE_HEIGHT + 42,
+        bounds
+            .y
+            .saturating_add(caption_height)
+            .saturating_add(text_line_height)
+            .saturating_add(42),
         bounds.w - 20,
-        bounds.h - CAPTION_HEIGHT - 2 * TEXT_LINE_HEIGHT - 100,
+        bounds
+            .h
+            .saturating_sub(caption_height)
+            .saturating_sub(text_line_height.saturating_mul(2))
+            .saturating_sub(100),
     );
     let grid_client = IntRect::new(
         grid.x + 3,
@@ -2218,21 +2438,26 @@ pub fn portrait_sel_layout_with_metrics_at(
         grid_client.h,
     );
     let columns = (grid_viewport.w / PREVIEW_SIZE).max(1) as usize;
-    let visible_rows = ((grid_viewport.h + TILE_HEIGHT - 1) / TILE_HEIGHT).max(1) as usize;
-    let options_y = bounds.y + bounds.h - TEXT_LINE_HEIGHT - 44;
-    let import_label = IntRect::new(bounds.x + 10, options_y, 106, TEXT_LINE_HEIGHT);
+    let visible_rows = ((grid_viewport.h + tile_height - 1) / tile_height).max(1) as usize;
+    let options_y = bounds.y + bounds.h - text_line_height - 44;
+    let import_label = IntRect::new(
+        bounds.x + 10,
+        options_y,
+        metrics.import_label_width.unwrap_or(106),
+        text_line_height,
+    );
     let option_width = ((bounds.w - 10) / 3 - 10).max(1);
     let set_picture = IntRect::new(
         bounds.x + option_width + 20,
         options_y,
         option_width,
-        TEXT_LINE_HEIGHT,
+        text_line_height,
     );
     let set_big_icon = IntRect::new(
         bounds.x + option_width * 2 + 30,
         options_y,
         option_width,
-        TEXT_LINE_HEIGHT,
+        text_line_height,
     );
     let buttons_y = bounds.y + bounds.h - 36;
     let ok = IntRect::new(
@@ -2249,7 +2474,7 @@ pub fn portrait_sel_layout_with_metrics_at(
     );
     let location_count_i32 = i32::try_from(location_count).unwrap_or(i32::MAX);
     let popup_content_height = location_count_i32
-        .saturating_mul(TEXT_LINE_HEIGHT)
+        .saturating_mul(text_line_height)
         .saturating_add(
             location_count_i32
                 .saturating_sub(1)
@@ -2259,13 +2484,19 @@ pub fn portrait_sel_layout_with_metrics_at(
     let popup_height = popup_content_height.saturating_add(10);
     // `ContextMenu::UpdateElementPositions` widens the menu to its widest
     // entry and never shrinks it below the width it already has, which
-    // `DoDropdown` seeded from the combo (`C4GuiMenu.cpp:333-358`). The 10px
-    // is the same left+right margin the entries are inset by below.
+    // `DoDropdown` seeded from the combo (`C4GuiMenu.cpp:333-358`). Combo
+    // entries carry Ico_Empty, whose blank cell is the row height plus 2px;
+    // the final 10px is the menu's left+right margin.
     let popup_width = metrics
         .caption_width
-        .map(|width| width.saturating_add(10))
+        .map(|width| {
+            width
+                .saturating_add(text_line_height)
+                .saturating_add(2 + 10)
+        })
         .unwrap_or(location_combo.w)
-        .max(location_combo.w);
+        .max(location_combo.w)
+        .max(40);
     // `Screen::DoContext` opens bottom-right of the anchor, flipping to the
     // other side when that would cross the screen edge, and falling back to
     // the edge itself when the flipped side has no room either
@@ -2290,11 +2521,11 @@ pub fn portrait_sel_layout_with_metrics_at(
             IntRect::new(
                 location_popup.x + 5,
                 location_popup.y.saturating_add(5).saturating_add(
-                    (TEXT_LINE_HEIGHT + CONTEXT_ROW_SPACING)
+                    (text_line_height + CONTEXT_ROW_SPACING)
                         .saturating_mul(i32::try_from(index).unwrap_or(i32::MAX)),
                 ),
                 location_popup.w - 10,
-                TEXT_LINE_HEIGHT,
+                text_line_height,
             )
         })
         .collect();
@@ -2587,6 +2818,16 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    fn emitted_sounds(actions: &[PortraitSelAction]) -> Vec<PortraitSelSound> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                PortraitSelAction::GuiSound(sound) => Some(*sound),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn test_controller() -> PortraitSelController {
         PortraitSelController::new(
             vec![PortraitLocation::new("User Path", "/portraits")],
@@ -2665,6 +2906,64 @@ mod tests {
         assert_eq!(layout.cancel, rect(586, 571, 120, 32));
         assert_eq!(layout.columns, 5);
         assert_eq!(layout.visible_rows, 3);
+    }
+
+    #[test]
+    fn portrait_selector_layout_tracks_the_active_font_metrics() {
+        // The dialog title, ComboBox, option row, popup entries and portrait
+        // item height all derive from the active TextFont/MiniFont rather than
+        // the shipped Endeavour pixel sizes (`C4GuiDialogs.cpp:399,448-455`,
+        // `C4GuiComboBox.cpp:218-220`, `C4FileSelDlg.cpp:127-169,426-444`,
+        // `C4GuiMenu.cpp:62-81`). Label::SetText also autosizes the Import
+        // caption (`C4GuiLabels.cpp:65-76,97-116`).
+        let text_line_height = 30;
+        let mini_line_height = 60;
+        let layout = portrait_sel_layout_with_metrics(
+            1152,
+            723,
+            2,
+            PortraitSelMetrics {
+                caption_width: Some(500),
+                location_label_width: Some(80),
+                import_label_width: Some(140),
+                text_line_height: Some(text_line_height),
+                mini_line_height: Some(mini_line_height),
+            },
+        );
+
+        assert_eq!(layout.caption.h, text_line_height);
+        assert_eq!(layout.location_label.h, text_line_height);
+        assert_eq!(layout.location_combo.h, text_line_height + 4);
+        assert_eq!(layout.grid.y, layout.bounds.y + text_line_height * 2 + 42);
+        assert_eq!(layout.grid.h, layout.bounds.h - text_line_height * 3 - 100);
+        assert_eq!(layout.import_label.w, 140);
+        assert_eq!(layout.import_label.h, text_line_height);
+        assert_eq!(layout.set_picture.h, text_line_height);
+        assert_eq!(layout.location_options[0].h, text_line_height);
+        assert_eq!(
+            layout.location_popup.h,
+            2 * text_line_height + CONTEXT_ROW_SPACING + 10
+        );
+        assert_eq!(layout.location_popup.w, 500 + text_line_height + 2 + 10);
+        assert_eq!(layout.visible_rows, 2);
+    }
+
+    #[test]
+    fn pre_render_grid_geometry_uses_the_cached_active_mini_font_height() {
+        // ListItem adds MiniFont::BreakMessage's pixel height to its 100px
+        // preview (`C4FileSelDlg.cpp:426-444`). Hit testing and keyboard
+        // movement may ask for that geometry between metric refresh and the
+        // next draw, so the cache-miss path must not fall back to Endeavour.
+        let controller = PortraitSelController::new(
+            vec![PortraitLocation::new("User", "/u")],
+            0,
+            Vec::new(),
+            true,
+            true,
+        );
+        controller.mini_line_height.set(Some(60));
+
+        assert_eq!(controller.grid_content_layout(1).items[0].rect.h, 160);
     }
 
     #[test]
@@ -2969,7 +3268,12 @@ mod tests {
         let label = controller.items()[0].label();
         assert!(fonts.mini.measure(label, false).0 > max_width);
 
-        let content = portrait_grid_content_layout(controller.items(), 1, Some(&fonts.mini));
+        let content = portrait_grid_content_layout(
+            controller.items(),
+            1,
+            Some(&fonts.mini),
+            fonts.mini.line_height,
+        );
         let wrapped = &content.items[0].wrapped_label;
         assert!(
             wrapped.contains('\n'),
@@ -3009,8 +3313,12 @@ mod tests {
         controller.resize(400, 360);
 
         let layout = controller.layout();
-        let expected =
-            portrait_grid_content_layout(controller.items(), layout.columns, Some(&fonts.mini));
+        let expected = portrait_grid_content_layout(
+            controller.items(),
+            layout.columns,
+            Some(&fonts.mini),
+            fonts.mini.line_height,
+        );
         assert!(expected.items[0].rect.h > TILE_HEIGHT);
         assert_eq!(controller.grid_content_layout(layout.columns), expected);
         let exact_max = expected
@@ -3047,8 +3355,12 @@ mod tests {
 
         let layout = controller.layout();
         let fonts = crate::test_support::endeavour_font_set();
-        let measured =
-            portrait_grid_content_layout(controller.items(), layout.columns, Some(&fonts.mini));
+        let measured = portrait_grid_content_layout(
+            controller.items(),
+            layout.columns,
+            Some(&fonts.mini),
+            fonts.mini.line_height,
+        );
         let exact_max = measured
             .content_height
             .saturating_sub(layout.grid_viewport.h)
@@ -3410,7 +3722,10 @@ mod tests {
         let mut controller = test_controller();
         controller.selected = Some(0);
         controller.focus = PortraitSelControl::Ok;
-        assert!(controller.handle_key_down(KeyCode::Space).is_empty());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Space),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)]
+        );
         let combo = controller.layout().location_combo;
         let combo_point = GuiPoint::new(
             (combo.x + combo.w / 2) as f32,
@@ -3563,14 +3878,20 @@ mod tests {
         // `C4GuiListBox.cpp:72-81`).
         let mut controller = test_controller();
         controller.focus = PortraitSelControl::Location;
-        assert!(controller.handle_gamepad_low_down().is_empty());
+        assert_eq!(
+            controller.handle_gamepad_low_down(),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorOpen)]
+        );
         assert!(controller.combo_open);
         assert!(controller.handle_gamepad_low_up().is_empty());
 
         controller.combo_open = false;
         controller.focus = PortraitSelControl::SetPicture;
         let old_picture = controller.set_picture();
-        assert!(controller.handle_gamepad_low_down().is_empty());
+        assert_eq!(
+            controller.handle_gamepad_low_down(),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)]
+        );
         assert_eq!(controller.set_picture(), !old_picture);
         assert!(controller.handle_gamepad_low_up().is_empty());
 
@@ -3582,10 +3903,16 @@ mod tests {
         ));
 
         controller.focus = PortraitSelControl::Cancel;
-        assert!(controller.handle_gamepad_low_down().is_empty());
+        assert_eq!(
+            controller.handle_gamepad_low_down(),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)]
+        );
         assert_eq!(
             controller.handle_gamepad_low_up(),
-            vec![PortraitSelAction::Cancel]
+            vec![
+                PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                PortraitSelAction::Cancel,
+            ]
         );
     }
 
@@ -3606,9 +3933,10 @@ mod tests {
             .handle_gamepad_direction(KeyCode::Right)
             .is_empty());
         assert_eq!(controller.focus(), PortraitSelControl::Location);
-        assert!(controller
-            .handle_gamepad_direction(KeyCode::Down)
-            .is_empty());
+        assert_eq!(
+            controller.handle_gamepad_direction(KeyCode::Down),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorOpen)]
+        );
         assert!(controller.combo_open);
 
         assert!(controller
@@ -3616,13 +3944,19 @@ mod tests {
             .is_empty());
         assert_eq!(controller.focus(), PortraitSelControl::Location);
         assert_eq!(controller.combo_highlight, None);
-        assert!(controller.handle_gamepad_direction(KeyCode::Up).is_empty());
+        assert_eq!(
+            controller.handle_gamepad_direction(KeyCode::Up),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::Command)]
+        );
         assert_eq!(
             controller.combo_highlight,
             Some(controller.locations().len() - 1)
         );
 
-        assert!(controller.handle_gamepad_high_down().is_empty());
+        assert_eq!(
+            controller.handle_gamepad_high_down(),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)]
+        );
         assert!(!controller.combo_open);
         assert_eq!(
             controller.handle_gamepad_high_down(),
@@ -3640,10 +3974,16 @@ mod tests {
 
         assert!(controller.handle_key_down(KeyCode::Tab).is_empty());
         assert_eq!(controller.focus(), PortraitSelControl::Close);
-        assert!(controller.handle_key_down(KeyCode::Space).is_empty());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Space),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::ArrowHit)]
+        );
         assert_eq!(
             controller.handle_key_up(KeyCode::Space),
-            vec![PortraitSelAction::Cancel]
+            vec![
+                PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                PortraitSelAction::Cancel,
+            ]
         );
     }
 
@@ -3889,11 +4229,14 @@ mod tests {
 
         assert_eq!(
             controller.handle_pointer_double_click(first_item),
-            vec![PortraitSelAction::Accept(PortraitSelCommit {
-                choice: PortraitChoice::File(path),
-                set_picture: true,
-                set_big_icon: true,
-            })]
+            vec![
+                PortraitSelAction::GuiSound(PortraitSelSound::Command),
+                PortraitSelAction::Accept(PortraitSelCommit {
+                    choice: PortraitChoice::File(path),
+                    set_picture: true,
+                    set_big_icon: true,
+                }),
+            ]
         );
         assert_eq!(controller.selected_index(), Some(0));
         assert_eq!(controller.focus(), PortraitSelControl::SetPicture);
@@ -3911,7 +4254,10 @@ mod tests {
         let row = layout.location_options[0];
         let row_point = GuiPoint::new((row.x + row.w / 2) as f32, (row.y + row.h / 2) as f32);
 
-        assert!(controller.handle_pointer_double_click(row_point).is_empty());
+        assert_eq!(
+            controller.handle_pointer_double_click(row_point),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::Command)]
+        );
         assert!(controller.combo_open);
         assert_eq!(controller.combo_highlight, Some(0));
         assert_eq!(controller.selected_index(), None);
@@ -3937,7 +4283,10 @@ mod tests {
         controller.combo_highlight = Some(0);
         let outside = GuiPoint::new(layout.grid.x as f32, layout.grid.y as f32);
 
-        assert!(controller.handle_pointer_right_down(outside).is_empty());
+        assert_eq!(
+            controller.handle_pointer_right_down(outside),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorClose)]
+        );
         assert!(!controller.combo_open);
         assert_eq!(controller.combo_highlight, None);
 
@@ -3948,7 +4297,10 @@ mod tests {
             (second.x + second.w / 2) as f32,
             (second.y + second.h / 2) as f32,
         );
-        assert!(controller.handle_pointer_right_down(inside).is_empty());
+        assert_eq!(
+            controller.handle_pointer_right_down(inside),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::Command)]
+        );
         assert!(controller.combo_open);
         assert_eq!(controller.combo_highlight, Some(1));
     }
@@ -4102,7 +4454,10 @@ mod tests {
         );
         controller.focus = PortraitSelControl::Location;
 
-        assert!(controller.handle_key_down(KeyCode::Down).is_empty());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Down),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::DoorOpen)]
+        );
         assert!(controller.combo_open);
         assert_eq!(controller.combo_highlight, None);
         for key in [
@@ -4335,7 +4690,10 @@ mod tests {
             true,
             false,
         );
-        assert!(controller.handle_key_down(KeyCode::Down).is_empty());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Down),
+            vec![PortraitSelAction::GuiSound(PortraitSelSound::Command)]
+        );
         assert_eq!(controller.selected_index(), Some(0));
         assert_eq!(
             controller.handle_key_down(KeyCode::Enter),
@@ -4579,6 +4937,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn location_popup_width_includes_the_blank_combo_icon_cell() {
+        // ComboBox_FillCB gives every entry Ico_Empty, so ContextMenu::Entry
+        // adds one row-height icon cell plus its 2px gap before the text
+        // (`C4GuiComboBox.cpp:37-44`, `C4Gui.h:1365-1370`,
+        // `C4GuiMenu.cpp:62-81,327-359`). The popup also has 5px margins on
+        // both sides.
+        let layout = portrait_sel_layout_with_metrics(
+            320,
+            480,
+            1,
+            PortraitSelMetrics {
+                caption_width: Some(200),
+                ..PortraitSelMetrics::default()
+            },
+        );
+
+        assert_eq!(
+            layout.location_popup.w,
+            200 + TEXT_LINE_HEIGHT + 2 + 10,
+            "the blank icon still reserves its native cell"
+        );
+    }
+
+    #[test]
+    fn location_popup_never_shrinks_below_the_context_menu_minimum() {
+        // ContextMenu starts at 40px wide before ComboBox and its entries
+        // widen it (`C4GuiMenu.cpp:24-27`, `C4GuiComboBox.cpp:102-120`). A
+        // translated label can consume the narrow dialog's remaining row,
+        // but it cannot make the popup narrower than that constructor size.
+        let layout = portrait_sel_layout_with_metrics(
+            320,
+            480,
+            0,
+            PortraitSelMetrics {
+                location_label_width: Some(500),
+                ..PortraitSelMetrics::default()
+            },
+        );
+
+        assert_eq!(layout.location_popup.w, 40);
+    }
+
     /// The location dropdown raises C++'s context-menu sounds
     /// (clonk-org/clonk-rs#571).
     ///
@@ -4600,15 +5001,6 @@ mod tests {
     /// "implemented".
     #[test]
     fn the_location_dropdown_raises_the_native_context_menu_sounds() {
-        let sounds = |actions: &[PortraitSelAction]| {
-            actions
-                .iter()
-                .filter_map(|action| match action {
-                    PortraitSelAction::GuiSound(sound) => Some(*sound),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
         let combo = portrait_sel_layout(600, 500, 2).location_combo;
         let combo_point = GuiPoint::new(
             (combo.x + combo.w / 2) as f32,
@@ -4631,7 +5023,7 @@ mod tests {
         let mut controller = controller_with_two();
         let opened = controller.handle_pointer_down(combo_point);
         assert!(controller.combo_open);
-        assert_eq!(sounds(&opened), [PortraitSelSound::DoorOpen]);
+        assert_eq!(emitted_sounds(&opened), [PortraitSelSound::DoorOpen]);
 
         // Moving the highlight over an entry is a user selection change.
         let option = controller.layout().location_options[1];
@@ -4640,16 +5032,16 @@ mod tests {
             (option.y + option.h / 2) as f32,
         );
         let moved = controller.handle_pointer_move(option_point);
-        assert_eq!(sounds(&moved), [PortraitSelSound::Command]);
+        assert_eq!(emitted_sounds(&moved), [PortraitSelSound::Command]);
         // Staying on the same entry is not a change and must stay silent.
-        assert!(sounds(&controller.handle_pointer_move(option_point)).is_empty());
+        assert!(emitted_sounds(&controller.handle_pointer_move(option_point)).is_empty());
 
         // Choosing an entry plays Click and *not* DoorClose. A context menu
         // activates on press, not release.
         let chosen = controller.handle_pointer_down(option_point);
         assert!(!controller.combo_open);
         assert_eq!(
-            sounds(&chosen),
+            emitted_sounds(&chosen),
             [PortraitSelSound::Click],
             "activation aborts the context without its sound, then clicks"
         );
@@ -4659,14 +5051,666 @@ mod tests {
         controller.handle_pointer_down(combo_point);
         let dismissed = controller.handle_pointer_down(GuiPoint::new(2.0, 2.0));
         assert!(!controller.combo_open);
-        assert_eq!(sounds(&dismissed), [PortraitSelSound::DoorClose]);
+        assert_eq!(emitted_sounds(&dismissed), [PortraitSelSound::DoorClose]);
 
         // Escape is the keyboard form of the same user abort.
         let mut controller = controller_with_two();
         controller.handle_pointer_down(combo_point);
         let escaped = controller.handle_key_down(KeyCode::Escape);
         assert!(!controller.combo_open);
-        assert_eq!(sounds(&escaped), [PortraitSelSound::DoorClose]);
+        assert_eq!(emitted_sounds(&escaped), [PortraitSelSound::DoorClose]);
+    }
+
+    #[test]
+    fn grid_selection_sounds_only_for_user_changes_to_an_item() {
+        // ListBox::MouseInput and its navigation keys call SelectionChanged
+        // after installing a different non-null item; SelectionChanged emits
+        // Command before scrolling/callbacks. Re-selecting a boundary or
+        // clearing onto blank space is silent (`C4GuiListBox.cpp:142-168,
+        // 218-383,571-586`).
+        let entries = ["King.png", "Mage.png"]
+            .into_iter()
+            .map(|name| {
+                PortraitFileEntry::from_path(PathBuf::from(format!("/portraits/{name}")))
+                    .expect("portrait entry")
+            })
+            .collect();
+        let mut controller = PortraitSelController::new(
+            vec![PortraitLocation::new("User", "/portraits")],
+            0,
+            entries,
+            true,
+            true,
+        );
+        let layout = controller.layout();
+        let first = GuiPoint::new(
+            (layout.grid_viewport.x + 1) as f32,
+            (layout.grid_viewport.y + 1) as f32,
+        );
+        let blank = GuiPoint::new(
+            (layout.grid_viewport.x + 1) as f32,
+            (layout.grid_viewport.y + TILE_HEIGHT + 1) as f32,
+        );
+
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_down(first)),
+            [PortraitSelSound::Command]
+        );
+        assert!(emitted_sounds(&controller.handle_pointer_down(first)).is_empty());
+        assert!(emitted_sounds(&controller.handle_pointer_down(blank)).is_empty());
+        assert_eq!(controller.selected_index(), None);
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Right)),
+            [PortraitSelSound::Command]
+        );
+        assert!(emitted_sounds(&controller.handle_key_down(KeyCode::Left)).is_empty());
+    }
+
+    #[test]
+    fn grid_double_click_sounds_before_accept_only_when_selection_changes() {
+        // ListBox installs and announces a changed selection before invoking
+        // the portrait double-click callback; the callback itself calls DoOK
+        // without a Button Click (`C4GuiListBox.cpp:142-168,571-586`,
+        // `C4FileSelDlg.cpp:230-239`).
+        let mut controller = PortraitSelController::new(
+            vec![PortraitLocation::new("User", "/portraits")],
+            0,
+            vec![
+                PortraitFileEntry::from_path(PathBuf::from("/portraits/King.png"))
+                    .expect("portrait entry"),
+            ],
+            true,
+            true,
+        );
+        let viewport = controller.layout().grid_viewport;
+        let point = GuiPoint::new((viewport.x + 1) as f32, (viewport.y + 1) as f32);
+
+        let changed = controller.handle_pointer_double_click(point);
+        assert_eq!(
+            emitted_sounds(&changed),
+            [PortraitSelSound::Command],
+            "selection announces before the acceptance callback"
+        );
+        assert!(matches!(
+            changed.as_slice(),
+            [
+                PortraitSelAction::GuiSound(PortraitSelSound::Command),
+                PortraitSelAction::Accept(_)
+            ]
+        ));
+
+        let unchanged = controller.handle_pointer_double_click(point);
+        assert!(emitted_sounds(&unchanged).is_empty());
+        assert!(matches!(
+            unchanged.as_slice(),
+            [PortraitSelAction::Accept(_)]
+        ));
+    }
+
+    #[test]
+    fn checkbox_toggles_emit_arrow_hit_on_the_native_activation_edge() {
+        // CheckBox toggles on pointer-up, but on Space/gamepad-low down and on
+        // a caption access key. Every successful toggle calls GUISound before
+        // its callback (`C4GuiCheckBox.cpp:43-96,145-149`).
+        let mut controller = test_controller();
+        controller.labels.player_image = "&Player image".to_string();
+        let square = checkbox_square(controller.layout().set_picture);
+        let point = GuiPoint::new(
+            (square.x + square.w / 2) as f32,
+            (square.y + square.h / 2) as f32,
+        );
+
+        assert!(emitted_sounds(&controller.handle_pointer_down(point)).is_empty());
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_up(point)),
+            [PortraitSelSound::ArrowHit]
+        );
+
+        controller.focus = PortraitSelControl::SetPicture;
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Space)),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(emitted_sounds(&controller.handle_key_up(KeyCode::Space)).is_empty());
+        assert_eq!(
+            emitted_sounds(&controller.handle_gamepad_low_down()),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(emitted_sounds(&controller.handle_gamepad_low_up()).is_empty());
+        assert_eq!(
+            emitted_sounds(&controller.handle_hotkey('P').expect("marked hotkey")),
+            [PortraitSelSound::ArrowHit]
+        );
+    }
+
+    #[test]
+    fn dialog_buttons_sound_on_press_and_successful_release_but_not_direct_keys() {
+        // Button::SetDown sounds ArrowHit when the visual press starts, and a
+        // successful release sounds Click before OnPress. Caption access keys
+        // call OnPress directly, as do FileSel's Return override and Dialog's
+        // Escape path, so those routes remain silent (`C4GuiButton.cpp:70-79,
+        // 112-128,147-200`, `C4FileSelDlg.cpp:118-123`).
+        let mut controller = test_controller();
+        controller.selected = Some(0);
+        controller.labels.cancel = "&Cancel".to_string();
+        let layout = controller.layout();
+        let ok = GuiPoint::new(
+            (layout.ok.x + layout.ok.w / 2) as f32,
+            (layout.ok.y + layout.ok.h / 2) as f32,
+        );
+
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_down(ok)),
+            [PortraitSelSound::ArrowHit]
+        );
+        let released = controller.handle_pointer_up(ok);
+        assert!(matches!(
+            released.as_slice(),
+            [
+                PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                PortraitSelAction::Accept(_)
+            ]
+        ));
+
+        controller.focus = PortraitSelControl::Ok;
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Space)),
+            [PortraitSelSound::ArrowHit]
+        );
+        let released = controller.handle_key_up(KeyCode::Space);
+        assert!(matches!(
+            released.as_slice(),
+            [
+                PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                PortraitSelAction::Accept(_)
+            ]
+        ));
+
+        assert!(emitted_sounds(&controller.handle_key_down(KeyCode::Enter)).is_empty());
+        assert!(emitted_sounds(&controller.handle_key_down(KeyCode::Escape)).is_empty());
+        assert!(emitted_sounds(&controller.handle_hotkey('O').expect("OK hotkey")).is_empty());
+        assert!(emitted_sounds(&controller.handle_hotkey('C').expect("Cancel hotkey")).is_empty());
+    }
+
+    #[test]
+    fn repeated_button_key_down_does_not_repeat_arrow_hit() {
+        // Button::SetDown returns immediately when its visual state already
+        // equals the requested one, so OS key repeat cannot replay ArrowHit
+        // while Space remains held (`C4GuiButton.cpp:183-190`).
+        let mut controller = test_controller();
+        controller.focus = PortraitSelControl::Ok;
+
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Space)),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Space)).is_empty(),
+            "a repeated down event leaves the already-pressed button silent"
+        );
+    }
+
+    #[test]
+    fn captured_button_leave_and_reentry_each_emit_arrow_hit() {
+        // While a Button owns left capture, MouseLeave clears its down state
+        // and re-entry with left still held restores it. Each SetDown
+        // transition sounds, and the final successful release still clicks
+        // (`C4GuiButton.cpp:112-128,147-200`).
+        let mut controller = test_controller();
+        controller.selected = Some(0);
+        let ok = controller.layout().ok;
+        let inside = GuiPoint::new((ok.x + ok.w / 2) as f32, (ok.y + ok.h / 2) as f32);
+        let outside = GuiPoint::new((ok.x - 5) as f32, inside.y);
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_down(inside)),
+            [PortraitSelSound::ArrowHit]
+        );
+
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_move(outside)),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(emitted_sounds(&controller.handle_pointer_move(outside)).is_empty());
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_move(inside)),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_up(inside)),
+            [PortraitSelSound::Click]
+        );
+    }
+
+    #[test]
+    fn window_leave_and_reentry_preserve_captured_widget_transitions() {
+        // A captured Button receives MouseLeave and SetUp(false), then
+        // re-enters SetDown while left remains held; releasing outside instead
+        // cancels the capture. ScrollBar arrow capture likewise survives the
+        // window boundary so held re-entry can re-arm it
+        // (`C4GuiButton.cpp:169-200`, `C4GuiContainers.cpp:391-457`).
+        let mut button = test_controller();
+        button.selected = Some(0);
+        let ok = button.layout().ok;
+        let inside = GuiPoint::new((ok.x + ok.w / 2) as f32, (ok.y + ok.h / 2) as f32);
+        button.handle_pointer_down(inside);
+
+        assert_eq!(
+            emitted_sounds(&button.pointer_left()),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert_eq!(
+            emitted_sounds(&button.handle_pointer_move_with_left_down(inside, true)),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert_eq!(
+            emitted_sounds(&button.pointer_left()),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(
+            emitted_sounds(&button.handle_pointer_move_with_left_down(inside, false)).is_empty()
+        );
+        assert!(emitted_sounds(&button.handle_pointer_up(inside)).is_empty());
+
+        let entries = (0..20)
+            .map(|index| {
+                PortraitFileEntry::from_path(PathBuf::from(format!(
+                    "/portraits/Portrait{index}.png"
+                )))
+                .expect("portrait entry")
+            })
+            .collect();
+        let mut scrollbar = PortraitSelController::new(
+            vec![PortraitLocation::new("User", "/portraits")],
+            0,
+            entries,
+            true,
+            true,
+        );
+        let bar = scrollbar.layout().grid_scrollbar;
+        let arrow = GuiPoint::new((bar.x + 8) as f32, (bar.y + 1) as f32);
+        scrollbar.handle_pointer_down(arrow);
+
+        assert!(emitted_sounds(&scrollbar.pointer_left()).is_empty());
+        assert_eq!(
+            emitted_sounds(&scrollbar.handle_pointer_move_with_left_down(arrow, true)),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(emitted_sounds(&scrollbar.pointer_left()).is_empty());
+        assert!(
+            emitted_sounds(&scrollbar.handle_pointer_move_with_left_down(arrow, false)).is_empty()
+        );
+        assert!(!scrollbar.scrollbar_arrow_captured);
+    }
+
+    #[test]
+    fn cancelled_interaction_drops_button_key_drag_and_scrollbar_capture() {
+        // A hard input cancellation is not a window-boundary MouseLeave: it
+        // releases Button::SetDown without pressing, then forgets every drag
+        // owner. ScrollBar::MouseLeave clears its arrow silently
+        // (`C4GuiButton.cpp:169-200`, `C4GuiContainers.cpp:391-444`).
+        let mut button = test_controller();
+        button.selected = Some(0);
+        let ok = button.layout().ok;
+        let inside = GuiPoint::new((ok.x + ok.w / 2) as f32, (ok.y + ok.h / 2) as f32);
+        button.handle_pointer_down(inside);
+        assert_eq!(
+            emitted_sounds(&button.cancel_interaction()),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(
+            emitted_sounds(&button.handle_pointer_move_with_left_down(inside, true)).is_empty()
+        );
+        assert!(emitted_sounds(&button.handle_pointer_up(inside)).is_empty());
+
+        button.focus = PortraitSelControl::Ok;
+        button.handle_key_down(KeyCode::Space);
+        assert_eq!(
+            emitted_sounds(&button.cancel_interaction()),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(emitted_sounds(&button.handle_key_up(KeyCode::Space)).is_empty());
+
+        let title = button.layout().caption;
+        let title_point = GuiPoint::new((title.x + 5) as f32, (title.y + 5) as f32);
+        button.handle_pointer_down(title_point);
+        assert!(button.title_drag.is_some());
+        assert!(emitted_sounds(&button.cancel_interaction()).is_empty());
+        assert!(button.title_drag.is_none());
+
+        let entries = (0..20)
+            .map(|index| {
+                PortraitFileEntry::from_path(PathBuf::from(format!(
+                    "/portraits/Portrait{index}.png"
+                )))
+                .expect("portrait entry")
+            })
+            .collect();
+        let mut scrollbar = PortraitSelController::new(
+            vec![PortraitLocation::new("User", "/portraits")],
+            0,
+            entries,
+            true,
+            true,
+        );
+        let bar = scrollbar.layout().grid_scrollbar;
+        let arrow = GuiPoint::new((bar.x + 8) as f32, (bar.y + 1) as f32);
+        scrollbar.handle_pointer_down(arrow);
+        assert!(emitted_sounds(&scrollbar.cancel_interaction()).is_empty());
+        assert!(!scrollbar.scrollbar_arrow_captured);
+        assert!(
+            emitted_sounds(&scrollbar.handle_pointer_move_with_left_down(arrow, true)).is_empty()
+        );
+    }
+
+    #[test]
+    fn location_keyboard_and_gamepad_routes_raise_context_menu_sounds() {
+        // ComboBox opens from Down/Space/gamepad-low/gamepad-Down, then the
+        // ContextMenu sounds Command for each changed keyboard selection,
+        // Click for activation and DoorClose for its high-button abort
+        // (`C4GuiComboBox.cpp:66-124`, `C4GuiMenu.cpp:240-320,412-422`).
+        let controller_with_two = || {
+            let mut controller = PortraitSelController::new(
+                vec![
+                    PortraitLocation::new("User", "/u"),
+                    PortraitLocation::new("Program", "/p"),
+                ],
+                0,
+                Vec::new(),
+                true,
+                true,
+            );
+            controller.focus = PortraitSelControl::Location;
+            controller
+        };
+
+        let mut controller = controller_with_two();
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Down)),
+            [PortraitSelSound::DoorOpen]
+        );
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Down)),
+            [PortraitSelSound::Command]
+        );
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Down)),
+            [PortraitSelSound::Command]
+        );
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Enter)),
+            [PortraitSelSound::Click]
+        );
+
+        let mut controller = controller_with_two();
+        assert_eq!(
+            emitted_sounds(&controller.handle_key_down(KeyCode::Space)),
+            [PortraitSelSound::DoorOpen]
+        );
+        assert_eq!(
+            emitted_sounds(&controller.handle_gamepad_high_down()),
+            [PortraitSelSound::DoorClose]
+        );
+
+        let mut controller = controller_with_two();
+        assert_eq!(
+            emitted_sounds(&controller.handle_gamepad_low_down()),
+            [PortraitSelSound::DoorOpen]
+        );
+
+        let mut controller = controller_with_two();
+        assert_eq!(
+            emitted_sounds(&controller.handle_gamepad_direction(KeyCode::Down)),
+            [PortraitSelSound::DoorOpen]
+        );
+    }
+
+    #[test]
+    fn direct_location_row_press_sounds_selection_before_activation() {
+        // ContextMenu::MouseInput first changes the hovered selection and
+        // raises Command, then its same left-down runs DoOK and Click. A row
+        // already selected by pointer motion only needs the Click
+        // (`C4GuiMenu.cpp:200-227,412-422,513-533`).
+        let make = || {
+            PortraitSelController::new(
+                vec![
+                    PortraitLocation::new("User", "/u"),
+                    PortraitLocation::new("Program", "/p"),
+                ],
+                0,
+                Vec::new(),
+                true,
+                true,
+            )
+        };
+        let mut controller = make();
+        let combo = controller.layout().location_combo;
+        let combo_point = GuiPoint::new(
+            (combo.x + combo.w / 2) as f32,
+            (combo.y + combo.h / 2) as f32,
+        );
+        controller.handle_pointer_down(combo_point);
+        let row = controller.layout().location_options[1];
+        let row_point = GuiPoint::new((row.x + row.w / 2) as f32, (row.y + row.h / 2) as f32);
+
+        let direct = controller.handle_pointer_down(row_point);
+        assert_eq!(
+            emitted_sounds(&direct),
+            [PortraitSelSound::Command, PortraitSelSound::Click]
+        );
+        assert!(matches!(
+            direct.as_slice(),
+            [
+                PortraitSelAction::GuiSound(PortraitSelSound::Command),
+                PortraitSelAction::GuiSound(PortraitSelSound::Click),
+                PortraitSelAction::ChangeLocation { index: 1, .. }
+            ]
+        ));
+
+        let mut controller = make();
+        controller.handle_pointer_down(combo_point);
+        controller.handle_pointer_move(row_point);
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_down(row_point)),
+            [PortraitSelSound::Click]
+        );
+    }
+
+    #[test]
+    fn nonactivating_context_pointer_events_sound_selection_and_user_abort() {
+        // Every ContextMenu mouse event updates its hovered selection, but
+        // only LeftDown activates. RightDown/LeftDouble inside therefore emit
+        // Command only when the row changes; RightDown outside is a screen
+        // user-abort and emits DoorClose (`C4GuiMenu.cpp:200-227`,
+        // `C4Gui.cpp:766-776`).
+        let mut controller = PortraitSelController::new(
+            vec![
+                PortraitLocation::new("User", "/u"),
+                PortraitLocation::new("Program", "/p"),
+            ],
+            0,
+            Vec::new(),
+            true,
+            true,
+        );
+        let combo = controller.layout().location_combo;
+        controller.handle_pointer_down(GuiPoint::new(
+            (combo.x + combo.w / 2) as f32,
+            (combo.y + combo.h / 2) as f32,
+        ));
+        let row_point = |index: usize, controller: &PortraitSelController| {
+            let row = controller.layout().location_options[index];
+            GuiPoint::new((row.x + row.w / 2) as f32, (row.y + row.h / 2) as f32)
+        };
+
+        let second = row_point(1, &controller);
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_right_down(second)),
+            [PortraitSelSound::Command]
+        );
+        assert!(controller.is_location_popup_open());
+        assert!(emitted_sounds(&controller.handle_pointer_right_down(second)).is_empty());
+
+        let first = row_point(0, &controller);
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_double_click(first)),
+            [PortraitSelSound::Command]
+        );
+        assert!(controller.is_location_popup_open());
+
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_right_down(GuiPoint::new(2.0, 2.0))),
+            [PortraitSelSound::DoorClose]
+        );
+        assert!(!controller.is_location_popup_open());
+    }
+
+    #[test]
+    fn context_pointer_up_refreshes_the_highlight_before_staying_open() {
+        // ContextMenu::MouseInput recalculates the pointed row for every
+        // mouse event, including LeftUp, and SelectionChanged(true) sounds
+        // Command when that installs a different entry. Only LeftDown calls
+        // DoOK, so release alone keeps the menu open (`C4GuiMenu.cpp:200-227`).
+        let mut controller = PortraitSelController::new(
+            vec![
+                PortraitLocation::new("User", "/u"),
+                PortraitLocation::new("Program", "/p"),
+            ],
+            0,
+            Vec::new(),
+            true,
+            true,
+        );
+        let combo = controller.layout().location_combo;
+        let combo_point = GuiPoint::new(
+            (combo.x + combo.w / 2) as f32,
+            (combo.y + combo.h / 2) as f32,
+        );
+        controller.handle_pointer_down(combo_point);
+        controller.handle_pointer_up(combo_point);
+        let first = controller.layout().location_options[0];
+        let second = controller.layout().location_options[1];
+        controller.handle_pointer_move(GuiPoint::new(
+            (first.x + first.w / 2) as f32,
+            (first.y + first.h / 2) as f32,
+        ));
+        let second_point = GuiPoint::new(
+            (second.x + second.w / 2) as f32,
+            (second.y + second.h / 2) as f32,
+        );
+
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_up(second_point)),
+            [PortraitSelSound::Command]
+        );
+        assert_eq!(controller.combo_highlight, Some(1));
+        assert!(controller.is_location_popup_open());
+        assert!(emitted_sounds(&controller.handle_pointer_up(second_point)).is_empty());
+    }
+
+    #[test]
+    fn left_down_outside_context_routes_after_door_close() {
+        // Screen::MouseInput aborts the context first, then forwards the same
+        // left-down to the underlying dialog. A Button therefore receives its
+        // ArrowHit after the context's DoorClose; clicking the ComboBox itself
+        // is the special case that closes without reopening
+        // (`C4Gui.cpp:766-792`, `C4GuiComboBox.cpp:187-200`).
+        let mut controller = test_controller();
+        controller.selected = Some(0);
+        let layout = controller.layout();
+        let combo = GuiPoint::new(
+            (layout.location_combo.x + layout.location_combo.w / 2) as f32,
+            (layout.location_combo.y + layout.location_combo.h / 2) as f32,
+        );
+        let ok = GuiPoint::new(
+            (layout.ok.x + layout.ok.w / 2) as f32,
+            (layout.ok.y + layout.ok.h / 2) as f32,
+        );
+
+        controller.handle_pointer_down(combo);
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_down(ok)),
+            [PortraitSelSound::DoorClose, PortraitSelSound::ArrowHit]
+        );
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_up(ok)),
+            [PortraitSelSound::Click]
+        );
+
+        controller.handle_pointer_down(combo);
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_down(combo)),
+            [PortraitSelSound::DoorClose]
+        );
+        assert!(!controller.is_location_popup_open());
+    }
+
+    #[test]
+    fn portrait_scrollbar_sounds_match_native_state_transitions() {
+        // ScrollBar sounds ArrowHit when an active arrow is armed/disarmed,
+        // Command when track/thumb capture begins, and Command then ArrowHit
+        // when a held arrow crosses onto the track. Leaving is silent and
+        // re-entry while held re-arms it (`C4GuiContainers.cpp:391-457`).
+        let entries = (0..20)
+            .map(|index| {
+                PortraitFileEntry::from_path(PathBuf::from(format!(
+                    "/portraits/Portrait{index}.png"
+                )))
+                .expect("portrait entry")
+            })
+            .collect::<Vec<_>>();
+        let make = || {
+            PortraitSelController::new(
+                vec![PortraitLocation::new("User", "/portraits")],
+                0,
+                entries.clone(),
+                true,
+                true,
+            )
+        };
+        let mut controller = make();
+        let bar = controller.layout().grid_scrollbar;
+        let top = GuiPoint::new((bar.x + 8) as f32, (bar.y + 1) as f32);
+        let bottom = GuiPoint::new((bar.x + 8) as f32, (bar.y + bar.h - 1) as f32);
+        let track = GuiPoint::new((bar.x + 8) as f32, (bar.y + bar.h / 2) as f32);
+        let outside = GuiPoint::new((bar.x - 10) as f32, track.y);
+
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_down(top)),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(emitted_sounds(&controller.handle_pointer_move(outside)).is_empty());
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_move(top)),
+            [PortraitSelSound::ArrowHit]
+        );
+        assert!(emitted_sounds(&controller.handle_pointer_move(bottom)).is_empty());
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_up(bottom)),
+            [PortraitSelSound::ArrowHit]
+        );
+
+        let mut controller = make();
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_down(track)),
+            [PortraitSelSound::Command]
+        );
+        assert!(emitted_sounds(&controller.handle_pointer_move(bottom)).is_empty());
+        assert!(emitted_sounds(&controller.handle_pointer_up(bottom)).is_empty());
+
+        let mut controller = make();
+        controller.handle_pointer_down(top);
+        assert_eq!(
+            emitted_sounds(&controller.handle_pointer_move(track)),
+            [PortraitSelSound::Command, PortraitSelSound::ArrowHit]
+        );
+        assert!(emitted_sounds(&controller.handle_pointer_up(track)).is_empty());
+
+        let mut inactive = test_controller();
+        let top = inactive.layout().grid_scrollbar;
+        assert!(emitted_sounds(
+            &inactive.handle_pointer_down(GuiPoint::new((top.x + 8) as f32, (top.y + 1) as f32,))
+        )
+        .is_empty());
     }
 
     /// The selector title bounces after three seconds, one pixel per drawn
@@ -4810,7 +5854,8 @@ mod tests {
         assert_eq!(defaults.player_image, "Player image");
         assert_eq!(defaults.lobby_icon, "Lobby-Icon");
         assert_eq!(defaults.no_portrait, "No Portrait");
-        assert_eq!(defaults.ok, "OK");
+        assert_eq!(defaults.loading, "Loading...");
+        assert_eq!(defaults.ok, "&OK");
         assert_eq!(defaults.cancel, "Cancel");
         // IDS_MSG_SELECT is "Select %s", filled with IDS_TYPE_PORTRAIT.
         assert_eq!(defaults.select_portrait, "Select Portrait");
@@ -4826,13 +5871,13 @@ mod tests {
             640,
             480,
             1,
-            PortraitSelMetrics::measured(font, &defaults),
+            PortraitSelMetrics::measured(&fonts, &defaults),
         );
         let german_width = portrait_sel_layout_with_metrics(
             640,
             480,
             1,
-            PortraitSelMetrics::measured(font, &german),
+            PortraitSelMetrics::measured(&fonts, &german),
         );
         assert_eq!(
             english_width.location_label.w,
@@ -4846,6 +5891,24 @@ mod tests {
         assert_eq!(
             english_width.location_label.w, 57,
             "measuring must agree with the C++-verified English geometry"
+        );
+        assert_eq!(
+            english_width.import_label.w,
+            font.measure(&defaults.import_image_as, true).0
+        );
+        assert_eq!(
+            english_width.import_label.w, 106,
+            "the active font must preserve the C++-verified English import width"
+        );
+        assert_eq!(
+            portrait_sel_layout_with_metrics(
+                1152,
+                723,
+                4,
+                PortraitSelMetrics::measured(&fonts, &defaults),
+            ),
+            portrait_sel_layout(1152, 723, 4),
+            "measured shipped fonts preserve the verified default capture"
         );
         assert!(
             german_width.location_label.w > english_width.location_label.w,
@@ -4869,6 +5932,50 @@ mod tests {
             controller.items().last().map(|item| item.label()),
             Some("Kein Portrait"),
             "the No Portrait tile is localized"
+        );
+    }
+
+    #[test]
+    fn ordinary_label_hotkey_markup_is_expanded_before_measure_and_draw() {
+        // Label::SetText expands `&` markup before autosizing and retains the
+        // expanded string for drawing (`C4GuiLabels.cpp:65-76,97-116`).
+        let fonts = crate::test_support::endeavour_font_set();
+        let plain = PortraitSelLabels {
+            location: "Location:".to_string(),
+            import_image_as: "Import image as:".to_string(),
+            ..Default::default()
+        };
+        let marked = PortraitSelLabels {
+            location: "&Location:".to_string(),
+            import_image_as: "&Import image as:".to_string(),
+            ..Default::default()
+        };
+        let native_expanded = PortraitSelLabels {
+            location: expand_hotkey_markup(&marked.location).0,
+            import_image_as: expand_hotkey_markup(&marked.import_image_as).0,
+            ..Default::default()
+        };
+        assert_eq!(
+            PortraitSelMetrics::measured(&fonts, &marked),
+            PortraitSelMetrics::measured(&fonts, &plain),
+            "the hidden mnemonic marker cannot widen either label"
+        );
+
+        let render = |labels| {
+            let mut controller = PortraitSelController::with_labels(
+                vec![PortraitLocation::new("User", "/u")],
+                0,
+                Vec::new(),
+                true,
+                true,
+                labels,
+            );
+            render_test_controller(&mut controller)
+        };
+        assert_eq!(
+            render(marked).pixels(),
+            render(native_expanded).pixels(),
+            "the marker must expand to the highlighted native markup before drawing"
         );
     }
 
@@ -4955,6 +6062,65 @@ mod tests {
         );
         assert!(dialog.handle_hotkey('P').is_none());
         assert!(!dialog.set_picture());
+    }
+
+    #[test]
+    fn pending_thumbnail_uses_the_active_loading_caption() {
+        // `C4PortraitSelDlg::ListItem::DrawElement` resolves
+        // IDS_PRC_INITIALIZE at draw time (`C4FileSelDlg.cpp:470-495`).
+        let render = |loading: &str| {
+            let mut dialog = PortraitSelController::with_labels(
+                vec![PortraitLocation::new("User", "/u")],
+                0,
+                vec![PortraitFileEntry {
+                    full_path: PathBuf::from("/u/a.png"),
+                    filename: "a.png".to_string(),
+                    label: "a".to_string(),
+                }],
+                false,
+                false,
+                PortraitSelLabels {
+                    loading: loading.to_string(),
+                    ..Default::default()
+                },
+            );
+            render_test_controller(&mut dialog)
+        };
+
+        assert_ne!(
+            render("Loading...").pixels(),
+            render("Laden...").pixels(),
+            "the active language's progress caption must reach the renderer"
+        );
+    }
+
+    #[test]
+    fn dialog_button_access_keys_follow_the_active_captions() {
+        // `newOKButton` and `newCancelButton` take IDS_DLG_OK/CANCEL, and
+        // `Button::SetText` registers the marker in those localized captions
+        // (`C4Gui.h:1574-1575`, `C4GuiButton.cpp:48-76`). German Cancel is
+        // `&Abbrechen`, so hardcoding the English OK mnemonic cannot pass.
+        let mut dialog = PortraitSelController::with_labels(
+            vec![PortraitLocation::new("User", "/u")],
+            0,
+            Vec::new(),
+            false,
+            false,
+            PortraitSelLabels {
+                ok: "&OK".to_string(),
+                cancel: "&Abbrechen".to_string(),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            dialog.handle_hotkey('A'),
+            Some(vec![PortraitSelAction::Cancel])
+        );
+        assert_eq!(
+            dialog.handle_hotkey('O'),
+            Some(vec![PortraitSelAction::SelectionRequired])
+        );
     }
 
     /// The selector moves when its wooden title is dragged
@@ -5045,6 +6211,29 @@ mod tests {
             controller.layout().bounds,
             origin,
             "pressing Close must not drag the dialog out from under the pointer"
+        );
+    }
+
+    #[test]
+    fn releasing_a_title_drag_applies_the_final_pointer_delta() {
+        // `Element::StopDragging` calls `DoDragging` once before clearing the
+        // drag target (`C4Gui.cpp:255-259`). A release may therefore be the
+        // first event carrying the pointer's final position.
+        let mut controller = test_controller();
+        controller.resize(640, 480);
+        let before = controller.layout();
+        let grab = GuiPoint::new(
+            (before.caption.x + before.caption.w / 2) as f32,
+            (before.caption.y + before.caption.h / 2) as f32,
+        );
+
+        controller.handle_pointer_down(grab);
+        controller.handle_pointer_up(GuiPoint::new(grab.x + 37.0, grab.y + 19.0));
+
+        let dropped = controller.layout().bounds;
+        assert_eq!(
+            (dropped.x - before.bounds.x, dropped.y - before.bounds.y),
+            (37, 19)
         );
     }
 

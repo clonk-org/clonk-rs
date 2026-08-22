@@ -31,6 +31,11 @@ DATED_SNAPSHOT = re.compile(r"[Aa]udit snapshot\s*\(\d{4}-\d{2}-\d{2}\)")
 # The private work queue the snapshot used to cite; those ids resolve only
 # outside this repository.
 PRIVATE_QUEUE = re.compile(r"\bM\d{2}\s+queue\b|\bM\d{2}-P\d-L\d{3}\b|\bCLO-\d{3}\b")
+# This gap inventory was left behind in two retired census fragments and
+# contradicted the detailed, tested portrait-selector row.
+PORTRAIT_GAP_CLAIM = re.compile(
+    r"\bPortrait\b[^.]*\bstill lacks\b", re.IGNORECASE | re.DOTALL
+)
 
 
 class MenuParityDocTest(unittest.TestCase):
@@ -84,6 +89,14 @@ class MenuParityDocTest(unittest.TestCase):
             match,
             "private work-queue ids resolve only outside this repository; "
             "state the fact or cite a public issue instead",
+        )
+
+    def test_no_stale_portrait_gap_claims(self):
+        match = PORTRAIT_GAP_CLAIM.search(self.text)
+        self.assertIsNone(
+            match,
+            "the portrait-selector reference must not repeat the retired gap "
+            "inventory after its detailed row records the regression evidence",
         )
 
     def test_cpp_anchors_survive(self):
