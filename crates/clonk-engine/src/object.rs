@@ -2493,7 +2493,8 @@ impl Object {
             .vertices
             .iter()
             .zip(&self.frame_vertex_contacts)
-            .find_map(|(vertex, &contact)| (contact != 0).then_some(vertex.x.signum()))
+            .filter_map(|(vertex, &contact)| (contact != 0).then_some(vertex.x.signum()))
+            .find(|&weight| weight != 0)
             .unwrap_or(0)
     }
 

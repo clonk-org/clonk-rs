@@ -5,6 +5,87 @@
 
 use super::*;
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MovementProbeTrace {
+    pub(crate) position: Vector2,
+    pub(crate) object_position: Vector2,
+    pub(crate) fixed_position: FixedVec2,
+    pub(crate) rotation: i32,
+    pub(crate) fixed_rotation: C4Fixed,
+    pub(crate) fixed_velocity: FixedVec2,
+    pub(crate) rotation_velocity: C4Fixed,
+    pub(crate) motion_x: i32,
+    pub(crate) motion_y: i32,
+    pub(crate) result: bool,
+    pub(crate) t_contact: u32,
+    pub(crate) contact_count: i32,
+    pub(crate) contact_cnat: u32,
+    pub(crate) vertex_contacts: Vec<u32>,
+    pub(crate) random_count: i32,
+    pub(crate) random_hold: u32,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct MovementParityTrace {
+    pub(crate) probes: Vec<MovementProbeTrace>,
+    pub(crate) contact_invocations: usize,
+    pub(crate) update_pos_calls: usize,
+    pub(crate) pre_contact_action_t_contact: Option<u32>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static MOVEMENT_PARITY_TRACE: std::cell::RefCell<Option<MovementParityTrace>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn begin_movement_parity_trace() {
+    MOVEMENT_PARITY_TRACE.with(|trace| {
+        debug_assert!(trace.borrow().is_none());
+        *trace.borrow_mut() = Some(MovementParityTrace::default());
+    });
+}
+
+#[cfg(test)]
+fn take_movement_parity_trace() -> MovementParityTrace {
+    MOVEMENT_PARITY_TRACE.with(|trace| {
+        trace
+            .borrow_mut()
+            .take()
+            .expect("movement parity trace was enabled")
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn record_movement_contact_invocation() {
+    MOVEMENT_PARITY_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.contact_invocations += 1;
+        }
+    });
+}
+
+#[cfg(test)]
+fn record_movement_update_pos() {
+    MOVEMENT_PARITY_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.update_pos_calls += 1;
+        }
+    });
+}
+
+#[cfg(test)]
+fn record_pre_contact_action_t_contact(t_contact: u32) {
+    MOVEMENT_PARITY_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.pre_contact_action_t_contact = Some(t_contact);
+        }
+    });
+}
+
 impl Engine {
     fn movement_live_config_at(&self, object_id: ObjectId) -> Option<MovementLiveConfig> {
         let index = self.find_object_index(object_id)?;
@@ -263,10 +344,39 @@ impl Engine {
             self.dispatch_live_movement_contact(object_id, MovementContactDispatch::ShapeProbe)?;
             self.refresh_live_movement_solid_masks(solid_masks);
         }
-        Ok(contacted
+        let result = contacted
             && self
                 .find_object_index(object_id)
-                .is_some_and(|index| self.objects[index].frame_shape_contact_count != 0))
+                .is_some_and(|index| self.objects[index].frame_shape_contact_count != 0);
+        #[cfg(test)]
+        if let Some(object) = self
+            .find_object_index(object_id)
+            .and_then(|index| self.objects.get(index))
+        {
+            MOVEMENT_PARITY_TRACE.with(|trace| {
+                if let Some(trace) = trace.borrow_mut().as_mut() {
+                    trace.probes.push(MovementProbeTrace {
+                        position: candidate,
+                        object_position: object.state.position,
+                        fixed_position: object.fixed_position,
+                        rotation: object.state.rotation,
+                        fixed_rotation: object.fixed_rotation,
+                        fixed_velocity: object.fixed_velocity,
+                        rotation_velocity: object.rotation_velocity,
+                        motion_x: object.motion_x,
+                        motion_y: object.motion_y,
+                        result,
+                        t_contact: object.frame_t_contact,
+                        contact_count: object.frame_shape_contact_count,
+                        contact_cnat: object.frame_shape_contact_cnat,
+                        vertex_contacts: object.frame_vertex_contacts.clone(),
+                        random_count: self.rng.count,
+                        random_hold: self.rng.hold,
+                    });
+                }
+            });
+        }
+        Ok(result)
     }
 
     fn begin_live_object_motion(
@@ -608,6 +718,61 @@ impl Engine {
         Ok(outcome)
     }
 
+    /// Test-only entry to the exact `DoUnattachedMovement` translation stage.
+    /// The oracle stops before rotation and `ContactAction`, so using the full
+    /// `exec_object_movement` here would compare state from later C++ stages.
+    #[cfg(test)]
+    pub(crate) fn parity_advance_live_position_per_pixel(
+        &mut self,
+        index: usize,
+    ) -> Result<(MovementStepOutcome, MovementParityTrace), EngineError> {
+        let object_id = self.objects[index].id;
+        self.objects[index].motion_x = 0;
+        self.objects[index].motion_y = 0;
+        let mut solid_masks = self.live_movement_solid_masks();
+        let mut mask_attachments = None;
+        begin_movement_parity_trace();
+        let outcome = self.advance_live_position_per_pixel(
+            object_id,
+            &mut solid_masks,
+            &mut mask_attachments,
+        );
+        let trace = take_movement_parity_trace();
+        outcome.map(|outcome| (outcome, trace))
+    }
+
+    /// Test-only entry to the exact rotation block that follows unattached
+    /// translation in `C4Object::DoMovement` (C4Movement.cpp:372-436).
+    #[cfg(test)]
+    pub(crate) fn parity_advance_live_rotation(
+        &mut self,
+        index: usize,
+        redirect_yr: bool,
+    ) -> Result<((bool, u32, bool), MovementParityTrace), EngineError> {
+        let object_id = self.objects[index].id;
+        let mut solid_masks = self.live_movement_solid_masks();
+        begin_movement_parity_trace();
+        let outcome =
+            self.advance_live_rotation(object_id, &mut solid_masks, false, redirect_yr, false);
+        let trace = take_movement_parity_trace();
+        outcome.map(|outcome| (outcome, trace))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parity_exec_object_movement(
+        &mut self,
+        index: usize,
+        action_library: &ActionLibrary,
+        definition_id: &DefinitionId,
+        solid_mask_indices: &[usize],
+    ) -> Result<(ExecMovementOutcome, MovementParityTrace), EngineError> {
+        begin_movement_parity_trace();
+        let outcome =
+            self.exec_object_movement(index, action_library, definition_id, solid_mask_indices);
+        let trace = take_movement_parity_trace();
+        outcome.map(|outcome| (outcome, trace))
+    }
+
     pub(crate) fn advance_live_rotation(
         &mut self,
         object_id: ObjectId,
@@ -707,6 +872,8 @@ impl Engine {
                     // ContactCheck for every attempted degree
                     // (C4Object.cpp:322-344; C4Movement.cpp:397-411).
                     self.update_sector_for_index(index);
+                    #[cfg(test)]
+                    record_movement_update_pos();
                 }
 
                 let Some(index) = self.find_object_index(object_id) else {
@@ -771,6 +938,8 @@ impl Engine {
                     object.rotation_velocity = C4Fixed::ZERO;
                     object.refresh_velocity_from_fixed();
                     self.update_sector_for_index(index);
+                    #[cfg(test)]
+                    record_movement_update_pos();
                     break;
                 }
                 if let Some(index) = self.find_object_index(object_id) {
@@ -993,6 +1162,8 @@ impl Engine {
             // UpdateSolidMask and InLiquid/Splash. C++ restores accumulated
             // iContacts to t_contact only immediately before ContactAction
             // (C4Movement.cpp:443-470).
+            #[cfg(test)]
+            record_pre_contact_action_t_contact(self.objects[idx].frame_t_contact);
             self.objects[idx].frame_t_contact = movement_outcome.contact_cnat;
             let definition_id = self.objects[idx].definition_id.clone();
             self.exec_contact_action(idx, movement_outcome.contact_cnat, &definition_id)?;

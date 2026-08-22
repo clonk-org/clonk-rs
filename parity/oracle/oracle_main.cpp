@@ -4172,10 +4172,12 @@ struct C4Shape
 
     bool ContactCheck(int32_t cx, int32_t cy);
     bool Attach(int32_t &cx, int32_t &cy, uint8_t cnat_pos);
+    void Rotate(int32_t angle, bool update_vertices);
 };
 
 #include "shape_contact_check.inc"
 #include "shape_attach.inc"
+#include "shape_rotate.inc"
 
 // C4Object::TargetBounds (C4Movement.cpp:128-164), the clamp SideBounds and
 // VerticalBounds run the movement target through. It decides which velocity
@@ -4193,7 +4195,9 @@ const int32_t DFA_ATTACH = 14;
 
 // OCF_Rotate, which the vertical contact cascade consults before bleeding ydir
 // into rdir (C4Movement.cpp:305-311).
-const uint32_t OCF_Rotate = 1u << 17;
+const uint32_t OCF_Rotate = 1u << 9; // C4Constants.h:115
+const C4Fixed FixHalfCircle = itofix(180);
+const C4Fixed FixFullCircle = itofix(360);
 
 struct C4ActMapEntry
 {
@@ -4207,6 +4211,7 @@ struct C4DefLike
     // case says which it wants; inventing a default here would have made the
     // clamp fire in the oracle and not in the port.
     int32_t BorderBound{0};
+    int32_t Rotateable{0};
     C4ActMapEntry ActMap[1]{};
 };
 
@@ -4216,12 +4221,43 @@ struct C4ActionLike
     int32_t t_attach{0};
 };
 
+struct MovementProbe
+{
+    int32_t x{};
+    int32_t y{};
+    int32_t object_x{};
+    int32_t object_y{};
+    int32_t fix_x{};
+    int32_t fix_y{};
+    int32_t rotation{};
+    int32_t fix_r{};
+    int32_t xdir{};
+    int32_t ydir{};
+    int32_t rdir{};
+    int32_t motion_x{};
+    int32_t motion_y{};
+    int32_t result{};
+    int32_t t_contact{};
+    int32_t contact_count{};
+    int32_t contact_cnat{};
+    int32_t vertex_contacts[MaxVertex]{};
+    int32_t random_count{};
+    uint32_t random_hold{};
+};
+
 struct C4Object
 {
     C4Fixed xdir{Fix0};
     C4Fixed ydir{Fix0};
-    int32_t ContactCalls[4]{};
+    int32_t ContactCalls[16]{};
     int32_t ContactCallCount{};
+    int32_t CallbackCalls[16]{};
+    int32_t CallbackCallCount{};
+    bool ContactFunctions{};
+    bool CallbackRandom{};
+    uint32_t ContactReturnMask{};
+    MovementProbe Probes[32]{};
+    int32_t ProbeCount{};
 
     // Movement state. `x`/`y` are the whole-pixel position the loop steps, and
     // `fix_x`/`fix_y` the fixed accumulator it rewrites on contact.
@@ -4229,12 +4265,15 @@ struct C4Object
     int32_t y{};
     C4Fixed fix_x{Fix0};
     C4Fixed fix_y{Fix0};
+    int32_t r{};
+    C4Fixed fix_r{Fix0};
     C4Fixed rdir{Fix0};
     int32_t motion_x{};
     int32_t motion_y{};
     uint32_t OCF{};
     bool Alive{false};
     C4Shape Shape{};
+    C4Shape BaseShape{};
     int32_t Category{0};
     C4DefLike DefStorage{};
     C4DefLike *Def{&DefStorage};
@@ -4247,24 +4286,25 @@ struct C4Object
 
     bool Contact(int32_t cnat)
     {
-        if (ContactCallCount < 4) ContactCalls[ContactCallCount] = cnat;
+        if (ContactCallCount < 16) ContactCalls[ContactCallCount] = cnat;
         ++ContactCallCount;
-        return false;
+        if (!ContactFunctions) return false;
+        if (CallbackCallCount < 16) CallbackCalls[CallbackCallCount] = cnat;
+        ++CallbackCallCount;
+        if (CallbackRandom) Random(17);
+        return ContactReturnMask & static_cast<uint32_t>(cnat);
     }
 
-    // The shape's own check, reached through the object the same way
-    // C4Object::ContactCheck does (C4Movement.cpp:167-183 calls
-    // Shape.ContactCheck after positioning the shape).
-    int32_t ContactCheck(int32_t cx, int32_t cy)
-    {
-        Shape.ContactCheck(cx, cy);
-        t_contact = Shape.ContactCNAT;
-        return Shape.ContactCount;
-    }
+    int32_t ContactCheckNative(int32_t cx, int32_t cy);
+    int32_t ContactCheck(int32_t cx, int32_t cy);
     int32_t t_contact{};
     bool AnyContact{false};
     uint32_t Contacts{};
     bool RedirectYR{false};
+    bool RotationAnyContact{false};
+    uint32_t RotationContacts{};
+    bool Turned{false};
+    int32_t UpdatePosCalls{};
 
     void TargetBounds(
         int32_t &ctco, int32_t limit_low, int32_t limit_hi, int32_t cnat_low, int32_t cnat_hi);
@@ -4278,9 +4318,54 @@ struct C4Object
         motion_y += my;
     }
     void DoUnattachedMovement();
+    void UpdateShape()
+    {
+        // C4Object::UpdateShape first copies Def->Shape and then applies the
+        // ABSOLUTE object angle before its unconditional UpdatePos
+        // (C4Object.cpp:322-344). Re-rotating the live shape here would
+        // accumulate rounding that production never has.
+        Shape = BaseShape;
+        Shape.Rotate(r, true);
+        UpdatePos();
+    }
+    void UpdatePos() { ++UpdatePosCalls; }
+    void DoRotation(bool fNoAttach, bool fRedirectYR);
 };
 
+#include "object_contact_check.inc"
 #include "target_bounds.inc"
+
+int32_t C4Object::ContactCheck(int32_t cx, int32_t cy)
+{
+    const int32_t result = ContactCheckNative(cx, cy);
+    if (ProbeCount < 32)
+    {
+        MovementProbe &probe = Probes[ProbeCount];
+        probe.x = cx;
+        probe.y = cy;
+        probe.object_x = x;
+        probe.object_y = y;
+        probe.fix_x = fix_x.val;
+        probe.fix_y = fix_y.val;
+        probe.rotation = r;
+        probe.fix_r = fix_r.val;
+        probe.xdir = xdir.val;
+        probe.ydir = ydir.val;
+        probe.rdir = rdir.val;
+        probe.motion_x = motion_x;
+        probe.motion_y = motion_y;
+        probe.result = result;
+        probe.t_contact = t_contact;
+        probe.contact_count = Shape.ContactCount;
+        probe.contact_cnat = Shape.ContactCNAT;
+        for (int32_t v = 0; v < Shape.VtxNum; ++v)
+            probe.vertex_contacts[v] = Shape.VtxContactCNAT[v];
+        probe.random_count = RandomCount;
+        probe.random_hold = RandomHold;
+    }
+    ++ProbeCount;
+    return result;
+}
 
 #define GBackHgt GridHgt
 
@@ -4293,7 +4378,7 @@ struct C4Object
 #include "side_bounds.inc"
 #include "vertical_bounds.inc"
 
-// The unattached half of C4Object::DoMovement (C4Movement.cpp:253-321), lifted
+// The unattached half of C4Object::DoMovement (C4Movement.cpp:254-322), lifted
 // as the statement it is. The locals it opens with are DoMovement's own; the
 // attached branch, the DigFree preamble and the ContactAction tail are out of
 // this section's scope and are not lifted.
@@ -4313,6 +4398,25 @@ void C4Object::DoUnattachedMovement()
     (void)ctcoy;
     (void)ctx;
     (void)cty;
+}
+
+// The exact rotation block of C4Object::DoMovement
+// (C4Movement.cpp:372-436), including one-degree probes, undo, redirection,
+// and circle normalization.
+void C4Object::DoRotation(bool fNoAttach, bool fRedirectYR)
+{
+    int32_t ctcor, ctx = x, cty = y, iContact = 0;
+    bool fAnyContact = false;
+    uint32_t iContacts = 0;
+    bool fTurned = false;
+#include "do_movement_rotation.inc"
+    RotationAnyContact = fAnyContact;
+    RotationContacts = iContacts;
+    Turned = fTurned;
+    (void)ctcor;
+    (void)ctx;
+    (void)cty;
+    (void)iContact;
 }
 
 #undef GBackHgt
@@ -9463,7 +9567,7 @@ int main()
         using shape_contact::GridHgt;
         using shape_contact::GridWdt;
         using shape_contact::OCF_Rotate;
-        // The unattached collision loop (C4Movement.cpp:253-321).
+        // The unattached collision loop (C4Movement.cpp:254-322).
         //
         // Each axis accumulates its fixed target first, clamps it, and then
         // walks ONE PIXEL AT A TIME with a ContactCheck per step. Three things
@@ -9565,6 +9669,519 @@ int main()
                    obj.xdir.val, obj.ydir.val, obj.rdir.val, obj.motion_x, obj.motion_y,
                    obj.AnyContact ? "true" : "false", obj.Contacts,
                    obj.RedirectYR ? "true" : "false", obj.ContactCallCount);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("do_movement_collision_matrix");
+    {
+        using namespace shape_contact;
+
+        struct Vertex
+        {
+            int32_t x, y, cnat, friction;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t seed;
+            int32_t x, y;
+            int32_t fix_x_offset, fix_y_offset;
+            int32_t xdir_n, xdir_d;
+            int32_t ydir_n, ydir_d;
+            int32_t floor_y, ceiling_y, wall_x, wall_material;
+            int32_t left_open, right_open;
+            bool top_open, bottom_open;
+            int32_t border_bound;
+            bool alive, rotatable;
+            bool callbacks;
+            uint32_t callback_return_mask;
+            bool callback_random;
+            int32_t vertex_count;
+            Vertex vertices[MaxVertex];
+        };
+
+        const int32_t L = CNAT_Left, R = CNAT_Right, T = CNAT_Top, B = CNAT_Bottom;
+        const Case cases[] = {
+            // Raw fixed contact snap while moving right: the whole target is
+            // only reached because the starting accumulator has a fraction.
+            {"fractional_right_wall_snap", 31, 8, 6, 20000, 0, 1, 4, 0, 1,
+             -1, -1, 10, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{1, 0, R, 0}}},
+            {"left_wall", 32, 8, 6, 0, 0, -4, 1, 0, 1,
+             -1, -1, 4, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{-1, 0, L, 0}}},
+            {"ceiling", 33, 8, 8, 0, 0, 0, 1, -4, 1,
+             -1, 4, -1, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{0, -1, T, 0}}},
+            // GetPix's side-height rule is exercised through the movement
+            // loop itself, not just the standalone Shape.ContactCheck matrix.
+            {"closed_left_border", 34, 1, 6, 0, 0, -3, 1, 0, 1,
+             -1, -1, -1, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{-1, 0, L, 0}}},
+            {"open_left_border", 35, 1, 6, 0, 0, -3, 1, 0, 1,
+             -1, -1, -1, 1, 8, 0, true, false, 0, false, false, false, 0, false,
+             1, {{-1, 0, L, 0}}},
+            // Both bottom vertices contact on the same probe. The two rows
+            // reverse their authored order so ContactVtxFriction's first-slot
+            // rule is visible in the resulting raw xdir.
+            {"two_contacts_first_friction_20", 36, 8, 6, 0, 0, 3, 1, 4, 1,
+             10, -1, -1, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             2, {{-1, 1, B, 20}, {1, 1, B, 90}}},
+            {"two_contacts_first_friction_90", 37, 8, 6, 0, 0, 3, 1, 4, 1,
+             10, -1, -1, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             2, {{1, 1, B, 90}, {-1, 1, B, 20}}},
+            // A single off-centre bottom contact redirects into a non-zero
+            // angular velocity. Its sign follows ContactVtxWeight.
+            {"single_left_weight_rotates", 38, 8, 6, 0, 0, 0, 1, 4, 1,
+             10, -1, -1, 1, 0, 0, true, false, 0, false, true, false, 0, false,
+             1, {{-2, 1, B, 0}}},
+            {"single_right_weight_rotates", 39, 8, 6, 0, 0, 0, 1, 4, 1,
+             10, -1, -1, 1, 0, 0, true, false, 0, false, true, false, 0, false,
+             1, {{2, 1, B, 0}}},
+            {"two_contacts_do_not_rotate", 40, 8, 6, 0, 0, 0, 1, 4, 1,
+             10, -1, -1, 1, 0, 0, true, false, 0, false, true, false, 0, false,
+             2, {{-2, 1, B, 0}, {2, 1, B, 0}}},
+            {"living_single_contact_does_not_rotate", 44, 8, 6, 0, 0, 0, 1, 4, 1,
+             10, -1, -1, 1, 0, 0, true, false, 0, true, true, false, 0, false,
+             1, {{-2, 1, B, 0}}},
+            // Both axes cross fixtoi's half-pixel threshold only because of
+            // their raw starting remainder. Removing either offset skips the
+            // collision, so the raw accumulators are load-bearing inputs.
+            {"fractional_floor_snap", 45, 8, 8, 0, 20000, 0, 1, 1, 4,
+             10, -1, -1, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{0, 1, B, 0}}},
+            // A vertical contact with no contacted Left neighbour slides one
+            // way; a point on the closed left border has Left but no Right and
+            // takes the opposite RedirectForce arm (C4Movement.cpp:304-307).
+            {"vertical_contact_without_left_redirects", 46, 8, 4, 0, 0, 0, 1, 2, 1,
+             -1, -1, 8, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{0, 1, B, 0}}},
+            {"vertical_contact_without_right_redirects", 47, 0, 4, 0, 0, 0, 1, 2, 1,
+             -1, -1, 0, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{0, 1, B, 0}}},
+            // Horizontal completes before vertical. The wall contact redirects
+            // only half a pixel from xdir, leaving the original downward ydir
+            // to reach the floor and OR both direction masks.
+            {"wall_then_floor_aggregates", 41, 8, 6, 0, 0, 4, 1, 4, 1,
+             10, -1, 12, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             2, {{0, 1, B, 0}, {1, 0, R, 0}}},
+            // The same probe carries Right|Bottom. Falsy callbacks visit both
+            // in bit order and spend two synced draws; a truthy Right stops the
+            // callback loop after one without cancelling the collision.
+            {"callbacks_falsy_visit_both", 42, 8, 9, 0, 0, 2, 1, 0, 1,
+             10, -1, 10, 1, 0, 0, true, false, 0, false, false, true, 0, true,
+             2, {{0, 1, B, 0}, {1, 0, R, 0}}},
+            {"callback_truthy_right_stops_bottom", 42, 8, 9, 0, 0, 2, 1, 0, 1,
+             10, -1, 10, 1, 0, 0, true, false, 0, false, false, true,
+             static_cast<uint32_t>(R), true, 2, {{0, 1, B, 0}, {1, 0, R, 0}}},
+            // Side/VerticalBounds clamp all three landscape-bound directions
+            // before the pixel walk and dispatch the matching Contact callback
+            // (C4Movement.cpp:128-164,185-213,262-263,289-290).
+            {"side_bound_right", 48, 20, 6, 0, 0, 5, 1, 0, 1,
+             -1, -1, -1, 1, 0, 0, true, false, C4D_Border_Sides,
+             false, false, true, 0, false, 1, {{0, 0, R, 0}}},
+            {"top_bound", 49, 8, 5, 0, 0, 0, 1, -5, 1,
+             -1, -1, -1, 1, 0, 0, true, false, C4D_Border_Top,
+             false, false, true, 0, false, 1, {{0, 0, T, 0}}},
+            {"bottom_bound", 50, 8, 12, 0, 0, 0, 1, 5, 1,
+             -1, -1, -1, 1, 0, 0, true, false, C4D_Border_Bottom,
+             false, false, true, 0, false, 1, {{0, 0, B, 0}}},
+            // RightOpen is a height, while BottomOpen is a flag. Each pair
+            // differs only in that native border setting.
+            {"closed_right_border", 51, 22, 6, 0, 0, 3, 1, 0, 1,
+             -1, -1, -1, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{1, 0, R, 0}}},
+            {"open_right_border", 52, 22, 6, 0, 0, 3, 1, 0, 1,
+             -1, -1, -1, 1, 0, 8, true, false, 0, false, false, false, 0, false,
+             1, {{1, 0, R, 0}}},
+            {"closed_bottom_border", 53, 8, 14, 0, 0, 0, 1, 3, 1,
+             -1, -1, -1, 1, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{0, 1, B, 0}}},
+            {"open_bottom_border", 54, 8, 14, 0, 0, 0, 1, 3, 1,
+             -1, -1, -1, 1, 0, 0, true, true, 0, false, false, false, 0, false,
+             1, {{0, 1, B, 0}}},
+            // Byte 3 is the MCVehic value C4SolidMask::Put writes. This pins
+            // the movement-facing density; the Rust side supplies it through
+            // an actual live blocker mask instead of prepainting terrain.
+            {"stationary_solid_mask_wall", 43, 8, 6, 0, 0, 4, 1, 0, 1,
+             -1, -1, 12, MVehicle, 0, 0, true, false, 0, false, false, false, 0, false,
+             1, {{1, 0, R, 0}}},
+        };
+
+        for (const auto &c : cases)
+        {
+            sep();
+            FixedRandom(c.seed);
+            Randomize3();
+
+            for (int32_t gy = 0; gy < GridHgt; ++gy)
+                for (int32_t gx = 0; gx < GridWdt; ++gx)
+                    g_grid[gy][gx] = 0;
+            if (c.floor_y >= 0)
+                for (int32_t gy = c.floor_y; gy < GridHgt; ++gy)
+                    for (int32_t gx = 0; gx < GridWdt; ++gx)
+                        g_grid[gy][gx] = 1;
+            if (c.ceiling_y >= 0)
+                for (int32_t gy = 0; gy <= c.ceiling_y; ++gy)
+                    for (int32_t gx = 0; gx < GridWdt; ++gx)
+                        g_grid[gy][gx] = 1;
+            if (c.wall_x >= 0)
+                for (int32_t gy = 0; gy < GridHgt; ++gy)
+                    g_grid[gy][c.wall_x] = c.wall_material;
+            g_left_open = c.left_open;
+            g_right_open = c.right_open;
+            g_top_open = c.top_open;
+            g_bottom_open = c.bottom_open;
+
+            shape_contact::C4Object object;
+            object.x = c.x;
+            object.y = c.y;
+            object.fix_x = itofix(c.x);
+            object.fix_x.val += c.fix_x_offset;
+            object.fix_y = itofix(c.y);
+            object.fix_y.val += c.fix_y_offset;
+            object.xdir = itofix(c.xdir_n, c.xdir_d);
+            object.ydir = itofix(c.ydir_n, c.ydir_d);
+            object.Alive = c.alive;
+            object.OCF = c.rotatable ? shape_contact::OCF_Rotate : 0u;
+            object.DefStorage.BorderBound = c.border_bound;
+            object.ContactFunctions = c.callbacks;
+            object.ContactReturnMask = c.callback_return_mask;
+            object.CallbackRandom = c.callback_random;
+            object.Shape.x = -2;
+            object.Shape.y = -2;
+            object.Shape.Wdt = 5;
+            object.Shape.Hgt = 5;
+            object.Shape.VtxNum = c.vertex_count;
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+            {
+                object.Shape.VtxX[v] = c.vertices[v].x;
+                object.Shape.VtxY[v] = c.vertices[v].y;
+                object.Shape.VtxCNAT[v] = c.vertices[v].cnat;
+                object.Shape.VtxFriction[v] = c.vertices[v].friction;
+            }
+
+            object.DoUnattachedMovement();
+
+            printf("{\"name\":\"%s\",\"seed\":%d,\"x0\":%d,\"y0\":%d,"
+                   "\"fix_x_offset\":%d,\"fix_y_offset\":%d,"
+                   "\"xdir_n\":%d,\"xdir_d\":%d,\"ydir_n\":%d,\"ydir_d\":%d,"
+                   "\"floor_y\":%d,\"ceiling_y\":%d,\"wall_x\":%d,\"wall_material\":%d,"
+                   "\"left_open\":%d,\"right_open\":%d,\"top_open\":%d,\"bottom_open\":%d,"
+                   "\"border_bound\":%d,\"alive\":%d,\"rotatable\":%d,"
+                   "\"callbacks\":%d,\"callback_return_mask\":%u,\"callback_random\":%d,"
+                   "\"vertices\":[",
+                   c.name, c.seed, c.x, c.y, c.fix_x_offset, c.fix_y_offset,
+                   c.xdir_n, c.xdir_d, c.ydir_n, c.ydir_d, c.floor_y, c.ceiling_y,
+                   c.wall_x, c.wall_material, c.left_open, c.right_open,
+                   c.top_open ? 1 : 0, c.bottom_open ? 1 : 0, c.border_bound,
+                   c.alive ? 1 : 0, c.rotatable ? 1 : 0, c.callbacks ? 1 : 0,
+                   c.callback_return_mask, c.callback_random ? 1 : 0);
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+                printf("%s{\"x\":%d,\"y\":%d,\"cnat\":%d,\"friction\":%d}",
+                       v ? "," : "", c.vertices[v].x, c.vertices[v].y,
+                       c.vertices[v].cnat, c.vertices[v].friction);
+            printf("],\"x\":%d,\"y\":%d,\"fix_x\":%d,\"fix_y\":%d,"
+                   "\"xdir\":%d,\"ydir\":%d,\"rdir\":%d,"
+                   "\"motion_x\":%d,\"motion_y\":%d,\"any_contact\":%d,"
+                   "\"contacts\":%u,\"redirect_yr\":%d,\"t_contact\":%d,"
+                   "\"contact_count\":%d,\"contact_cnat\":%d,\"vertex_contacts\":[",
+                   object.x, object.y, object.fix_x.val, object.fix_y.val,
+                   object.xdir.val, object.ydir.val, object.rdir.val,
+                   object.motion_x, object.motion_y, object.AnyContact ? 1 : 0,
+                   object.Contacts, object.RedirectYR ? 1 : 0, object.t_contact,
+                   object.Shape.ContactCount, object.Shape.ContactCNAT);
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+                printf("%s%d", v ? "," : "", object.Shape.VtxContactCNAT[v]);
+            printf("],\"contact_invocations\":%d,\"callback_order\":[",
+                   object.ContactCallCount);
+            for (int32_t call = 0; call < object.CallbackCallCount; ++call)
+                printf("%s%d", call ? "," : "", object.CallbackCalls[call]);
+            printf("],\"probes\":[");
+            for (int32_t p = 0; p < object.ProbeCount; ++p)
+            {
+                const MovementProbe &probe = object.Probes[p];
+                printf("%s{\"x\":%d,\"y\":%d,\"object_x\":%d,\"object_y\":%d,"
+                       "\"fix_x\":%d,\"fix_y\":%d,\"rotation\":%d,\"fix_r\":%d,"
+                       "\"xdir\":%d,\"ydir\":%d,"
+                       "\"rdir\":%d,\"motion_x\":%d,\"motion_y\":%d,"
+                       "\"result\":%d,\"t_contact\":%d,\"contact_count\":%d,"
+                       "\"contact_cnat\":%d,\"vertex_contacts\":[",
+                       p ? "," : "", probe.x, probe.y, probe.object_x, probe.object_y,
+                       probe.fix_x, probe.fix_y, probe.rotation, probe.fix_r,
+                       probe.xdir, probe.ydir, probe.rdir,
+                       probe.motion_x, probe.motion_y, probe.result, probe.t_contact,
+                       probe.contact_count, probe.contact_cnat);
+                for (int32_t v = 0; v < c.vertex_count; ++v)
+                    printf("%s%d", v ? "," : "", probe.vertex_contacts[v]);
+                printf("],\"random_count\":%d,\"random_hold\":%u}",
+                       probe.random_count, static_cast<unsigned>(probe.random_hold));
+            }
+            printf("],\"random_count\":%d,\"random_hold\":%u}", RandomCount,
+                   static_cast<unsigned>(RandomHold));
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("do_movement_rotation_matrix");
+    {
+        using namespace shape_contact;
+
+        struct Vertex
+        {
+            int32_t x, y, cnat, friction;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t seed;
+            int32_t x, y;
+            int32_t rotation, fix_r_raw;
+            int32_t rdir_n, rdir_d;
+            int32_t ydir_n, ydir_d;
+            int32_t wall_x;
+            int32_t rotateable;
+            bool redirect_yr;
+            int32_t vertex_count;
+            Vertex vertices[MaxVertex];
+        };
+        const Case cases[] = {
+            {"free_positive", 60, 12, 3, 0, 0, 1, 2, 0, 1, -1, 1, false,
+             1, {{0, 10, CNAT_Right, 0}}},
+            {"free_negative", 61, 12, 3, 0, 0, -1, 2, 0, 1, -1, 1, false,
+             1, {{0, 10, CNAT_Left, 0}}},
+            // At +3 degrees the long vertex first rounds one pixel left into
+            // the wall. Native restores the +2 degree shape and redirects
+            // rdir into ydir only when translation did not already do so.
+            {"wall_reject_redirects_to_y", 62, 8, 3, 0, 0, 1, 1, 0, 1, 7, 1, false,
+             1, {{0, 10, CNAT_Right, 0}}},
+            {"wall_reject_after_vertical_redirect", 63, 8, 3, 0, 0, 1, 1, 0, 1, 7, 1, true,
+             1, {{0, 10, CNAT_Right, 0}}},
+            {"definition_rotation_limit", 64, 12, 3, 0, 0, 1, 1, 0, 1, -1, 2, false,
+             1, {{0, 10, CNAT_Right, 0}}},
+            // fix_r's authored fraction and rdir*5 cross the half-degree
+            // rounding threshold together; either value alone leaves r at 0.
+            {"fractional_rotation_accumulation", 65, 12, 3, 0, 20000, 1, 20, 0, 1,
+             -1, 1, false, 1, {{0, 10, CNAT_Right, 0}}},
+        };
+
+        for (const auto &c : cases)
+        {
+            sep();
+            FixedRandom(c.seed);
+            Randomize3();
+            for (int32_t gy = 0; gy < GridHgt; ++gy)
+                for (int32_t gx = 0; gx < GridWdt; ++gx)
+                    g_grid[gy][gx] = 0;
+            if (c.wall_x >= 0)
+                for (int32_t gy = 0; gy < GridHgt; ++gy)
+                    g_grid[gy][c.wall_x] = 1;
+            g_left_open = g_right_open = 0;
+            g_top_open = true;
+            g_bottom_open = false;
+
+            shape_contact::C4Object object;
+            object.x = c.x;
+            object.y = c.y;
+            object.fix_x = itofix(c.x);
+            object.fix_y = itofix(c.y);
+            object.r = c.rotation;
+            object.fix_r = itofix(c.rotation);
+            object.fix_r.val += c.fix_r_raw;
+            object.rdir = itofix(c.rdir_n, c.rdir_d);
+            object.ydir = itofix(c.ydir_n, c.ydir_d);
+            object.OCF = shape_contact::OCF_Rotate;
+            object.DefStorage.Rotateable = c.rotateable;
+            object.Shape.x = -1;
+            object.Shape.y = -1;
+            object.Shape.Wdt = 3;
+            object.Shape.Hgt = 12;
+            object.Shape.VtxNum = c.vertex_count;
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+            {
+                object.Shape.VtxX[v] = c.vertices[v].x;
+                object.Shape.VtxY[v] = c.vertices[v].y;
+                object.Shape.VtxCNAT[v] = c.vertices[v].cnat;
+                object.Shape.VtxFriction[v] = c.vertices[v].friction;
+            }
+            object.BaseShape = object.Shape;
+
+            object.DoRotation(false, c.redirect_yr);
+
+            printf("{\"name\":\"%s\",\"seed\":%d,\"x0\":%d,\"y0\":%d,"
+                   "\"rotation0\":%d,\"fix_r_raw\":%d,\"rdir_n\":%d,\"rdir_d\":%d,"
+                   "\"ydir_n\":%d,\"ydir_d\":%d,\"wall_x\":%d,\"rotateable\":%d,"
+                   "\"redirect_yr\":%d,\"vertices\":[",
+                   c.name, c.seed, c.x, c.y, c.rotation, c.fix_r_raw,
+                   c.rdir_n, c.rdir_d, c.ydir_n, c.ydir_d, c.wall_x,
+                   c.rotateable, c.redirect_yr ? 1 : 0);
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+                printf("%s{\"x\":%d,\"y\":%d,\"cnat\":%d,\"friction\":%d}",
+                       v ? "," : "", c.vertices[v].x, c.vertices[v].y,
+                       c.vertices[v].cnat, c.vertices[v].friction);
+            printf("],\"x\":%d,\"y\":%d,\"fix_x\":%d,\"fix_y\":%d,"
+                   "\"rotation\":%d,\"fix_r\":%d,\"rdir\":%d,\"ydir\":%d,"
+                   "\"motion_x\":%d,\"motion_y\":%d,\"any_contact\":%d,"
+                   "\"contacts\":%u,\"turned\":%d,\"t_contact\":%d,"
+                   "\"contact_count\":%d,\"contact_cnat\":%d,"
+                   "\"shape_x\":%d,\"shape_y\":%d,\"shape_wdt\":%d,\"shape_hgt\":%d,"
+                   "\"update_pos_calls\":%d,\"final_vertices\":[",
+                   object.x, object.y, object.fix_x.val, object.fix_y.val,
+                   object.r, object.fix_r.val, object.rdir.val, object.ydir.val,
+                   object.motion_x, object.motion_y, object.RotationAnyContact ? 1 : 0,
+                   object.RotationContacts, object.Turned ? 1 : 0, object.t_contact,
+                   object.Shape.ContactCount, object.Shape.ContactCNAT,
+                   object.Shape.x, object.Shape.y, object.Shape.Wdt, object.Shape.Hgt,
+                   object.UpdatePosCalls);
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+                printf("%s{\"x\":%d,\"y\":%d,\"cnat\":%d,\"friction\":%d}",
+                       v ? "," : "", object.Shape.VtxX[v], object.Shape.VtxY[v],
+                       object.Shape.VtxCNAT[v], object.Shape.VtxFriction[v]);
+            printf("],\"probes\":[");
+            for (int32_t p = 0; p < object.ProbeCount; ++p)
+            {
+                const MovementProbe &probe = object.Probes[p];
+                printf("%s{\"x\":%d,\"y\":%d,\"object_x\":%d,\"object_y\":%d,"
+                       "\"fix_x\":%d,\"fix_y\":%d,\"rotation\":%d,\"fix_r\":%d,"
+                       "\"xdir\":%d,\"ydir\":%d,\"rdir\":%d,"
+                       "\"motion_x\":%d,\"motion_y\":%d,\"result\":%d,"
+                       "\"t_contact\":%d,\"contact_count\":%d,\"contact_cnat\":%d,"
+                       "\"vertex_contacts\":[",
+                       p ? "," : "", probe.x, probe.y, probe.object_x, probe.object_y,
+                       probe.fix_x, probe.fix_y, probe.rotation, probe.fix_r,
+                       probe.xdir, probe.ydir, probe.rdir, probe.motion_x, probe.motion_y,
+                       probe.result, probe.t_contact, probe.contact_count, probe.contact_cnat);
+                for (int32_t v = 0; v < c.vertex_count; ++v)
+                    printf("%s%d", v ? "," : "", probe.vertex_contacts[v]);
+                printf("],\"random_count\":%d,\"random_hold\":%u}",
+                       probe.random_count, static_cast<unsigned>(probe.random_hold));
+            }
+            printf("],\"random_count\":%d,\"random_hold\":%u}", RandomCount,
+                   static_cast<unsigned>(RandomHold));
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("do_movement_contact_action_handoff");
+    {
+        using namespace shape_contact;
+        FixedRandom(70);
+        Randomize3();
+        for (int32_t gy = 0; gy < GridHgt; ++gy)
+            for (int32_t gx = 0; gx < GridWdt; ++gx)
+                g_grid[gy][gx] = (gy >= 10 || gx == 12) ? 1 : 0;
+        g_left_open = g_right_open = 0;
+        g_top_open = true;
+        g_bottom_open = false;
+
+        shape_contact::C4Object movement;
+        movement.x = 8;
+        movement.y = 6;
+        movement.fix_x = itofix(8);
+        movement.fix_y = itofix(6);
+        movement.xdir = itofix(4);
+        movement.ydir = itofix(4);
+        movement.Shape.x = -2;
+        movement.Shape.y = -2;
+        movement.Shape.Wdt = 5;
+        movement.Shape.Hgt = 5;
+        movement.Shape.VtxNum = 2;
+        movement.Shape.VtxX[0] = 0;
+        movement.Shape.VtxY[0] = 1;
+        movement.Shape.VtxCNAT[0] = CNAT_Bottom;
+        movement.Shape.VtxX[1] = 1;
+        movement.Shape.VtxY[1] = 0;
+        movement.Shape.VtxCNAT[1] = CNAT_Right;
+        movement.DoUnattachedMovement();
+
+        const int32_t pre_tail_t_contact = movement.t_contact;
+        ::C4Object action;
+        action.Action.Dir = DIR_Right;
+        action.OCF = 0;
+        action.xdir = movement.xdir;
+        action.ydir = movement.ydir;
+        bool contact_action_called = false;
+        // C4Movement.cpp:467-472 assigns the accumulated mask immediately
+        // before ContactAction. Bottom is first and returns from the exact
+        // DFA_FLIGHT arm already compiled above (C4Object.cpp:4336-4351).
+        if (movement.AnyContact)
+        {
+            movement.t_contact = movement.Contacts;
+            if (movement.t_contact & CNAT_Bottom)
+            {
+                action.ContactActionBottomFlight(0);
+                contact_action_called = true;
+            }
+        }
+
+        printf("{\"name\":\"wall_then_floor_bottom_precedence\",\"seed\":70,"
+               "\"x\":%d,\"y\":%d,\"fix_x\":%d,\"fix_y\":%d,"
+               "\"motion_x\":%d,\"motion_y\":%d,\"pre_tail_t_contact\":%d,"
+               "\"contacts\":%u,\"final_t_contact\":%d,\"contact_action_called\":%d,"
+               "\"action_after\":%d,\"direction_after\":%d,"
+               "\"xdir_after\":%d,\"ydir_after\":%d,"
+               "\"random_count\":%d,\"random_hold\":%u}",
+               movement.x, movement.y, movement.fix_x.val, movement.fix_y.val,
+               movement.motion_x, movement.motion_y, pre_tail_t_contact,
+               movement.Contacts, movement.t_contact, contact_action_called ? 1 : 0,
+               action.ContactAction, action.Action.Dir, action.xdir.val, action.ydir.val,
+               RandomCount, static_cast<unsigned>(RandomHold));
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("contact_vtx_helpers");
+    {
+        using namespace shape_contact;
+
+        struct Vertex
+        {
+            int32_t x, contact, friction;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t vertex_count;
+            Vertex vertices[MaxVertex];
+        };
+        const Case cases[] = {
+            {"no_contacts", 3, {{0, 0, 11}, {-3, 0, 22}, {4, 0, 33}}},
+            // ContactVtxWeight does not stop at a contacted centre vertex:
+            // C4Movement.cpp:74-83 keeps scanning until a contacted vertex has
+            // a non-zero x coordinate.
+            {"center_then_left", 2, {{0, CNAT_Bottom, 17}, {-3, CNAT_Left, 91}}},
+            {"center_then_right", 2, {{0, CNAT_Bottom, 23}, {4, CNAT_Right, 82}}},
+            // Friction has deliberately different ordering: unlike weight,
+            // C4Movement.cpp:89-95 returns the first contacted slot even when
+            // that slot is centred.
+            {"first_contact_friction", 3, {{-2, CNAT_Left, 20}, {2, CNAT_Right, 90}, {0, 0, 100}}},
+        };
+
+        for (const auto &c : cases)
+        {
+            sep();
+            shape_contact::C4Object object;
+            object.Shape.VtxNum = c.vertex_count;
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+            {
+                object.Shape.VtxX[v] = c.vertices[v].x;
+                object.Shape.VtxContactCNAT[v] = c.vertices[v].contact;
+                object.Shape.VtxFriction[v] = c.vertices[v].friction;
+            }
+
+            printf("{\"name\":\"%s\",\"vertices\":[", c.name);
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+                printf("%s{\"x\":%d,\"contact\":%d,\"friction\":%d}", v ? "," : "",
+                       c.vertices[v].x, c.vertices[v].contact, c.vertices[v].friction);
+            printf("],\"weight\":%d,\"friction\":%d,\"has_left\":%d,\"has_right\":%d}",
+                   shape_contact::ContactVtxWeight(&object),
+                   shape_contact::ContactVtxFriction(&object),
+                   shape_contact::ContactVtxCNAT(&object, CNAT_Left) ? 1 : 0,
+                   shape_contact::ContactVtxCNAT(&object, CNAT_Right) ? 1 : 0);
         }
     }
     arr_end();

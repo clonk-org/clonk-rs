@@ -2347,7 +2347,7 @@ impl Engine {
     }
 
     /// The callback half of `C4Object::ContactCheck` (C4Movement.cpp:
-    /// 166-182): contacted directions run left/right/top/bottom and a truthy
+    /// 166-183): contacted directions run left/right/top/bottom and a truthy
     /// result stops the remaining calls. Both movement probes and Stabilize's
     /// temporary upright probe use this same path.
     pub(crate) fn dispatch_contact_callbacks(
@@ -2377,6 +2377,8 @@ impl Engine {
             if shape_probe && self.objects[idx].frame_shape_contact_cnat & cnat == 0 {
                 continue;
             }
+            #[cfg(test)]
+            crate::engine_movement::record_movement_contact_invocation();
             let Some(function_name) = contact_callback_name(cnat) else {
                 continue;
             };

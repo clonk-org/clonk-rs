@@ -695,6 +695,29 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Shape.cpp" > "$gen/shape_contact_check.inc"
 
+# C4Object::ContactCheck is the callback half of the same probe. Rename only
+# its definition so the scaffold can wrap the production body and record the
+# per-step result without rewriting Shape.ContactCheck inside it.
+awk '
+  /^int32_t C4Object::ContactCheck\(int32_t iAtX, int32_t iAtY\)$/ {
+    p = 1
+    sub(/C4Object::ContactCheck/, "C4Object::ContactCheckNative")
+  }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/object_contact_check.inc"
+
+# Rotation updates every live contact vertex before the second collision walk.
+# Compile the real fixed-trigonometry body so the rotation matrix and fixtoi
+# rounding cannot drift from C++.
+awk '
+  /^void C4Shape::Rotate\(int32_t iAngle, bool bUpdateVertices\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Shape.cpp" > "$gen/shape_rotate.inc"
+
 # 3q2. Lift C4PXS::Execute in full. `pxs_allocation` pins only the allocator;
 #      this is the per-tick step itself — raw C4Fixed position/velocity, the
 #      gravity accumulation, the airborne wind branch and its exact pair of
@@ -959,6 +982,16 @@ awk '
   p { print }
   END { if (!found) exit 1 }
 ' "$src/C4Movement.cpp" > "$gen/do_movement_unattached.inc"
+
+# The immediately following rotation block is a second one-degree-at-a-time
+# collision walk. Keep it mechanically lifted through the circle-bound tail;
+# the scaffold supplies the DoMovement locals and an absolute UpdateShape.
+awk '
+  /^\t\/\/ Rotation$/ { p = 1 }
+  p && /^\tif \(Number == / { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/do_movement_rotation.inc"
 
 # 3q3b. Lift mrfIncinerate. It is the one reaction whose arms are asymmetric in
 #       a way a port is likely to flatten: `meeMassMove` and `meePXSPos` try to
