@@ -4,6 +4,24 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.2] - 2026-08-22
+
+### Bug fixes
+
+- Decide rejected speech before script continuation (#989)
+- Complete native portrait selector parity (#988)
+- Bound C4Script expression nesting instead of overflowing the stack (#976)
+- Stop slicing past a value-less INI line (#975)
+
+### Performance
+
+- Halve Skies of Fire activation time (#986)
+
+### Testing
+
+- Fuzz the legacy WAV MIDI and RMID decoders (#974)
+- Fuzz the legacy resource-text parsers (#973)
+
 ## [0.19.1] - 2026-08-21
 
 ### Bug fixes
