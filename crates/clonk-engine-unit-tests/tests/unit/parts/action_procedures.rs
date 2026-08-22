@@ -5318,6 +5318,77 @@ fn actmap_sound_loops_while_its_action_slot_stays_selected() {
     );
 }
 
+/// SetAction compares the requested slot for the old-sound stop, then applies
+/// incomplete-construction coercion and compares the final slot for the new
+/// start. Requesting the already-selected A therefore leaves A's loop alone
+/// even though the final state becomes ActIdle; requesting B stops A but does
+/// not start B (C4Object.cpp:4121-4130,4159-4163).
+#[test]
+fn incomplete_set_action_sound_uses_requested_stop_and_coerced_start_gates() {
+    let definition = action_definition_fixture!(
+        "PartialSound",
+        "Partial sound",
+        r#"#strict
+public func KeepSame() { return SetAction("Keep"); }
+public func LeaveForOther() { return SetAction("Other"); }
+"#,
+        Some("Idle");
+        "Idle" => ActionSpec::default(),
+        "Keep" => ActionSpec::default().with_sound("KeepSound"),
+        "Leave" => ActionSpec::default().with_sound("LeaveSound"),
+        "Other" => ActionSpec::default().with_sound("OtherSound"),
+    );
+    let (mut engine, keep) = definition_fixture_case!(
+        5,
+        definition,
+        "PartialSound",
+        with_category: CATEGORY_OBJECT,
+        with_construction: FULL_CON - 1,
+        with_action: ActionState::new("Keep")
+    );
+    let leave = spawn_test!(
+        engine,
+        "PartialSound",
+        with_category: CATEGORY_OBJECT,
+        with_construction: FULL_CON - 1,
+        with_action: ActionState::new("Leave")
+    );
+
+    let keep_index = engine.test_object_index(keep);
+    unit_assert_eq!(engine.call_object_function(keep_index, "KeepSame", Vec::new()).test_value() => Value::Bool(true));
+    let leave_index = engine.test_object_index(leave);
+    unit_assert_eq!(engine.call_object_function(leave_index, "LeaveForOther", Vec::new()).test_value() => Value::Bool(true));
+
+    let coerced = engine.test_tick();
+    unit_assert_eq!(coerced.object(keep).test_value().action.name => "Idle");
+    unit_assert_eq!(coerced.object(leave).test_value().action.name => "Idle");
+    unit_assert!(coerced.audio.iter().any(|command| matches!(
+        command,
+        AudioCommand::PlaySound { name, target, .. }
+            if name == "KeepSound" && *target == Some(keep)
+    )));
+    unit_assert!(coerced.audio.iter().any(|command| matches!(
+        command,
+        AudioCommand::PlaySound { name, target, .. }
+            if name == "LeaveSound" && *target == Some(leave)
+    )));
+    unit_assert!(coerced.audio.iter().all(|command| !matches!(
+        command,
+        AudioCommand::StopSound { name, target }
+            if name == "KeepSound" && *target == Some(keep)
+    )));
+    unit_assert!(coerced.audio.iter().any(|command| matches!(
+        command,
+        AudioCommand::StopSound { name, target }
+            if name == "LeaveSound" && *target == Some(leave)
+    )), "expected LeaveSound stop, got {:?}", coerced.audio);
+    unit_assert!(coerced.audio.iter().all(|command| !matches!(
+        command,
+        AudioCommand::PlaySound { name, target, .. }
+            if name == "OtherSound" && *target == Some(leave)
+    )));
+}
+
 /// `C4Object::SetAction` emits the outgoing ActMap sound stop before the new
 /// action's start (C4Object.cpp:4149-4152, 4186-4190). A caller can select B
 /// and then A again before the frame closes, so end-of-frame reconciliation

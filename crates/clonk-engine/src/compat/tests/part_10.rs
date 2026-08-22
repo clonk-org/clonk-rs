@@ -1393,7 +1393,9 @@ protected func Initialize() { order = order * 10 + 3; }
             None,
             HashMap::from([(
                 "Work".to_owned(),
-                ActionSpec::default().with_start_call("Started"),
+                ActionSpec::default()
+                    .with_start_call("Started")
+                    .with_sound("WorkSound"),
             )]),
         );
         product.set_components(vec![
@@ -1433,6 +1435,18 @@ protected func Initialize() { order = order * 10 + 3; }
         );
         assert_eq!(product.local_vars.get("order"), Some(&v_int(123)));
         assert_eq!(product.local_vars.get("start_calls"), Some(&INT_1));
+        let work_sounds = engine
+            .drain_tick_presentation()
+            .audio
+            .into_iter()
+            .filter(|command| {
+                matches!(command, AudioCommand::PlaySound { name, .. } if name == "WorkSound")
+            })
+            .count();
+        // Construction's SetAction already starts the loop synchronously.
+        // Materializing the deferred new object must not replay NewInstance at
+        // the frame boundary (C4Object.cpp:4159-4163).
+        assert_eq!(work_sounds, 1);
         assert_eq!(
             engine
                 .objects

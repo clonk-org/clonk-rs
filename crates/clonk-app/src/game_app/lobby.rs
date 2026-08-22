@@ -3910,12 +3910,14 @@ impl GameApp {
         for sound in sounds {
             match sound {
                 LobbySound::StartElevatorLoop => {
-                    if let Some(audio) = self.audio.as_mut() {
+                    if let Some(audio) = self.audio.as_ref() {
+                        let mut audio = audio.borrow_mut();
                         audio.start_lobby_elevator(&self.snapshot);
                     }
                 }
                 LobbySound::StopElevatorLoop => {
-                    if let Some(audio) = self.audio.as_mut() {
+                    if let Some(audio) = self.audio.as_ref() {
+                        let mut audio = audio.borrow_mut();
                         audio.stop_lobby_elevator();
                     }
                 }

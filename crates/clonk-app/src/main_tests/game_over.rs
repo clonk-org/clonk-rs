@@ -790,59 +790,66 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
     fs::write(global.join("Frontend.mid"), silent_pcm_wav(1_000)).test_value();
 
     let mut app = new_menu_app(320, 200);
-    let audio = app.audio.test_mut();
-    audio.stop_music();
-    audio.music_resolver =
-        MusicResolver::with_global_group(Group::open(&global).test_value()).test_value();
-    audio.options.menu_music_enabled = false;
-    audio.set_scenario_music_level(Some(25));
-    let stale_recent = Arc::clone(
-        &audio
-            .music_resolver
-            .resolve("Frontend.mid")
-            .test_value()
-            .identity,
-    );
-    lock_unpoisoned(&audio.music_control).most_recently_played = Some(stale_recent);
+    {
+        let mut audio = app.test_audio_mut();
+        audio.stop_music();
+        audio.music_resolver =
+            MusicResolver::with_global_group(Group::open(&global).test_value()).test_value();
+        audio.options.menu_music_enabled = false;
+        audio.set_scenario_music_level(Some(25));
+        let stale_recent = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("Frontend.mid")
+                .test_value()
+                .identity,
+        );
+        lock_unpoisoned(&audio.music_control).most_recently_played = Some(stale_recent);
+    }
 
     app.begin_frontend_music_entry();
     main_assert!(app.frontend_music_attempted_for_entry);
-    let audio = app.audio.test_ref();
-    main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
-    main_assert_eq!(
-        audio
-            .music_resolver
-            .first_default()
-            .map(|asset| asset.file_name_bytes.as_slice()) =>
-        Some(b"Frontend.mid".as_slice()),
-        "all C++ music extensions resolve through the frontend playlist"
-    );
-    main_assert_eq!(lock_unpoisoned(&audio.music_control).scenario_level => None);
-    main_assert!(lock_unpoisoned(&audio.music_control).most_recently_played.is_none());
-    main_assert!(!audio.music_is_playing());
+    {
+        let audio = app.test_audio_ref();
+        main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
+        main_assert_eq!(
+            audio
+                .music_resolver
+                .first_default()
+                .map(|asset| asset.file_name_bytes.as_slice()) =>
+            Some(b"Frontend.mid".as_slice()),
+            "all C++ music extensions resolve through the frontend playlist"
+        );
+        main_assert_eq!(lock_unpoisoned(&audio.music_control).scenario_level => None);
+        main_assert!(lock_unpoisoned(&audio.music_control).most_recently_played.is_none());
+        main_assert!(!audio.music_is_playing());
+    }
 
     app.set_frontend_music_option(true).test_value();
-    let audio = app.audio.test_ref();
-    let first_generation = lock_unpoisoned(&audio.music_control).generation;
+    let first_generation = {
+        let audio = app.test_audio_ref();
+        let generation = lock_unpoisoned(&audio.music_control).generation;
+        generation
+    };
 
     let wait_for_mixer_start = |app: &GameApp| {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !app.audio.test_ref().system.music_is_playing() && Instant::now() < deadline {
+        while !app.test_audio_ref().system.music_is_playing() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        app.audio.test_ref().system.music_is_playing()
+        app.test_audio_ref().system.music_is_playing()
     };
     main_assert!(wait_for_mixer_start(&app), "Frontend.mid starts playback");
 
-    let mixer = Arc::clone(app.audio.test_ref().system.mixer());
+    let mixer = Arc::clone(app.test_audio_ref().system.mixer());
     let mut output = vec![0_i16; mixer.sample_rate() as usize * 2 * 2];
     mixer.mix_i16(&mut output);
-    main_assert!(!app.audio.as_ref().expect("test audio").system.music_is_playing(), "draining past the asset end proves frontend music is non-looping");
+    main_assert!(!app.test_audio_ref().system.music_is_playing(), "draining past the asset end proves frontend music is non-looping");
 
     app.test_update();
     app.ensure_menu_music();
     main_assert_eq!(
-        lock_unpoisoned(&app.audio.as_ref().expect("test audio").music_control).generation =>
+        lock_unpoisoned(&app.test_audio_ref().music_control).generation =>
         first_generation,
         "frontend navigation does not pump an ended track"
     );
@@ -852,14 +859,14 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
     main_assert!(wait_for_mixer_start(&app), "a new startup entry restarts frontend music");
 
     app.set_frontend_music_option(false).test_value();
-    main_assert!(!app.audio.as_ref().expect("test audio").options.menu_music_enabled);
-    main_assert!(!app.audio.as_ref().expect("test audio").system.music_is_playing());
+    main_assert!(!app.test_audio_ref().options.menu_music_enabled);
+    main_assert!(!app.test_audio_ref().system.music_is_playing());
     app.set_frontend_music_option(true).test_value();
     main_assert!(wait_for_mixer_start(&app), "FEMusic re-enable restarts the frontend playlist");
 
     app.runtime_music_enabled = false;
     app.play_sandbox_audio();
-    main_assert_eq!(app.audio.as_ref().expect("test audio").music_resolver.playlist => None, "game entry restores the default playlist");
+    main_assert_eq!(app.test_audio_ref().music_resolver.playlist => None, "game entry restores the default playlist");
 }
 
 #[test]
@@ -1365,10 +1372,12 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
         .test_value()
         .games()
         .to_vec();
-    let audio = app.audio.test_mut();
-    audio.options.menu_sound_enabled = true;
-    audio.configure_scenario(Some(&scenario));
-    audio.missing_sounds.clear();
+    {
+        let mut audio = app.test_audio_mut();
+        audio.options.menu_sound_enabled = true;
+        audio.configure_scenario(Some(&scenario));
+        audio.missing_sounds.clear();
+    }
 
     app.request_startup_network_refresh_at(now + Duration::from_millis(999))
         .test_value();
@@ -1380,9 +1389,11 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     main_assert_eq!(app.status_text => "Retained status");
     main_assert_eq!(app.netdlg_last_click => Some((0, now)));
     main_assert!(app.message_dialogs.is_empty());
-    let audio = app.audio.as_ref().test_value();
-    main_assert!(audio.loaded_sounds.keys().any(|key| key.to_ascii_lowercase().contains("error.wav")), "the rejected refresh must request only the Error GUI sound");
-    main_assert!(audio.missing_sounds.is_empty());
+    {
+        let audio = app.test_audio_ref();
+        main_assert!(audio.loaded_sounds.keys().any(|key| key.to_ascii_lowercase().contains("error.wav")), "the rejected refresh must request only the Error GUI sound");
+        main_assert!(audio.missing_sounds.is_empty());
+    }
     main_assert!(!app.take_exit_request());
 }
 
@@ -4068,6 +4079,7 @@ fn hover_game_over_action_for_test(app: &mut GameApp, action: GameOverAction) {
 
 fn assert_game_over_fixture_has_no_sound_activity(app: &GameApp) {
     if let Some(audio) = app.audio.as_ref() {
+        let audio = audio.borrow();
         main_assert!(!audio.options.sound_enabled);
         main_assert!(!audio.options.menu_sound_enabled);
         main_assert!(audio.active_channels.is_empty(), "game-over input must not synthesize a UI sound");
@@ -4746,60 +4758,61 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
     }
 
     let mut logo_music = new_running_sandbox_app();
-    let configured_before_logo = logo_music.audio.test_ref().options.music_enabled;
+    let configured_before_logo = logo_music.test_audio_ref().options.music_enabled;
     logo_music.test_modifiers(ModifiersState::SUPER);
     logo_music.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert!(logo_music.runtime_flash_message.is_some());
-    main_assert_eq!(logo_music.audio.as_ref().expect("test audio").options.music_enabled => configured_before_logo);
+    main_assert_eq!(logo_music.test_audio_ref().options.music_enabled => configured_before_logo);
 
     let mut logo_sound = new_running_sandbox_app();
-    let sound_before_logo = logo_sound.audio.test_ref().options.sound_enabled;
+    let sound_before_logo = logo_sound.test_audio_ref().options.sound_enabled;
     logo_sound.test_modifiers(ModifiersState::CONTROL | ModifiersState::SUPER);
     logo_sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    main_assert_eq!(logo_sound.audio.as_ref().expect("test audio").options.sound_enabled => !sound_before_logo);
+    main_assert_eq!(logo_sound.test_audio_ref().options.sound_enabled => !sound_before_logo);
     main_assert!(logo_sound.runtime_flash_message.is_none());
 
     let mut sound = new_running_sandbox_app();
     let before_sound = sound
         .audio
         .as_ref()
-        .map(|audio| audio.options.sound_enabled);
+        .map(|audio| audio.borrow().options.sound_enabled);
     sound.test_modifiers(ModifiersState::CONTROL);
     sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert!(sound.runtime_flash_message.is_none());
     if let (Some(before), Some(audio)) = (before_sound, sound.audio.as_ref()) {
+        let audio = audio.borrow();
         main_assert_eq!(audio.options.sound_enabled => !before);
     }
 
     let mut existing_sound = new_running_sandbox_app();
-    let audio = existing_sound.audio.test_mut();
-    let handle = audio.system.load_sound(&silent_pcm_wav(1_000)).test_value();
-    let duration_ms = handle.duration_ms().test_value();
-    audio.active_channels.insert(
-        SoundInstanceKey::new("Loop", None),
-        ChannelInfo {
-            channel: Some(ChannelId(999, 1)),
-            handle,
-            duration_ms,
-            sample_key: "loop".to_string(),
-            sample_name: "loop.wav".to_string(),
-            sample_order: 0,
-            instance_order: 1,
-            looped: true,
-            target: None,
-            volume: 100,
-            custom_falloff: None,
-            started_at: Instant::now(),
-            detached_mix: None,
-        },
-    );
+    {
+        let mut audio = existing_sound.test_audio_mut();
+        let handle = audio.system.load_sound(&silent_pcm_wav(1_000)).test_value();
+        let duration_ms = handle.duration_ms().test_value();
+        audio.active_channels.insert(
+            SoundInstanceKey::new("Loop", None),
+            ChannelInfo {
+                channel: Some(ChannelId(999, 1)),
+                handle,
+                duration_ms,
+                sample_key: "loop".to_string(),
+                sample_name: "loop.wav".to_string(),
+                sample_order: 0,
+                instance_order: 1,
+                looped: true,
+                target: None,
+                volume: 100,
+                custom_falloff: None,
+                started_at: Instant::now(),
+                detached_mix: None,
+            },
+        );
+    }
     existing_sound.test_modifiers(ModifiersState::CONTROL);
     existing_sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert!(
         existing_sound
-            .audio
-            .as_ref()
-            .expect("test audio")
+            .test_audio_ref()
             .active_channels
             .contains_key(&SoundInstanceKey::new("Loop", None)),
         "C4SoundSystem::ToggleOnOff does not halt existing instances"

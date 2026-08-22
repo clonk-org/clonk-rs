@@ -1593,9 +1593,7 @@ pub(crate) fn apply_host_crew_experience(
             MessageSpec::target(format!("{object_name} is promoted|to {rank_name}!"), target)
                 .with_color(invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR)),
         ));
-        context
-            .audio_mut()
-            .play_sound("Trumpet", Some(target), 100, false, false, None);
+        let _ = context.play_sound("Trumpet", Some(target), 100, false, false, None);
     }
 
     true

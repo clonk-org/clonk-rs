@@ -56,8 +56,8 @@ impl GameApp {
             } else {
                 self.play_sandbox_audio();
             }
-        } else if let Some(audio) = self.audio.as_mut() {
-            audio.stop_music();
+        } else if let Some(audio) = self.audio.as_ref() {
+            audio.borrow_mut().stop_music();
         }
     }
 
@@ -67,7 +67,7 @@ impl GameApp {
         let enabled = self
             .audio
             .as_ref()
-            .map(|audio| !audio.music_is_playing())
+            .map(|audio| !audio.borrow().music_is_playing())
             .ok_or_else(|| {
                 classic_parity_engine_error(report_classic_parity_boundary(
                     ClassicParityBoundary::RuntimeAudioSystem {
@@ -87,7 +87,7 @@ impl GameApp {
         let next_enabled = self
             .audio
             .as_ref()
-            .map(|audio| !audio.options.music_enabled)
+            .map(|audio| !audio.borrow().options.music_enabled)
             .ok_or_else(|| {
                 classic_parity_engine_error(report_classic_parity_boundary(
                     ClassicParityBoundary::RuntimeAudioSystem {
@@ -99,8 +99,9 @@ impl GameApp {
 
         let enabled = self
             .audio
-            .as_mut()
+            .as_ref()
             .map(|audio| {
+                let mut audio = audio.borrow_mut();
                 audio.options.music_enabled = !audio.options.music_enabled;
                 audio.options.music_enabled
             })
@@ -114,13 +115,14 @@ impl GameApp {
     /// `Application.SoundSystem->ToggleOnOff()` (C4MainMenu.cpp:842-845).
     pub(crate) fn toggle_sound_option(&mut self) -> Result<(), EngineError> {
         let enabled = {
-            let audio = self.audio.as_mut().ok_or_else(|| {
+            let audio = self.audio.as_ref().ok_or_else(|| {
                 classic_parity_engine_error(report_classic_parity_boundary(
                     ClassicParityBoundary::RuntimeAudioSystem {
                         action: "the running SoundToggle action",
                     },
                 ))
             })?;
+            let mut audio = audio.borrow_mut();
             // C4SoundSystem::ToggleOnOff changes only RXSound. The next sound
             // update releases mixer channels while retaining logical instances;
             // starts made while muted are retained channel-less as well.
@@ -143,7 +145,7 @@ impl GameApp {
 
     pub(crate) fn set_frontend_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
         self.resume_frontend_music_after_fade = false;
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup frontend-music option",
@@ -151,6 +153,7 @@ impl GameApp {
             ))
         })?;
         self.frontend_music_attempted_for_entry = true;
+        let mut audio = audio.borrow_mut();
         audio.options.menu_music_enabled = enabled;
         if enabled {
             match audio.play_frontend_music() {
@@ -171,7 +174,7 @@ impl GameApp {
         let enabled = self
             .audio
             .as_ref()
-            .map(|audio| !audio.options.menu_music_enabled)
+            .map(|audio| !audio.borrow().options.menu_music_enabled)
             .ok_or_else(|| {
                 classic_parity_engine_error(report_classic_parity_boundary(
                     ClassicParityBoundary::RuntimeAudioSystem {
@@ -185,14 +188,14 @@ impl GameApp {
     }
 
     pub(crate) fn set_frontend_sound_option(&mut self, enabled: bool) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup frontend-sound option",
                 },
             ))
         })?;
-        audio.options.menu_sound_enabled = enabled;
+        audio.borrow_mut().options.menu_sound_enabled = enabled;
         Ok(())
     }
 
@@ -200,7 +203,7 @@ impl GameApp {
         let enabled = self
             .audio
             .as_ref()
-            .map(|audio| !audio.options.menu_sound_enabled)
+            .map(|audio| !audio.borrow().options.menu_sound_enabled)
             .ok_or_else(|| {
                 classic_parity_engine_error(report_classic_parity_boundary(
                     ClassicParityBoundary::RuntimeAudioSystem {
@@ -223,9 +226,10 @@ impl GameApp {
     }
 
     pub(crate) fn play_control_message_sound(&mut self, name: &str) -> bool {
-        let Some(audio) = self.audio.as_mut() else {
+        let Some(audio) = self.audio.as_ref() else {
             return false;
         };
+        let mut audio = audio.borrow_mut();
         for candidate in [
             name.to_string(),
             format!("{name}.ogg"),
@@ -604,6 +608,13 @@ impl GameApp {
     }
 
     pub(crate) fn update_before_sound_instance_step(&mut self) -> Result<(), EngineError> {
+        let viewports = self.graphics.active_viewport_projections();
+        let game_running = matches!(self.mode, AppMode::Running);
+        if let Some(audio) = self.audio.as_ref() {
+            audio
+                .borrow_mut()
+                .set_synchronous_sound_state(&viewports, game_running);
+        }
         // Each C4Game::Execute attempt recomputes whether Control.Prepare is
         // blocked. The scheduler reads the reason after this method returns.
         self.waiting_network_control = None;
@@ -1076,7 +1087,7 @@ impl GameApp {
                     && self
                         .audio
                         .as_ref()
-                        .is_none_or(|audio| !audio.music_is_playing());
+                        .is_none_or(|audio| !audio.borrow().music_is_playing());
                 if fade_finished {
                     self.resume_frontend_music_after_fade = false;
                     self.ensure_menu_music();
@@ -1092,7 +1103,8 @@ impl GameApp {
         // a SetPlayList restart sees the state at its exact event position.
         let mut runtime_music_enabled = self.runtime_music_enabled;
         let viewports = self.graphics.active_viewport_projections();
-        let speech_outcomes = if let Some(audio) = self.audio.as_mut() {
+        let speech_outcomes = if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             audio.process_audio_with_viewports(
                 &self.snapshot,
                 &viewports,
@@ -1125,7 +1137,7 @@ impl GameApp {
             && self
                 .audio
                 .as_ref()
-                .is_some_and(|audio| !audio.music_is_playing());
+                .is_some_and(|audio| !audio.borrow().music_is_playing());
         if restart_music {
             if let Some(path) = self
                 .active_scenario
@@ -1142,7 +1154,8 @@ impl GameApp {
     pub(crate) fn update_sound_instances_for_current_mode(&mut self) {
         let game_running = matches!(self.mode, AppMode::Running);
         let viewports = self.graphics.active_viewport_projections();
-        if let Some(audio) = self.audio.as_mut() {
+        if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             audio.pump_queued_music_starts();
             audio.update_channels(&self.snapshot, &viewports, game_running);
         }
@@ -1191,8 +1204,8 @@ impl GameApp {
     pub(crate) fn fade_out_game_music(&mut self) -> bool {
         let fading = self
             .audio
-            .as_mut()
-            .is_some_and(|audio| audio.fade_out_music(GAME_MUSIC_FADE_OUT_MS));
+            .as_ref()
+            .is_some_and(|audio| audio.borrow_mut().fade_out_music(GAME_MUSIC_FADE_OUT_MS));
         self.resume_frontend_music_after_fade = fading;
         fading
     }
@@ -1201,14 +1214,17 @@ impl GameApp {
         // The old fade belongs to the object destroyed by MusicSystem.emplace.
         // Its replacement is immediately eligible for DoStartup playback.
         self.resume_frontend_music_after_fade = false;
-        if let Some(audio) = self.audio.as_mut() {
-            audio.reset_music_system_generation(self.app_paths.as_ref());
+        if let Some(audio) = self.audio.as_ref() {
+            audio
+                .borrow_mut()
+                .reset_music_system_generation(self.app_paths.as_ref());
         }
     }
 
     pub(crate) fn begin_frontend_music_entry(&mut self) {
         self.frontend_music_attempted_for_entry = false;
-        if let Some(audio) = self.audio.as_mut() {
+        if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             lock_unpoisoned(&audio.music_control).most_recently_played = None;
             if self.resume_frontend_music_after_fade {
                 audio.prepare_frontend_music();
@@ -1228,14 +1244,14 @@ impl GameApp {
             return;
         }
         self.frontend_music_attempted_for_entry = true;
-        if let Some(audio) = self.audio.as_mut() {
+        self.resume_frontend_music_after_fade = false;
+        if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             audio.prepare_frontend_music();
             if !audio.menu_music_enabled() {
-                self.resume_frontend_music_after_fade = false;
                 audio.stop_music();
                 return;
             }
-            self.resume_frontend_music_after_fade = false;
             match audio.play_default_music(false) {
                 Ok(true) => {}
                 Ok(false) => audio.stop_music(),
@@ -1251,8 +1267,10 @@ impl GameApp {
         let game_running = matches!(self.mode, AppMode::Running);
         #[cfg(test)]
         self.ui_sound_log.push(name.to_owned());
-        if let Some(audio) = self.audio.as_mut() {
-            audio.play_gui_sound(name, game_running, &self.snapshot);
+        if let Some(audio) = self.audio.as_ref() {
+            audio
+                .borrow_mut()
+                .play_gui_sound(name, game_running, &self.snapshot);
         }
     }
 
@@ -1261,10 +1279,14 @@ impl GameApp {
         let game_running = matches!(self.mode, AppMode::Running);
         #[cfg(test)]
         self.ui_sound_log.push(name.to_owned());
-        let Some(audio) = self.audio.as_mut() else {
+        let Some(audio) = self.audio.as_ref() else {
             return;
         };
-        if let Err(error) = audio.try_start_global_effect(name, game_running, &self.snapshot) {
+        if let Err(error) =
+            audio
+                .borrow_mut()
+                .try_start_global_effect(name, game_running, &self.snapshot)
+        {
             tracing::error!(sound = %name, %error, "failed to play global sound effect");
         }
     }
@@ -1272,12 +1294,14 @@ impl GameApp {
     pub(crate) fn play_viewport_feedback_sound_for_game_state(&mut self, game_running: bool) {
         #[cfg(test)]
         self.ui_sound_log.push("CloseViewport".to_owned());
-        let Some(audio) = self.audio.as_mut() else {
+        let Some(audio) = self.audio.as_ref() else {
             return;
         };
-        if let Err(error) =
-            audio.try_start_global_effect("CloseViewport", game_running, &self.snapshot)
-        {
+        if let Err(error) = audio.borrow_mut().try_start_global_effect(
+            "CloseViewport",
+            game_running,
+            &self.snapshot,
+        ) {
             tracing::error!(sound = "CloseViewport", %error, "failed to play viewport feedback");
         }
     }
@@ -1285,7 +1309,8 @@ impl GameApp {
     pub(crate) fn play_scenario_audio(&mut self, path: &Path) {
         self.resume_frontend_music_after_fade = false;
         let runtime_music_enabled = self.runtime_music_enabled;
-        if let Some(audio) = self.audio.as_mut() {
+        if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             audio.configure_scenario(Some(path));
             if !runtime_music_enabled {
                 audio.stop_music();
@@ -1310,7 +1335,8 @@ impl GameApp {
     pub(crate) fn play_sandbox_audio(&mut self) {
         self.resume_frontend_music_after_fade = false;
         let runtime_music_enabled = self.runtime_music_enabled;
-        if let Some(audio) = self.audio.as_mut() {
+        if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             audio.configure_scenario(None);
             audio.set_music_playlist(None);
             if !runtime_music_enabled {

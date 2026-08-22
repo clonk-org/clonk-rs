@@ -6257,12 +6257,12 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     runtime_assert_ne!(changed_on_release.engine.player(changed_on_release.local_owner).expect("local player").control.pressed_coms & left_mask => 0);
 
     let mut focus = new_running_sandbox_app();
-    let sound_before = focus.audio.test_ref().options.sound_enabled;
+    let sound_before = focus.test_audio_ref().options.sound_enabled;
     focus.test_modifiers(ModifiersState::CONTROL);
     focus.handle_focus_lost().test_value();
     assert!(focus.keyboard_modifiers.is_empty());
     focus.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    runtime_assert_eq!(focus.audio.as_ref().expect("test audio").options.sound_enabled => sound_before);
+    runtime_assert_eq!(focus.test_audio_ref().options.sound_enabled => sound_before);
     assert!(focus.runtime_flash_message.is_some());
 }
 
@@ -6317,10 +6317,10 @@ fn speed_keys_flash_clamp_and_honor_keyconfig_priority() {
                 .expect("parse earlier-global collision"),
         ),
     );
-    let sound_enabled = global_collision.audio.test_ref().options.sound_enabled;
+    let sound_enabled = global_collision.test_audio_ref().options.sound_enabled;
     global_collision.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     runtime_assert_eq!(
-        global_collision.audio.as_ref().expect("sandbox audio context").options.sound_enabled => !sound_enabled;
+        global_collision.test_audio_ref().options.sound_enabled => !sound_enabled;
         global_collision.frame_skip => 1;
     );
     assert!(!global_collision.full_speed);
@@ -6455,12 +6455,12 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
         runtime_assert_eq!(rebound.runtime_flash_message.is_none() => player_scope, "{layer:?}");
 
         let mut sound = make_layer(layer);
-        let before = sound.audio.test_ref().options.sound_enabled;
+        let before = sound.test_audio_ref().options.sound_enabled;
         sound.test_modifiers(ModifiersState::CONTROL);
         sound
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("Ctrl+F3 on {layer:?}: {error}"));
-        runtime_assert_eq!(sound.audio.as_ref().expect("test audio").options.sound_enabled => !before, "{layer:?}");
+        runtime_assert_eq!(sound.test_audio_ref().options.sound_enabled => !before, "{layer:?}");
         assert!(sound.runtime_flash_message.is_none(), "{layer:?}");
     }
 }

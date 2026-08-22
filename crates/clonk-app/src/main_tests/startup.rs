@@ -240,7 +240,7 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
 
     let mut app = new_real_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
-    app.audio = Some(audio);
+    app.audio = Some(connect_audio_context(&mut app.engine, audio));
     app.resume_frontend_music_after_fade = true;
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.startup_restart_diagnostics
@@ -248,26 +248,28 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
         .test_value();
 
-    let audio = app.audio.test_ref();
-    let mut final_catalog = audio.music_resolver.active_filenames();
-    final_catalog.sort();
-    main_assert_eq!(final_catalog => ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]);
-    main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
-    main_assert!(!app.resume_frontend_music_after_fade);
-    main_assert!(app.frontend_music_attempted_for_entry);
-    let expected_frontend = audio
-        .music_resolver
-        .first_default()
-        .test_value()
-        .identity
-        .clone();
-    let controlled = audio.controlled_music_loads.test_ref();
-    main_assert_eq!(controlled.requests.len() => 1);
-    let request = controlled.requests.front().test_value();
-    main_assert!(!request.looped);
-    main_assert!(request.identity.as_ref().is_some_and(|identity| Arc::ptr_eq(identity, &expected_frontend)));
-
-    let pre_console_generation = lock_unpoisoned(&audio.music_control).generation;
+    let pre_console_generation = {
+        let audio = app.test_audio_ref();
+        let mut final_catalog = audio.music_resolver.active_filenames();
+        final_catalog.sort();
+        main_assert_eq!(final_catalog => ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]);
+        main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
+        main_assert!(!app.resume_frontend_music_after_fade);
+        main_assert!(app.frontend_music_attempted_for_entry);
+        let expected_frontend = audio
+            .music_resolver
+            .first_default()
+            .test_value()
+            .identity
+            .clone();
+        let controlled = audio.controlled_music_loads.test_ref();
+        main_assert_eq!(controlled.requests.len() => 1);
+        let request = controlled.requests.front().test_value();
+        main_assert!(!request.looped);
+        main_assert!(request.identity.as_ref().is_some_and(|identity| Arc::ptr_eq(identity, &expected_frontend)));
+        let generation = lock_unpoisoned(&audio.music_control).generation;
+        generation
+    };
     fs::remove_file(global.join("Final Base.ogg")).test_value();
     fs::remove_file(extras.join("Final Match.ogg")).test_value();
     fs::write(global.join("Console Only.ogg"), b"console").test_value();
@@ -279,22 +281,24 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
         .test_value();
 
-    let audio = app.audio.test_ref();
-    main_assert_eq!(lock_unpoisoned(&audio.music_control).generation => pre_console_generation);
-    let mut retained_catalog = audio.music_resolver.active_filenames();
-    retained_catalog.sort();
-    main_assert_eq!(retained_catalog => ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]);
-    main_assert!(audio.music_resolver.resolve("Console Only").is_none());
-    main_assert_eq!(
-        audio
-            .controlled_music_loads
-            .as_ref()
-            .expect("controlled music loading")
-            .requests
-            .len() =>
-        1,
-        "console failure must not run C4Startup::DoStartup again"
-    );
+    {
+        let audio = app.test_audio_ref();
+        main_assert_eq!(lock_unpoisoned(&audio.music_control).generation => pre_console_generation);
+        let mut retained_catalog = audio.music_resolver.active_filenames();
+        retained_catalog.sort();
+        main_assert_eq!(retained_catalog => ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]);
+        main_assert!(audio.music_resolver.resolve("Console Only").is_none());
+        main_assert_eq!(
+            audio
+                .controlled_music_loads
+                .as_ref()
+                .expect("controlled music loading")
+                .requests
+                .len() =>
+            1,
+            "console failure must not run C4Startup::DoStartup again"
+        );
+    }
     main_assert!(app.resume_frontend_music_after_fade);
 
     app.console_mode = false;
@@ -304,10 +308,12 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         .add_fatal_error("fixture command-line failure");
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
         .test_value();
-    let audio = app.audio.test_ref();
-    main_assert_eq!(lock_unpoisoned(&audio.music_control).generation => pre_console_generation);
-    main_assert!(audio.music_resolver.resolve("Console Only").is_none());
-    main_assert_eq!(audio.controlled_music_loads.as_ref().expect("controlled music loading").requests.len() => 1);
+    {
+        let audio = app.test_audio_ref();
+        main_assert_eq!(lock_unpoisoned(&audio.music_control).generation => pre_console_generation);
+        main_assert!(audio.music_resolver.resolve("Console Only").is_none());
+        main_assert_eq!(audio.controlled_music_loads.as_ref().expect("controlled music loading").requests.len() => 1);
+    }
 
     app.classic_command_line.scenario = None;
     app.classic_command_line.record_stream = Some(PathBuf::from("record.example:11114"));
@@ -320,11 +326,11 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     // Its ordinary startup lineage must run the same QuitGame -> PreInit
     // reconstruction, while the earlier console edit is still pending.
     app.classic_command_line = ClassicCommandLine::default();
-    let pre_lobby_generation = lock_unpoisoned(&app.audio.test_ref().music_control).generation;
+    let pre_lobby_generation = lock_unpoisoned(&app.test_audio_ref().music_control).generation;
     install_test_classic_host_lobby(&mut app);
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::ExitRequested])
         .test_value();
-    let audio = app.audio.test_ref();
+    let audio = app.test_audio_ref();
     main_assert!(lock_unpoisoned(&audio.music_control).generation > pre_lobby_generation);
     main_assert!(audio.music_resolver.resolve("Console Only").is_some());
     main_assert_eq!(
@@ -4203,8 +4209,8 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
             .unwrap_or_else(|error| panic!("seed Sound.{key}: {error}"));
     }
     app.app_paths = Some(paths.clone());
-    app.audio.test_mut().options.menu_music_enabled = true;
-    app.audio.test_mut().options.menu_sound_enabled = true;
+    app.test_audio_mut().options.menu_music_enabled = true;
+    app.test_audio_mut().options.menu_sound_enabled = true;
 
     let press_frontend_f3 = |app: &mut GameApp, modifiers: ModifiersState, label: &str| {
         app.handle_modifiers_changed(modifiers)
@@ -4259,8 +4265,8 @@ fn frontend_audio_toggle_write_failure_keeps_live_state() {
     let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     app.app_paths = Some(paths.clone());
-    let music_before = app.audio.test_ref().options.menu_music_enabled;
-    let sound_before = app.audio.test_ref().options.menu_sound_enabled;
+    let music_before = app.test_audio_ref().options.menu_music_enabled;
+    let sound_before = app.test_audio_ref().options.menu_sound_enabled;
 
     fs::remove_file(paths.config_file()).test_value();
     fs::create_dir(paths.config_file()).test_value();
@@ -4271,7 +4277,7 @@ fn frontend_audio_toggle_write_failure_keeps_live_state() {
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F3, ElementState::Released);
 
-    let audio = app.audio.test_ref();
+    let audio = app.test_audio_ref();
     main_assert_eq!(audio.options.menu_music_enabled => !music_before);
     main_assert_eq!(audio.options.menu_sound_enabled => !sound_before);
 }
@@ -4285,12 +4291,12 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             .startup_options_dialog
             .as_ref()
             .map(|dialog| dialog.sound().frontend_music);
-        let before_music = app.audio.test_ref().options.menu_music_enabled;
+        let before_music = app.test_audio_ref().options.menu_music_enabled;
         app.handle_modifiers_changed(ModifiersState::empty())
             .unwrap_or_else(|error| panic!("clear modifiers for {label}: {error}"));
         app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("frontend F3 over {label}: {error}"));
-        main_assert_eq!(app.audio.as_ref().expect("test audio").options.menu_music_enabled => !before_music, "{label}");
+        main_assert_eq!(app.test_audio_ref().options.menu_music_enabled => !before_music, "{label}");
         if let Some(before_visual_music) = before_visual_music {
             main_assert_eq!(
                 app.startup_options_dialog
@@ -4310,7 +4316,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         app.handle_key(VirtualKeyCode::F3, ElementState::Released)
             .unwrap_or_else(|error| panic!("frontend F3 release over {label}: {error}"));
 
-        let before_sound = app.audio.test_ref().options.menu_sound_enabled;
+        let before_sound = app.test_audio_ref().options.menu_sound_enabled;
         let before_visual_sound = app
             .startup_options_dialog
             .as_ref()
@@ -4319,7 +4325,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             .unwrap_or_else(|error| panic!("set Ctrl for {label}: {error}"));
         app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("frontend Ctrl+F3 over {label}: {error}"));
-        main_assert_eq!(app.audio.as_ref().expect("test audio").options.menu_sound_enabled => !before_sound, "{label}");
+        main_assert_eq!(app.test_audio_ref().options.menu_sound_enabled => !before_sound, "{label}");
         if let Some(before_visual_sound) = before_visual_sound {
             main_assert_eq!(
                 app.startup_options_dialog

@@ -1174,7 +1174,7 @@ impl Engine {
                     format!("{object_name} becomes {age}!|Happy birthday!"),
                     object_id,
                 ));
-                self.pending_audio.push(AudioCommand::PlaySound {
+                self.emit_audio_command(AudioCommand::PlaySound {
                     name: "Trumpet".to_string(),
                     target: Some(object_id),
                     volume: 100,
@@ -1299,7 +1299,7 @@ impl Engine {
                             for content in contents {
                                 self.close_object_menu(content, true)?;
                             }
-                            self.pending_audio.push(AudioCommand::PlaySound {
+                            self.emit_audio_command(AudioCommand::PlaySound {
                                 name: "Trumpet".to_string(),
                                 target: Some(base_id),
                                 volume: 100,
@@ -2561,10 +2561,13 @@ impl Engine {
     /// AssignDeath's ordinary SetActionByName("Dead") transition.
     fn set_death_action_by_name(&mut self, idx: usize, action: &str) -> Result<(), EngineError> {
         let definition_id = self.objects[idx].definition_id.clone();
-        let Some(library) = self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| definition.action_library().clone())
+        let Some((library, incomplete_activity)) =
+            self.definitions.get(&definition_id).map(|definition| {
+                (
+                    definition.action_library().clone(),
+                    definition.incomplete_activity(),
+                )
+            })
         else {
             return Ok(());
         };
@@ -2572,6 +2575,13 @@ impl Engine {
             return Ok(());
         }
         let previous = self.objects[idx].state.action.clone();
+        let previous_index = previous
+            .act_map_index
+            .or_else(|| library.named_action_index(&previous.name));
+        let requested_index = library.named_action_index(action);
+        let requested_action_changed = previous.name != action || previous_index != requested_index;
+        let active_action_allowed =
+            self.objects[idx].state.construction >= FULL_CON || incomplete_activity;
         let update = ActionUpdate {
             name: Some(action.to_string()),
             phase: Some(0),
@@ -2583,12 +2593,15 @@ impl Engine {
             target: None,
             target2: None,
             callbacks_dispatched: false,
+            action_sound_dispatched: false,
+            action_sound_selection: None,
         };
         let object = &mut self.objects[idx];
-        let result = object
-            .state
-            .action
-            .apply_update_with_library(&update, &library);
+        let result = object.state.action.apply_update_with_library_and_activity(
+            &update,
+            &library,
+            active_action_allowed,
+        );
         // SetAction fix resync (C4Object.cpp:4144) — only past the
         // NoOtherAction early returns.
         let applied = matches!(result, ActionUpdateResult::Applied);
@@ -2597,13 +2610,20 @@ impl Engine {
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
         if applied {
-            let previous_flip_dir = object.state.action_flip_dir(&library);
-            object.record_action_event(previous, ActionTransitionKind::Forced);
+            let previous_flip_dir =
+                library.flip_dir_for_entry(&previous.name, previous.act_map_index);
+            object.record_action_event_with_sound_stop(
+                previous,
+                ActionTransitionKind::Forced,
+                &library,
+                requested_action_changed,
+            );
             // SetAction's FlipDir refresh, guarded on the value changing and
             // ordered before SetOCF (C4Object.cpp:4182-4192).
             if previous_flip_dir != self.object_action_flip_dir(idx) {
                 self.update_object_flip_dir(idx);
             }
+            self.dispatch_pending_action_sounds(idx, false);
             // SetAction calls SetOCF before StartCall/AbortCall
             // (C4Object.cpp:4141,4173).
             self.refresh_object_ocf(idx);
@@ -2632,16 +2652,26 @@ impl Engine {
             self.objects[idx].state.controller = caused_by;
         }
         let definition_id = self.objects[idx].definition_id.clone();
-        let library = self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| definition.action_library().clone());
-        if let Some(library) = library {
+        let library = self.definitions.get(&definition_id).map(|definition| {
+            (
+                definition.action_library().clone(),
+                definition.incomplete_activity(),
+            )
+        });
+        if let Some((library, incomplete_activity)) = library {
+            let active_action_allowed =
+                self.objects[idx].state.construction >= FULL_CON || incomplete_activity;
             for action in ["Tumble", "Jump"] {
                 if !library.contains(action) {
                     continue;
                 }
                 let previous = self.objects[idx].state.action.clone();
+                let previous_index = previous
+                    .act_map_index
+                    .or_else(|| library.named_action_index(&previous.name));
+                let requested_index = library.named_action_index(action);
+                let requested_action_changed =
+                    previous.name != action || previous_index != requested_index;
                 let update = ActionUpdate {
                     name: Some(action.to_string()),
                     phase: Some(0),
@@ -2653,24 +2683,39 @@ impl Engine {
                     target: None,
                     target2: None,
                     callbacks_dispatched: false,
+                    action_sound_dispatched: false,
+                    action_sound_selection: None,
                 };
-                let object = &mut self.objects[idx];
-                let result = object
+                let result = self.objects[idx]
                     .state
                     .action
-                    .apply_update_with_library(&update, &library);
+                    .apply_update_with_library_and_activity(
+                        &update,
+                        &library,
+                        active_action_allowed,
+                    );
                 if matches!(result, ActionUpdateResult::Applied) {
                     // C4Object::SetAction resynchronizes both fixed
                     // coordinates after every successful action selection,
                     // including a same-action Jump selected by Fling
                     // (C4Object.cpp:4142-4169).
-                    object.fixed_position =
-                        FixedVec2::from_ints(object.state.position.x, object.state.position.y);
-                    if previous.name != object.state.action.name
-                        || previous.act_map_index != object.state.action.act_map_index
                     {
-                        object.record_action_event(previous, ActionTransitionKind::Forced);
+                        let object = &mut self.objects[idx];
+                        object.fixed_position =
+                            FixedVec2::from_ints(object.state.position.x, object.state.position.y);
+                        if previous.name != object.state.action.name
+                            || previous.act_map_index != object.state.action.act_map_index
+                        {
+                            object.record_action_event_with_sound_stop(
+                                previous,
+                                ActionTransitionKind::Forced,
+                                &library,
+                                requested_action_changed,
+                            );
+                        }
                     }
+                    self.dispatch_pending_action_sounds(idx, false);
+                    let object = &mut self.objects[idx];
                     // Tumble also turns the object (SetDir, C4ObjectCom.cpp:77)
                     if action == "Tumble" {
                         let direction = if txdir < C4Fixed::ZERO {

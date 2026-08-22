@@ -6,6 +6,14 @@
 use super::*;
 
 impl Engine {
+    /// Connect the app-owned, client-local sound instance registry used by
+    /// synchronous native sound calls. The weak endpoint deliberately stays
+    /// outside saved and synchronized engine state.
+    #[doc(hidden)]
+    pub fn configure_synchronous_sound_host(&mut self, host: Option<SynchronousSoundHostHandle>) {
+        self.audio_registry.set_synchronous_host(host);
+    }
+
     pub(crate) fn resort_any_object_pending(&self) -> bool {
         self.resort_any_object
             || self.pending_object_order_commands.iter().any(|command| {

@@ -725,7 +725,12 @@ fn local_join_publishes_control_before_initialize_player_audio() {
 
     app.join_local_player().test_value();
 
-    main_assert!(app.engine.pending_audio.iter().any(|command| matches!(command, clonk_engine::AudioCommand::PlaySound { name, .. } if name == "LocalJoin")));
+    main_assert!(
+        app.test_audio_ref()
+            .missing_sounds
+            .contains("request::localjoin"),
+        "InitializePlayer sound reaches the local audio host"
+    );
 }
 
 #[test]

@@ -472,7 +472,7 @@ impl Engine {
         }
         self.apply_particle_commands(particles);
         if !audio.is_empty() {
-            self.pending_audio.extend(audio);
+            self.emit_audio_commands(audio);
         }
         if !messages.is_empty() {
             for command in messages {

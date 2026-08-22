@@ -1489,7 +1489,7 @@ impl Engine {
                 // draw as the presentation gate; emitting the command draws
                 // no additional randomness.
                 if self.rng.rnd3() == 0 {
-                    self.pending_audio.push(AudioCommand::PlaySoundAt {
+                    self.emit_audio_command(AudioCommand::PlaySoundAt {
                         name: "Pshshsh".to_string(),
                         position: Vector2::new(*x, *y),
                     });
@@ -1549,7 +1549,7 @@ impl Engine {
                         self.spawn_smoke(*x, *y, level);
                     }
                     if self.rng.random(20) == 0 {
-                        self.pending_audio.push(AudioCommand::PlaySoundAt {
+                        self.emit_audio_command(AudioCommand::PlaySoundAt {
                             name: "Corrode".to_string(),
                             position: Vector2::new(*x, *y),
                         });
@@ -1777,7 +1777,7 @@ impl Engine {
             self.spawn_smoke(request.x, request.y, request.level);
         }
         if let Some(request) = sound_request {
-            self.pending_audio.push(AudioCommand::PlaySoundAt {
+            self.emit_audio_command(AudioCommand::PlaySoundAt {
                 name: request.name.to_string(),
                 position: Vector2::new(request.x, request.y),
             });
@@ -2336,7 +2336,7 @@ impl Engine {
                     .extend(object_order_commands);
                 self.apply_next_mission_commands(next_mission_commands);
                 if !audio_events.is_empty() {
-                    self.pending_audio.extend(audio_events);
+                    self.emit_audio_commands(audio_events);
                 }
                 for command in messages {
                     self.messages.apply_command(command);

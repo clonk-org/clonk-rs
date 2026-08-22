@@ -1176,6 +1176,35 @@ impl ActionLibrary {
         )
     }
 
+    /// Whether the numeric slot requested by the stale phase-end differs from
+    /// the live old slot. C++ uses this pre-construction-coercion comparison
+    /// for StopSoundEffect (C4Object.cpp:4121-4130).
+    pub(crate) fn phase_end_requested_action_changed(
+        &self,
+        state: &ActionState,
+        phase_end: &ActionPhaseEnd,
+        current_library: &ActionLibrary,
+    ) -> bool {
+        if state.phase < phase_end.length {
+            return false;
+        }
+        let Some(spec) = self.spec_for_entry(&phase_end.action, phase_end.act_map_index) else {
+            return false;
+        };
+        if Self::holds_at_phase_end(spec) {
+            return false;
+        }
+        let Some((requested, requested_index)) =
+            Self::requested_transition_target(spec, current_library)
+        else {
+            return false;
+        };
+        let current_index = state
+            .act_map_index
+            .or_else(|| current_library.named_action_index(&state.name));
+        requested != state.name || requested_index != current_index
+    }
+
     pub fn procedure_for_action(&self, action: &str) -> ActionProcedure {
         self.specs
             .get(action)
@@ -1385,13 +1414,7 @@ impl ActionLibrary {
     ) -> bool {
         // NextAction=Hold clamps at the last phase and keeps the action
         // (ActHold, C4Def.cpp:786-787; C4Object.cpp:5457-5459).
-        if spec.next_index == Some(ACT_HOLD)
-            || (spec.next_index.is_none()
-                && spec
-                    .next
-                    .as_deref()
-                    .is_some_and(|next| next.eq_ignore_ascii_case("Hold")))
-        {
+        if Self::holds_at_phase_end(spec) {
             state.phase = length.wrapping_sub(1);
             return false;
         }
@@ -1399,24 +1422,9 @@ impl ActionLibrary {
         // NextActionName stays ActIdle too (the C4Def::Load mapping loop,
         // C4Def.cpp:784-792) — both go to the literal Idle state, NOT the
         // library's default SPAWN action.
-        let (requested, requested_index) = match spec.next_index {
-            // SetAction(int) validates the numeric target against the LIVE
-            // definition. This matters when a stale PhaseCall pAction came
-            // from another definition: an index valid there may be outside
-            // the new ActMap and must fail without falling back to ActIdle.
-            Some(index) if index >= 0 => {
-                let Some((name, _)) = library.physical_entry(index as u32) else {
-                    return false;
-                };
-                (name, Some(index as u32))
-            }
-            Some(_) => (DEFAULT_ACTION_NAME, None),
-            None => spec
-                .next
-                .as_deref()
-                .filter(|next| library.contains(next))
-                .map(|next| (next, library.named_action_index(next)))
-                .unwrap_or((DEFAULT_ACTION_NAME, None)),
+        let Some((requested, requested_index)) = Self::requested_transition_target(spec, library)
+        else {
+            return false;
         };
         let current_index = state
             .act_map_index
@@ -1439,7 +1447,7 @@ impl ActionLibrary {
         // still returns true and resets Phase/PhaseDelay when coercion leaves
         // an already-idle object in ActIdle.
         let (resolved, resolved_index) = if active_action_allowed {
-            (requested, requested_index)
+            (requested.as_str(), requested_index)
         } else {
             (DEFAULT_ACTION_NAME, None)
         };
@@ -1472,6 +1480,38 @@ impl ActionLibrary {
         state.phase = 0;
         state.ticks = 0;
         true
+    }
+
+    fn holds_at_phase_end(spec: &ActionSpec) -> bool {
+        spec.next_index == Some(ACT_HOLD)
+            || (spec.next_index.is_none()
+                && spec
+                    .next
+                    .as_deref()
+                    .is_some_and(|next| next.eq_ignore_ascii_case("Hold")))
+    }
+
+    fn requested_transition_target(
+        spec: &ActionSpec,
+        library: &ActionLibrary,
+    ) -> Option<(String, Option<u32>)> {
+        match spec.next_index {
+            // SetAction(int) validates the numeric target against the LIVE
+            // definition. This matters when a stale PhaseCall pAction came
+            // from another definition: an index valid there may be outside
+            // the new ActMap and must fail without falling back to ActIdle.
+            Some(index) if index >= 0 => library
+                .physical_entry(index as u32)
+                .map(|(name, _)| (name.to_string(), Some(index as u32))),
+            Some(_) => Some((DEFAULT_ACTION_NAME.to_string(), None)),
+            None => Some(
+                spec.next
+                    .as_deref()
+                    .filter(|next| library.contains(next))
+                    .map(|next| (next.to_string(), library.named_action_index(next)))
+                    .unwrap_or_else(|| (DEFAULT_ACTION_NAME.to_string(), None)),
+            ),
+        }
     }
 }
 
@@ -1637,6 +1677,19 @@ impl ActionState {
         update: &ActionUpdate,
         library: &ActionLibrary,
     ) -> ActionUpdateResult {
+        self.apply_update_with_library_and_activity(update, library, true)
+    }
+
+    /// SetAction's library-aware update with the construction gate supplied
+    /// by the owning object. Validation and NoOtherAction use the requested
+    /// slot; only the installed slot is coerced to ActIdle
+    /// (C4Object.cpp:4111-4130).
+    pub(crate) fn apply_update_with_library_and_activity(
+        &mut self,
+        update: &ActionUpdate,
+        library: &ActionLibrary,
+        active_action_allowed: bool,
+    ) -> ActionUpdateResult {
         let mut resolved = update.clone();
         if resolved.name.as_deref().is_some_and(is_builtin_idle_name) {
             resolved.name = Some(DEFAULT_ACTION_NAME.to_string());
@@ -1664,6 +1717,9 @@ impl ActionState {
                 resolved.phase = Some(0);
                 resolved.ticks = Some(0);
             }
+        }
+        if !active_action_allowed && resolved.name.is_some() {
+            resolved.name = Some(DEFAULT_ACTION_NAME.to_string());
         }
 
         let previous_name = self.name.clone();
@@ -1809,6 +1865,20 @@ pub struct ActionUpdate {
     /// the fold must not queue duplicate transition callbacks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub callbacks_dispatched: bool,
+    /// The script/native SetAction seam already applied the old-stop/new-start
+    /// pair to the client-local sound system at the call site. The later state
+    /// fold must acknowledge the resulting action-sound selection without
+    /// replaying `NewInstance` (and potentially drawing wildcard RNG again).
+    /// Presentation-only: this marker never enters save or control data.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub action_sound_dispatched: bool,
+    /// Resulting attempted action-loop selection after the already-dispatched
+    /// operations: absent preserves the previous loop, `Some(None)` records a
+    /// stop with no replacement, and `Some(Some(name))` records a start.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub action_sound_selection: Option<Option<String>>,
 }
 
 impl ActionUpdate {
@@ -1884,6 +1954,10 @@ impl ActionUpdate {
             // must not erase its already-dispatched callback marker.
             self.callbacks_dispatched |= other.callbacks_dispatched;
         }
+        self.action_sound_dispatched |= other.action_sound_dispatched;
+        if other.action_sound_selection.is_some() {
+            self.action_sound_selection = other.action_sound_selection;
+        }
         if other.phase.is_some() {
             self.phase = other.phase;
         }
@@ -1920,6 +1994,8 @@ impl Default for ActionUpdate {
             target: None,
             target2: None,
             callbacks_dispatched: false,
+            action_sound_dispatched: false,
+            action_sound_selection: None,
         }
     }
 }

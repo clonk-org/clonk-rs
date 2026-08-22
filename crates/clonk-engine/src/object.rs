@@ -2074,11 +2074,14 @@ pub struct Object {
     /// reconciliation. This is runtime presentation state, not synchronized
     /// or save-persisted object state.
     pub(crate) pending_action_sound_events: VecDeque<ActionSoundTransition>,
-    /// ActMap `Sound=` of the numeric action slot this object currently holds
-    /// a looping `StartSoundEffect` instance for (C4Object.cpp:4186-4190).
-    /// Client-local presentation state like the rest of C4SoundSystem: it is
-    /// neither synchronized nor save-persisted, so it stays off `ObjectState`.
+    /// ActMap `Sound=` most recently attempted for this object. Rejected starts
+    /// are remembered too: C++ does not retry `NewInstance` later merely
+    /// because mixer state changed.
     pub(crate) active_action_sound: Option<String>,
+    /// Whether creation or a SetAction transition has made the initial
+    /// ActMap-sound decision. `None` cannot encode this because an action may
+    /// legitimately have no Sound=.
+    pub(crate) action_sound_initialized: bool,
     /// The DFA_SWIM free-fall exit `return`ed out of ExecAction this
     /// frame BEFORE any t_attach assignment — the frame's movement runs
     /// unattached (C4Object.cpp:4692,4956).
@@ -2145,8 +2148,12 @@ pub(crate) struct ActionTransitionEvent {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActionSoundTransition {
-    pub(crate) previous_action: ActionState,
-    pub(crate) current_action: ActionState,
+    /// Concrete old-slot name captured before incomplete construction can
+    /// coerce the requested slot (C4Object.cpp:4121-4130).
+    pub(crate) stop: Option<String>,
+    /// Concrete final-slot name captured after coercion
+    /// (C4Object.cpp:4159-4163).
+    pub(crate) start: Option<String>,
 }
 
 #[derive(Debug)]
@@ -2286,6 +2293,7 @@ impl Object {
             pending_action_events: VecDeque::new(),
             pending_action_sound_events: VecDeque::new(),
             active_action_sound: None,
+            action_sound_initialized: false,
             swim_exit_this_frame: false,
             material_contents: Vec::new(),
             shape_template,
@@ -2609,6 +2617,27 @@ impl Object {
             self.last_energy_loss_cause = cause;
         }
         let outcome = self.state.apply_delta(delta, action_library);
+        if outcome.action_change.is_some()
+            && delta
+                .action
+                .as_ref()
+                .is_some_and(|action| action.action_sound_dispatched)
+        {
+            // The host-call seam already ran SetAction's StopSoundEffect /
+            // StartSoundEffect pair. Remember the selected slot even when its
+            // NewInstance was rejected: C++ does not retry that start at the
+            // frame boundary, and a retry could consume wildcard RNG or become
+            // spuriously successful after mixer state changes.
+            self.pending_action_sound_events.clear();
+            if let Some(selection) = delta
+                .action
+                .as_ref()
+                .and_then(|action| action.action_sound_selection.clone())
+            {
+                self.active_action_sound = selection;
+            }
+            self.action_sound_initialized = true;
+        }
         if let Some(position) = delta.position {
             self.fixed_position = FixedVec2::from_ints(position.x, position.y);
         }
@@ -3116,19 +3145,56 @@ impl Object {
         &mut self,
         previous: ActionState,
         kind: ActionTransitionKind,
+        action_library: &ActionLibrary,
     ) {
         let current = self.state.action.clone();
-        if previous.name != current.name || previous.act_map_index != current.act_map_index {
-            self.pending_action_sound_events
-                .push_back(ActionSoundTransition {
-                    previous_action: previous.clone(),
-                    current_action: current,
-                });
-        }
+        let changed =
+            previous.name != current.name || previous.act_map_index != current.act_map_index;
+        self.record_action_sound_transition(&previous, &current, action_library, changed);
         self.pending_action_events.push_back(ActionTransitionEvent {
             previous_action: previous,
             kind,
         });
+    }
+
+    pub(crate) fn record_action_event_with_sound_stop(
+        &mut self,
+        previous: ActionState,
+        kind: ActionTransitionKind,
+        action_library: &ActionLibrary,
+        stop_previous: bool,
+    ) {
+        let current = self.state.action.clone();
+        self.record_action_sound_transition(&previous, &current, action_library, stop_previous);
+        self.pending_action_events.push_back(ActionTransitionEvent {
+            previous_action: previous,
+            kind,
+        });
+    }
+
+    pub(crate) fn record_action_sound_transition(
+        &mut self,
+        previous: &ActionState,
+        current: &ActionState,
+        action_library: &ActionLibrary,
+        stop_previous: bool,
+    ) {
+        let start_current =
+            previous.name != current.name || previous.act_map_index != current.act_map_index;
+        if !stop_previous && !start_current {
+            return;
+        }
+        let sound_for = |action: &ActionState| {
+            action_library
+                .spec_for_state(action)
+                .and_then(|spec| spec.sound.clone())
+                .filter(|sound| !sound.is_empty())
+        };
+        self.pending_action_sound_events
+            .push_back(ActionSoundTransition {
+                stop: stop_previous.then(|| sound_for(previous)).flatten(),
+                start: start_current.then(|| sound_for(current)).flatten(),
+            });
     }
 
     pub(crate) fn execute_command_queue(
@@ -3197,7 +3263,11 @@ impl Object {
                 .unwrap_or(false);
             if let Some(change) = delta_outcome.action_change {
                 if !callbacks_dispatched {
-                    self.record_action_event(change.previous, ActionTransitionKind::Forced);
+                    self.record_action_event(
+                        change.previous,
+                        ActionTransitionKind::Forced,
+                        current_action_library,
+                    );
                 }
             }
             if let Some((previous, new)) = delta_outcome.container_change {
@@ -3740,6 +3810,15 @@ pub struct SpawnConfig {
     #[serde(default = "default_construction")]
     pub construction: i32,
     pub action: Option<ActionState>,
+    /// Construction already dispatched the selected action sound through the
+    /// client-local host before this deferred spawn materialized.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub action_sound_dispatched: bool,
+    /// Final attempted action-loop selection already applied by Construction.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub action_sound_selection: Option<Option<String>>,
     #[serde(default)]
     pub direction: Direction,
     #[serde(default)]
@@ -3967,6 +4046,8 @@ impl SpawnConfig {
             magic_energy: None,
             construction: FULL_CON,
             action: None,
+            action_sound_dispatched: false,
+            action_sound_selection: None,
             direction: Direction::default(),
             command_direction: CommandDirection::default(),
             effects: Vec::new(),

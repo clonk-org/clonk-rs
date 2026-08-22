@@ -1729,9 +1729,7 @@ fn report_buy_error(
     let _ = player_message(&[Value::Int(player), Value::String(message.into())])?;
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
-            context
-                .audio_mut()
-                .play_sound("Error", target, 100, false, false, None);
+            let _ = context.play_sound("Error", target, 100, false, false, None);
         }
     });
     Ok(())
@@ -3265,14 +3263,7 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         if !selected {
             HOST_CONTEXT.with(|cell| {
                 if let Some(context) = cell.borrow_mut().as_mut() {
-                    context.audio_mut().play_sound(
-                        "Grab",
-                        Some(container),
-                        100,
-                        false,
-                        false,
-                        None,
-                    );
+                    let _ = context.play_sound("Grab", Some(container), 100, false, false, None);
                 }
             });
         }

@@ -4,7 +4,7 @@ impl GameApp {
     pub(crate) fn voice_chat_enabled(&self) -> bool {
         self.audio
             .as_ref()
-            .is_some_and(|audio| audio.options.voice_enabled)
+            .is_some_and(|audio| audio.borrow().options.voice_enabled)
     }
 
     /// The one player this client speaks as, or `None` when it is not a voice
@@ -53,7 +53,7 @@ impl GameApp {
     fn voice_activation(&self) -> Option<crate::settings::VoiceActivation> {
         self.audio
             .as_ref()
-            .and_then(|audio| audio.options.voice_activation())
+            .and_then(|audio| audio.borrow().options.voice_activation())
     }
 
     /// What the mixer is playing, for the echo canceller to subtract. Every
@@ -65,7 +65,7 @@ impl GameApp {
     fn voice_echo_reference(&self) -> Option<clonk_audio::VoiceEchoReference> {
         self.audio
             .as_ref()
-            .map(|audio| audio.system.voice_echo_reference())
+            .map(|audio| audio.borrow().system.voice_echo_reference())
     }
 
     pub(crate) fn handle_voice_key(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
@@ -73,7 +73,7 @@ impl GameApp {
             .audio
             .as_ref()
             .map_or(VirtualKeyCode::Backquote, |audio| {
-                audio.options.voice_push_to_talk
+                audio.borrow().options.voice_push_to_talk
             });
         let keyboard_scope_available = !self.runtime_gui_has_keyboard_focus()
             && !self.runtime_top_default_dialog_is_exclusive();
@@ -121,7 +121,7 @@ impl GameApp {
         let input_device = self
             .audio
             .as_ref()
-            .and_then(|audio| audio.options.voice_input_device.clone());
+            .and_then(|audio| audio.borrow().options.voice_input_device.clone());
         if let Err(error) =
             self.voice_chat
                 .start_capture_on_device(Some(key), echo_reference, input_device)
@@ -141,7 +141,7 @@ impl GameApp {
         let input_device = self
             .audio
             .as_ref()
-            .and_then(|audio| audio.options.voice_input_device.clone());
+            .and_then(|audio| audio.borrow().options.voice_input_device.clone());
         if !voice_activated {
             if self.voice_chat.voice_activated_capture_requested() {
                 self.voice_chat.stop_capture();
@@ -174,6 +174,7 @@ impl GameApp {
         let Some(audio) = self.audio.as_ref() else {
             return;
         };
+        let audio = audio.borrow();
         for (client_id, player_id) in speakers {
             audio
                 .system
@@ -210,6 +211,7 @@ impl GameApp {
         // Whatever the player has set right now, handed to a capture that may
         // already be open: the stages are switched, not reopened.
         if let Some(audio) = self.audio.as_ref() {
+            let audio = audio.borrow();
             self.voice_chat
                 .set_processing(audio.options.voice_processing());
         }
@@ -224,7 +226,7 @@ impl GameApp {
         let voice_volume = self
             .audio
             .as_ref()
-            .map_or(0.0, |audio| audio.options.voice_volume);
+            .map_or(0.0, |audio| audio.borrow().options.voice_volume);
 
         for frame in received {
             let Some(client_id) = i32::try_from(frame.client_id).ok() else {
@@ -245,6 +247,7 @@ impl GameApp {
             };
             if accepted.reset_stream {
                 if let Some(audio) = self.audio.as_ref() {
+                    let audio = audio.borrow();
                     audio.system.remove_voice_stream(accepted.stream_id);
                 }
             }
@@ -272,6 +275,7 @@ impl GameApp {
                 continue;
             };
             if let Some(audio) = self.audio.as_ref() {
+                let audio = audio.borrow();
                 let stream_id = crate::voice_chat::voice_stream_id(client_id, player_id);
                 let queued_frames = audio.system.voice_stream_stats(stream_id).queued_frames;
                 let maximum_queued_frames =

@@ -801,13 +801,14 @@ impl GameApp {
         &mut self,
         enabled: bool,
     ) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup game-music option",
                 },
             ))
         })?;
+        let mut audio = audio.borrow_mut();
         // The startup BoolConfig writes RXMusic only. There is no running
         // game whose playback state should be changed here.
         audio.options.music_enabled = enabled;
@@ -818,37 +819,40 @@ impl GameApp {
         &mut self,
         enabled: bool,
     ) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup game-sound option",
                 },
             ))
         })?;
+        let mut audio = audio.borrow_mut();
         audio.options.sound_enabled = enabled;
         Ok(())
     }
 
     pub(crate) fn set_startup_music_volume(&mut self, value: i32) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup music-volume slider",
                 },
             ))
         })?;
+        let mut audio = audio.borrow_mut();
         audio.set_music_volume_percent(value);
         Ok(())
     }
 
     pub(crate) fn set_startup_sound_volume(&mut self, value: i32) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup sound-volume slider",
                 },
             ))
         })?;
+        let mut audio = audio.borrow_mut();
         audio.set_sound_volume_percent(value);
         Ok(())
     }
@@ -862,13 +866,14 @@ impl GameApp {
     /// hosted or joined game rather than one already running -- which the
     /// startup Options dialog can never be open over.
     pub(crate) fn set_startup_voice_enabled(&mut self, enabled: bool) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup voice-chat option",
                 },
             ))
         })?;
+        let mut audio = audio.borrow_mut();
         audio.options.voice_enabled = enabled;
         Ok(())
     }
@@ -884,13 +889,14 @@ impl GameApp {
         &mut self,
         voice_activated: bool,
     ) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup voice-activation option",
                 },
             ))
         })?;
+        let mut audio = audio.borrow_mut();
         use crate::settings::VoiceActivationMode;
         audio.options.voice_activation_mode = if voice_activated {
             VoiceActivationMode::VoiceActivated
@@ -905,13 +911,14 @@ impl GameApp {
     /// speech be boosted. The positional mix multiplies this in every frame,
     /// so it is live immediately.
     pub(crate) fn set_startup_voice_volume(&mut self, value: i32) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
+        let audio = self.audio.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
                     action: "the startup voice-volume slider",
                 },
             ))
         })?;
+        let mut audio = audio.borrow_mut();
         audio.options.set_voice_volume_percent(value);
         Ok(())
     }
@@ -2829,7 +2836,8 @@ impl GameApp {
                             self.replace_startup_view(StartupView::NetworkLobby);
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
-                            if let Some(audio) = self.audio.as_mut() {
+                            if let Some(audio) = self.audio.as_ref() {
+                                let mut audio = audio.borrow_mut();
                                 audio.stop_music();
                             }
                             self.finish_classic_command_line_host_entry()?;
@@ -5028,7 +5036,8 @@ impl GameApp {
     }
 
     pub(crate) fn show_main_menu(&mut self) {
-        if let Some(audio) = self.audio.as_mut() {
+        if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             audio.stop_lobby_elevator();
         }
         self.restore_startup_fonts();

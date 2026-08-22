@@ -1504,11 +1504,8 @@ pub(crate) fn message(args: &[Value]) -> Result<Value, RuntimeError> {
         // finish NewInstance before deciding whether this fallback survives.
         if let Some(sound) = extract_speech_segment(&raw_message) {
             let speech_target = context.script_object_context;
-            let (queued, pending_fallback) = context.audio_mut().try_play_speech(
-                &sound,
-                speech_target,
-                fallback.as_ref().ok().cloned(),
-            );
+            let (queued, pending_fallback) =
+                context.try_play_speech(&sound, speech_target, fallback.as_ref().ok().cloned());
             if queued {
                 if let Some(pending_fallback) = pending_fallback {
                     context.register_message(MessageCommand::PendingSpeech(pending_fallback));
@@ -1571,11 +1568,8 @@ pub(crate) fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
                 let speech_target = target_raw
                     .map(ObjectId::new)
                     .or(context.script_object_context);
-                let (queued, pending_fallback) = context.audio_mut().try_play_speech(
-                    &sound,
-                    speech_target,
-                    fallback.as_ref().ok().cloned(),
-                );
+                let (queued, pending_fallback) =
+                    context.try_play_speech(&sound, speech_target, fallback.as_ref().ok().cloned());
                 if queued {
                     if let Some(pending_fallback) = pending_fallback {
                         context.register_message(MessageCommand::PendingSpeech(pending_fallback));
@@ -1677,11 +1671,8 @@ pub(crate) fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
         );
         if let Some(sound) = extract_speech_segment(&raw_message) {
             let speech_target = context.script_object_context;
-            let (queued, pending_fallback) = context.audio_mut().try_play_speech(
-                &sound,
-                speech_target,
-                fallback.as_ref().ok().cloned(),
-            );
+            let (queued, pending_fallback) =
+                context.try_play_speech(&sound, speech_target, fallback.as_ref().ok().cloned());
             if queued {
                 if let Some(pending_fallback) = pending_fallback {
                     context.register_message(MessageCommand::PendingSpeech(pending_fallback));

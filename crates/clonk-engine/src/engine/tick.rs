@@ -603,6 +603,7 @@ impl Engine {
                 if object_may_execute_command_work {
                     self.landscape = landscape_slot;
                 }
+                self.dispatch_pending_action_sounds(idx, false);
                 self.update_inactive_list_for_status_change(object_id, previous_status, new_status);
                 self.update_selection_for_state_change(
                     object_id,
@@ -738,7 +739,7 @@ impl Engine {
                             .extend(object_order_commands);
                         self.apply_next_mission_commands(next_mission_commands);
                         if !audio_events.is_empty() {
-                            self.pending_audio.extend(audio_events);
+                            self.emit_audio_commands(audio_events);
                         }
                         if !event_messages.is_empty() {
                             for command in event_messages {
@@ -923,6 +924,8 @@ impl Engine {
                 // SetAction(NextAction). Callback-side SetPhase/SetAction can
                 // therefore suppress or alter this transition.
                 let transition_previous_state = self.objects[idx].state.action.clone();
+                let mut transition_action_library = None;
+                let mut stop_previous_action_sound = false;
                 if let Some(phase_end) = advance_outcome.phase_end.take() {
                     let (current_definition_id, current_action_library) =
                         self.object_definition_context(idx)?;
@@ -935,6 +938,12 @@ impl Engine {
                             .definitions
                             .get(&current_definition_id)
                             .is_some_and(Definition::incomplete_activity);
+                    stop_previous_action_sound = exec_action_library
+                        .phase_end_requested_action_changed(
+                            &self.objects[idx].state.action,
+                            &phase_end,
+                            &current_action_library,
+                        );
                     advance_outcome.wrapped = exec_action_library
                         .finish_phase_end_against_with_activity(
                             &mut self.objects[idx].state.action,
@@ -942,18 +951,24 @@ impl Engine {
                             &current_action_library,
                             active_action_allowed,
                         );
+                    transition_action_library = Some(current_action_library);
                 }
 
                 // A successful SetAction always resyncs fixed coords; Hold
                 // and NoOtherAction rejection leave them untouched.
                 if advance_outcome.wrapped {
+                    let current_action_library = transition_action_library
+                        .as_ref()
+                        .expect("a wrapped phase end retained its action library");
                     {
                         let object = &mut self.objects[idx];
                         object.fixed_position =
                             FixedVec2::from_ints(object.state.position.x, object.state.position.y);
-                        object.record_action_event(
+                        object.record_action_event_with_sound_stop(
                             transition_previous_state.clone(),
                             ActionTransitionKind::Natural,
+                            current_action_library,
+                            stop_previous_action_sound,
                         );
                         // A PhaseCall may have assigned removal already. C++
                         // nevertheless executes the stale pAction phase-end
@@ -972,6 +987,7 @@ impl Engine {
                     if previous_flip_dir != self.object_action_flip_dir(idx) {
                         self.update_object_flip_dir(idx);
                     }
+                    self.dispatch_pending_action_sounds(idx, allow_deleted_phase_end_start);
                     // C4Object::SetAction refreshes OCF after selecting the
                     // actual (possibly incomplete-coerced) action and before
                     // StartCall/EndCall (C4Object.cpp:4165-4183).
@@ -1363,6 +1379,7 @@ impl Engine {
                                 object.record_action_event(
                                     change.previous,
                                     ActionTransitionKind::Forced,
+                                    &action_library,
                                 );
                             }
                         }
@@ -1379,6 +1396,7 @@ impl Engine {
                             container_change,
                         )
                     };
+                    self.dispatch_pending_action_sounds(idx, false);
                     let native_float_bounds = self.uses_native_float_bounds(
                         idx,
                         self.object_physical_without_fair_fill(idx).float,
@@ -1416,7 +1434,7 @@ impl Engine {
                     );
                     self.update_sector_for_index(idx);
                     if !audio.is_empty() {
-                        self.pending_audio.extend(audio);
+                        self.emit_audio_commands(audio);
                     }
                     self.update_selection_for_state_change(
                         object_id,
@@ -1531,7 +1549,7 @@ impl Engine {
                             self.apply_landscape_operations(landscape_ops);
                         }
                         if !audio_events.is_empty() {
-                            self.pending_audio.extend(audio_events);
+                            self.emit_audio_commands(audio_events);
                         }
                         if !event_messages.is_empty() {
                             for command in event_messages {
@@ -1851,88 +1869,40 @@ impl Engine {
     /// 4186-4190): leaving a numeric action slot stops that slot's `Sound=`
     /// and entering one starts it as an object-attached loop at volume 100.
     ///
-    /// C++ emits both inside `SetAction`; the port reconciles the frame's
-    /// resulting selection instead, because the Rust action state is mutated
-    /// from a dozen sites (script `SetAction`, the ExecAction `NextAction`
-    /// wrap, command/procedure/economy forcing, `ChangeDef`) and a hook per
-    /// site would leak a stuck loop the moment one was missed. Sound is
-    /// client-local presentation, never synchronized or save-persisted, so
-    /// deriving it from observed state costs no determinism. The existing
-    /// action-transition observation also retains the ordered slot sequence,
-    /// so an A->B->A round trip completed inside one frame emits the same
-    /// stop/start pairs C++ produces before returning to A.
-    fn reconcile_action_sounds(&mut self) {
-        for index in 0..self.objects.len() {
-            let (id, destroyed, active) = {
-                let object = &self.objects[index];
-                (object.id, object.destroyed, object.state.status.is_active())
-            };
-            // A removed object's looping instances are halted by
-            // DetachObjectSounds (C4SoundSystem::ClearPointers), which C++
-            // reaches from removal rather than from SetAction. Drop the
-            // tracking without emitting a redundant stop of our own.
-            if destroyed || !active {
-                self.objects[index].active_action_sound = None;
-                self.objects[index].pending_action_sound_events.clear();
-                continue;
-            }
+    /// Every queued entry contains the concrete names chosen at SetAction's
+    /// two distinct gates. In particular, incomplete construction may change
+    /// the final slot after C++ has already decided whether to stop the old
+    /// one, so deriving either operation from end-of-frame state is wrong.
+    pub(crate) fn dispatch_pending_action_sounds(&mut self, index: usize, allow_deleted: bool) {
+        let (id, deleted) = {
+            let object = &self.objects[index];
+            (
+                object.id,
+                object.destroyed || matches!(object.state.status, ObjectStatus::Deleted),
+            )
+        };
+        // A removed object's looping instances are halted by
+        // DetachObjectSounds (C4SoundSystem::ClearPointers), which C++ reaches
+        // from removal rather than from SetAction. A stale phase-end SetAction
+        // is the exception: C++ finishes that already-entered call even after
+        // its PhaseCall removed the object.
+        if deleted && !allow_deleted {
+            self.objects[index].active_action_sound = None;
+            self.objects[index].pending_action_sound_events.clear();
+            return;
+        }
 
-            let transitions = std::mem::take(&mut self.objects[index].pending_action_sound_events);
-            for transition in transitions {
-                if transition.previous_action.name == transition.current_action.name
-                    && transition.previous_action.act_map_index
-                        == transition.current_action.act_map_index
-                {
-                    continue;
-                }
-
-                if let Some(previous) = self.objects[index].active_action_sound.take() {
-                    self.pending_audio.push(AudioCommand::StopSound {
-                        name: previous,
-                        target: Some(id),
-                    });
-                }
-                let desired = self
-                    .definitions
-                    .get(&self.objects[index].definition_id)
-                    .map(Definition::action_library)
-                    .and_then(|library| library.spec_for_state(&transition.current_action))
-                    .and_then(|spec| spec.sound.clone());
-                if let Some(sound) = desired {
-                    self.pending_audio.push(AudioCommand::PlaySound {
-                        name: sound.clone(),
-                        target: Some(id),
-                        volume: 100,
-                        looped: true,
-                        // `StartSoundEffect` goes straight to `NewInstance`
-                        // (C4SoundSystem.cpp:54-58). The IsSoundPlaying gate is
-                        // FnSound's alone (C4Script.cpp:2317-2319), so the action
-                        // sound must not inherit it.
-                        multiple: true,
-                        custom_falloff: None,
-                        target_position: None,
-                    });
-                    self.objects[index].active_action_sound = Some(sound);
-                }
-            }
-
-            let desired = self
-                .definitions
-                .get(&self.objects[index].definition_id)
-                .map(Definition::action_library)
-                .and_then(|library| library.spec_for_state(&self.objects[index].state.action))
-                .and_then(|spec| spec.sound.clone());
-            if desired == self.objects[index].active_action_sound {
-                continue;
-            }
-            if let Some(previous) = self.objects[index].active_action_sound.take() {
-                self.pending_audio.push(AudioCommand::StopSound {
+        let transitions = std::mem::take(&mut self.objects[index].pending_action_sound_events);
+        for transition in transitions {
+            if let Some(previous) = transition.stop {
+                self.emit_audio_command(AudioCommand::StopSound {
                     name: previous,
                     target: Some(id),
                 });
+                self.objects[index].active_action_sound = None;
             }
-            if let Some(sound) = desired {
-                self.pending_audio.push(AudioCommand::PlaySound {
+            if let Some(sound) = transition.start {
+                self.emit_audio_command(AudioCommand::PlaySound {
                     name: sound.clone(),
                     target: Some(id),
                     volume: 100,
@@ -1947,6 +1917,51 @@ impl Engine {
                 });
                 self.objects[index].active_action_sound = Some(sound);
             }
+            self.objects[index].action_sound_initialized = true;
+        }
+    }
+
+    pub(crate) fn initialize_action_sound(&mut self, index: usize, allow_deleted: bool) {
+        if self.objects[index].action_sound_initialized {
+            return;
+        }
+        let deleted = self.objects[index].destroyed
+            || matches!(self.objects[index].state.status, ObjectStatus::Deleted);
+        if deleted && !allow_deleted {
+            return;
+        }
+        let id = self.objects[index].id;
+        let desired = self
+            .definitions
+            .get(&self.objects[index].definition_id)
+            .map(Definition::action_library)
+            .and_then(|library| library.spec_for_state(&self.objects[index].state.action))
+            .and_then(|spec| spec.sound.clone())
+            .filter(|sound| !sound.is_empty());
+        if let Some(sound) = desired {
+            self.emit_audio_command(AudioCommand::PlaySound {
+                name: sound.clone(),
+                target: Some(id),
+                volume: 100,
+                looped: true,
+                multiple: true,
+                custom_falloff: None,
+                target_position: None,
+            });
+            self.objects[index].active_action_sound = Some(sound);
+        }
+        self.objects[index].action_sound_initialized = true;
+    }
+
+    fn reconcile_action_sounds(&mut self) {
+        for index in 0..self.objects.len() {
+            self.dispatch_pending_action_sounds(index, false);
+            if self.objects[index].destroyed
+                || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+            {
+                continue;
+            }
+            self.initialize_action_sound(index, false);
         }
     }
 
@@ -2336,6 +2351,13 @@ impl Engine {
                     .state
                     .action
                     .apply_update_with_library(&action, &action_library);
+                if action.action_sound_dispatched && matches!(result, ActionUpdateResult::Applied) {
+                    object.pending_action_sound_events.clear();
+                    if let Some(selection) = action.action_sound_selection.clone() {
+                        object.active_action_sound = selection;
+                    }
+                    object.action_sound_initialized = true;
+                }
                 // C4Object::SetAction resyncs the fixed coords to the
                 // integer position once past its early returns
                 // (C4Object.cpp:4144).
@@ -2349,7 +2371,11 @@ impl Engine {
                         || object.state.action.act_map_index != previous_action.act_map_index)
                     && !action.callbacks_dispatched
                 {
-                    object.record_action_event(previous_action, ActionTransitionKind::Forced);
+                    object.record_action_event(
+                        previous_action,
+                        ActionTransitionKind::Forced,
+                        &action_library,
+                    );
                 }
             } else {
                 object.state.action.reconcile_with_library(&action_library);
@@ -2550,6 +2576,7 @@ impl Engine {
         if update_touches_flip_dir {
             self.update_object_flip_dir(index);
         }
+        self.dispatch_pending_action_sounds(index, false);
         // Host-driven changes are SetOCF events (SetAlive C4Object.h:361,
         // DoCon C4Object.cpp:1417, status C4Object.cpp:4139).
         self.refresh_object_ocf(index);
@@ -2620,6 +2647,8 @@ impl Engine {
         if self.objects[index].destroyed && !allow_deleted_initial_start {
             return Ok(());
         }
+        self.dispatch_pending_action_sounds(index, allow_deleted_initial_start);
+        self.initialize_action_sound(index, allow_deleted_initial_start);
 
         let mut needs_start = previous_action.is_none();
 
@@ -3033,7 +3062,7 @@ impl Engine {
         }
 
         if !outcome_audio.events.is_empty() {
-            self.pending_audio.extend(outcome_audio.events);
+            self.emit_audio_commands(outcome_audio.events);
         }
         if !messages.is_empty() {
             for command in messages {
@@ -3183,7 +3212,11 @@ impl Engine {
                 energy_died |= outcome.energy_died;
                 if let Some(change) = outcome.action_change {
                     if !callbacks_dispatched {
-                        object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                        object.record_action_event(
+                            change.previous,
+                            ActionTransitionKind::Forced,
+                            action_library,
+                        );
                     }
                 }
                 if let Some(change) = outcome.container_change {
@@ -3205,6 +3238,7 @@ impl Engine {
                 effect_events.append(&mut applied);
             }
         }
+        self.dispatch_pending_action_sounds(index, false);
 
         let native_float_bounds = self
             .uses_native_float_bounds(index, self.object_physical_without_fair_fill(index).float);
@@ -3348,7 +3382,7 @@ impl Engine {
                 .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if !audio_events.is_empty() {
-                self.pending_audio.extend(audio_events);
+                self.emit_audio_commands(audio_events);
             }
             if !event_messages.is_empty() {
                 for command in event_messages {
@@ -3591,8 +3625,11 @@ impl Engine {
                     energy_died = apply_outcome.energy_died;
                     if let Some(change) = apply_outcome.action_change {
                         if !callbacks_dispatched {
-                            object
-                                .record_action_event(change.previous, ActionTransitionKind::Forced);
+                            object.record_action_event(
+                                change.previous,
+                                ActionTransitionKind::Forced,
+                                &action_library,
+                            );
                         }
                     }
                     if let Some(change) = apply_outcome.container_change {
@@ -3620,6 +3657,7 @@ impl Engine {
                     effect_events.extend(object.mark_destroyed());
                 }
             }
+            self.dispatch_pending_action_sounds(index, false);
             self.apply_info_update(object_id, info_rank_update, info_link_update);
             self.update_sector_for_index(index);
             if energy_died {
@@ -3738,7 +3776,7 @@ impl Engine {
                     .extend(object_order_commands);
                 self.apply_next_mission_commands(next_mission_commands);
                 if !audio_events.is_empty() {
-                    self.pending_audio.extend(audio_events);
+                    self.emit_audio_commands(audio_events);
                 }
                 if !event_messages.is_empty() {
                     for command in event_messages {

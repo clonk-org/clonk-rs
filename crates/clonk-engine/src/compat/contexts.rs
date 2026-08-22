@@ -1,4 +1,5 @@
 use super::*;
+use crate::{LocalAudioPlayerView, LocalAudioWorld, LocalSoundStart};
 use clonk_core::log_target::SCRIPT_LOG_TARGET;
 // `HostObjectContext::new` is the tests' positional constructor; the
 // engine builds scopes through `with_category`.
@@ -4080,6 +4081,11 @@ impl EffectHostContext {
         else {
             return;
         };
+        self.pending_spawns[spawn_index].action_sound_dispatched |= update.action_sound_dispatched;
+        if update.action_sound_selection.is_some() {
+            self.pending_spawns[spawn_index].action_sound_selection =
+                update.action_sound_selection.clone();
+        }
         let mut action = self.pending_spawns[spawn_index]
             .action
             .take()
@@ -5735,7 +5741,9 @@ impl EffectHostContext {
             })
             .or_else(|| self.get_world_object(target).map(|object| object.position))
         {
-            self.audio.detach_object_sounds(target, position);
+            if !self.detach_synchronous_object_sounds(target, position) {
+                self.audio.detach_object_sounds(target, position);
+            }
         }
         self.removed_object_references.insert(target);
         let mut reference_sweep = clonk_script::ObjectReferenceSweep::active(target.as_u64());
@@ -7482,6 +7490,140 @@ impl EffectHostContext {
         &mut self.audio
     }
 
+    pub(crate) fn start_synchronous_sound(&mut self, request: &LocalSoundStart) -> Option<bool> {
+        if !self.audio.synchronous_host_configured() {
+            return None;
+        }
+        let Some(host) = self.audio.synchronous_host() else {
+            return Some(false);
+        };
+        let started = host.with_mut(|host| host.start_sound(request, self))?;
+        if started {
+            if let Some(target) = request.target {
+                self.audio.note_attached_sound(target);
+            }
+        }
+        Some(started)
+    }
+
+    pub(crate) fn play_sound(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        looped: bool,
+        multiple: bool,
+        custom_falloff: Option<i32>,
+    ) -> bool {
+        let request = LocalSoundStart {
+            name: name.to_owned(),
+            target,
+            volume: i32::from(volume),
+            looped,
+            multiple,
+            custom_falloff,
+            target_position: None,
+            position: None,
+        };
+        self.start_synchronous_sound(&request).unwrap_or_else(|| {
+            self.audio
+                .play_sound(name, target, volume, looped, multiple, custom_falloff);
+            true
+        })
+    }
+
+    pub(crate) fn play_sound_at(&mut self, name: &str, position: Vector2) -> bool {
+        let request = LocalSoundStart {
+            name: name.to_owned(),
+            target: None,
+            volume: 100,
+            looped: false,
+            multiple: true,
+            custom_falloff: None,
+            target_position: None,
+            position: Some(position),
+        };
+        self.start_synchronous_sound(&request).unwrap_or_else(|| {
+            self.audio.events.push(AudioCommand::PlaySoundAt {
+                name: name.to_owned(),
+                position,
+            });
+            true
+        })
+    }
+
+    pub(crate) fn try_play_speech(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        fallback: Option<MessageSpec>,
+    ) -> (bool, Option<SpeechFallback>) {
+        let request = LocalSoundStart {
+            name: name.to_owned(),
+            target,
+            volume: 100,
+            looped: false,
+            multiple: true,
+            custom_falloff: None,
+            target_position: None,
+            position: None,
+        };
+        self.start_synchronous_sound(&request)
+            .map(|started| (started, None))
+            .unwrap_or_else(|| self.audio.try_play_speech(name, target, fallback))
+    }
+
+    pub(crate) fn stop_synchronous_sound(&mut self, name: &str, target: Option<ObjectId>) -> bool {
+        if !self.audio.synchronous_host_configured() {
+            return false;
+        }
+        self.audio.synchronous_host().is_none_or(|host| {
+            host.with_mut(|host| host.stop_sound(name, target))
+                .is_some()
+        })
+    }
+
+    pub(crate) fn set_synchronous_sound_volume(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: i32,
+    ) -> bool {
+        if !self.audio.synchronous_host_configured() {
+            return false;
+        }
+        let Some(host) = self.audio.synchronous_host() else {
+            return true;
+        };
+        let handled = host
+            .with_mut(|host| host.set_sound_volume(name, target, volume, self))
+            .is_some();
+        if handled && volume > 0 {
+            if let Some(target) = target {
+                self.audio.note_attached_sound(target);
+            }
+        }
+        handled
+    }
+
+    pub(crate) fn detach_synchronous_object_sounds(
+        &mut self,
+        target: ObjectId,
+        position: Vector2,
+    ) -> bool {
+        if !self.audio.synchronous_host_configured() {
+            return false;
+        }
+        if self.audio.synchronous_host().is_some_and(|host| {
+            host.with_mut(|host| host.detach_object_sounds(target, position, self))
+                .is_none()
+        }) {
+            return false;
+        }
+        self.audio.note_detached_sounds(target);
+        true
+    }
+
     pub(crate) fn request_game_over(&mut self) -> bool {
         if self.game_over_triggered {
             return false;
@@ -7725,6 +7867,26 @@ impl EffectHostContext {
         outcome.solid_mask_operations = self.solid_mask_operations;
         outcome.host_raster_preview = host_raster_preview;
         outcome
+    }
+}
+
+impl LocalAudioWorld for EffectHostContext {
+    fn object_position(&self, object: ObjectId) -> Option<Vector2> {
+        self.get_world_object(object)
+            .map(|object| object.position())
+    }
+
+    fn object_status_present(&self, object: ObjectId) -> bool {
+        self.get_world_object(object)
+            .is_some_and(|object| !matches!(object.status, ObjectStatus::Deleted))
+    }
+
+    fn player_view(&self, player: i32) -> Option<LocalAudioPlayerView> {
+        self.player_state(player).map(|state| LocalAudioPlayerView {
+            cursor: state.cursor,
+            view_cursor: state.view_cursor,
+            view_target: state.view_target,
+        })
     }
 }
 

@@ -1665,7 +1665,7 @@ impl Engine {
         }
     }
 
-    fn detach_audio_for_object(&mut self, target: ObjectId, position: Vector2) {
+    pub(crate) fn detach_audio_for_object(&mut self, target: ObjectId, position: Vector2) {
         if self.pending_audio.iter().any(|command| {
             matches!(
                 command,
@@ -1703,7 +1703,7 @@ impl Engine {
                 )
             });
             if !duplicate_detach {
-                self.pending_audio.push(event);
+                self.emit_audio_command(event);
             }
         }
     }

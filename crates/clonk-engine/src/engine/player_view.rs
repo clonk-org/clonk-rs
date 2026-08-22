@@ -516,7 +516,8 @@ impl Engine {
         }
         let volume = self.environment.wind.abs().saturating_sub(30) * 2;
         self.audio_registry.sound_level("Wind", None, volume);
-        self.pending_audio.extend(self.audio_registry.take_events());
+        let audio = self.audio_registry.take_events();
+        self.emit_audio_commands(audio);
     }
 
     /// Disaster launch from `C4Weather::Execute` (C4Weather.cpp:104-148),

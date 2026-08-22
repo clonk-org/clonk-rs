@@ -3564,13 +3564,16 @@ fn upper_board_and_message_board_fail_closed_when_resources_missing() {
 #[test]
 fn runtime_f3_and_ingame_music_action_install_the_localized_flash() {
     let mut app = new_running_sandbox_app();
-    let configured_music = app.audio.as_ref().map(|audio| audio.options.music_enabled);
-    let expected_enabled = !app.audio.test_ref().music_is_playing();
+    let configured_music = app
+        .audio
+        .as_ref()
+        .map(|audio| audio.borrow().options.music_enabled);
+    let expected_enabled = !app.test_audio_ref().music_is_playing();
     let resources = app.runtime_flash_resources().test_value().clone();
     let expected_text = resources.music_on_off(expected_enabled);
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert_eq!(app.runtime_music_enabled => expected_enabled);
-    main_assert_eq!(app.audio.as_ref().map(|audio| audio.options.music_enabled) => configured_music, "running global F3 must not change persisted RXMusic");
+    main_assert_eq!(app.audio.as_ref().map(|audio| audio.borrow().options.music_enabled) => configured_music, "running global F3 must not change persisted RXMusic");
     let message = app.runtime_flash_message.test_ref();
     main_assert_eq!(message.text => expected_text);
     main_assert_eq!(
@@ -3584,13 +3587,16 @@ fn runtime_f3_and_ingame_music_action_install_the_localized_flash() {
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert_eq!(app.runtime_music_enabled => !expected_enabled);
     main_assert_ne!(app.runtime_flash_message => after_down);
-    main_assert_eq!(app.audio.as_ref().map(|audio| audio.options.music_enabled) => configured_music);
+    main_assert_eq!(app.audio.as_ref().map(|audio| audio.borrow().options.music_enabled) => configured_music);
     let after_repeat = app.runtime_flash_message.clone();
     app.test_key(VirtualKeyCode::F3, ElementState::Released);
     main_assert_eq!(app.runtime_flash_message => after_repeat);
 
     let mut menu = new_running_sandbox_app();
-    let configured_before = menu.audio.as_ref().map(|audio| audio.options.music_enabled);
+    let configured_before = menu
+        .audio
+        .as_ref()
+        .map(|audio| audio.borrow().options.music_enabled);
     menu.ingame_menu.replace(
         menu.local_owner,
         Some(IngameMenuState::options_menu(
@@ -3604,6 +3610,7 @@ fn runtime_f3_and_ingame_music_action_install_the_localized_flash() {
     main_assert!(menu.runtime_flash_message.is_some());
     main_assert_eq!(menu.ingame_menu.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
     if let (Some(before), Some(audio)) = (configured_before, menu.audio.as_ref()) {
+        let audio = audio.borrow();
         main_assert_eq!(audio.options.music_enabled => !before);
         main_assert_eq!(menu.runtime_music_enabled => !before);
     }
@@ -4029,19 +4036,17 @@ fn start_real_scenario_loads_from_disk() {
     main_assert_eq!(scenario.title => "Alpha Mission");
 
     let frontend_music = app
-        .audio
-        .test_ref()
+        .test_audio_ref()
         .system
         .load_music(&silent_pcm_wav(5_000))
         .test_value();
-    app.audio
-        .test_ref()
+    app.test_audio_ref()
         .system
         .play_music(&frontend_music, true)
         .test_value();
 
     app.start_scenario(scenario).test_value();
-    main_assert!(app.audio.as_ref().expect("test audio").system.music_is_playing(), "scenario initialization must fade rather than halt frontend music");
+    main_assert!(app.test_audio_ref().system.music_is_playing(), "scenario initialization must fade rather than halt frontend music");
     main_assert!(app.resume_frontend_music_after_fade);
     wait_for_running(&mut app);
 
