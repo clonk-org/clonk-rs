@@ -21,6 +21,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 clonk-resources = { path = "../crates/clonk-resources" }
+clonk-audio = { path = "../crates/clonk-audio" }
 
 [[bin]]
 name = "resource_text"
@@ -46,6 +47,13 @@ bench = false
 [[bin]]
 name = "rtf_plain_text"
 path = "fuzz_targets/rtf_plain_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audio_decode"
+path = "fuzz_targets/audio_decode.rs"
 test = false
 doc = false
 bench = false
