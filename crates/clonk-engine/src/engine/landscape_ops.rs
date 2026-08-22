@@ -5,6 +5,12 @@
 
 use super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static MATERIAL_INCINERATE_PROBES: std::cell::RefCell<Vec<(i32, i32)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Engine {
     pub(crate) fn process_dig_material_conversions(&mut self, idx: usize, requested: bool) {
         if idx >= self.objects.len() || self.materials.is_empty() {
@@ -359,7 +365,7 @@ impl Engine {
         height: i32,
         material: MaterialId,
     ) {
-        if width <= 0 || height <= 0 {
+        if self.materials.get_by_id(material).is_none() || width <= 0 || height <= 0 {
             return;
         }
         let x_end = origin.x.saturating_add(width);
@@ -371,7 +377,7 @@ impl Engine {
                 let matches = self
                     .landscape
                     .as_ref()
-                    .and_then(|landscape| landscape.material_at(x, y))
+                    .and_then(|landscape| landscape.dig_free_pixel_material_at(x, y))
                     == Some(material);
                 if matches {
                     let _ = self.dig_free_pix(x, y);
@@ -1576,6 +1582,10 @@ impl Engine {
                 {
                     return false;
                 }
+                #[cfg(test)]
+                MATERIAL_INCINERATE_PROBES.with(|probes| {
+                    probes.borrow_mut().push((*x, *y));
+                });
                 let can_incinerate = self
                     .landscape
                     .as_ref()
@@ -2732,5 +2742,116 @@ impl Engine {
             audio_state: current_audio,
             rng,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::landscape::{Landscape, PixelGrid};
+
+    #[test]
+    fn dig_free_material_rect_uses_exact_pix2mat_for_prefilter() {
+        // DigFreeMat compares GetMat exactly before calling DigFreePix
+        // (C4Landscape.cpp:1012-1019); GetMat is Pix2Mat[GetPix]
+        // (C4Landscape.h:173-176). An unresolved Surface8 slot must not use
+        // the column approximation and therefore must not reach DigFreePix's
+        // instability probe (C4Landscape.cpp:918-925).
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\nDigFree=1\nInstable=1\n",
+        )
+        .expect("material parses");
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        let earth = engine.materials.id_of("Earth").expect("Earth exists");
+
+        let grid = PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 100],
+            vec![None, None],
+            vec![None, None],
+        );
+        let mut landscape = Landscape::flat_with_material(1, 0, Some(earth));
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.material_at(0, 0)),
+            Some(earth),
+            "the general lookup deliberately has a column fallback",
+        );
+
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow_mut().clear());
+        engine.dig_free_material_rect(Vector2::new(0, 0), 1, 1, earth);
+
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(Landscape::pixel_grid)
+                .and_then(|grid| grid.byte_at(0, 0)),
+            Some(1),
+        );
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| {
+            assert!(
+                probes.borrow().is_empty(),
+                "unmatched pixels are not probed"
+            );
+        });
+        assert_eq!(engine.mass_movers.live_movers(), 0);
+    }
+
+    #[test]
+    fn dig_free_material_rect_rejects_material_outside_loaded_map() {
+        // DigFreeMat's outer MatValid gate precedes the rectangle walk
+        // (C4Landscape.cpp:1012-1019). Even if a stale Pix2Mat slot carries
+        // that numeric id, an id outside Game.Material.Num cannot reach
+        // DigFreePix or its instability probe.
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\nInstable=1\n",
+        )
+        .expect("material parses");
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        let invalid = crate::material::MaterialId::new(99).expect("id fits");
+
+        let grid = PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 100],
+            vec![None, Some("Ghost".to_string())],
+            vec![None, None],
+        );
+        let mut landscape = Landscape::flat(1, 0);
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+        engine
+            .landscape
+            .as_mut()
+            .expect("landscape exists")
+            .resolve_grid_materials(|name| (name == "Ghost").then_some(invalid));
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.dig_free_pixel_material_at(0, 0)),
+            Some(invalid),
+            "fixture carries a stale exact Pix2Mat id",
+        );
+
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow_mut().clear());
+        engine.dig_free_material_rect(Vector2::new(0, 0), 1, 1, invalid);
+
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| {
+            assert!(
+                probes.borrow().is_empty(),
+                "invalid materials skip the walk"
+            );
+        });
+        assert_eq!(engine.mass_movers.live_movers(), 0);
     }
 }
