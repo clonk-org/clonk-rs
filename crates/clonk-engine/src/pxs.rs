@@ -8,7 +8,7 @@
 
 use crate::math::{itofix, C4Fixed, FixedVec2};
 use crate::rng::LcgRng;
-use crate::MaterialId;
+use crate::{MaterialId, MaterialSet};
 use serde::{Deserialize, Serialize};
 
 /// `PXSChunkSize` / `PXSMaxChunk` (C4PXS.h:40).
@@ -62,11 +62,32 @@ pub struct Pxs {
     pub ydir: C4Fixed,
 }
 
+/// The non-material fields C++ leaves behind when a PXS deactivates. These
+/// bits still reach `PXS.c4b` because Save writes complete allocated chunks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DeadPxsPayload {
+    x: i32,
+    y: i32,
+    xdir: i32,
+    ydir: i32,
+}
+
+impl From<Pxs> for DeadPxsPayload {
+    fn from(pxs: Pxs) -> Self {
+        Self {
+            x: pxs.x.val(),
+            y: pxs.y.val(),
+            xdir: pxs.xdir.val(),
+            ydir: pxs.ydir.val(),
+        }
+    }
+}
+
 /// Ascending occupancy index over the PXS slot array.
 ///
 /// An accelerator, never an authority: every bit mirrors one slot of `chunks`,
 /// and the answers it gives are the ones the linear scans gave. It exists so
-/// `C4PXSSystem::Execute` (C4PXS.cpp:212-234) and the inner free-slot scan of
+/// `C4PXSSystem::Execute` (C4PXS.cpp:218-240) and the inner free-slot scan of
 /// `C4PXSSystem::New` (C4PXS.cpp:189-196) stop reading the empties between
 /// live pixels. The visit order is unchanged: the index is read fresh at every
 /// step, so a pixel created into a not-yet-visited slot is still executed in
@@ -164,6 +185,8 @@ impl SlotOccupancy {
 #[derive(Debug, Clone, Default)]
 pub struct PxsSystem {
     chunks: Vec<Option<Vec<Option<Pxs>>>>,
+    /// Raw x/y/xdir/ydir bits retained for free slots in each allocated chunk.
+    dead_payload_chunks: Vec<Option<Vec<DeadPxsPayload>>>,
     chunk_counts: Vec<usize>,
     /// Accelerator over `chunks`, never an authority — see `SlotOccupancy`.
     occupancy: SlotOccupancy,
@@ -181,13 +204,34 @@ impl PxsSystem {
             self.chunks.resize_with(PXS_MAX_CHUNK, || None);
             self.chunk_counts.resize(PXS_MAX_CHUNK, 0);
         }
+        if self.dead_payload_chunks.len() != PXS_MAX_CHUNK {
+            self.dead_payload_chunks.resize_with(PXS_MAX_CHUNK, || None);
+        }
         self.occupancy.ensure();
     }
 
-    /// `C4PXSSystem::New` (C4PXS.cpp:175-199): scan chunks in order,
-    /// allocating missing ones; within a non-full chunk take the first free
-    /// slot. Followed by `Create`'s field init (C4PXS.cpp:201-210).
-    pub fn create(
+    /// `C4PXSSystem::Create` then `New` (C4PXS.cpp:181-215): reject material
+    /// IDs outside the supplied live map before scanning chunks; within the
+    /// first non-full chunk, allocate its first free slot and initialize the
+    /// fields.
+    pub(crate) fn create(
+        &mut self,
+        materials: &MaterialSet,
+        mat: MaterialId,
+        x: C4Fixed,
+        y: C4Fixed,
+        xdir: C4Fixed,
+        ydir: C4Fixed,
+    ) -> bool {
+        if materials.get_by_id(mat).is_none() {
+            return false;
+        }
+        self.create_unchecked(mat, x, y, xdir, ydir)
+    }
+
+    /// Raw `C4PXSSystem::New` allocation used by storage tests after their
+    /// material validity has already been established elsewhere.
+    pub(crate) fn create_unchecked(
         &mut self,
         mat: MaterialId,
         x: C4Fixed,
@@ -199,20 +243,26 @@ impl PxsSystem {
         for chunk_index in 0..PXS_MAX_CHUNK {
             if self.chunks[chunk_index].is_none() {
                 self.chunks[chunk_index] = Some(vec![None; PXS_CHUNK_SIZE]);
+                self.dead_payload_chunks[chunk_index] =
+                    Some(vec![DeadPxsPayload::default(); PXS_CHUNK_SIZE]);
                 self.chunk_counts[chunk_index] = 0;
                 self.occupancy.clear_chunk(chunk_index);
             }
             if self.chunk_counts[chunk_index] < PXS_CHUNK_SIZE {
                 if let Some(slot) = self.occupancy.first_free_in_chunk(chunk_index) {
-                    self.chunks[chunk_index]
-                        .as_mut()
-                        .expect("chunk allocated above")[slot] = Some(Pxs {
+                    let pxs = Pxs {
                         mat,
                         x,
                         y,
                         xdir,
                         ydir,
-                    });
+                    };
+                    self.chunks[chunk_index]
+                        .as_mut()
+                        .expect("chunk allocated above")[slot] = Some(pxs);
+                    self.dead_payload_chunks[chunk_index]
+                        .as_mut()
+                        .expect("payload chunk allocated above")[slot] = pxs.into();
                     self.chunk_counts[chunk_index] += 1;
                     self.occupancy.set(chunk_index * PXS_CHUNK_SIZE + slot);
                     return true;
@@ -234,12 +284,13 @@ impl PxsSystem {
         )
     }
 
-    /// `C4PXSSystem::Cast` (C4PXS.cpp:303-316): per particle draw
+    /// `C4PXSSystem::Cast` (C4PXS.cpp:309-321): per particle draw
     /// `Random(level+1)` for ydir FIRST, then for xdir (forced argument
     /// evaluation order), giving xdir = itofix(r1 - level/2)/10 and
     /// ydir = itofix(r2 - level)/10.
-    pub fn cast(
+    pub(crate) fn cast(
         &mut self,
+        materials: &MaterialSet,
         rng: &mut LcgRng,
         mat: MaterialId,
         num: i32,
@@ -249,7 +300,14 @@ impl PxsSystem {
     ) {
         for _ in 0..num {
             let velocity = Self::sample_cast_velocity(rng, level);
-            self.create(mat, itofix(tx), itofix(ty), velocity.x, velocity.y);
+            self.create(
+                materials,
+                mat,
+                itofix(tx),
+                itofix(ty),
+                velocity.x,
+                velocity.y,
+            );
         }
     }
 
@@ -262,7 +320,7 @@ impl PxsSystem {
     /// What the last Execute pass walked, against the live PXS it found.
     ///
     /// `C4PXSSystem::Execute` visits every slot of every allocated chunk in
-    /// chunk-major order (`C4PXS.cpp:212-234`), so the visited count could be
+    /// chunk-major order (`C4PXS.cpp:218-240`), so the visited count could be
     /// *derived* from the allocated chunks. Deriving it is what left it
     /// unfalsifiable — nothing checked a pass agreed — so the pass reports
     /// what it inspected instead. The gap between visited and live is the work
@@ -309,7 +367,7 @@ impl PxsSystem {
     #[cfg(test)]
     fn first_free_in_chunk_linear(&self, chunk: usize) -> Option<usize> {
         // `New` allocates a missing chunk before scanning it
-        // (C4PXS.cpp:180-187), so an absent chunk is an entirely free one.
+        // (C4PXS.cpp:181-188), so an absent chunk is an entirely free one.
         self.chunks
             .get(chunk)
             .and_then(|slots| slots.as_ref())
@@ -331,7 +389,7 @@ impl PxsSystem {
     }
 
     /// `C4PXSSystem::Count` as observed by `C4ControlSyncCheck::Set` after
-    /// the frame's Execute pass (C4PXS.cpp:212-234; C4Control.cpp:453).
+    /// the frame's Execute pass (C4PXS.cpp:218-240; C4Control.cpp:453).
     pub fn execute_count(&self) -> usize {
         self.execute_count
     }
@@ -367,6 +425,7 @@ impl PxsSystem {
         for source in 0..PXS_MAX_CHUNK {
             let count = self.chunk_counts[source];
             let chunk = self.chunks[source].take();
+            let dead_payloads = self.dead_payload_chunks[source].take();
             if count == 0 {
                 continue;
             }
@@ -374,11 +433,13 @@ impl PxsSystem {
                 continue;
             };
             self.chunks[destination] = Some(chunk);
+            self.dead_payload_chunks[destination] = dead_payloads;
             self.chunk_counts[destination] = count;
             destination += 1;
         }
         for index in destination..PXS_MAX_CHUNK {
             self.chunks[index] = None;
+            self.dead_payload_chunks[index] = None;
             self.chunk_counts[index] = 0;
         }
         // Chunks moved, so every bit did: rebuild rather than track the shift.
@@ -386,7 +447,7 @@ impl PxsSystem {
     }
 
     /// Slot accessors for the engine-driven execute loop. The engine walks
-    /// chunk-major slot order like `C4PXSSystem::Execute` (C4PXS.cpp:212-234)
+    /// chunk-major slot order like `C4PXSSystem::Execute` (C4PXS.cpp:218-240)
     /// and runs each live PXS IN PLACE: `peek_slot` copies the pixel while
     /// the slot keeps carrying it (Mat != MNone for the whole execution, so
     /// `New()` — C4PXS.cpp:195-202 — never hands the executing slot to a
@@ -403,6 +464,9 @@ impl PxsSystem {
     pub fn put_slot(&mut self, chunk: usize, slot: usize, pxs: Pxs) {
         if let Some(slots) = self.chunks.get_mut(chunk).and_then(|chunk| chunk.as_mut()) {
             slots[slot] = Some(pxs);
+            self.dead_payload_chunks[chunk]
+                .as_mut()
+                .expect("allocated PXS chunk has payload storage")[slot] = pxs.into();
             self.occupancy.set(chunk * PXS_CHUNK_SIZE + slot);
         }
     }
@@ -410,14 +474,32 @@ impl PxsSystem {
     /// `C4PXS::Deactivate` (C4PXS.cpp:139-149): Mat = MNone plus the chunk
     /// count decrement (`C4PXSSystem::Delete`, C4PXS.cpp:426-437).
     pub fn clear_slot(&mut self, chunk: usize, slot: usize) {
+        self.clear_slot_with_payload(chunk, slot, None);
+    }
+
+    /// Clear an executing slot while retaining the fields as mutated by its
+    /// final `C4PXS::Execute` path before Deactivate sets Mat to MNone.
+    pub(crate) fn deactivate_slot(&mut self, chunk: usize, slot: usize, pxs: Pxs) {
+        self.clear_slot_with_payload(chunk, slot, Some(pxs.into()));
+    }
+
+    fn clear_slot_with_payload(
+        &mut self,
+        chunk: usize,
+        slot: usize,
+        dead_payload: Option<DeadPxsPayload>,
+    ) {
         let cleared = self
             .chunks
             .get_mut(chunk)
             .and_then(|chunk| chunk.as_mut())
             .and_then(|slots| slots.get_mut(slot))
-            .and_then(|entry| entry.take())
-            .is_some();
-        if cleared {
+            .and_then(|entry| entry.take());
+        if let Some(pxs) = cleared {
+            self.dead_payload_chunks[chunk]
+                .as_mut()
+                .expect("allocated PXS chunk has payload storage")[slot] =
+                dead_payload.unwrap_or_else(|| pxs.into());
             self.occupancy.unset(chunk * PXS_CHUNK_SIZE + slot);
             if let Some(count) = self.chunk_counts.get_mut(chunk) {
                 *count = count.saturating_sub(1);
@@ -430,10 +512,21 @@ impl PxsSystem {
     pub fn free_empty_chunks(&mut self) {
         self.ensure_layout();
         for chunk_index in 0..PXS_MAX_CHUNK {
-            if self.chunks[chunk_index].is_some() && self.chunk_counts[chunk_index] == 0 {
-                self.chunks[chunk_index] = None;
-                self.occupancy.clear_chunk(chunk_index);
-            }
+            self.free_empty_chunk(chunk_index);
+        }
+    }
+
+    /// The outer Execute loop performs this check immediately before it scans
+    /// each individual chunk (C4PXS.cpp:218-240), not as a global pre-pass.
+    pub(crate) fn free_empty_chunk(&mut self, chunk_index: usize) {
+        self.ensure_layout();
+        if chunk_index < PXS_MAX_CHUNK
+            && self.chunks[chunk_index].is_some()
+            && self.chunk_counts[chunk_index] == 0
+        {
+            self.chunks[chunk_index] = None;
+            self.dead_payload_chunks[chunk_index] = None;
+            self.occupancy.clear_chunk(chunk_index);
         }
     }
 
@@ -476,9 +569,12 @@ impl PxsSystem {
         }
         self.ensure_layout();
         let slots = self.chunks[chunk].get_or_insert_with(|| vec![None; PXS_CHUNK_SIZE]);
+        let dead_payloads = self.dead_payload_chunks[chunk]
+            .get_or_insert_with(|| vec![DeadPxsPayload::default(); PXS_CHUNK_SIZE]);
         if slots[slot].replace(pxs).is_none() {
             self.chunk_counts[chunk] += 1;
         }
+        dead_payloads[slot] = pxs.into();
         self.occupancy.set(chunk * PXS_CHUNK_SIZE + slot);
         true
     }
@@ -507,11 +603,21 @@ impl PxsSystem {
         system.ensure_layout();
         for chunk_index in 0..chunk_count {
             system.chunks[chunk_index] = Some(vec![None; PXS_CHUNK_SIZE]);
+            system.dead_payload_chunks[chunk_index] =
+                Some(vec![DeadPxsPayload::default(); PXS_CHUNK_SIZE]);
             let chunk_start = chunk_index * PXS_CHUNK_BYTES;
             for slot in 0..PXS_CHUNK_SIZE {
                 let record_start = chunk_start + slot * PXS_RECORD_BYTES;
                 let record = &payload[record_start..record_start + PXS_RECORD_BYTES];
                 let raw_material = read_component_i32(&record[..4]);
+                system.dead_payload_chunks[chunk_index]
+                    .as_mut()
+                    .expect("payload chunk allocated above")[slot] = DeadPxsPayload {
+                    x: read_component_i32(&record[4..8]),
+                    y: read_component_i32(&record[8..12]),
+                    xdir: read_component_i32(&record[12..16]),
+                    ydir: read_component_i32(&record[16..20]),
+                };
                 if raw_material == M_NONE {
                     continue;
                 }
@@ -552,8 +658,16 @@ impl PxsSystem {
         let allocated_chunks = self.chunks.iter().filter(|chunk| chunk.is_some()).count();
         let mut bytes = Vec::with_capacity(4 + allocated_chunks * PXS_CHUNK_BYTES);
         bytes.extend_from_slice(&1i32.to_le_bytes());
-        for chunk in self.chunks.iter().filter_map(Option::as_ref) {
-            for slot in chunk {
+        for (chunk_index, chunk) in self
+            .chunks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, chunk)| chunk.as_ref().map(|chunk| (index, chunk)))
+        {
+            let dead_payloads = self.dead_payload_chunks[chunk_index]
+                .as_ref()
+                .expect("allocated PXS chunk has payload storage");
+            for (slot_index, slot) in chunk.iter().enumerate() {
                 match slot {
                     Some(pxs) => {
                         bytes.extend_from_slice(&(pxs.mat.index() as i32).to_le_bytes());
@@ -563,7 +677,10 @@ impl PxsSystem {
                     }
                     None => {
                         bytes.extend_from_slice(&M_NONE.to_le_bytes());
-                        bytes.extend_from_slice(&[0; PXS_RECORD_BYTES - 4]);
+                        let dead = dead_payloads[slot_index];
+                        for value in [dead.x, dead.y, dead.xdir, dead.ydir] {
+                            bytes.extend_from_slice(&value.to_le_bytes());
+                        }
                     }
                 }
             }
@@ -573,6 +690,7 @@ impl PxsSystem {
 
     pub fn clear(&mut self) {
         self.chunks.clear();
+        self.dead_payload_chunks.clear();
         self.chunk_counts.clear();
         self.occupancy = SlotOccupancy::default();
         self.execute_count = 0;
@@ -597,12 +715,12 @@ mod tests {
 
     #[test]
     fn create_fills_lowest_free_slot_like_cpp_new() {
-        // C4PXSSystem::New (C4PXS.cpp:175-199): first chunk with space wins,
+        // C4PXSSystem::New (C4PXS.cpp:181-205): first chunk with space wins,
         // and within it the first Mat==MNone slot — freed slots are reused
         // at the lowest index, which feeds the deterministic execution order.
         let mut system = PxsSystem::default();
         for i in 0..3 {
-            assert!(system.create(mat(0), fixed(i), fixed(0), fixed(0), fixed(0)));
+            assert!(system.create_unchecked(mat(0), fixed(i), fixed(0), fixed(0), fixed(0)));
         }
         assert_eq!(system.count(), 3);
 
@@ -613,7 +731,7 @@ mod tests {
         assert_eq!(system.count(), 2);
 
         // next create reuses slot 1, not slot 3
-        assert!(system.create(mat(0), fixed(99), fixed(0), fixed(0), fixed(0)));
+        assert!(system.create_unchecked(mat(0), fixed(99), fixed(0), fixed(0), fixed(0)));
         let order: Vec<i32> = system.iter().map(|pxs| fixtoi(pxs.x)).collect();
         assert_eq!(order, [0, 99, 2], "reused slot keeps chunk-major order");
     }
@@ -624,18 +742,18 @@ mod tests {
         // count (C4PXS.cpp:189) and creation fails once all chunks are full.
         let mut system = PxsSystem::default();
         for i in 0..(PXS_CHUNK_SIZE + 1) {
-            assert!(system.create(mat(0), fixed(i as i32), fixed(0), fixed(0), fixed(0)));
+            assert!(system.create_unchecked(mat(0), fixed(i as i32), fixed(0), fixed(0), fixed(0)));
         }
         assert!(system.chunk_allocated(0));
         assert!(system.chunk_allocated(1));
         assert_eq!(system.count(), PXS_CHUNK_SIZE + 1);
 
         for _ in (PXS_CHUNK_SIZE + 1)..(PXS_MAX_CHUNK * PXS_CHUNK_SIZE) {
-            assert!(system.create(mat(0), fixed(0), fixed(0), fixed(0), fixed(0)));
+            assert!(system.create_unchecked(mat(0), fixed(0), fixed(0), fixed(0), fixed(0)));
         }
         assert!(
-            !system.create(mat(0), fixed(0), fixed(0), fixed(0), fixed(0)),
-            "all 10000 slots full → create fails (C4PXS.cpp:198)"
+            !system.create_unchecked(mat(0), fixed(0), fixed(0), fixed(0), fixed(0)),
+            "all 10000 slots full → create fails (C4PXS.cpp:204)"
         );
     }
 
@@ -644,7 +762,7 @@ mod tests {
         // C4PXSSystem::Execute frees allocated chunks whose count hit zero
         // (C4PXS.cpp:218-222).
         let mut system = PxsSystem::default();
-        assert!(system.create(mat(0), fixed(0), fixed(0), fixed(0), fixed(0)));
+        assert!(system.create_unchecked(mat(0), fixed(0), fixed(0), fixed(0), fixed(0)));
         system.clear_slot(0, 0);
         assert!(system.chunk_allocated(0));
         system.free_empty_chunks();
@@ -706,14 +824,84 @@ mod tests {
     }
 
     #[test]
+    fn dead_payload_storage_tracks_chunk_compaction_reuse_and_release() {
+        // SyncClearance moves surviving chunks in order (C4PXS.cpp:406-424),
+        // and New reuses the lowest Mat==MNone slot (C4PXS.cpp:181-205).
+        let mut system = PxsSystem::default();
+        let live = Pxs {
+            mat: mat(0),
+            x: C4Fixed::from_raw(1),
+            y: C4Fixed::from_raw(2),
+            xdir: C4Fixed::from_raw(3),
+            ydir: C4Fixed::from_raw(4),
+        };
+        let old_dead = Pxs {
+            x: C4Fixed::from_raw(11),
+            y: C4Fixed::from_raw(12),
+            xdir: C4Fixed::from_raw(13),
+            ydir: C4Fixed::from_raw(14),
+            ..live
+        };
+        assert!(system.create_at(2, 0, live));
+        assert!(system.create_at(2, 1, old_dead));
+        system.clear_slot(2, 1);
+
+        system.sync_clearance();
+
+        assert_eq!(
+            system.dead_payload_chunks[0]
+                .as_ref()
+                .expect("moved payload chunk")[1],
+            old_dead.into()
+        );
+        let replacement = Pxs {
+            x: C4Fixed::from_raw(21),
+            y: C4Fixed::from_raw(22),
+            xdir: C4Fixed::from_raw(23),
+            ydir: C4Fixed::from_raw(24),
+            ..live
+        };
+        assert!(system.create_unchecked(
+            replacement.mat,
+            replacement.x,
+            replacement.y,
+            replacement.xdir,
+            replacement.ydir,
+        ));
+        assert_eq!(system.peek_slot(0, 1), Some(replacement));
+        assert_eq!(
+            system.dead_payload_chunks[0]
+                .as_ref()
+                .expect("payload chunk")[1],
+            replacement.into()
+        );
+
+        system.clear_slot(0, 0);
+        system.clear_slot(0, 1);
+        assert!(
+            system.to_c4b().is_none(),
+            "dead payloads alone do not keep PXS.c4b"
+        );
+        system.free_empty_chunks();
+        assert!(system.dead_payload_chunks[0].is_none());
+        system.clear();
+        assert!(system.dead_payload_chunks.is_empty());
+    }
+
+    #[test]
     fn cast_consumes_synced_draws_in_cpp_order() {
-        // C4PXSSystem::Cast (C4PXS.cpp:303-315): r2 = Random(level+1) drawn
+        // C4PXSSystem::Cast (C4PXS.cpp:309-321): r2 = Random(level+1) drawn
         // BEFORE r1 (forced evaluation order); xdir = itofix(r1-level/2)/10,
         // ydir = itofix(r2-level)/10 — raw int division on the fixed value.
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material]\nName=M0\n[Material]\nName=M1\n[Material]\nName=M2\n",
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
         let mut system = PxsSystem::default();
         let mut rng = LcgRng::new(42);
         let mut mirror = LcgRng::new(42);
-        system.cast(&mut rng, mat(2), 2, 30, 40, 20);
+        system.cast(&materials, &mut rng, mat(2), 2, 30, 40, 20);
         assert_eq!(rng, {
             mirror.random(21);
             mirror.random(21);
@@ -738,6 +926,129 @@ mod tests {
 
     const CPP_PXS_FORM1: &[u8] = include_bytes!("../tests/fixtures/cpp_pxs_form1.c4b");
     const CPP_PXS_FORM2: &[u8] = include_bytes!("../tests/fixtures/cpp_pxs_form2.c4b");
+
+    #[test]
+    fn c4b_save_preserves_deactivated_slot_payload() {
+        // Deactivate changes only Mat (pinned snapshot C4PXS.cpp:139-149),
+        // then Save writes every field of every allocated slot verbatim
+        // (pinned snapshot C4PXS.cpp:324-349).
+        let dead_values = [17, -23, 0x1234_5678, i32::MIN + 9];
+        let mut system = PxsSystem::default();
+        assert!(system.create_at(
+            0,
+            0,
+            Pxs {
+                mat: mat(2),
+                x: C4Fixed::from_raw(dead_values[0]),
+                y: C4Fixed::from_raw(dead_values[1]),
+                xdir: C4Fixed::from_raw(dead_values[2]),
+                ydir: C4Fixed::from_raw(dead_values[3]),
+            },
+        ));
+        assert!(system.create_at(
+            0,
+            1,
+            Pxs {
+                mat: mat(4),
+                x: fixed(1),
+                y: fixed(2),
+                xdir: fixed(3),
+                ydir: fixed(4),
+            },
+        ));
+
+        system.clear_slot(0, 0);
+
+        let bytes = system.to_c4b().expect("one live PXS keeps the component");
+        let dead_record = &bytes[4..4 + PXS_RECORD_BYTES];
+        assert_eq!(read_component_i32(&dead_record[..4]), M_NONE);
+        let saved_values = std::array::from_fn(|field| {
+            read_component_i32(&dead_record[(field + 1) * 4..(field + 2) * 4])
+        });
+        assert_eq!(saved_values, dead_values);
+    }
+
+    #[test]
+    fn engine_state_restore_preserves_the_raw_pxs_component() {
+        // Save writes every field of every allocated slot, including dead
+        // payload (pinned snapshot C4PXS.cpp:324-349), and Load restores the
+        // complete chunk records verbatim (C4PXS.cpp:383-397).
+        let mut engine = crate::Engine::new();
+        let dead = Pxs {
+            mat: mat(2),
+            x: C4Fixed::from_raw(17),
+            y: C4Fixed::from_raw(-23),
+            xdir: C4Fixed::from_raw(0x1234_5678),
+            ydir: C4Fixed::from_raw(i32::MIN + 9),
+        };
+        let live = Pxs {
+            mat: mat(4),
+            x: fixed(1),
+            y: fixed(2),
+            xdir: fixed(3),
+            ydir: fixed(4),
+        };
+        assert!(engine.pxs_system.create_at(0, 0, dead));
+        assert!(engine.pxs_system.create_at(0, 1, live));
+        engine.pxs_system.clear_slot(0, 0);
+        let component = engine
+            .pxs_system
+            .to_c4b()
+            .expect("live PXS keeps the component");
+
+        let mut state = engine.capture_state();
+        let projected = state
+            .particles
+            .iter_mut()
+            .find(|particle| particle.definition_id.starts_with("material/pxs/"))
+            .expect("live PXS has a legacy particle projection");
+        projected.pxs_fixed = Some([101, 102, 103, 104]);
+        let state: crate::EngineState =
+            serde_json::from_slice(&serde_json::to_vec(&state).expect("engine state serializes"))
+                .expect("engine state deserializes");
+        assert_eq!(state.pxs_component.as_deref(), Some(component.as_slice()));
+
+        let mut restored = crate::Engine::new();
+        restored.restore_state(&state).expect("state restores");
+
+        // The raw component is authoritative when present; the deliberately
+        // corrupted legacy projection above must not replace its live slot.
+        assert_eq!(restored.pxs_system.to_c4b(), Some(component));
+    }
+
+    #[test]
+    fn c4b_load_keeps_format2_dead_payload_unconverted() {
+        // The pinned Load converts format-2 fields only inside Mat != MNone
+        // (C4PXS.cpp:383-397), and the next Save writes the dead bytes too
+        // (C4PXS.cpp:324-349).
+        let mut format2 = vec![0; 4 + PXS_CHUNK_BYTES];
+        format2[..4].copy_from_slice(&2i32.to_le_bytes());
+        let write_field = |bytes: &mut [u8], slot: usize, field: usize, value: i32| {
+            let start = 4 + slot * PXS_RECORD_BYTES + field * 4;
+            bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        for slot in 0..PXS_CHUNK_SIZE {
+            write_field(&mut format2, slot, 0, M_NONE);
+        }
+        write_field(&mut format2, 0, 0, 2);
+        for (field, value) in [1.25_f32, -2.5, 0.5, -0.25].into_iter().enumerate() {
+            write_field(&mut format2, 0, field + 1, value.to_bits() as i32);
+        }
+        let dead_slot = 7;
+        let dead_values = [0x7fc0_1234_u32 as i32, -11, i32::MAX, i32::MIN];
+        for (field, value) in dead_values.into_iter().enumerate() {
+            write_field(&mut format2, dead_slot, field + 1, value);
+        }
+
+        let system = PxsSystem::from_c4b(&format2).expect("format-2 component loads");
+        let saved = system.to_c4b().expect("live PXS keeps the component");
+        let dead_record_start = 4 + dead_slot * PXS_RECORD_BYTES;
+        let dead_record = &saved[dead_record_start..dead_record_start + PXS_RECORD_BYTES];
+        let saved_values = std::array::from_fn(|field| {
+            read_component_i32(&dead_record[(field + 1) * 4..(field + 2) * 4])
+        });
+        assert_eq!(saved_values, dead_values);
+    }
 
     #[test]
     fn c4b_load_restores_fixed_and_historical_float_chunks_and_slots() {
@@ -867,7 +1178,7 @@ mod scan_baseline_tests {
                     );
                 }
                 2 => {
-                    system.create(
+                    system.create_unchecked(
                         material,
                         C4Fixed::ZERO,
                         C4Fixed::ZERO,

@@ -2545,7 +2545,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
         // With no landscape GBackWdt/GBackHgt are zero, so this valid PXS
         // deactivates in C4PXS::Execute's out-of-bounds check.
-        unit_assert!(engine.pxs_system.create(sand, math::C4Fixed::ZERO, math::C4Fixed::ZERO, math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
+        unit_assert!(engine.create_pxs(sand, math::C4Fixed::ZERO, math::C4Fixed::ZERO, math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
         engine.tick_pxs();
         unit_assert_eq!(engine.pxs_system.iter().count() => 0, "pixel deactivated");
         unit_assert_eq!(engine.sync_check(0).pxs_count => 1, "Count records the executed slot even though it died");

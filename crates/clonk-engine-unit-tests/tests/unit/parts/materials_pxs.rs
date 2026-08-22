@@ -104,7 +104,7 @@
         xdir: i32,
         ydir: i32,
     ) -> bool {
-        engine.pxs_system.create(
+        engine.create_pxs(
             material,
             math::itofix(x),
             math::itofix(y),
@@ -838,7 +838,7 @@
         let mut engine = pxs_engine(22, materials);
         engine.set_landscape(world);
         engine.set_physics(PhysicsSettings::new(0, 12, -20));
-        unit_assert!(engine.pxs_system.create(mist, itofix(3), itofix(2), C4Fixed::ZERO, itofix(1),));
+        unit_assert!(engine.create_pxs(mist, itofix(3), itofix(2), C4Fixed::ZERO, itofix(1),));
         let mirror = engine.rng.clone();
 
         engine.tick_pxs();
@@ -1542,7 +1542,7 @@
         // C4PXSSystem::Execute runs each PXS IN PLACE (C4PXS.cpp:218-240):
         // while a PXS executes, its slot still carries Mat != MNone, so a
         // PXS created inside a reaction (InsertMaterial's slide loop
-        // re-creates the droplet, C4Landscape.cpp:1192-1196) can never be
+        // re-creates the droplet, C4Landscape.cpp:1178-1183) can never be
         // handed that slot by New() (C4PXS.cpp:195-202). Only after the
         // reaction kills the pixel does Deactivate free it — the droplet
         // must land in the NEXT slot, keeping the deterministic
@@ -1593,6 +1593,73 @@
         let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
         unit_assert_eq!(order => [9, 7], "slot 0 was free during the droplet's creation only in C++ terms — \
              the droplet must sit in slot 1");
+    }
+
+    #[test]
+    fn later_empty_pxs_chunk_revived_mid_execute_preserves_its_dead_payload() {
+        // Execute deletes an empty chunk only when the outer loop reaches it
+        // (pinned snapshot C4PXS.cpp:218-240). An earlier full chunk may create
+        // into that allocation first; Save must then retain its other records.
+        let materials = materials_pxs_test_materials(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            SplashRate=0
+            MaxSlide=10
+        "#,
+        );
+        let water = materials.id_of("Water").test_value();
+        let mut engine = pxs_engine(3, materials);
+        let mut bytes = vec![0u8; 12 * 12];
+        for y in 6..12 {
+            for x in 0..=6 {
+                bytes[y * 12 + x] = 20;
+            }
+        }
+        let grid = pxs_grid(12, 12, bytes, &[(20, 25, "Water")]);
+        let mut world = Landscape::with_default_material(12, vec![6; 12], Some(water)).test_value();
+        world.set_world_height(12);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let dead = pxs::Pxs {
+            mat: water,
+            x: C4Fixed::from_raw(0x1122_3344),
+            y: C4Fixed::from_raw(-17),
+            xdir: C4Fixed::from_raw(0x5566_7788),
+            ydir: C4Fixed::from_raw(i32::MIN + 31),
+        };
+        unit_assert!(engine.pxs_system.create_at(1, 7, dead));
+        engine.pxs_system.clear_slot(1, 7);
+
+        // Slot 0 creates a slid droplet while chunk 0 is still full. New must
+        // use chunk 1 before Execute reaches and considers freeing that chunk.
+        unit_assert!(create_test_pxs(&mut engine, water, 3, 7, 0, 1));
+        for slot in 1..pxs::PXS_CHUNK_SIZE {
+            unit_assert!(engine.pxs_system.create_at(
+                0,
+                slot,
+                pxs::Pxs {
+                    mat: water,
+                    x: itofix(10),
+                    y: itofix(2),
+                    xdir: C4Fixed::ZERO,
+                    ydir: C4Fixed::ZERO,
+                },
+            ));
+        }
+
+        engine.tick_pxs();
+
+        let component = engine.capture_state().pxs_component.test_value();
+        let offset = 4 + (pxs::PXS_CHUNK_SIZE + 7) * 20;
+        let record = &component[offset..offset + 20];
+        let actual = std::array::from_fn(|field| {
+            i32::from_le_bytes(record[field * 4..field * 4 + 4].try_into().test_value())
+        });
+        unit_assert_eq!(actual => [-1, dead.x.val(), dead.y.val(), dead.xdir.val(), dead.ydir.val()]);
     }
 
     #[test]
@@ -1848,6 +1915,66 @@
         engine.tick_pxs();
         unit_assert_eq!(engine.pxs_system.count() => 0, "enclosed PXS inserts and dies");
         unit_assert_eq!(engine.rng => mirror, "no synced draws while enclosed");
+    }
+
+    #[test]
+    fn cast_pxs_operation_rejects_an_unloaded_material_before_allocating() {
+        // C4PXSSystem::Create rejects an invalid material before New may
+        // allocate a chunk (pinned snapshot C4PXS.cpp:207-215).
+        let mut empty_engine = Engine::new();
+        unit_assert!(!empty_engine.create_pxs(
+            MaterialId::new(0).test_value(),
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+        ));
+        let materials = materials_pxs_test_materials(
+            "[Material]\nName=Water\nDensity=25\n",
+        );
+        let mut engine = pxs_engine(0, materials);
+        let invalid = MaterialId::new(99).test_value();
+
+        unit_assert!(!engine.create_pxs(
+            invalid,
+            itofix(7),
+            itofix(8),
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+        ));
+
+        engine.apply_landscape_operations(vec![LandscapeOperation::CastPxs {
+            material: invalid,
+            position: Vector2::new(7, 8),
+            velocities: vec![FixedVec2::ZERO],
+        }]);
+
+        unit_assert_eq!(engine.pxs_system.count() => 0);
+        unit_assert!(!engine.pxs_system.chunk_allocated(0), "invalid material cannot allocate a PXS chunk");
+    }
+
+    #[test]
+    fn pxs_create_reads_the_material_map_after_growth() {
+        // Create's MatValid check reads the live material map
+        // (pinned snapshot C4PXS.cpp:207-215), including later additions.
+        let initial = materials_pxs_test_materials("[Material]\nName=Water\nDensity=25\n");
+        let extra = materials_pxs_test_materials("[Material]\nName=Earth\nDensity=50\n")
+            .iter()
+            .next()
+            .cloned()
+            .test_value();
+        let mut engine = pxs_engine(0, initial);
+
+        engine.materials_mut().push(extra);
+
+        let earth = engine.materials().id_of("Earth").test_value();
+        unit_assert!(engine.create_pxs(
+            earth,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+        ));
     }
 
     #[test]
@@ -2247,7 +2374,7 @@
             .surface_height(column_x)
             .test_value();
 
-        engine.pxs_system.create(
+        engine.create_pxs(
             flame,
             math::itofix(column_x),
             math::ftofix(before_height as f32 + 0.25),
@@ -2271,7 +2398,7 @@
             .test_value();
         unit_assert_eq!(after_height => before_height, "incineration should not erode the landscape surface");
 
-        engine.pxs_system.create(
+        engine.create_pxs(
             flame,
             math::itofix(column_x),
             math::ftofix(before_height as f32 + 0.25),
@@ -4974,7 +5101,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
     /// live pixels.
     ///
     /// `C4PXSSystem::Execute` visits every slot of every allocated chunk
-    /// (C4PXS.cpp:212-234), so a single pixel in chunk 0 cost 500 slot reads
+    /// (C4PXS.cpp:218-240), so a single pixel in chunk 0 cost 500 slot reads
     /// and one more in chunk 3 cost 1,000 — the sparse case is the expensive
     /// one, because a chunk stays allocated for as long as any pixel in it
     /// lives. The occupancy index answers "next live slot at or after here"

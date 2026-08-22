@@ -119,6 +119,7 @@ impl SplashHost for Engine {
     ) -> Result<(), Self::Error> {
         if let Some(material) = self.extract_material(source.x, source.y) {
             self.pxs_system.create(
+                &self.materials,
                 material,
                 crate::math::itofix(destination.x),
                 crate::math::itofix(destination.y),

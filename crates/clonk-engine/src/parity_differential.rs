@@ -148,16 +148,20 @@ fn expect_eq_u64(section: &str, index: usize, field: &str, cpp: u64, rust: u64) 
 }
 
 fn expect_rng_state(section: &str, case: &Value, rng: &LcgRng) {
+    expect_rng_state_at(section, 0, case, rng);
+}
+
+fn expect_rng_state_at(section: &str, index: usize, case: &Value, rng: &LcgRng) {
     expect_eq(
         section,
-        0,
+        index,
         "random_count",
         i(case, "random_count"),
         i64::from(rng.count),
     );
     expect_eq_u64(
         section,
-        0,
+        index,
         "random_hold",
         u(case, "random_hold"),
         u64::from(rng.hold),
@@ -1751,7 +1755,7 @@ fn parity_differential_matches_cpp_golden() {
             }
             let tag = idx as i32;
             assert!(
-                system.create(material, itofix(tag), itofix(0), itofix(0), itofix(0)),
+                system.create_unchecked(material, itofix(tag), itofix(0), itofix(0), itofix(0),),
                 "the golden sequence never exhausts the chunk table"
             );
             let placed = locate(&system, tag).expect("the created pixel is in a slot");
@@ -7251,9 +7255,468 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             expect_eq(
                 &label,
                 frame,
-                "random_count",
-                i(fr, "random_count"),
-                i64::from(engine.rng.count),
+                "mat",
+                i(fr, "mat"),
+                if deactivated {
+                    -1
+                } else {
+                    pixel.mat.index() as i64
+                },
+            );
+            expect_rng_state_at(&label, frame, fr, &engine.rng);
+        }
+    }
+
+    // 16b2. Full PXS lifecycle: the real system walk around C4PXS::Execute.
+    //
+    // The single-pixel section above pins C4PXS.cpp:28-137 in isolation. This
+    // sequence additionally lifts C4PXSSystem::Execute (C4PXS.cpp:218-240),
+    // Deactivate/Delete (:139-149, :426-437), Create's free-slot reuse
+    // (:181-216), and Synchronize (:401-404). Four occupied slots make the
+    // ascending execution order visible in the two splash particles' distinct
+    // raw xdir values; one custom Insert dies into landscape, while a masked
+    // reaction exists but deliberately continues through the contact loop.
+    {
+        let lifecycle = golden
+            .get("pxs_lifecycle")
+            .and_then(Value::as_object)
+            .expect("pxs_lifecycle is an object");
+        let steps = lifecycle["steps"]
+            .as_array()
+            .expect("pxs_lifecycle.steps is an array");
+        let step_named = |name: &str| {
+            steps
+                .iter()
+                .find(|step| step["step"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("pxs_lifecycle golden is missing step `{name}`"))
+        };
+
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material]
+            Name=Vacuum
+            Density=0
+
+            [Material]
+            Name=Earth
+            Density=50
+
+            [Material]
+            Name=InsertWater
+            Density=25
+            WindDrift=20
+            SplashRate=0
+            MaxSlide=0
+
+            [Reaction]
+            Type=Insert
+            TargetSpec=Earth
+            CheckSlide=0
+
+            [Material]
+            Name=SplashWater
+            Density=25
+            WindDrift=20
+            SplashRate=1
+            MaxSlide=0
+
+            [Material]
+            Name=MaskedWater
+            Density=25
+            WindDrift=20
+            SplashRate=0
+            MaxSlide=0
+
+            [Reaction]
+            Type=Insert
+            TargetSpec=Earth
+            CheckSlide=0
+            ExecMask=1
+            "#,
+        )
+        .expect("PXS lifecycle materials parse");
+
+        const WDT: u32 = 16;
+        const HGT: u32 = 12;
+        const EARTH_BYTE: u8 = 1;
+        let mut bytes = vec![0_u8; WDT as usize * HGT as usize];
+        for x in 0..WDT as usize {
+            bytes[10 * WDT as usize + x] = EARTH_BYTE;
+        }
+        let mut densities = vec![0; 128];
+        densities[1] = 50;
+        densities[2] = 25;
+        densities[3] = 25;
+        densities[4] = 25;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        material_names[2] = Some("InsertWater".to_string());
+        material_names[3] = Some("SplashWater".to_string());
+        material_names[4] = Some("MaskedWater".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+        engine.rng = LcgRng::new(lifecycle["seed"].as_i64().unwrap_or(0) as u32);
+        engine.rng.randomize3();
+
+        let initial_landscape = landscape_material_snapshot(&engine, WDT, HGT);
+        let insert = crate::material::MaterialId::new(2).expect("InsertWater id");
+        let splash = crate::material::MaterialId::new(3).expect("SplashWater id");
+        let masked = crate::material::MaterialId::new(4).expect("MaskedWater id");
+        for (mat, x) in [(insert, 2), (splash, 6), (splash, 10), (masked, 13)] {
+            assert!(engine.create_pxs(mat, itofix(x), itofix(9), C4Fixed::ZERO, itofix(1),));
+        }
+
+        let check_step = |label: &str, step: &Value, engine: &Engine| {
+            expect_eq(
+                label,
+                0,
+                "execute_count",
+                i(step, "execute_count"),
+                engine.pxs_system.execute_count() as i64,
+            );
+            expect_eq(
+                label,
+                0,
+                "live",
+                i(step, "live"),
+                engine.pxs_system.count() as i64,
+            );
+            expect_eq(
+                label,
+                0,
+                "chunk0_allocated",
+                i64::from(step["chunk0_allocated"].as_bool().unwrap_or(false)),
+                i64::from(engine.pxs_system.chunk_allocated(0)),
+            );
+            let chunk_count = (0..crate::pxs::PXS_CHUNK_SIZE)
+                .filter(|slot| engine.pxs_system.peek_slot(0, *slot).is_some())
+                .count();
+            expect_eq(
+                label,
+                0,
+                "chunk0_count",
+                i(step, "chunk0_count"),
+                chunk_count as i64,
+            );
+
+            for expected in step["slots"].as_array().expect("pxs_lifecycle step slots") {
+                let slot = i(expected, "slot") as usize;
+                let actual = engine.pxs_system.peek_slot(0, slot);
+                expect_eq(
+                    label,
+                    slot,
+                    "mat",
+                    i(expected, "mat"),
+                    actual.map_or(-1, |pixel| pixel.mat.index() as i64),
+                );
+                if let Some(pixel) = actual {
+                    for (field, cpp, rust) in [
+                        ("x", i(expected, "x"), i64::from(pixel.x.val())),
+                        ("y", i(expected, "y"), i64::from(pixel.y.val())),
+                        ("xdir", i(expected, "xdir"), i64::from(pixel.xdir.val())),
+                        ("ydir", i(expected, "ydir"), i64::from(pixel.ydir.val())),
+                    ] {
+                        expect_eq(label, slot, field, cpp, rust);
+                    }
+                }
+            }
+
+            let changes = landscape_material_changes(&initial_landscape, engine, WDT, HGT);
+            let expected_insertions = step["insertions"]
+                .as_array()
+                .expect("pxs_lifecycle step insertions");
+            expect_eq(
+                label,
+                0,
+                "insertions",
+                expected_insertions.len() as i64,
+                changes.len() as i64,
+            );
+            for (index, (expected, actual)) in
+                expected_insertions.iter().zip(changes.iter()).enumerate()
+            {
+                let (x, y, before, after) = *actual;
+                expect_eq(label, index, "insert_x", i(expected, "x"), i64::from(x));
+                expect_eq(label, index, "insert_y", i(expected, "y"), i64::from(y));
+                expect_eq(
+                    label,
+                    index,
+                    "insert_before",
+                    -1,
+                    before.map_or(-1, |material| material.index() as i64),
+                );
+                expect_eq(
+                    label,
+                    index,
+                    "insert_mat",
+                    i(expected, "mat"),
+                    after.map_or(-1, |material| material.index() as i64),
+                );
+            }
+
+            expect_rng_state(label, step, &engine.rng);
+            expect_eq(
+                label,
+                0,
+                "rnd3_ptr",
+                i(step, "rnd3_ptr"),
+                i64::from(engine.rng.rnd3_ptr()),
+            );
+
+            // The oracle mechanically executes C4PXSSystem::Save
+            // (C4PXS.cpp:324-360). Its full-component hash catches tag,
+            // allocated-chunk ordering, every slot, and retained dead payload;
+            // decoded leading slots make a byte divergence readable. Compare
+            // this separately from ordinary live-slot equality: dead fields
+            // are serialization state, never execution state (Execute gates
+            // on Mat != MNone at :233-238).
+            let expected_saved = step["saved_slots"]
+                .as_array()
+                .expect("pxs_lifecycle saved slots");
+            let component = engine.pxs_system.to_c4b();
+            expect_eq(
+                label,
+                0,
+                "save_ok",
+                i64::from(step["save_ok"].as_bool().expect("save_ok is boolean")),
+                1,
+            );
+            expect_eq(
+                label,
+                0,
+                "save_present",
+                i64::from(
+                    step["save_present"]
+                        .as_bool()
+                        .expect("save_present is boolean"),
+                ),
+                i64::from(component.is_some()),
+            );
+            expect_eq(
+                label,
+                0,
+                "save_len",
+                i(step, "save_len"),
+                component.as_ref().map_or(0, Vec::len) as i64,
+            );
+            let save_tag = component
+                .as_deref()
+                .and_then(|bytes| bytes.get(..4))
+                .map(|bytes| {
+                    i32::from_le_bytes(bytes.try_into().expect("four-byte PXS format tag"))
+                })
+                .unwrap_or(-1);
+            expect_eq(
+                label,
+                0,
+                "save_tag",
+                i(step, "save_tag"),
+                i64::from(save_tag),
+            );
+            let save_hash = component
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .fold(14_695_981_039_346_656_037_u64, |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211)
+                });
+            expect_eq_u64(label, 0, "save_hash", u(step, "save_hash"), save_hash);
+            for expected in expected_saved {
+                let component = component
+                    .as_ref()
+                    .expect("saved slots require a PXS.c4b component");
+                let slot = i(expected, "slot") as usize;
+                let offset = 4 + slot * 20;
+                for (field, key) in ["mat", "x", "y", "xdir", "ydir"].into_iter().enumerate() {
+                    let raw = i32::from_le_bytes(
+                        component[offset + field * 4..offset + field * 4 + 4]
+                            .try_into()
+                            .expect("one serialized PXS field"),
+                    );
+                    expect_eq(label, slot, key, i(expected, key), i64::from(raw));
+                }
+            }
+        };
+
+        engine.tick_pxs();
+        check_step(
+            "pxs_lifecycle[after_first_execute]",
+            step_named("after_first_execute"),
+            &engine,
+        );
+
+        engine.pxs_system.synchronize();
+        check_step(
+            "pxs_lifecycle[after_synchronize]",
+            step_named("after_synchronize"),
+            &engine,
+        );
+
+        assert!(engine.create_pxs(insert, itofix(4), itofix(9), C4Fixed::ZERO, itofix(1),));
+        check_step(
+            "pxs_lifecycle[after_reuse]",
+            step_named("after_reuse"),
+            &engine,
+        );
+
+        engine.tick_pxs();
+        check_step(
+            "pxs_lifecycle[after_second_execute]",
+            step_named("after_second_execute"),
+            &engine,
+        );
+
+        // Empty chunks are retained by the pass in which their final PXS
+        // dies, then deleted at the head of the following system Execute
+        // (C4PXS.cpp:218-240). Reset only the fixture world/system; the
+        // synchronized RNG continues from the mixed-slot sequence above.
+        engine.pxs_system.clear();
+        let mut bytes = vec![0_u8; WDT as usize * HGT as usize];
+        for x in 0..WDT as usize {
+            bytes[10 * WDT as usize + x] = EARTH_BYTE;
+        }
+        let mut densities = vec![0; 128];
+        densities[1] = 50;
+        densities[2] = 25;
+        densities[3] = 25;
+        densities[4] = 25;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        material_names[2] = Some("InsertWater".to_string());
+        material_names[3] = Some("SplashWater".to_string());
+        material_names[4] = Some("MaskedWater".to_string());
+        let grid = PixelGrid::new(WDT, HGT, bytes, densities, material_names, vec![None; 128]);
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+        assert!(engine.create_pxs(insert, itofix(8), itofix(9), C4Fixed::ZERO, itofix(1),));
+
+        engine.tick_pxs();
+        check_step(
+            "pxs_lifecycle[cleanup_after_death]",
+            step_named("cleanup_after_death"),
+            &engine,
+        );
+        engine.tick_pxs();
+        check_step(
+            "pxs_lifecycle[cleanup_after_following_execute]",
+            step_named("cleanup_after_following_execute"),
+            &engine,
+        );
+
+        // The real system frees an empty allocation only when the outer loop
+        // reaches that chunk. A synchronous insertion from full chunk 0 may
+        // therefore revive empty chunk 1 first; its untouched tombstones must
+        // survive into Save (C4PXS.cpp:218-240,324-349).
+        let revival = &lifecycle["chunk_revival"];
+        let revival_library = MaterialLibrary::parse(
+            "[Material Water]\nName=Water\nDensity=25\nFriction=0\nSplashRate=0\nMaxSlide=10\n",
+        )
+        .expect("chunk-revival material parses");
+        let revival_materials = crate::MaterialSet::from_resource_library(&revival_library);
+        let water = revival_materials.id_of("Water").expect("Water material id");
+        let mut revival_engine = Engine::with_seed(3);
+        revival_engine.set_materials(revival_materials);
+        let mut bytes = vec![0_u8; 12 * 12];
+        for y in 6..12 {
+            for x in 0..=6 {
+                bytes[y * 12 + x] = 20;
+            }
+        }
+        let mut densities = vec![0; 128];
+        densities[20] = 25;
+        let mut material_names = vec![None; 128];
+        material_names[20] = Some("Water".to_string());
+        let grid = PixelGrid::new(12, 12, bytes, densities, material_names, vec![None; 128]);
+        let mut landscape = Landscape::with_default_material(12, vec![6; 12], Some(water))
+            .expect("chunk-revival landscape");
+        landscape.set_world_height(12);
+        landscape.set_pixel_grid(grid);
+        revival_engine.set_landscape(landscape);
+
+        let dead = crate::pxs::Pxs {
+            mat: water,
+            x: C4Fixed::from_raw(0x1122_3344),
+            y: C4Fixed::from_raw(-17),
+            xdir: C4Fixed::from_raw(0x5566_7788),
+            ydir: C4Fixed::from_raw(i32::MIN + 31),
+        };
+        assert!(revival_engine.pxs_system.create_at(1, 7, dead));
+        revival_engine.pxs_system.clear_slot(1, 7);
+        assert!(revival_engine.create_pxs(water, itofix(3), itofix(7), C4Fixed::ZERO, itofix(1),));
+        for slot in 1..crate::pxs::PXS_CHUNK_SIZE {
+            assert!(revival_engine.pxs_system.create_at(
+                0,
+                slot,
+                crate::pxs::Pxs {
+                    mat: water,
+                    x: itofix(10),
+                    y: itofix(2),
+                    xdir: C4Fixed::ZERO,
+                    ydir: C4Fixed::ZERO,
+                },
+            ));
+        }
+
+        revival_engine.tick_pxs();
+        let component = revival_engine.pxs_system.to_c4b();
+        expect_eq(
+            "pxs_lifecycle[chunk_revival]",
+            0,
+            "execute_count",
+            i(revival, "execute_count"),
+            revival_engine.pxs_system.execute_count() as i64,
+        );
+        expect_eq(
+            "pxs_lifecycle[chunk_revival]",
+            0,
+            "chunk1_allocated",
+            i64::from(revival["chunk1_allocated"].as_bool().unwrap_or(false)),
+            i64::from(revival_engine.pxs_system.chunk_allocated(1)),
+        );
+        expect_eq(
+            "pxs_lifecycle[chunk_revival]",
+            0,
+            "save_ok",
+            i64::from(revival["save_ok"].as_bool().unwrap_or(false)),
+            1,
+        );
+        expect_eq(
+            "pxs_lifecycle[chunk_revival]",
+            0,
+            "save_present",
+            i64::from(revival["save_present"].as_bool().unwrap_or(false)),
+            i64::from(component.is_some()),
+        );
+        expect_eq(
+            "pxs_lifecycle[chunk_revival]",
+            0,
+            "save_len",
+            i(revival, "save_len"),
+            component.as_ref().map_or(0, Vec::len) as i64,
+        );
+        let component = component.expect("revived chunk has a saved component");
+        let record = 4 + (crate::pxs::PXS_CHUNK_SIZE + 7) * 20;
+        for (field, key) in ["mat", "x", "y", "xdir", "ydir"].into_iter().enumerate() {
+            let raw = i32::from_le_bytes(
+                component[record + field * 4..record + field * 4 + 4]
+                    .try_into()
+                    .expect("one revived tombstone field"),
+            );
+            expect_eq(
+                "pxs_lifecycle[chunk_revival]",
+                7,
+                key,
+                i(&revival["saved_slot7"], key),
+                i64::from(raw),
             );
         }
     }
@@ -9848,7 +10311,8 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
-    // 16f. pxs_slots: `C4PXSSystem::Cast` and `Create` (C4PXS.cpp:207-222) —
+    // 16f. pxs_slots: `C4PXSSystem::Create` and `Cast`
+    //      (C4PXS.cpp:207-215,309-321) —
     //      the layer above the allocator. `pxs_allocation` already owns `New`'s
     //      slot choice, over four slots freed out of order; this covers what
     //      that one cannot reach:
@@ -9867,6 +10331,20 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
     //      The steps run as one sequence against one system, so a wrong slot
     //      choice early shows up in every later step.
     {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material]
+            Name=Vacuum
+            [Material]
+            Name=Earth
+            [Material]
+            Name=Water
+            [Material]
+            Name=Granite
+            "#,
+        )
+        .expect("PXS slot material map parses");
+        let materials = crate::MaterialSet::from_resource_library(&library);
         let mut system = crate::pxs::PxsSystem::default();
         let mut rng = LcgRng::new(0x5151);
         rng.randomize3();
@@ -9896,14 +10374,11 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
                     let live = system.peek_slot(0, index);
                     let mat = live.map(|pxs| pxs.mat.index() as i64).unwrap_or(-1);
                     expect_eq(label, index, "slot_mat", i(slot, "mat"), mat);
-                    // A dead slot is compared by material only. C++'s `Deactivate`
-                    // clears `Mat` and leaves the position and velocity bytes in
-                    // place (C4PXS.cpp:139-149), where nothing ever reads them —
-                    // `Execute` and `Load` both gate on `Mat != MNone` — while the
-                    // port drops the whole record. The difference is unreachable
-                    // from the simulation; it is visible only in a saved `PXS.c4b`,
-                    // which `Save` writes chunk-at-a-time including dead slots
-                    // (C4PXS.cpp:346-350). Noted on clonk-org/clonk-rs#510.
+                    // Ordinary execution equality compares a dead slot by Mat
+                    // only: Execute and Load gate on Mat != MNone. Its retained
+                    // raw payload is serialization state instead, and the
+                    // integrated `pxs_lifecycle.saved_slots` section compares
+                    // those exact PXS.c4b bytes (C4PXS.cpp:139-149, 324-349).
                     if let Some(pxs) = live {
                         expect_eq(label, index, "slot_x", i(slot, "x"), pxs.x.val() as i64);
                         expect_eq(label, index, "slot_y", i(slot, "y"), pxs.y.val() as i64);
@@ -9933,7 +10408,43 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
                 .unwrap_or_else(|| panic!("pxs_slots golden is missing step `{name}`"))
         };
 
+        // Create validates against the loaded material map before New may
+        // allocate a chunk (C4PXS.cpp:207-215). Drive both the checked Rust
+        // allocator and its production operation fold with a representable
+        // MaterialId immediately beyond this four-entry map.
+        let mut invalid_engine = Engine::with_seed(0);
+        invalid_engine.configure_materials_from_library(&library);
+        let invalid_material =
+            crate::material::MaterialId::new(99).expect("representable invalid id");
+        let create_result = invalid_engine.create_pxs(
+            invalid_material,
+            itofix(7),
+            itofix(8),
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+        );
+        invalid_engine.apply_landscape_operations(vec![LandscapeOperation::CastPxs {
+            material: invalid_material,
+            position: crate::Vector2::new(7, 8),
+            velocities: vec![FixedVec2::new(C4Fixed::ZERO, C4Fixed::ZERO)],
+        }]);
+        let invalid_step = step_named("invalid_create");
+        expect_eq(
+            "pxs_slots[invalid_create]",
+            0,
+            "result",
+            i64::from(invalid_step["result"].as_bool().unwrap_or(true)),
+            i64::from(create_result),
+        );
+        check(
+            "pxs_slots[invalid_create]",
+            invalid_step,
+            &invalid_engine.pxs_system,
+            0,
+        );
+
         system.cast(
+            &materials,
             &mut rng,
             crate::material::MaterialId::new(2).unwrap(),
             3,
@@ -9959,6 +10470,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         mark = rng.count;
 
         system.cast(
+            &materials,
             &mut rng,
             crate::material::MaterialId::new(1).unwrap(),
             1,
@@ -9976,7 +10488,14 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
 
         let granite = crate::material::MaterialId::new(3).unwrap();
         while system.count() < crate::pxs::PXS_CHUNK_SIZE {
-            system.create(granite, itofix(1), itofix(2), C4Fixed::ZERO, C4Fixed::ZERO);
+            system.create(
+                &materials,
+                granite,
+                itofix(1),
+                itofix(2),
+                C4Fixed::ZERO,
+                C4Fixed::ZERO,
+            );
         }
         check(
             "pxs_slots[fill_chunk]",
@@ -9986,7 +10505,14 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         );
         mark = rng.count;
 
-        system.create(granite, itofix(7), itofix(8), C4Fixed::ZERO, C4Fixed::ZERO);
+        system.create(
+            &materials,
+            granite,
+            itofix(7),
+            itofix(8),
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+        );
         check(
             "pxs_slots[spill_to_chunk1]",
             step_named("spill_to_chunk1"),

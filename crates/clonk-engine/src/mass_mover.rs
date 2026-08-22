@@ -615,6 +615,7 @@ impl Engine {
                         crate::material::MaterialReactionExecution::Converted(_)
                     ) {
                         self.pxs_system.create(
+                            &self.materials,
                             mat,
                             crate::math::itofix(x),
                             crate::math::itofix(y),
