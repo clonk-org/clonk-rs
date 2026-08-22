@@ -141,6 +141,117 @@ fn scenario_section_switch_preserves_physical_viewport_sound_routing() {
 }
 
 #[test]
+fn scenario_section_switch_preserves_global_and_inactive_object_sounds() {
+    #[derive(Default)]
+    struct SectionSoundHost {
+        instances: Vec<Option<ObjectId>>,
+        detached: Vec<ObjectId>,
+        clear_count: usize,
+    }
+
+    impl SynchronousSoundHost for SectionSoundHost {
+        fn start_sound(&mut self, request: &LocalSoundStart, _world: &dyn LocalAudioWorld) -> bool {
+            self.instances.push(request.target);
+            true
+        }
+
+        fn stop_sound(&mut self, _name: &str, _target: Option<ObjectId>) {}
+
+        fn set_sound_volume(
+            &mut self,
+            _name: &str,
+            _target: Option<ObjectId>,
+            _volume: i32,
+            _world: &dyn LocalAudioWorld,
+        ) {
+        }
+
+        fn detach_object_sounds(
+            &mut self,
+            target: ObjectId,
+            _position: Vector2,
+            _world: &dyn LocalAudioWorld,
+        ) {
+            self.instances.retain(|instance| *instance != Some(target));
+            self.detached.push(target);
+        }
+
+        fn clear_sound_instances(&mut self) {
+            self.instances.clear();
+            self.clear_count += 1;
+        }
+    }
+
+    let mut definition = test_definition("SND1", "Sound source", "");
+    definition.configure_actions(
+        Some("Idle".to_string()),
+        HashMap::from([
+            ("Idle".to_string(), ActionSpec::default()),
+            ("Loop".to_string(), ActionSpec::default().with_sound("Loop")),
+        ]),
+    );
+    let mut engine = Engine::with_seed(3);
+    engine.register_test_definition(definition);
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+    let active = spawn_fixture!(engine, "SND1");
+    let inactive = spawn_fixture!(
+        engine,
+        "SND1",
+        with_status: ObjectStatus::Inactive,
+        with_action: ActionState::new("Loop")
+    );
+    let inactive_index = engine.test_object_index(inactive);
+    engine.objects[inactive_index].state.action = ActionState::new("Loop");
+    engine.objects[inactive_index].active_action_sound = Some("Loop".to_string());
+    engine.objects[inactive_index].action_sound_initialized = true;
+    let host = Rc::new(RefCell::new(SectionSoundHost::default()));
+    let registration = SynchronousSoundHostRegistration::new(&host);
+    engine.configure_synchronous_sound_host(Some(registration.handle()));
+    for target in [None, Some(active), Some(inactive)] {
+        engine.emit_audio_command(AudioCommand::PlaySound {
+            name: "Loop".into(),
+            target,
+            volume: 100,
+            looped: true,
+            multiple: true,
+            custom_falloff: None,
+            target_position: None,
+        });
+    }
+    engine.drain_tick_presentation();
+    assert_eq!(
+        host.borrow().instances,
+        vec![None, Some(active), Some(inactive)]
+    );
+
+    // LoadScenarioSection removes only active objects, and ClearPointers only
+    // visits instances attached to each removed object. Global instances and
+    // sounds on retained inactive objects survive (C4Game.cpp:4190-4201;
+    // C4SoundSystem.cpp:89-95).
+    assert!(engine.load_test_section("next", 0, vec![inactive]));
+    assert_eq!(host.borrow().instances, vec![None, Some(inactive)]);
+    engine.drain_tick_presentation();
+    assert_eq!(host.borrow().instances, vec![None, Some(inactive)]);
+    assert_eq!(host.borrow().detached, vec![active]);
+    assert_eq!(host.borrow().clear_count, 0);
+    let inactive_index = engine.test_object_index(inactive);
+    assert!(engine.objects[inactive_index].action_sound_initialized);
+    assert_eq!(
+        engine.objects[inactive_index]
+            .active_action_sound
+            .as_deref(),
+        Some("Loop"),
+        "the retained ActMap loop must not be selected or started a second time",
+    );
+
+    let state = engine.capture_state();
+    crate::TestValueExt::test_value(engine.restore_state(&state));
+    assert!(host.borrow().instances.is_empty());
+    assert_eq!(host.borrow().clear_count, 1);
+}
+
+#[test]
 fn resumed_non_main_implicit_root_cannot_reopen_after_unsaved_departure() {
     let mut engine = resumed_non_main_root_engine();
 

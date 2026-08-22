@@ -1049,6 +1049,84 @@ fn loop_started_while_muted_gets_a_channel_after_unmute() {
 }
 
 #[test]
+fn synchronous_deleted_target_rejects_loop_and_applies_cached_one_shot_mix() {
+    struct DeletedTargetWorld(ObjectId);
+
+    impl clonk_engine::LocalAudioWorld for DeletedTargetWorld {
+        fn object_position(&self, object: ObjectId) -> Option<Vector2> {
+            (object == self.0).then_some(Vector2::new(40, 50))
+        }
+
+        fn object_status_present(&self, object: ObjectId) -> bool {
+            object != self.0
+        }
+
+        fn player_view(&self, _player: i32) -> Option<clonk_engine::LocalAudioPlayerView> {
+            None
+        }
+    }
+
+    let (_dir, mut audio, _) = test_audio_context_with_sound(1_000);
+    let target = ObjectId::new(7);
+    let world = DeletedTargetWorld(target);
+    let request = |looped| clonk_engine::LocalSoundStart {
+        name: "Loop".to_string(),
+        target: Some(target),
+        volume: 100,
+        looped,
+        multiple: true,
+        custom_falloff: Some(350),
+        target_position: None,
+        position: None,
+    };
+
+    audio.set_synchronous_sound_state(&[audio_viewport(0, OWNER_NONE, Vector2::new(40, 50))], true);
+    audio.rendered_object_audibility.insert(
+        target,
+        CachedObjectAudibilityMix {
+            object_position: Vector2::new(40, 50),
+            audibility: 50,
+            pan: 25,
+        },
+    );
+    let (initial_volume, initial_pan) =
+        deleted_target_initial_execute_mix((1.0, 0.0), (50, 0.25), Some(1_400));
+    main_assert!((initial_volume - 0.75).abs() < 1e-6, "volume={initial_volume}");
+    main_assert!((initial_pan - 0.25).abs() < 1e-6, "pan={initial_pan}");
+
+    // Fresh Instance::Execute caches the object before DetachObj, so a
+    // one-shot first gets the final positional volume/pan and then still
+    // applies that cached object's audibility, custom falloff and pan
+    // (C4SoundSystem.cpp:153-170,190-202,351-355). A loop is rejected.
+    main_assert!(!clonk_engine::SynchronousSoundHost::start_sound(
+        &mut audio,
+        &request(true),
+        &world,
+    ));
+    main_assert!(audio.active_channels.is_empty());
+    main_assert!(clonk_engine::SynchronousSoundHost::start_sound(
+        &mut audio,
+        &request(false),
+        &world,
+    ));
+    let info = &audio.active_channels[&SoundInstanceKey::new("Loop", None)];
+    let (volume, pan) = info.detached_mix.test_value();
+    main_assert!((volume - 1.0).abs() < 1e-6, "volume={volume}");
+    main_assert!(pan.abs() < 1e-6, "pan={pan}");
+    main_assert!(info.channel.is_none(), "custom falloff silences Execute(true)");
+
+    // The cached object pointer is local to Execute(true). On the next pass
+    // the instance is position-only and restores at its detached raw mix.
+    let snapshot = make_snapshot(Vec::new(), Vec::new());
+    audio.update_channels(
+        &snapshot,
+        &[audio_viewport(0, OWNER_NONE, Vector2::new(40, 50))],
+        true,
+    );
+    main_assert!(audio.active_channels[&SoundInstanceKey::new("Loop", None)].channel.is_some());
+}
+
+#[test]
 fn channel_restore_at_capacity_follows_sample_then_instance_order() {
     let dir = tempdir();
     let scenario = dir.path().join("Audio.c4s");
@@ -3738,7 +3816,7 @@ fn options_sound_sheet_seeds_from_live_audio_and_applies_typed_actions() {
     let mut app = new_running_sandbox_app();
     app.return_to_menu();
     {
-        let audio = app.audio.test_mut();
+        let mut audio = app.test_audio_mut();
         audio.options.menu_music_enabled = true;
         audio.options.menu_sound_enabled = false;
         audio.options.music_enabled = true;
@@ -3786,7 +3864,7 @@ fn options_sound_sheet_seeds_from_live_audio_and_applies_typed_actions() {
     ])
     .test_value();
 
-    let audio = app.audio.test_ref();
+    let audio = app.test_audio_ref();
     main_assert!(!audio.options.menu_music_enabled);
     main_assert!(audio.options.menu_sound_enabled);
     main_assert!(!audio.options.music_enabled);
@@ -3852,7 +3930,7 @@ fn options_sound_modifier_tabs_and_raw_gamepad_buttons_keep_classic_ownership() 
         ),
     ]);
     main_assert_eq!(gamepad.startup_options_dialog.as_ref().expect("options dialog").focused_sound_checkbox() => Some(SoundCheckboxId::FrontendSoundEffects));
-    main_assert!(!gamepad.audio.as_ref().unwrap().options.menu_sound_enabled);
+    main_assert!(!gamepad.test_audio_ref().options.menu_sound_enabled);
     gamepad.test_gamepad_events([
         gamepad_gui_button_event(
             GamepadSlot::new(0),
@@ -3865,7 +3943,7 @@ fn options_sound_modifier_tabs_and_raw_gamepad_buttons_keep_classic_ownership() 
             ElementState::Pressed,
         ),
     ]);
-    main_assert!(gamepad.audio.as_ref().unwrap().options.menu_sound_enabled);
+    main_assert!(gamepad.test_audio_ref().options.menu_sound_enabled);
 
     let mut back = new_running_sandbox_app();
     back.return_to_menu();
@@ -3908,7 +3986,7 @@ fn options_sound_held_arrow_advances_before_each_rendered_frame() {
     let mut app = new_classic_running_sandbox_app();
     app.return_to_menu();
     app.resize(800, 600).test_value();
-    app.audio.test_mut().set_music_volume_percent(50);
+    app.test_audio_mut().set_music_volume_percent(50);
     enter_unported_startup_subscreen(
         &mut app,
         ClassicStartupSubscreen::Options(clonk_frontend::startup_options_dlg::OptionsSheet::Sound),
@@ -3924,11 +4002,11 @@ fn options_sound_held_arrow_advances_before_each_rendered_frame() {
         PhysicalPosition::new(f64::from(slider.x + 2), f64::from(slider.y + slider.h / 2));
     app.test_cursor(decrement);
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(app.audio.as_ref().expect("test audio").options.music_volume_percent() => 50, "the arrow changes during DrawElement, not on pointer-down");
+    main_assert_eq!(app.test_audio_ref().options.music_volume_percent() => 50, "the arrow changes during DrawElement, not on pointer-down");
 
     let mut frame = vec![0_u8; 800 * 600 * 4];
     app.test_render(&mut frame);
-    main_assert!(app.audio.as_ref().expect("test audio").options.music_volume_percent() < 50, "advance_frame must apply the slider callback before pixels");
+    main_assert!(app.test_audio_ref().options.music_volume_percent() < 50, "advance_frame must apply the slider callback before pixels");
     app.test_left_button(ElementState::Released);
 }
 
@@ -4061,9 +4139,11 @@ fn ingame_options_sound_and_music_toggles_persist_to_config_file() {
     // isolated config writes; this state-only running fixture needs no
     // installed resources or user-data discovery.
     let mut app = new_state_only_lightweight_running_sandbox_app();
-    let audio = app.audio.test_mut();
-    audio.options.sound_enabled = true;
-    audio.options.music_enabled = true;
+    {
+        let mut audio = app.test_audio_mut();
+        audio.options.sound_enabled = true;
+        audio.options.music_enabled = true;
+    }
     app.runtime_music_enabled = true;
 
     let user_data = tempdir();
@@ -4109,13 +4189,13 @@ fn ingame_options_sound_and_music_toggles_persist_to_config_file() {
 #[test]
 fn music_toggle_tracks_actual_and_script_playback_and_missing_audio_fails_typed() {
     let mut ended = new_running_sandbox_app();
-    let configured = ended.audio.test_ref().options.music_enabled;
+    let configured = ended.test_audio_ref().options.music_enabled;
     ended.runtime_music_enabled = true;
-    ended.audio.test_mut().stop_music();
+    ended.test_audio_mut().stop_music();
     let resources = ended.runtime_flash_resources().test_value().clone();
     ended.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert!(ended.runtime_music_enabled);
-    main_assert_eq!(ended.audio.as_ref().expect("test audio").options.music_enabled => configured);
+    main_assert_eq!(ended.test_audio_ref().options.music_enabled => configured);
     main_assert_eq!(ended.runtime_flash_message.as_ref().expect("On flash").text => resources.music_on_off(true));
 
     let mut scripted = new_running_sandbox_app();
@@ -4129,7 +4209,7 @@ fn music_toggle_tracks_actual_and_script_playback_and_missing_audio_fails_typed(
     }];
     scripted.update_audio();
     main_assert!(scripted.runtime_music_enabled);
-    main_assert!(scripted.audio.as_ref().expect("test audio").music_is_playing(), "MusicSystem::Execute analogue starts a replacement while enabled");
+    main_assert!(scripted.test_audio_ref().music_is_playing(), "MusicSystem::Execute analogue starts a replacement while enabled");
     scripted.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert!(!scripted.runtime_music_enabled);
 

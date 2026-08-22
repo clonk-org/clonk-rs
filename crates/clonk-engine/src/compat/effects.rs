@@ -1967,10 +1967,7 @@ fn native_explosion(
         if let Some(context) = cell.borrow_mut().as_mut() {
             // The current C++ oracle's std::format receives the promoted int
             // value of '0' + grade, hence Blast49..Blast51.
-            context.audio_mut().events.push(AudioCommand::PlaySoundAt {
-                name: format!("Blast{}", i32::from(b'0') + grade),
-                position,
-            });
+            let _ = context.play_sound_at(&format!("Blast{}", i32::from(b'0') + grade), position);
         }
     });
 

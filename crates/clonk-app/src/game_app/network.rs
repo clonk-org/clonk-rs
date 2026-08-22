@@ -4660,6 +4660,7 @@ impl GameApp {
                         if let Ok(client_id) = i32::try_from(client_id) {
                             let removed = self.voice_chat.forget_client(client_id);
                             if let Some(audio) = self.audio.as_ref() {
+                                let audio = audio.borrow();
                                 for (speaker_client_id, player_id) in removed {
                                     audio.system.remove_voice_stream(
                                         crate::voice_chat::voice_stream_id(
@@ -6399,7 +6400,8 @@ impl GameApp {
                 self.replace_startup_view(StartupView::NetworkLobby);
                 self.mode = AppMode::Menu;
                 self.status_text.clear();
-                if let Some(audio) = self.audio.as_mut() {
+                if let Some(audio) = self.audio.as_ref() {
+                    let mut audio = audio.borrow_mut();
                     audio.stop_music();
                 }
                 // The session is still in the state the finished round left it.

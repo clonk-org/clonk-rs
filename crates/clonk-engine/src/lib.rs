@@ -47,6 +47,7 @@ mod input;
 pub mod landscape;
 mod live_c4_player;
 mod live_c4_save;
+mod local_audio;
 mod map_creator;
 mod map_creator_s2;
 mod mass_mover;
@@ -160,6 +161,10 @@ pub use live_c4_save::{
     LiveC4SaveNamedComponent, LiveC4SavePlayerPolicy, LiveC4SavePolicy,
     LiveC4SavePreLandscapeComponents, LiveC4SaveScenarioSectionMutation, LiveC4SaveSpec,
     LiveC4ValueEncodeError, LiveC4ValueEnumeration,
+};
+pub use local_audio::{
+    LocalAudioPlayerView, LocalAudioWorld, LocalSoundStart, SynchronousSoundHost,
+    SynchronousSoundHostHandle, SynchronousSoundHostRegistration,
 };
 pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{

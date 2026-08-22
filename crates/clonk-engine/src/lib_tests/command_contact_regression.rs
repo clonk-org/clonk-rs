@@ -1458,6 +1458,231 @@ fn action_transitions_reuse_the_definition_action_library() {
 }
 
 #[test]
+fn native_set_action_on_incomplete_object_uses_requested_and_final_sound_gates() {
+    // C4Object::SetAction compares the requested slot before stopping the old
+    // loop, then coerces incomplete activity to ActIdle before deciding
+    // whether to start the new loop (C4Object.cpp:4121-4130,4159-4163).
+    let mut definition = test_definition("ISND", "Incomplete sound fixture", "#strict\n");
+    definition.set_incomplete_activity(false);
+    definition.configure_actions(
+        Some("Idle".to_string()),
+        HashMap::from([
+            ("Idle".to_string(), ActionSpec::default()),
+            (
+                "A".to_string(),
+                ActionSpec::default().with_length(100).with_sound("A_Sound"),
+            ),
+            (
+                "B".to_string(),
+                ActionSpec::default().with_length(100).with_sound("B_Sound"),
+            ),
+            (
+                "Dead".to_string(),
+                ActionSpec::default()
+                    .with_length(100)
+                    .with_sound("Dead_Sound"),
+            ),
+            (
+                "Fight".to_string(),
+                ActionSpec::default()
+                    .with_length(100)
+                    .with_sound("Fight_Sound"),
+            ),
+            (
+                "Tumble".to_string(),
+                ActionSpec::default()
+                    .with_length(100)
+                    .with_sound("Tumble_Sound"),
+            ),
+        ]),
+    );
+    let mut engine = Engine::with_seed(0);
+    engine.register_test_definition(definition);
+    let same = spawn_fixture!(
+        engine,
+        "ISND",
+        with_construction: FULL_CON - 1,
+        with_action: ActionState::new("A")
+    );
+    let other = spawn_fixture!(
+        engine,
+        "ISND",
+        with_construction: FULL_CON - 1,
+        with_action: ActionState::new("A")
+    );
+    let death = spawn_fixture!(
+        engine,
+        "ISND",
+        with_construction: FULL_CON - 1,
+        with_action: ActionState::new("A"),
+        with_alive: true
+    );
+    let fling_other = spawn_fixture!(
+        engine,
+        "ISND",
+        with_construction: FULL_CON - 1,
+        with_action: ActionState::new("A")
+    );
+    let fling_same = spawn_fixture!(
+        engine,
+        "ISND",
+        with_construction: FULL_CON - 1,
+        with_action: ActionState::new("Tumble")
+    );
+    let fight = spawn_fixture!(
+        engine,
+        "ISND",
+        with_construction: FULL_CON - 1,
+        with_action: ActionState::new("A")
+    );
+    let _ = engine.drain_tick_presentation();
+
+    for (object, requested) in [(same, "A"), (other, "B")] {
+        let index = engine.test_object_index(object);
+        let definition_id = engine.objects[index].definition_id.clone();
+        assert!(engine
+            .action_with_calls(index, &definition_id, requested)
+            .expect("native action selection succeeds"));
+    }
+    let death_index = engine.test_object_index(death);
+    engine
+        .assign_death(death_index, false)
+        .expect("native death action succeeds");
+    for object in [fling_other, fling_same] {
+        let index = engine.test_object_index(object);
+        engine.fling_object(index, C4Fixed::ZERO, C4Fixed::ZERO, OWNER_NONE);
+    }
+    engine.object_action_fight(fight, same);
+
+    for object in [same, other, death, fling_other, fling_same, fight] {
+        assert_eq!(
+            engine.objects[engine.test_object_index(object)]
+                .state
+                .action
+                .name,
+            "Idle"
+        );
+    }
+    let audio = engine.drain_tick_presentation().audio;
+    assert!(audio.iter().all(|command| !matches!(
+        command,
+        AudioCommand::StopSound { name, target }
+            if name == "A_Sound" && *target == Some(same)
+    )));
+    assert!(audio.iter().any(|command| matches!(
+        command,
+        AudioCommand::StopSound { name, target }
+            if name == "A_Sound" && *target == Some(other)
+    )));
+    assert!(audio.iter().all(|command| !matches!(
+        command,
+        AudioCommand::PlaySound { name, target, .. }
+            if name == "B_Sound" && *target == Some(other)
+    )));
+    for (object, requested_sound) in [
+        (death, "Dead_Sound"),
+        (fling_other, "Tumble_Sound"),
+        (fight, "Fight_Sound"),
+    ] {
+        assert!(audio.iter().any(|command| matches!(
+            command,
+            AudioCommand::StopSound { name, target }
+                if name == "A_Sound" && *target == Some(object)
+        )));
+        assert!(audio.iter().all(|command| !matches!(
+            command,
+            AudioCommand::PlaySound { name, target, .. }
+                if name == requested_sound && *target == Some(object)
+        )));
+    }
+    assert!(audio.iter().all(|command| !matches!(
+        command,
+        AudioCommand::StopSound { name, target }
+            if name == "Tumble_Sound" && *target == Some(fling_same)
+    )));
+}
+
+#[test]
+fn objects_txt_action_restore_does_not_start_an_actmap_sound() {
+    // C4GameObjects::Load restores Action from Objects.txt and only performs
+    // UpdateFaces/SetOCF afterwards; it never calls SetAction. The ActMap
+    // Sound= start exists only inside SetAction (C4GameObjects.cpp:575-675;
+    // C4Object.cpp:4159-4163).
+    let mut definition = test_definition("LSND", "Loaded sound fixture", "#strict\n");
+    definition.configure_actions(
+        Some("Idle".to_string()),
+        HashMap::from([(
+            "Loop".to_string(),
+            ActionSpec::default()
+                .with_length(100)
+                .with_sound("LoadedLoop"),
+        )]),
+    );
+    let mut engine = Engine::with_seed(0);
+    engine.register_test_definition(definition);
+
+    let loaded = spawn_fixture!(
+        engine,
+        "LSND",
+        with_action: ActionState::new("Loop"),
+        with_loaded: true
+    );
+
+    assert!(engine.objects[engine.test_object_index(loaded)].action_sound_initialized);
+    assert!(engine
+        .drain_tick_presentation()
+        .audio
+        .iter()
+        .all(|command| !matches!(
+            command,
+            AudioCommand::PlaySound { name, target, .. }
+                if name == "LoadedLoop" && *target == Some(loaded)
+        )));
+}
+
+#[test]
+fn full_state_restore_does_not_start_the_saved_actmap_sound() {
+    // A full save restore uses the same Objects.txt C4GameObjects::Load path:
+    // Action is compiled directly and the post-load pass only refreshes faces
+    // and OCF. It does not call the SetAction-only Sound= start
+    // (C4GameObjects.cpp:575-675; C4Object.cpp:4159-4163).
+    let mut definition = test_definition("RSND", "Restored sound fixture", "#strict\n");
+    definition.configure_actions(
+        Some("Idle".to_string()),
+        HashMap::from([(
+            "Loop".to_string(),
+            ActionSpec::default()
+                .with_length(100)
+                .with_sound("RestoredLoop"),
+        )]),
+    );
+    let mut engine = Engine::with_seed(0);
+    engine.register_test_definition(definition);
+    let restored = spawn_fixture!(
+        engine,
+        "RSND",
+        with_action: ActionState::new("Loop")
+    );
+    let _ = engine.drain_tick_presentation();
+    let state = engine.capture_state();
+
+    crate::TestValueExt::test_value(engine.restore_state(&state));
+
+    let index = engine.test_object_index(restored);
+    assert!(engine.objects[index].action_sound_initialized);
+    assert_eq!(engine.objects[index].active_action_sound, None);
+    assert!(engine
+        .drain_tick_presentation()
+        .audio
+        .iter()
+        .all(|command| !matches!(
+            command,
+            AudioCommand::PlaySound { name, target, .. }
+                if name == "RestoredLoop" && *target == Some(restored)
+        )));
+}
+
+#[test]
 fn effect_timers_reuse_the_definition_reflection_table() {
     // C4Effect::Execute resolves the live C4Def carried by its object and
     // passes that pointer through the callback; it does not copy DefCore

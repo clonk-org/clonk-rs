@@ -105,6 +105,18 @@ impl<T, E: std::fmt::Debug> TestReference<T> for Result<T, E> {
     }
 }
 
+impl GameApp {
+    #[track_caller]
+    fn test_audio_ref(&self) -> std::cell::Ref<'_, AudioContext> {
+        self.audio.as_ref().test_value().borrow()
+    }
+
+    #[track_caller]
+    fn test_audio_mut(&self) -> std::cell::RefMut<'_, AudioContext> {
+        self.audio.as_ref().test_value().borrow_mut()
+    }
+}
+
 trait TestOptionExt<T> {
     fn test_value(self) -> T;
 }
@@ -4501,10 +4513,10 @@ fn new_game_over_keyboard_app() -> GameApp {
     let mut app = new_classic_running_sandbox_app();
     app.handle_game_over().test_value();
     assert!(app.game_over_dialog.is_some());
-    if let Some(audio) = app.audio.as_mut() {
+    if let Some(audio) = app.audio.as_ref() {
         // Isolate game-over input from InitGameFinal's intentional
         // CloseViewport feedback instance.
-        audio.active_channels.clear();
+        audio.borrow_mut().active_channels.clear();
     }
     app.status_text.clear();
     app

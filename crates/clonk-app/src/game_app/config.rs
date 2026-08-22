@@ -517,12 +517,12 @@ impl GameApp {
             sound: self
                 .audio
                 .as_ref()
-                .map(|audio| audio.options.sound_enabled)
+                .map(|audio| audio.borrow().options.sound_enabled)
                 .unwrap_or(false),
             music: self
                 .audio
                 .as_ref()
-                .map(|audio| audio.options.music_enabled)
+                .map(|audio| audio.borrow().options.music_enabled)
                 .unwrap_or(false),
             mouse_shown: self.mouse_control_allowed
                 && player_mouse.is_some()
@@ -1431,13 +1431,16 @@ impl GameApp {
         let reloaded_audio = AudioOptions::load(paths);
         if self.audio.is_none() && reloaded_audio.voice_enabled {
             match AudioContext::try_new_with_paths(reloaded_audio.clone(), paths) {
-                Ok(audio) => self.audio = Some(audio),
+                Ok(audio) => {
+                    self.audio = Some(connect_audio_context(&mut self.engine, audio));
+                }
                 Err(error) => {
                     tracing::warn!(%error, "voice opt-in could not initialise audio");
                 }
             }
         }
-        if let Some(audio) = self.audio.as_mut() {
+        if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             let music_volume = reloaded_audio.music_volume_percent();
             let sound_volume = reloaded_audio.sound_volume_percent();
             audio.options = reloaded_audio;
@@ -1685,7 +1688,8 @@ impl GameApp {
             tracing::warn!(?key, "ignoring voice capture for an unpersistable key");
             return Ok(true);
         }
-        if let Some(audio) = self.audio.as_mut() {
+        if let Some(audio) = self.audio.as_ref() {
+            let mut audio = audio.borrow_mut();
             audio.options.voice_push_to_talk = key;
         }
         let label = format_key_label(key);
@@ -1853,12 +1857,13 @@ impl GameApp {
         // Recreating the dialog destroys its ControlConfigArea before the
         // replacement starts on the Program sheet.
         self.gamepads.set_options_open_slot(None);
+        let audio = borrow_audio_context(self.audio.as_ref());
         let mut dialog = clonk_frontend::startup_options_dlg::OptionsDlgState::with_all(
             load_options_program_state(
                 self.app_paths.as_ref(),
                 Some(&self.startup_tooltip_resources),
             ),
-            load_options_sound_state(self.audio.as_ref()),
+            load_options_sound_state(audio.as_deref()),
             load_options_graphics_state(self.app_paths.as_ref()),
             load_options_control_state(
                 &self.bindings,
@@ -1868,6 +1873,7 @@ impl GameApp {
             ),
             load_options_network_state(self.app_paths.as_ref()),
         );
+        drop(audio);
         dialog.set_labels(self.localized_options_labels());
         if let (Some(fonts), Some(book)) = (
             self.assets.clonk_fonts.as_deref(),
@@ -1963,10 +1969,11 @@ impl GameApp {
     pub(crate) fn persist_open_options_config(&self) -> Option<io::Result<()>> {
         let paths = self.app_paths.as_ref()?;
         let dialog = self.startup_options_dialog.as_ref()?;
+        let audio = borrow_audio_context(self.audio.as_ref());
         Some(persist_startup_options_config(
             paths,
             dialog.program(),
-            self.audio.as_ref().map(|audio| &audio.options),
+            audio.as_deref().map(|audio| &audio.options),
             dialog.graphics(),
             dialog.network(),
             &self.bindings,
@@ -1977,10 +1984,11 @@ impl GameApp {
 
     pub(crate) fn apply_open_options_config(&self, config: &mut Config) -> Option<()> {
         let dialog = self.startup_options_dialog.as_ref()?;
+        let audio = borrow_audio_context(self.audio.as_ref());
         apply_startup_options_config(
             config,
             dialog.program(),
-            self.audio.as_ref().map(|audio| &audio.options),
+            audio.as_deref().map(|audio| &audio.options),
             dialog.graphics(),
             dialog.network(),
             &self.bindings,

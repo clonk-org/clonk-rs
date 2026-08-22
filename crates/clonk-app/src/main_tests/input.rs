@@ -4665,7 +4665,7 @@ fn options_voice_key_capture_reuses_the_classic_modal_and_rejects_chords() {
     use clonk_frontend::startup_options_dlg::OptionsDlgAction;
 
     let mut app = new_classic_menu_app(640, 480);
-    app.audio.test_mut().options.voice_push_to_talk = VirtualKeyCode::Backquote;
+    app.test_audio_mut().options.voice_push_to_talk = VirtualKeyCode::Backquote;
     app.open_options_menu();
     app.process_options_dialog_actions(vec![OptionsDlgAction::BeginVoicePushToTalkCapture])
         .test_value();
@@ -4678,13 +4678,13 @@ fn options_voice_key_capture_reuses_the_classic_modal_and_rejects_chords() {
     // A modified chord is consumed and rejected, exactly like a crew binding.
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
-    main_assert_eq!(app.audio.test_ref().options.voice_push_to_talk => VirtualKeyCode::Backquote);
+    main_assert_eq!(app.test_audio_ref().options.voice_push_to_talk => VirtualKeyCode::Backquote);
     main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::OptionsVoicePushToTalkCapture)));
     app.test_key(VirtualKeyCode::KeyV, ElementState::Released);
 
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
-    main_assert_eq!(app.audio.test_ref().options.voice_push_to_talk => VirtualKeyCode::KeyV);
+    main_assert_eq!(app.test_audio_ref().options.voice_push_to_talk => VirtualKeyCode::KeyV);
     main_assert_eq!(app.startup_options_dialog.as_ref().expect("options dialog").sound().push_to_talk_key => "V");
     main_assert!(app.message_dialogs.is_empty(), "the modal closes on capture");
     app.test_key(VirtualKeyCode::KeyV, ElementState::Released);

@@ -3873,7 +3873,7 @@ impl Engine {
             player.control.select_flash = 30;
         }
         // Game display (:1352): the app is the local player's view.
-        self.pending_audio.push(crate::AudioCommand::PlaySound {
+        self.emit_audio_command(crate::AudioCommand::PlaySound {
             name: "Ding".to_string(),
             target: None,
             volume: 100,
@@ -5981,7 +5981,7 @@ impl Engine {
             let selected = self.contained_call(target_index, "Selection", &[container_ref])?;
             if !compat::value_raw_truthy(&selected) {
                 let container_id = self.objects[index].id;
-                self.pending_audio.push(crate::AudioCommand::PlaySound {
+                self.emit_audio_command(crate::AudioCommand::PlaySound {
                     name: "Grab".to_string(),
                     target: Some(container_id),
                     volume: 100,
@@ -6259,7 +6259,7 @@ impl Engine {
     }
 
     fn play_line_construction_sound(&mut self, name: &str, clonk_id: ObjectId) {
-        self.pending_audio.push(crate::AudioCommand::PlaySound {
+        self.emit_audio_command(crate::AudioCommand::PlaySound {
             name: name.to_owned(),
             target: Some(clonk_id),
             volume: 100,

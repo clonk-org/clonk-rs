@@ -748,6 +748,14 @@ impl Engine {
     }
 
     pub fn restore_state(&mut self, state: &EngineState) -> Result<(), EngineError> {
+        self.restore_state_with_local_sound_reset(state, true)
+    }
+
+    fn restore_state_with_local_sound_reset(
+        &mut self,
+        state: &EngineState,
+        reset_local_sound_instances: bool,
+    ) -> Result<(), EngineError> {
         // C4Def::pFairCrewPhysical is derived runtime state. A restored game
         // must lazily rebuild it from the restored parameters and RNG epoch.
         self.clear_fair_crew_physicals();
@@ -780,23 +788,41 @@ impl Engine {
                 ));
             }
         }
+        let retained_action_sound_state = if reset_local_sound_instances {
+            HashMap::new()
+        } else {
+            self.objects
+                .iter()
+                .map(|object| {
+                    (
+                        object.id,
+                        (
+                            object.active_action_sound.clone(),
+                            object.action_sound_initialized,
+                        ),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        };
         // Game.Input is not part of EngineState. A pre-load direct-removal
         // request must not fire against players from the restored game.
         self.host_requests.pending_client_updates.clear();
         self.host_requests.pending_remove_player_controls.clear();
-        // Sound instances are presentation state and are not serialized by
-        // C4SoundSystem. Loading a game starts without channels or object
-        // bindings from the discarded world.
-        self.audio_registry.clear_sound_instances();
-        self.pending_audio.retain(|command| {
-            matches!(
-                command,
-                AudioCommand::PlayMusic { .. }
-                    | AudioCommand::StopMusic
-                    | AudioCommand::SetMusicLevel { .. }
-                    | AudioCommand::SetMusicPlaylist { .. }
-            )
-        });
+        if reset_local_sound_instances {
+            // Sound instances are presentation state and are not serialized by
+            // C4SoundSystem. Loading a game starts without channels or object
+            // bindings from the discarded world.
+            self.clear_local_sound_instances();
+            self.pending_audio.retain(|command| {
+                matches!(
+                    command,
+                    AudioCommand::PlayMusic { .. }
+                        | AudioCommand::StopMusic
+                        | AudioCommand::SetMusicLevel { .. }
+                        | AudioCommand::SetMusicPlaylist { .. }
+                )
+            });
+        }
 
         self.frame = state.frame;
         self.game_time = state.game_time;
@@ -1175,6 +1201,20 @@ impl Engine {
                 .commands
                 .restore_from_snapshot(&persisted.command_stack);
             let restored_id = object.id;
+            if reset_local_sound_instances {
+                // Full save loading restores Action directly through
+                // Objects.txt, without SetAction's Sound= start. The local
+                // sound system was cleared above, so remember that the saved
+                // slot has been observed but owns no live loop
+                // (C4GameObjects.cpp:575-675; C4Object.cpp:4159-4163).
+                object.active_action_sound = None;
+                object.action_sound_initialized = true;
+            } else if let Some((active_sound, initialized)) =
+                retained_action_sound_state.get(&restored_id)
+            {
+                object.active_action_sound = active_sound.clone();
+                object.action_sound_initialized = *initialized;
+            }
             self.objects.push(object);
             self.note_objects_changed();
             // State restores rebuild the list verbatim like a compiled
@@ -1665,7 +1705,7 @@ impl Engine {
                 .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if !audio_events.is_empty() {
-                self.pending_audio.extend(audio_events);
+                self.emit_audio_commands(audio_events);
             }
             if !event_messages.is_empty() {
                 for command in event_messages {
@@ -2535,7 +2575,11 @@ impl Engine {
                 }
                 if let Some(change) = outcome.action_change {
                     if !callbacks_dispatched {
-                        object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                        object.record_action_event(
+                            change.previous,
+                            ActionTransitionKind::Forced,
+                            callback_action_library,
+                        );
                     }
                 }
                 state_snapshot = object.script_state_snapshot();
@@ -3358,12 +3402,27 @@ impl Engine {
         state.transfer_zones.clear();
         state.mass_movers.clear();
 
+        let removed_sound_targets = state
+            .objects
+            .iter()
+            .filter(|object| object.snapshot.status.is_active())
+            .filter(|object| !preserved.contains(&object.snapshot.id))
+            .map(|object| (object.snapshot.id, object.snapshot.position))
+            .collect::<Vec<_>>();
         state.objects.clear();
         state.objects.extend(retained);
         state.object_order = retained_order;
 
         self.base_extinguish_enabled = target.base_extinguish_enabled;
-        self.restore_state(&state)?;
+        // Native removes active departing objects through AssignRemoval and
+        // ClearPointers before InitGame installs the target section
+        // (C4Game.cpp:4190-4201). Detach now so target-section callbacks see
+        // the same freed sound channels while globals and inactive bindings
+        // remain in the process-local C4SoundSystem.
+        for (object, position) in removed_sound_targets {
+            self.detach_audio_for_object(object, position);
+        }
+        self.restore_state_with_local_sound_reset(&state, false)?;
         match target_landscape_systems.pxs {
             Some(mut pxs) => {
                 // C4PXSSystem::Load clears chunks but deliberately leaves the
@@ -3621,7 +3680,7 @@ impl Engine {
             format!("{object_name} is promoted|to {rank_name}!"),
             object_id,
         ));
-        self.pending_audio.push(AudioCommand::PlaySound {
+        self.emit_audio_command(AudioCommand::PlaySound {
             name: "Trumpet".to_string(),
             target: Some(object_id),
             volume: 100,

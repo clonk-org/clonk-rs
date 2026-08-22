@@ -2557,15 +2557,13 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
     };
     let test_music_bytes = silent_pcm_wav(10);
     let load_test_music = |app: &GameApp| {
-        app.audio
-            .test_ref()
+        app.test_audio_ref()
             .system
             .load_music(&test_music_bytes)
             .test_value()
     };
     let prime_music_toggle_off = |app: &mut GameApp, music: &MusicHandle| {
-        app.audio
-            .test_ref()
+        app.test_audio_ref()
             .system
             .play_music(music, true)
             .test_value();
@@ -2622,10 +2620,10 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
         sound_app
             .ingame_menu
             .replace(sound_app.local_owner, Some(sound_menu));
-        let sound_before = sound_app.audio.test_ref().options.sound_enabled;
+        let sound_before = sound_app.test_audio_ref().options.sound_enabled;
         sound_app.test_modifiers(ModifiersState::CONTROL);
         sound_app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-        main_assert_eq!(sound_app.audio.as_ref().expect("test audio").options.sound_enabled => !sound_before, "page {page:?}");
+        main_assert_eq!(sound_app.test_audio_ref().options.sound_enabled => !sound_before, "page {page:?}");
         main_assert!(sound_app.runtime_flash_message.is_none(), "page {page:?}");
         main_assert!(sound_app.ingame_menu.is_some(), "page {page:?}");
         sound_app.test_key(VirtualKeyCode::F3, ElementState::Released);
@@ -2679,10 +2677,10 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
             main_assert_eq!(rebound.engine.player(rebound.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 
             install_menu(&mut sound);
-            let before = sound.audio.test_ref().options.sound_enabled;
+            let before = sound.test_audio_ref().options.sound_enabled;
             sound.test_modifiers(ModifiersState::CONTROL);
             sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-            main_assert_eq!(sound.audio.as_ref().expect("test audio").options.sound_enabled => !before);
+            main_assert_eq!(sound.test_audio_ref().options.sound_enabled => !before);
             main_assert!(sound.runtime_flash_message.is_none());
             main_assert!(sound.engine.cursor_object_menu(sound.local_owner).is_some());
             sound.test_key(VirtualKeyCode::F3, ElementState::Released);

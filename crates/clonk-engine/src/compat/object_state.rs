@@ -2467,110 +2467,177 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
                 })
                 .and_then(|definition| context.world.definition_metadata(definition))
                 .is_some_and(|metadata| metadata.fire.incomplete_activity);
-            let object = match context.object_context_mut() {
-                Some(object) => object,
-                None => return Ok(Value::Bool(false)),
-            };
-
-            let current_action = object.effective_action_name().to_string();
-            let current_index = object.effective_action_index();
-            let current_phase = object.action_phase();
-            let callback_definition = object
-                .pending_update
-                .change_def
-                .clone()
-                .or_else(|| object.definition_id.clone());
-            let requested_index = object.action_library.named_action_index(&name);
-            let blocks_other_actions = object.effective_blocks_other_actions();
-            let requested_action_changed =
-                name != current_action || requested_index != current_index;
-            if blocks_other_actions && requested_action_changed && !force {
-                return Ok(Value::Bool(false));
-            }
-
-            // C4Object::SetAction validates the requested slot and applies the
-            // old action's NoOtherAction gate first, then accepts the call but
-            // coerces its resulting numeric action to ActIdle when the object is
-            // incomplete and the live definition disallows incomplete activity
-            // (C4Object.cpp:4111-4130).
-            let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
-                crate::action::DEFAULT_ACTION_NAME
-            } else {
-                name.as_str()
-            };
-            let actual_index = object.action_library.named_action_index(actual_name);
-            let changed_action = actual_name != current_action || actual_index != current_index;
-
-            let update = object
-                .pending_update
-                .action
-                .get_or_insert_with(ActionUpdate::default);
-            update.set_name(actual_name.to_string());
-            update.set_force(force);
-            // C4Object::SetAction snaps fix_x/fix_y after changing the action
-            // (C4Object.cpp:4144). If it follows DoCon in this staged call, that
-            // later snap wins over DoCon's stale-fixed UpdatePos behavior.
-            object.pending_update.construction_preserves_fixed_position = false;
-            let position = object.effective_position();
-            object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
-
-            // SetActionByName carries the action targets, and C4Object::SetAction
-            // assigns them ONLY when non-null (C4Object.cpp:4123-4125:
-            // `if (pTarget) Action.Target = pTarget;`) — nil preserves. Its
-            // Idle/ActIdle sentinel branch discards both supplied target args
-            // before calling SetAction (C4Object.cpp:4225-4227).
-            if !builtin_idle {
-                if target1.is_some() {
-                    object.set_action_target(0, target1);
+            let (
+                object_id,
+                current_action,
+                current_index,
+                current_phase,
+                callback_definition,
+                requested_action_changed,
+                actual_name,
+                actual_index,
+                changed_action,
+                stop_sound,
+                start_sound,
+            ) = {
+                let object = match context.object_context() {
+                    Some(object) => object,
+                    None => return Ok(Value::Bool(false)),
+                };
+                let current_action = object.effective_action_name().to_string();
+                let current_index = object.effective_action_index();
+                let requested_index = (!builtin_idle)
+                    .then(|| object.action_library.named_action_index(&name))
+                    .flatten();
+                let requested_action_changed =
+                    name != current_action || requested_index != current_index;
+                if object.effective_blocks_other_actions() && requested_action_changed && !force {
+                    return Ok(Value::Bool(false));
                 }
-                if target2.is_some() {
-                    object.set_action_target(1, target2);
-                }
-            }
-            // SetAction always clears PhaseDelay, even when it selects the same
-            // numeric slot and Phase was already zero (C4Object.cpp:4142-4146).
-            // Action.Time resets only when the numeric slot changes.
-            if changed_action {
-                object.reset_action_ticks();
-            } else {
-                object.reset_action_phase_delay();
-            }
-            // `Action.Phase = Action.PhaseDelay = 0` runs UNCONDITIONALLY on
-            // every successful SetAction (C4Object.cpp:4132, outside the
-            // change guard) — a pre-change SetPhase must not leak into the
-            // new action (the GoldRush FireRifle ph6 -> LoadRifle ph0 case).
-            object.set_action_phase(0);
 
-            let procedure_changed = object.update_effective_action(actual_name);
-            if procedure_changed {
-                object.reset_action_data();
-            }
-            // C4Object::SetAction fires the calls with NO same-action gate
-            // (C4Object.cpp:4146-4183) — a same-name SetAction re-runs the
-            // StartCall once. Marking the update dispatched keeps the fold
-            // from ALSO queueing deferred Abort/Start events (C++ has no
-            // such queue; leaving same-name staging to the queue made the
-            // coach's Driving guard loop forever against stale state).
-            if let Some(update) = object.pending_update.action.as_mut() {
-                update.callbacks_dispatched = true;
-            }
-            sync_callbacks = Some((
-                object.id(),
-                (actual_name != crate::action::DEFAULT_ACTION_NAME)
+                // C4Object::SetAction validates the requested slot and applies
+                // the old action's NoOtherAction gate first, then stops the old
+                // slot before incomplete construction can coerce the requested
+                // slot to ActIdle (C4Object.cpp:4111-4130).
+                let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
+                    crate::action::DEFAULT_ACTION_NAME.to_string()
+                } else {
+                    name.clone()
+                };
+                let actual_index = (actual_name != crate::action::DEFAULT_ACTION_NAME)
+                    .then(|| object.action_library.named_action_index(&actual_name))
+                    .flatten();
+                let changed_action = actual_name != current_action || actual_index != current_index;
+                let stop_sound = requested_action_changed
                     .then(|| {
                         object
                             .action_library
-                            .start_callback_for_entry(actual_name, actual_index)
+                            .spec_for_entry(&current_action, current_index)
+                            .and_then(|spec| spec.sound.as_deref())
+                            .filter(|sound| !sound.is_empty())
+                            .map(str::to_owned)
                     })
-                    .flatten(),
-                object
-                    .action_library
-                    .abort_callback_for_entry(&current_action, current_index)
-                    .filter(|_| !force),
+                    .flatten();
+                let start_sound = changed_action
+                    .then(|| {
+                        object
+                            .action_library
+                            .spec_for_entry(&actual_name, actual_index)
+                            .and_then(|spec| spec.sound.as_deref())
+                            .filter(|sound| !sound.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .flatten();
+                (
+                    object.id(),
+                    current_action,
+                    current_index,
+                    object.action_phase(),
+                    object
+                        .pending_update
+                        .change_def
+                        .clone()
+                        .or_else(|| object.definition_id.clone()),
+                    requested_action_changed,
+                    actual_name,
+                    actual_index,
+                    changed_action,
+                    stop_sound,
+                    start_sound,
+                )
+            };
+
+            // StopSoundEffect is inside SetAction, before the action state is
+            // replaced. This must reach the local sound system before a later
+            // native in the same script can attempt another NewInstance.
+            if let Some(sound) = stop_sound.as_deref() {
+                if !context.stop_synchronous_sound(sound, Some(object_id)) {
+                    context.audio_mut().stop_sound(sound, Some(object_id));
+                }
+            }
+
+            let (start_call, abort_call) = {
+                let Some(object) = context.object_context_mut() else {
+                    return Ok(Value::Bool(false));
+                };
+                let update = object
+                    .pending_update
+                    .action
+                    .get_or_insert_with(ActionUpdate::default);
+                update.set_name(actual_name.clone());
+                update.set_force(force);
+                update.action_sound_dispatched |= requested_action_changed || changed_action;
+                let sound_selection = start_sound
+                    .as_ref()
+                    .map(|sound| Some(sound.clone()))
+                    .or_else(|| stop_sound.is_some().then_some(None));
+                if sound_selection.is_some() {
+                    update.action_sound_selection = sound_selection;
+                }
+                // C4Object::SetAction snaps fix_x/fix_y after changing the
+                // action (C4Object.cpp:4168-4169). If it follows DoCon in this
+                // staged call, that later snap wins over DoCon's stale-fixed
+                // UpdatePos behavior.
+                object.pending_update.construction_preserves_fixed_position = false;
+                let position = object.effective_position();
+                object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
+
+                // SetActionByName carries the action targets, and C4Object::SetAction
+                // assigns them ONLY when non-null (C4Object.cpp:4148-4150).
+                // Idle/ActIdle discards supplied target args before SetAction
+                // (C4Object.cpp:4225-4227).
+                if !builtin_idle {
+                    if target1.is_some() {
+                        object.set_action_target(0, target1);
+                    }
+                    if target2.is_some() {
+                        object.set_action_target(1, target2);
+                    }
+                }
+                if changed_action {
+                    object.reset_action_ticks();
+                } else {
+                    object.reset_action_phase_delay();
+                }
+                object.set_action_phase(0);
+
+                if object.update_effective_action(&actual_name) {
+                    object.reset_action_data();
+                }
+                // Start/Abort callbacks are also synchronous; the fold must not
+                // queue them a second time.
+                if let Some(update) = object.pending_update.action.as_mut() {
+                    update.callbacks_dispatched = true;
+                }
+                (
+                    (actual_name != crate::action::DEFAULT_ACTION_NAME)
+                        .then(|| {
+                            object
+                                .action_library
+                                .start_callback_for_entry(&actual_name, actual_index)
+                        })
+                        .flatten(),
+                    object
+                        .action_library
+                        .abort_callback_for_entry(&current_action, current_index)
+                        .filter(|_| !force),
+                )
+            };
+
+            // C++ starts the new loop after selecting the action/targets and
+            // before SetOCF and every Start/Abort callback
+            // (C4Object.cpp:4159-4197). Ignore NewInstance's result here just
+            // like C4Object::SetAction does.
+            if let Some(sound) = start_sound.as_deref() {
+                let _ = context.play_sound(sound, Some(object_id), 100, true, true, None);
+            }
+            sync_callbacks = Some((
+                object_id,
+                start_call,
+                abort_call,
                 current_phase,
                 callback_definition,
             ));
-            let object_id = object.id();
             // SetAction calls SetOCF before Start/Abort callbacks. Use the full
             // live refresh so leaving an ObjectDisabled action can re-add
             // OCF_FightReady rather than only clearing stale bits.
@@ -3933,78 +4000,146 @@ pub(crate) fn native_set_action_by_name_with_target(
                 })
                 .and_then(|definition| context.world.definition_metadata(definition))
                 .is_some_and(|metadata| metadata.fire.incomplete_activity);
-            let Some(object) = context.object_scope_mut(target) else {
-                return Ok(None);
-            };
-            // ActIdle is the built-in action slot before ActMap and is always a
-            // valid SetAction target even when no action named "Idle" exists.
-            if name != "Idle" && !object.action_library.contains(name) {
-                return Ok(None);
-            }
-            let current = object.effective_action_name().to_string();
-            let current_index = object.effective_action_index();
-            let requested_index = object.action_library.named_action_index(name);
-            let previous_phase = object.action_phase();
-            let definition = object
-                .pending_update
-                .change_def
-                .clone()
-                .or_else(|| object.definition_id.clone());
-            if object.effective_blocks_other_actions()
-                && (current != name || current_index != requested_index)
-            {
-                return Ok(None);
-            }
-            // C4Object::SetAction accepts the requested ActMap entry but coerces
-            // the resulting action to ActIdle for incomplete objects whose
-            // definition does not allow incomplete activity (:4127-4130).
-            let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
-                "Idle"
-            } else {
-                name
-            };
-            let actual_index = object.action_library.named_action_index(actual_name);
-
-            let changed = current != actual_name || current_index != actual_index;
-            let update = object
-                .pending_update
-                .action
-                .get_or_insert_with(ActionUpdate::default);
-            update.set_name(actual_name.to_string());
-            update.set_force(false);
-            update.callbacks_dispatched = true;
-            if changed {
-                object.reset_action_ticks();
-            } else {
-                object.reset_action_phase_delay();
-            }
-            object.set_action_phase(0);
-            if object.update_effective_action(actual_name) {
-                object.reset_action_data();
-            }
-            if !builtin_idle {
-                if let Some(action_target) = action_target {
-                    object.set_action_target(0, Some(action_target));
+            let (
+                current,
+                current_index,
+                requested_changed,
+                actual_name,
+                actual_index,
+                changed,
+                previous_phase,
+                definition,
+                stop_sound,
+                start_sound,
+            ) = {
+                let Some(object) = context.object_scope(target) else {
+                    return Ok(None);
+                };
+                // ActIdle is the built-in action slot before ActMap and is
+                // always valid even when no action named "Idle" exists.
+                if name != "Idle" && !object.action_library.contains(name) {
+                    return Ok(None);
                 }
-            }
-            let position = object.effective_position();
-            object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
-            object.refresh_cached_ocf();
-
-            let callbacks = (
-                (actual_name != "Idle")
+                let current = object.effective_action_name().to_string();
+                let current_index = object.effective_action_index();
+                let requested_index = (!builtin_idle)
+                    .then(|| object.action_library.named_action_index(name))
+                    .flatten();
+                let requested_changed = current != name || current_index != requested_index;
+                if object.effective_blocks_other_actions() && requested_changed {
+                    return Ok(None);
+                }
+                let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
+                    crate::action::DEFAULT_ACTION_NAME.to_string()
+                } else {
+                    name.to_string()
+                };
+                let actual_index = (actual_name != crate::action::DEFAULT_ACTION_NAME)
+                    .then(|| object.action_library.named_action_index(&actual_name))
+                    .flatten();
+                let changed = current != actual_name || current_index != actual_index;
+                let stop_sound = requested_changed
                     .then(|| {
                         object
                             .action_library
-                            .start_callback_for_entry(actual_name, actual_index)
+                            .spec_for_entry(&current, current_index)
+                            .and_then(|spec| spec.sound.as_deref())
+                            .filter(|sound| !sound.is_empty())
+                            .map(str::to_owned)
                     })
-                    .flatten(),
-                object
-                    .action_library
-                    .abort_callback_for_entry(&current, current_index),
-                previous_phase,
-                definition,
-            );
+                    .flatten();
+                let start_sound = changed
+                    .then(|| {
+                        object
+                            .action_library
+                            .spec_for_entry(&actual_name, actual_index)
+                            .and_then(|spec| spec.sound.as_deref())
+                            .filter(|sound| !sound.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .flatten();
+                (
+                    current,
+                    current_index,
+                    requested_changed,
+                    actual_name,
+                    actual_index,
+                    changed,
+                    object.action_phase(),
+                    object
+                        .pending_update
+                        .change_def
+                        .clone()
+                        .or_else(|| object.definition_id.clone()),
+                    stop_sound,
+                    start_sound,
+                )
+            };
+
+            if let Some(sound) = stop_sound.as_deref() {
+                if !context.stop_synchronous_sound(sound, Some(target)) {
+                    context.audio_mut().stop_sound(sound, Some(target));
+                }
+            }
+
+            let callbacks = {
+                let Some(object) = context.object_scope_mut(target) else {
+                    return Ok(None);
+                };
+                let update = object
+                    .pending_update
+                    .action
+                    .get_or_insert_with(ActionUpdate::default);
+                update.set_name(actual_name.clone());
+                update.set_force(false);
+                update.callbacks_dispatched = true;
+                update.action_sound_dispatched |= requested_changed || changed;
+                let sound_selection = start_sound
+                    .as_ref()
+                    .map(|sound| Some(sound.clone()))
+                    .or_else(|| stop_sound.is_some().then_some(None));
+                if sound_selection.is_some() {
+                    update.action_sound_selection = sound_selection;
+                }
+                if changed {
+                    object.reset_action_ticks();
+                } else {
+                    object.reset_action_phase_delay();
+                }
+                object.set_action_phase(0);
+                if object.update_effective_action(&actual_name) {
+                    object.reset_action_data();
+                }
+                if !builtin_idle {
+                    if let Some(action_target) = action_target {
+                        object.set_action_target(0, Some(action_target));
+                    }
+                }
+                let position = object.effective_position();
+                object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
+
+                (
+                    (actual_name != crate::action::DEFAULT_ACTION_NAME)
+                        .then(|| {
+                            object
+                                .action_library
+                                .start_callback_for_entry(&actual_name, actual_index)
+                        })
+                        .flatten(),
+                    object
+                        .action_library
+                        .abort_callback_for_entry(&current, current_index),
+                    previous_phase,
+                    definition,
+                )
+            };
+
+            if let Some(sound) = start_sound.as_deref() {
+                let _ = context.play_sound(sound, Some(target), 100, true, true, None);
+            }
+            if let Some(object) = context.object_scope_mut(target) {
+                object.refresh_cached_ocf();
+            }
             let _ = refresh_live_object_ocf(context, target);
             Ok(Some(callbacks))
         },

@@ -1624,10 +1624,13 @@ impl Engine {
     ) -> Result<bool, EngineError> {
         let builtin_idle = action::is_builtin_idle_name(name);
         let name = if builtin_idle { "Idle" } else { name };
-        let Some(library) = self
-            .definitions
-            .get(definition_id)
-            .map(Definition::shared_action_library_handle)
+        let Some((library, incomplete_activity)) =
+            self.definitions.get(definition_id).map(|definition| {
+                (
+                    definition.shared_action_library_handle(),
+                    definition.incomplete_activity(),
+                )
+            })
         else {
             return Ok(false);
         };
@@ -1639,6 +1642,15 @@ impl Engine {
             return Ok(false);
         }
         let previous = self.objects[idx].state.action.clone();
+        let previous_index = previous
+            .act_map_index
+            .or_else(|| library.named_action_index(&previous.name));
+        let requested_index = (!builtin_idle)
+            .then(|| library.named_action_index(name))
+            .flatten();
+        let requested_action_changed = previous.name != name || previous_index != requested_index;
+        let active_action_allowed =
+            self.objects[idx].state.construction >= FULL_CON || incomplete_activity;
         let object_id = self.objects[idx].id;
         let original_definition_id = self.objects[idx].definition_id.clone();
         let update = ActionUpdate {
@@ -1654,13 +1666,16 @@ impl Engine {
             target: (!builtin_idle).then_some(target).flatten().map(Some),
             target2: None,
             callbacks_dispatched: false,
+            action_sound_dispatched: false,
+            action_sound_selection: None,
         };
         let result = {
             let object = &mut self.objects[idx];
-            object
-                .state
-                .action
-                .apply_update_with_library(&update, &library)
+            object.state.action.apply_update_with_library_and_activity(
+                &update,
+                &library,
+                active_action_allowed,
+            )
         };
         if !matches!(result, ActionUpdateResult::Applied) {
             return Ok(false);
@@ -1676,6 +1691,15 @@ impl Engine {
             self.objects[idx].state.update_flip_dir(current_flip_dir);
         }
 
+        let current_action = self.objects[idx].state.action.clone();
+        self.objects[idx].record_action_sound_transition(
+            &previous,
+            &current_action,
+            &library,
+            requested_action_changed,
+        );
+        self.dispatch_pending_action_sounds(idx, false);
+
         // SetOCF and fixed-position resync both precede StartCall in C++
         // (C4Object.cpp:4165-4178).
         self.refresh_object_ocf(idx);
@@ -1685,7 +1709,6 @@ impl Engine {
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
 
-        let current_action = self.objects[idx].state.action.clone();
         if !library.is_idle_state(&current_action) {
             self.invoke_action_callback(
                 idx,
@@ -4063,10 +4086,13 @@ impl Engine {
             return;
         };
         let definition_id = self.objects[idx].definition_id.clone();
-        let Some(library) = self
-            .definitions
-            .get(&definition_id)
-            .map(Definition::shared_action_library_handle)
+        let Some((library, incomplete_activity)) =
+            self.definitions.get(&definition_id).map(|definition| {
+                (
+                    definition.shared_action_library_handle(),
+                    definition.incomplete_activity(),
+                )
+            })
         else {
             return;
         };
@@ -4074,6 +4100,14 @@ impl Engine {
             return;
         }
         let previous = self.objects[idx].state.action.clone();
+        let previous_index = previous
+            .act_map_index
+            .or_else(|| library.named_action_index(&previous.name));
+        let requested_index = library.named_action_index("Fight");
+        let requested_action_changed =
+            previous.name != "Fight" || previous_index != requested_index;
+        let active_action_allowed =
+            self.objects[idx].state.construction >= FULL_CON || incomplete_activity;
         let update = ActionUpdate {
             name: Some("Fight".to_string()),
             phase: Some(0),
@@ -4083,30 +4117,41 @@ impl Engine {
             target: Some(Some(target_id)),
             target2: Some(None),
             callbacks_dispatched: false,
+            action_sound_dispatched: false,
+            action_sound_selection: None,
         };
         let object = &mut self.objects[idx];
-        let result = object
-            .state
-            .action
-            .apply_update_with_library(&update, &library);
+        let result = object.state.action.apply_update_with_library_and_activity(
+            &update,
+            &library,
+            active_action_allowed,
+        );
         // SetAction fix resync (C4Object.cpp:4144) — only past the
         // NoOtherAction early returns.
         if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
             object.fixed_position =
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
-        if matches!(result, ActionUpdateResult::Applied)
+        let changed = matches!(result, ActionUpdateResult::Applied)
             && (previous.name != object.state.action.name
-                || previous.act_map_index != object.state.action.act_map_index)
-        {
+                || previous.act_map_index != object.state.action.act_map_index);
+        if changed {
             let previous_flip_dir =
                 library.flip_dir_for_entry(&previous.name, previous.act_map_index);
-            object.record_action_event(previous, ActionTransitionKind::Forced);
+            object.record_action_event_with_sound_stop(
+                previous,
+                ActionTransitionKind::Forced,
+                &library,
+                requested_action_changed,
+            );
             // SetAction's FlipDir refresh, guarded on the value changing
             // (C4Object.cpp:4183-4184).
             if previous_flip_dir != self.object_action_flip_dir(idx) {
                 self.update_object_flip_dir(idx);
             }
+        }
+        if changed {
+            self.dispatch_pending_action_sounds(idx, false);
         }
     }
 

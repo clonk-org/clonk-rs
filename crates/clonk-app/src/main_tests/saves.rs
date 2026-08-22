@@ -1884,7 +1884,7 @@ fn runtime_advanced_voice_opt_in_retries_a_missing_audio_context() {
     app.audio = None;
     app.synchronize_advanced_options_runtime();
 
-    main_assert!(app.audio.as_ref().is_some_and(|audio| audio.options.voice_enabled), "saving Advanced Voice.Enabled must not require an application restart",);
+    main_assert!(app.audio.as_ref().is_some_and(|audio| audio.borrow().options.voice_enabled), "saving Advanced Voice.Enabled must not require an application restart",);
 }
 
 fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
@@ -2789,7 +2789,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert!(app.startup_options_dialog.as_ref().expect("options dialog").sound().frontend_sound_effects, "Ctrl+F3 leaves the classic checkbox visually stale");
-    main_assert!(!app.audio.as_ref().expect("test audio").options.menu_sound_enabled, "live audio configuration remains authoritative");
+    main_assert!(!app.test_audio_ref().options.menu_sound_enabled, "live audio configuration remains authoritative");
     app.test_modifiers(ModifiersState::empty());
 
     {
@@ -2818,11 +2818,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(
-        app.audio
-            .as_ref()
-            .expect("test audio")
-            .options
-            .voice_volume_percent() =>
+        app.test_audio_ref().options.voice_volume_percent() =>
         200,
         "the Voice slider's right endpoint is the port-only boost ceiling",
     );
@@ -2832,7 +2828,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.audio.as_ref().expect("test audio").options.voice_activation_mode => crate::settings::VoiceActivationMode::VoiceActivated,);
+    main_assert_eq!(app.test_audio_ref().options.voice_activation_mode => crate::settings::VoiceActivationMode::VoiceActivated,);
 
     app.bindings
         .rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::KeyZ);
@@ -4340,16 +4336,16 @@ fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
             Some(false),
             app.engine.capture_state(),
     );
-    app.audio.test_mut().options.music_enabled = true;
+    app.test_audio_mut().options.music_enabled = true;
     app.runtime_music_enabled = true;
     app.set_runtime_flash_message("not serialized", RuntimeHelpCharset::Windows1252)
         .test_value();
 
     app.apply_loaded_game(save).test_value();
 
-    main_assert!(app.audio.as_ref().expect("test audio").options.music_enabled, "RXMusic remains an independent configured option");
+    main_assert!(app.test_audio_ref().options.music_enabled, "RXMusic remains an independent configured option");
     main_assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
-    main_assert!(app.audio.as_ref().expect("test audio").music_is_playing());
+    main_assert!(app.test_audio_ref().music_is_playing());
     main_assert!(app.runtime_flash_message.is_none());
 }
 

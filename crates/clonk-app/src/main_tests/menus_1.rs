@@ -2220,69 +2220,78 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
 
     let fixture = app
-        .audio
-        .test_ref()
+        .test_audio_ref()
         .system
         .load_music(&silent_pcm_wav(20))
         .test_value();
-    app.audio.test_mut().control_music_loads_with(fixture);
+    app.test_audio_mut().control_music_loads_with(fixture);
 
     // Menu music is started by `ensure_menu_music()` when asynchronous boot
     // loading completes and the menu is shown; pump boot to that point first.
     wait_for_menu(&mut app);
-    let audio = app.audio.test_ref();
-    let controlled = audio.controlled_music_loads.test_ref();
-    main_assert_eq!(controlled.requests.len() => 1);
-    let frontend = controlled.requests.front().test_value();
-    main_assert!(!frontend.looped, "frontend music is non-looping");
-    main_assert!(frontend.identity.is_some(), "frontend music came from the catalog");
-    main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
-    main_assert!(!audio.system.music_is_playing());
-    main_assert!(app.audio.as_mut().expect("test audio").complete_next_controlled_music_load().expect("complete frontend music load"));
-    main_assert!(app.audio.as_ref().expect("test audio").system.music_is_playing());
+    {
+        let audio = app.test_audio_ref();
+        let controlled = audio.controlled_music_loads.test_ref();
+        main_assert_eq!(controlled.requests.len() => 1);
+        let frontend = controlled.requests.front().test_value();
+        main_assert!(!frontend.looped, "frontend music is non-looping");
+        main_assert!(frontend.identity.is_some(), "frontend music came from the catalog");
+        main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
+        main_assert!(!audio.system.music_is_playing());
+    }
+    main_assert!(app.test_audio_mut().complete_next_controlled_music_load().expect("complete frontend music load"));
+    main_assert!(app.test_audio_ref().system.music_is_playing());
 
     app.start_sandbox_scenario(FrontendScenario::fallback())
         .test_value();
-    let audio = app.audio.test_ref();
-    let controlled = audio.controlled_music_loads.test_ref();
-    main_assert_eq!(controlled.requests.len() => 1);
-    let sandbox = controlled.requests.front().test_value();
-    main_assert!(sandbox.looped, "sandbox music is looping");
-    main_assert!(sandbox.identity.is_none(), "sandbox uses the direct music asset");
-    main_assert_eq!(audio.music_resolver.playlist => None);
-    main_assert!(!audio.system.music_is_playing());
-    main_assert!(app.audio.as_mut().expect("test audio").complete_next_controlled_music_load().expect("complete sandbox music load"));
+    {
+        let audio = app.test_audio_ref();
+        let controlled = audio.controlled_music_loads.test_ref();
+        main_assert_eq!(controlled.requests.len() => 1);
+        let sandbox = controlled.requests.front().test_value();
+        main_assert!(sandbox.looped, "sandbox music is looping");
+        main_assert!(sandbox.identity.is_none(), "sandbox uses the direct music asset");
+        main_assert_eq!(audio.music_resolver.playlist => None);
+        main_assert!(!audio.system.music_is_playing());
+    }
+    main_assert!(app.test_audio_mut().complete_next_controlled_music_load().expect("complete sandbox music load"));
     app.return_to_menu();
-    let audio = app.audio.test_ref();
-    main_assert!(!audio.system.music_is_playing(), "PreInit reconstruction hard-stops the fading game song");
-    main_assert!(!app.resume_frontend_music_after_fade);
-    main_assert_eq!(audio.music_fade_requests => [GAME_MUSIC_FADE_OUT_MS], "Game.Clear still requests its 2s fade before PreInit cancels it");
-    let controlled = audio.controlled_music_loads.test_ref();
-    main_assert_eq!(controlled.requests.len() => 1);
-    let frontend = controlled.requests.front().test_value();
-    main_assert!(!frontend.looped, "returned frontend music is non-looping");
-    main_assert!(frontend.identity.is_some(), "returned music came from the catalog");
-    main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
-    main_assert!(app.audio.as_mut().expect("test audio").complete_next_controlled_music_load().expect("complete returned frontend music load"));
-    let audio = app.audio.test_ref();
-    main_assert!(audio.system.music_is_playing());
-    main_assert_eq!(audio.music_load_pending.load(AtomicOrdering::Acquire) => 0);
-    main_assert!(audio.controlled_music_loads.as_ref().expect("controlled music loading").requests.is_empty());
+    {
+        let audio = app.test_audio_ref();
+        main_assert!(!audio.system.music_is_playing(), "PreInit reconstruction hard-stops the fading game song");
+        main_assert!(!app.resume_frontend_music_after_fade);
+        main_assert_eq!(audio.music_fade_requests => [GAME_MUSIC_FADE_OUT_MS], "Game.Clear still requests its 2s fade before PreInit cancels it");
+        let controlled = audio.controlled_music_loads.test_ref();
+        main_assert_eq!(controlled.requests.len() => 1);
+        let frontend = controlled.requests.front().test_value();
+        main_assert!(!frontend.looped, "returned frontend music is non-looping");
+        main_assert!(frontend.identity.is_some(), "returned music came from the catalog");
+        main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
+    }
+    main_assert!(app.test_audio_mut().complete_next_controlled_music_load().expect("complete returned frontend music load"));
+    {
+        let audio = app.test_audio_ref();
+        main_assert!(audio.system.music_is_playing());
+        main_assert_eq!(audio.music_load_pending.load(AtomicOrdering::Acquire) => 0);
+        main_assert!(audio.controlled_music_loads.as_ref().expect("controlled music loading").requests.is_empty());
+    }
 
     // Restart/Next Mission also reconstructs at PreInit, but skips
     // C4Startup::DoStartup and therefore must not enqueue Frontend.*.
     app.start_sandbox_scenario(FrontendScenario::fallback())
         .test_value();
-    main_assert!(app.audio.as_mut().expect("test audio").complete_next_controlled_music_load().expect("complete relaunch source music"));
-    app.audio.test_mut().set_scenario_music_level(Some(25));
+    main_assert!(app.test_audio_mut().complete_next_controlled_music_load().expect("complete relaunch source music"));
+    app.test_audio_mut().set_scenario_music_level(Some(25));
     app.return_to_menu_for_relaunch();
-    let audio = app.audio.test_ref();
-    main_assert!(!audio.system.music_is_playing());
-    main_assert!(!app.resume_frontend_music_after_fade);
-    main_assert_eq!(audio.music_fade_requests => [GAME_MUSIC_FADE_OUT_MS, GAME_MUSIC_FADE_OUT_MS], "each Game.Clear requests its fade before the next PreInit");
-    main_assert!(lock_unpoisoned(&audio.music_control).most_recently_played.is_none(), "the direct-relaunch PreInit generation has no prior song identity");
-    main_assert_eq!(lock_unpoisoned(&audio.music_control).scenario_level => None, "Game.Clear and the reconstructed music system discard scenario volume");
-    main_assert!(audio.controlled_music_loads.as_ref().expect("controlled music loading").requests.is_empty());
+    {
+        let audio = app.test_audio_ref();
+        main_assert!(!audio.system.music_is_playing());
+        main_assert!(!app.resume_frontend_music_after_fade);
+        main_assert_eq!(audio.music_fade_requests => [GAME_MUSIC_FADE_OUT_MS, GAME_MUSIC_FADE_OUT_MS], "each Game.Clear requests its fade before the next PreInit");
+        main_assert!(lock_unpoisoned(&audio.music_control).most_recently_played.is_none(), "the direct-relaunch PreInit generation has no prior song identity");
+        main_assert_eq!(lock_unpoisoned(&audio.music_control).scenario_level => None, "Game.Clear and the reconstructed music system discard scenario volume");
+        main_assert!(audio.controlled_music_loads.as_ref().expect("controlled music loading").requests.is_empty());
+    }
 }
 
 #[test]

@@ -2158,12 +2158,12 @@ fn saved_game_restores_music_level_after_scenario_reconfiguration(
     let save: SavedGameFile =
         serde_json::from_str(&serde_json::to_string(&save).expect("serialize tutorial save"))
             .test_value();
-    app.audio.test_mut().set_scenario_music_level(Some(73));
+    app.test_audio_mut().set_scenario_music_level(Some(73));
 
     app.apply_loaded_game(save).test_value();
 
     main_assert_eq!(app.engine.capture_state().music_level => 25);
-    let audio = app.audio.test_ref();
+    let audio = app.test_audio_ref();
     let control = lock_unpoisoned(&audio.music_control);
     main_assert_eq!(control.scenario_level => Some(25));
     main_assert!((control.effective_volume() - audio.options.music_volume * 0.25).abs() < f32::EPSILON);
@@ -2196,13 +2196,13 @@ fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
         source_title_png: None,
         engine_state,
     };
-    app.audio.test_mut().options.music_enabled = true;
+    app.test_audio_mut().options.music_enabled = true;
 
     app.apply_loaded_game(save).test_value();
 
     main_assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
     main_assert_eq!(app.engine.capture_state().play_list.as_deref() => Some("Theme*"), "Game.PlayList remains available to script and the next save");
-    main_assert_eq!(app.audio.as_ref().expect("test audio").music_resolver.playlist.as_deref() => None, "PlayScenarioMusic installs the physical DEFAULT filter");
+    main_assert_eq!(app.test_audio_ref().music_resolver.playlist.as_deref() => None, "PlayScenarioMusic installs the physical DEFAULT filter");
 
     app.snapshot = app.engine.test_tick();
     main_assert!(
@@ -2213,7 +2213,7 @@ fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
         "the delayed restore command cannot reinstall the saved filter"
     );
     app.update_audio();
-    main_assert_eq!(app.audio.as_ref().expect("test audio").music_resolver.playlist.as_deref() => None);
+    main_assert_eq!(app.test_audio_ref().music_resolver.playlist.as_deref() => None);
     main_assert_eq!(app.engine.capture_state().play_list.as_deref() => Some("Theme*"));
 }
 

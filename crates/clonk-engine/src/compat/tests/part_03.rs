@@ -701,6 +701,71 @@
     }
 
     #[test]
+    fn synchronous_sound_level_keeps_target_registered_for_later_detach() {
+        struct SoundLevelHost;
+
+        impl crate::SynchronousSoundHost for SoundLevelHost {
+            fn start_sound(
+                &mut self,
+                _request: &crate::LocalSoundStart,
+                _world: &dyn crate::LocalAudioWorld,
+            ) -> bool {
+                true
+            }
+
+            fn stop_sound(&mut self, _name: &str, _target: Option<ObjectId>) {}
+
+            fn set_sound_volume(
+                &mut self,
+                _name: &str,
+                _target: Option<ObjectId>,
+                _volume: i32,
+                _world: &dyn crate::LocalAudioWorld,
+            ) {
+            }
+
+            fn detach_object_sounds(
+                &mut self,
+                _target: ObjectId,
+                _position: Vector2,
+                _world: &dyn crate::LocalAudioWorld,
+            ) {
+            }
+
+            fn clear_sound_instances(&mut self) {}
+        }
+
+        let host = Rc::new(RefCell::new(SoundLevelHost));
+        let registration = crate::SynchronousSoundHostRegistration::new(&host);
+        let mut audio = AudioRegistry::new();
+        audio.set_synchronous_host(Some(registration.handle()));
+        let audio_guard = enter_audio_context(audio);
+        let target = ObjectId::new(1);
+        let (result, outcome) = with_object_host_context(|| {
+            sound_level(&[
+                Value::String("Loop".into()),
+                Value::Int(50),
+                object_reference_value(target),
+            ])
+        });
+        let mut retained = audio_guard.finish();
+
+        assert_eq!(result.expect("SoundLevel succeeds"), Value::Nil);
+        assert!(outcome.audio.events.is_empty(), "the host handled SoundLevel");
+        retained.detach_object_sounds(target, Vector2::new(20, 30));
+        // A positive SoundLevel may create a new attached looping instance.
+        // ClearPointers must therefore still detach it if object removal runs
+        // in a later engine phase (C4SoundSystem.cpp:361-379,438-447).
+        assert_eq!(
+            retained.take_events(),
+            vec![AudioCommand::DetachObjectSounds {
+                target,
+                position: Vector2::new(20, 30),
+            }]
+        );
+    }
+
+    #[test]
     fn sound_level_controls_prior_frame_one_shots_without_phantom_loops() {
         let mut audio = AudioRegistry::new();
         audio.play_sound("VolumeShot", None, 100, false, false, None);

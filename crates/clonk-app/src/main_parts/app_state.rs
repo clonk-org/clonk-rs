@@ -310,7 +310,7 @@ pub(crate) struct GameApp {
     /// C4GraphicsResource's game-local HUD, cursor and palette selection.
     /// `None` means the process-startup Graphics.c4g bundle is active.
     pub(crate) active_game_graphics: Option<GameGraphicsResources>,
-    pub(crate) audio: Option<AudioContext>,
+    pub(crate) audio: Option<SharedAudioContext>,
     /// Presentation-only proximity voice state; never serialized or passed to
     /// the deterministic engine.
     pub(crate) voice_chat: crate::voice_chat::VoiceChatState,

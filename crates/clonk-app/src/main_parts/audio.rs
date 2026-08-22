@@ -4,6 +4,8 @@
 //! the same binary crate, re-exported from `main.rs` so every path resolves.
 
 use super::*;
+use std::cell::{Ref, RefCell, RefMut};
+use std::rc::Rc;
 
 pub(crate) fn retained_gpu_gamma_mode(
     config: clonk_frontend::AdvancedRendererConfig,
@@ -2596,6 +2598,13 @@ pub(crate) struct AudioContext {
     /// graphics pass. A skipped or failed pass deliberately leaves this map
     /// untouched.
     pub(crate) rendered_object_audibility: HashMap<ObjectId, CachedObjectAudibilityMix>,
+    /// Exact app-owned viewport projections used by synchronous native sound
+    /// calls. GameApp refreshes these before callback-bearing scheduler
+    /// entries so `NewInstance` sees the same listener layout as C++.
+    synchronous_sound_viewports: Vec<ActiveViewportProjection>,
+    /// C4SoundSystem selects RXSound only while Game.IsRunning; startup and
+    /// scenario initialization use the independent FESamples toggle.
+    synchronous_game_running: bool,
     /// Where a sound's object stood when the engine queued the call, for
     /// objects that did not survive into the snapshot this frame applies
     /// against. Entries live only as long as an instance refers to them.
@@ -2603,6 +2612,62 @@ pub(crate) struct AudioContext {
     pub(crate) resolver: SoundResolver,
     pub(crate) music_resolver: MusicResolver,
     pub(crate) missing_sounds: HashSet<String>,
+}
+
+pub(crate) struct SharedAudioContext {
+    registration: clonk_engine::SynchronousSoundHostRegistration,
+    inner: Rc<RefCell<AudioContext>>,
+}
+
+impl SharedAudioContext {
+    fn new(audio: AudioContext) -> Self {
+        let inner = Rc::new(RefCell::new(audio));
+        let registration = clonk_engine::SynchronousSoundHostRegistration::new(&inner);
+        Self {
+            registration,
+            inner,
+        }
+    }
+
+    pub(crate) fn borrow(&self) -> Ref<'_, AudioContext> {
+        self.inner.borrow()
+    }
+
+    pub(crate) fn borrow_mut(&self) -> RefMut<'_, AudioContext> {
+        self.inner.borrow_mut()
+    }
+
+    fn handle(&self) -> clonk_engine::SynchronousSoundHostHandle {
+        self.registration.handle()
+    }
+}
+
+pub(crate) fn borrow_audio_context(
+    audio: Option<&SharedAudioContext>,
+) -> Option<Ref<'_, AudioContext>> {
+    audio.map(SharedAudioContext::borrow)
+}
+
+pub(crate) fn borrow_audio_context_mut(
+    audio: Option<&SharedAudioContext>,
+) -> Option<RefMut<'_, AudioContext>> {
+    audio.map(SharedAudioContext::borrow_mut)
+}
+
+pub(crate) fn connect_audio_context(
+    engine: &mut Engine,
+    audio: AudioContext,
+) -> SharedAudioContext {
+    let audio = SharedAudioContext::new(audio);
+    engine.configure_synchronous_sound_host(Some(audio.handle()));
+    audio
+}
+
+pub(crate) fn reconnect_audio_context(engine: &mut Engine, audio: Option<&SharedAudioContext>) {
+    if let Some(audio) = audio {
+        audio.borrow_mut().synchronous_game_running = false;
+    }
+    engine.configure_synchronous_sound_host(audio.map(SharedAudioContext::handle));
 }
 
 impl AudioContext {
@@ -2672,6 +2737,8 @@ impl AudioContext {
             active_channels: HashMap::new(),
             next_sound_instance_order: 1,
             rendered_object_audibility: HashMap::new(),
+            synchronous_sound_viewports: Vec::new(),
+            synchronous_game_running: false,
             emitter_positions: HashMap::new(),
             resolver,
             music_resolver,
@@ -3015,6 +3082,17 @@ impl AudioContext {
             &self.rendered_object_audibility,
         );
         self.rendered_object_audibility = rendered_object_audibility;
+    }
+
+    pub(crate) fn set_synchronous_sound_state(
+        &mut self,
+        viewports: &[ActiveViewportProjection],
+        game_running: bool,
+    ) {
+        self.synchronous_sound_viewports.clear();
+        self.synchronous_sound_viewports
+            .extend_from_slice(viewports);
+        self.synchronous_game_running = game_running;
     }
 
     pub(crate) fn reset_sfx(&mut self) {
@@ -3533,6 +3611,34 @@ impl AudioContext {
         viewports: &[ActiveViewportProjection],
         sound_enabled: bool,
     ) -> Result<bool, AudioError> {
+        self.try_start_sound_in_world(
+            name,
+            target,
+            volume,
+            looped,
+            multiple,
+            custom_falloff,
+            initial_mix,
+            &SoundWorld::Snapshot(snapshot),
+            viewports,
+            sound_enabled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_start_sound_in_world(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: i32,
+        looped: bool,
+        multiple: bool,
+        custom_falloff: Option<i32>,
+        initial_mix: Option<(f32, f32)>,
+        world: &SoundWorld<'_>,
+        viewports: &[ActiveViewportProjection],
+        sound_enabled: bool,
+    ) -> Result<bool, AudioError> {
         // FnSound checks IsSoundPlaying before StartSoundEffect unless the
         // caller explicitly requests multiple instances (C4Script.cpp:
         // 2317-2319). FindInst matches the prepared request against resolved
@@ -3563,10 +3669,54 @@ impl AudioContext {
         // (C4SoundSystem.cpp:341-350).
         let already_playing_near = self.active_channels.values().any(|info| {
             info.sample_key == resolved.sample_key
-                && sound_targets_are_near(info.target, target, snapshot, &self.emitter_positions)
+                && sound_targets_are_near(info.target, target, world, &self.emitter_positions)
         });
         if already_playing_near {
             return Ok(false);
+        }
+        // A fresh attached instance executes immediately. Status=0 detaches a
+        // one-shot at its final position, but DetachObj rejects loops outright
+        // (C4SoundSystem.cpp:153-170,351-355). Inactive status remains truthy.
+        let mut target = target;
+        let mut initial_mix = initial_mix;
+        let mut initial_execute_mix = None;
+        if let Some(missing_target) = target.filter(|target| !world.object_status_present(*target))
+        {
+            if looped {
+                return Ok(false);
+            }
+            let position = world
+                .object_position(missing_target)
+                .or_else(|| self.emitter_positions.get(&missing_target).copied());
+            let detached_mix = initial_mix.or_else(|| {
+                position.map(|position| {
+                    let (audibility, pan) =
+                        compute_positional_mix_values_in_world(position, world, viewports);
+                    (f32::from(audibility) / 100.0, pan)
+                })
+            });
+            // Execute cached GetObj() before DetachObj replaces the instance's
+            // target. Its remaining initial pass therefore applies the old
+            // object's audibility/falloff/pan on top of DetachObj's positional
+            // pair (C4SoundSystem.cpp:153-170,190-202).
+            let attached_mix = self
+                .rendered_object_audibility
+                .get(&missing_target)
+                .map(|cached| (cached.audibility, cached.pan as f32 / 100.0))
+                .or_else(|| {
+                    position.map(|position| {
+                        compute_positional_mix_values_in_world(position, world, viewports)
+                    })
+                });
+            if sound_enabled {
+                initial_execute_mix = detached_mix.zip(attached_mix).map(|(detached, attached)| {
+                    deleted_target_initial_execute_mix(detached, attached, custom_falloff)
+                });
+            }
+            // The object modifiers belong only to Execute(true)'s cached local
+            // pointer. Later Execute calls see the detached position variant.
+            initial_mix = detached_mix;
+            target = None;
         }
         let duration_ms = resolved.handle.duration_ms().unwrap_or(0);
         let instance_order = self.next_sound_instance_order;
@@ -3593,12 +3743,14 @@ impl AudioContext {
             started_at: Instant::now(),
             detached_mix: initial_mix,
         };
-        let (mut mix_volume, pan) = compute_mix_values_with_rendered_audibility(
-            &mut info,
-            snapshot,
-            viewports,
-            Some(&self.rendered_object_audibility),
-        );
+        let (mut mix_volume, pan) = initial_execute_mix.unwrap_or_else(|| {
+            compute_mix_values_in_world(
+                &mut info,
+                world,
+                viewports,
+                Some(&self.rendered_object_audibility),
+            )
+        });
         mix_volume *= self.options.sound_volume;
         if sound_enabled && mix_volume > 0.0 {
             let channel = self.system.play_sound(&info.handle, looped)?;
@@ -3647,7 +3799,23 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         viewports: &[ActiveViewportProjection],
     ) {
-        let detached_mix = compute_object_positional_mix(position, snapshot, viewports);
+        self.detach_object_sounds_in_world(
+            target,
+            position,
+            &SoundWorld::Snapshot(snapshot),
+            viewports,
+        );
+    }
+
+    fn detach_object_sounds_in_world(
+        &mut self,
+        target: ObjectId,
+        position: Vector2,
+        world: &SoundWorld<'_>,
+        viewports: &[ActiveViewportProjection],
+    ) {
+        let (audibility, pan) = compute_positional_mix_values_in_world(position, world, viewports);
+        let detached_mix = (f32::from(audibility) / 100.0, pan);
         let mut looping = Vec::new();
         let mut updates = Vec::new();
         for (key, info) in &mut self.active_channels {
@@ -3688,6 +3856,23 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         viewports: &[ActiveViewportProjection],
     ) -> bool {
+        self.update_sound_volume_in_world(
+            name,
+            target,
+            volume,
+            &SoundWorld::Snapshot(snapshot),
+            viewports,
+        )
+    }
+
+    fn update_sound_volume_in_world(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: i32,
+        world: &SoundWorld<'_>,
+        viewports: &[ActiveViewportProjection],
+    ) -> bool {
         let Some(key) = self.active_channel_key(name, target) else {
             return false;
         };
@@ -3702,9 +3887,9 @@ impl AudioContext {
             let Some(channel) = info.channel else {
                 return true;
             };
-            let (mut mix_volume, pan) = compute_mix_values_with_rendered_audibility(
+            let (mut mix_volume, pan) = compute_mix_values_in_world(
                 info,
-                snapshot,
+                world,
                 viewports,
                 Some(rendered_object_audibility),
             );
@@ -4052,6 +4237,96 @@ impl AudioContext {
     }
 }
 
+impl clonk_engine::SynchronousSoundHost for AudioContext {
+    fn start_sound(
+        &mut self,
+        request: &clonk_engine::LocalSoundStart,
+        world: &dyn clonk_engine::LocalAudioWorld,
+    ) -> bool {
+        let world = SoundWorld::Live(world);
+        let viewports = self.synchronous_sound_viewports.clone();
+        let sound_enabled = self.sound_effects_enabled(self.synchronous_game_running);
+        if let (Some(target), Some(position)) = (request.target, request.target_position) {
+            self.emitter_positions.insert(target, position);
+        }
+        let initial_mix = request.position.map(|position| {
+            let (audibility, pan) =
+                compute_positional_mix_values_in_world(position, &world, &viewports);
+            (f32::from(audibility) / 100.0, pan)
+        });
+        match self.try_start_sound_in_world(
+            &request.name,
+            request.target,
+            request.volume,
+            request.looped,
+            request.multiple,
+            request.custom_falloff,
+            initial_mix,
+            &world,
+            &viewports,
+            sound_enabled,
+        ) {
+            Ok(started) => started,
+            Err(error) => {
+                tracing::error!(sound = %request.name, %error, "failed to start script sound");
+                false
+            }
+        }
+    }
+
+    fn stop_sound(&mut self, name: &str, target: Option<ObjectId>) {
+        AudioContext::stop_sound(self, name, target);
+    }
+
+    fn set_sound_volume(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: i32,
+        world: &dyn clonk_engine::LocalAudioWorld,
+    ) {
+        if volume <= 0 {
+            self.stop_sound(name, target);
+            return;
+        }
+        let world = SoundWorld::Live(world);
+        let viewports = self.synchronous_sound_viewports.clone();
+        let sound_enabled = self.sound_effects_enabled(self.synchronous_game_running);
+        if self.update_sound_volume_in_world(name, target, volume, &world, &viewports) {
+            return;
+        }
+        if let Err(error) = self.try_start_sound_in_world(
+            name,
+            target,
+            volume,
+            true,
+            false,
+            None,
+            None,
+            &world,
+            &viewports,
+            sound_enabled,
+        ) {
+            tracing::error!(sound = %name, %error, "failed to start SoundLevel fallback loop");
+        }
+    }
+
+    fn detach_object_sounds(
+        &mut self,
+        target: ObjectId,
+        position: Vector2,
+        world: &dyn clonk_engine::LocalAudioWorld,
+    ) {
+        let world = SoundWorld::Live(world);
+        let viewports = self.synchronous_sound_viewports.clone();
+        self.detach_object_sounds_in_world(target, position, &world, &viewports);
+    }
+
+    fn clear_sound_instances(&mut self) {
+        self.reset_sfx();
+    }
+}
+
 /// Configure the app-owned sound resolver before any definition/scenario
 /// callback can call the Message family, then hand the engine only the
 /// client-local sample filenames needed for StartSoundEffect's success gate.
@@ -4149,6 +4424,114 @@ impl ChannelInfo {
     }
 }
 
+enum SoundWorld<'a> {
+    Snapshot(&'a SimulationSnapshot),
+    Live(&'a dyn clonk_engine::LocalAudioWorld),
+}
+
+impl SoundWorld<'_> {
+    fn object_position(&self, object: ObjectId) -> Option<Vector2> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.object(object).map(|object| object.position),
+            Self::Live(world) => world.object_position(object),
+        }
+    }
+
+    fn player_view(&self, player: i32) -> Option<clonk_engine::LocalAudioPlayerView> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot
+                .players
+                .iter()
+                .find(|state| state.id == player)
+                .map(|state| clonk_engine::LocalAudioPlayerView {
+                    cursor: state.cursor,
+                    view_cursor: state.view_cursor,
+                    view_target: state.view_target,
+                }),
+            Self::Live(world) => world.player_view(player),
+        }
+    }
+
+    fn object_status_present(&self, object: ObjectId) -> bool {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.object(object).is_some(),
+            Self::Live(world) => world.object_status_present(object),
+        }
+    }
+}
+
+fn compute_mix_values_in_world(
+    info: &mut ChannelInfo,
+    world: &SoundWorld<'_>,
+    viewports: &[ActiveViewportProjection],
+    rendered_object_audibility: Option<&HashMap<ObjectId, CachedObjectAudibilityMix>>,
+) -> (f32, f32) {
+    let base_volume = (info.volume as f32 / 100.0).max(0.0);
+    let Some(target) = info.target else {
+        return info.detached_mix.unwrap_or((base_volume, 0.0));
+    };
+    let Some(position) = world.object_position(target) else {
+        return info.detached_mix.unwrap_or((base_volume, 0.0));
+    };
+    let origin_mix = compute_positional_mix_values_in_world(position, world, viewports);
+    info.detached_mix = Some((f32::from(origin_mix.0) / 100.0, origin_mix.1));
+    let (audibility, pan) = rendered_object_audibility
+        .and_then(|cache| cache.get(&target))
+        .map(|cached| (cached.audibility, cached.pan as f32 / 100.0))
+        .unwrap_or(origin_mix);
+    (
+        base_volume * adjusted_audibility(audibility, info.custom_falloff),
+        pan,
+    )
+}
+
+fn compute_positional_mix_values_in_world(
+    source: Vector2,
+    world: &SoundWorld<'_>,
+    viewports: &[ActiveViewportProjection],
+) -> (u8, f32) {
+    let mut volume = 0u8;
+    let mut pan = 0i32;
+    for viewport in viewports {
+        let center = Vector2::new(
+            viewport.target_x.wrapping_add(viewport.logical_width / 2),
+            viewport.target_y.wrapping_add(viewport.logical_height / 2),
+        );
+        let listener = world
+            .player_view(viewport.owner)
+            .and_then(|player| {
+                player
+                    .view_cursor
+                    .and_then(|object| world.object_position(object))
+                    .or_else(|| {
+                        player
+                            .view_target
+                            .and_then(|object| world.object_position(object))
+                    })
+                    .or_else(|| {
+                        player
+                            .cursor
+                            .and_then(|object| world.object_position(object))
+                    })
+            })
+            .unwrap_or(center);
+        volume = volume.max(positional_audibility(source, listener));
+        pan = pan.wrapping_add(source.x.wrapping_sub(center.x) / 5);
+    }
+    (volume, pan.clamp(-100, 100) as f32 / 100.0)
+}
+
+pub(crate) fn deleted_target_initial_execute_mix(
+    detached: (f32, f32),
+    attached: (u8, f32),
+    custom_falloff: Option<i32>,
+) -> (f32, f32) {
+    (
+        detached.0 * adjusted_audibility(attached.0, custom_falloff),
+        detached.1 + attached.1,
+    )
+}
+
 /// `IsNear` reads the position off the live `C4Object`
 /// (`C4SoundSystem.cpp:252-261`). A script that calls `Sound` and then
 /// `RemoveObject` is still live at that moment — C++ processes the removal
@@ -4164,14 +4547,13 @@ impl ChannelInfo {
 fn sound_targets_are_near(
     existing: Option<ObjectId>,
     requested: Option<ObjectId>,
-    snapshot: &SimulationSnapshot,
+    world: &SoundWorld<'_>,
     emitters: &HashMap<ObjectId, Vector2>,
 ) -> bool {
     const NEAR_SOUND_RADIUS: i64 = 50;
     let position = |id: ObjectId| {
-        snapshot
-            .object(id)
-            .map(|object| object.position)
+        world
+            .object_position(id)
             .or_else(|| emitters.get(&id).copied())
     };
     match (existing, requested) {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::SynchronousSoundHostHandle;
 
 pub(crate) fn music(args: &[Value]) -> Result<Value, RuntimeError> {
     let song = match args.first().unwrap_or(&Value::Nil) {
@@ -156,7 +157,9 @@ pub(crate) fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
         }
 
         if loop_flag < 0 {
-            context.audio_mut().stop_sound(&name, target_id);
+            if !context.stop_synchronous_sound(&name, target_id) {
+                context.audio_mut().stop_sound(&name, target_id);
+            }
             return Ok(Value::Bool(true));
         }
 
@@ -179,11 +182,10 @@ pub(crate) fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         let volume = volume.clamp(0, 100) as u8;
         let looped = loop_flag > 0;
-        // Live sound instances and resolved filenames are client-local. Emit
-        // every ordered request so the frontend can perform FindInst exactly.
-        context
-            .audio_mut()
-            .play_sound(&name, target_id, volume, looped, multiple, custom_falloff);
+        // The app host completes NewInstance on the calling game thread. An
+        // engine-only fixture has no endpoint and retains the ordered command
+        // fallback used by snapshot consumers.
+        let _ = context.play_sound(&name, target_id, volume, looped, multiple, custom_falloff);
         Ok(Value::Bool(true))
     })
 }
@@ -217,7 +219,7 @@ pub(crate) fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
 
         // FindInst and NewInstance both resolve ".wav" for an empty name and
         // match nothing (C4SoundSystem.cpp:271-286,307-320,361-366).
-        if !name.is_empty() {
+        if !name.is_empty() && !context.set_synchronous_sound_volume(&name, target_id, level) {
             context.audio_mut().sound_level(&name, target_id, level);
         }
         Ok(Value::Nil)
@@ -259,6 +261,13 @@ impl Drop for AudioContextGuard {
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct AudioRegistry {
+    /// Whether an embedding frontend explicitly supplied its local audio
+    /// availability. `false` retains the queued engine-only fixture path;
+    /// `true` with no handle mirrors C++'s missing `Application.AudioSystem`.
+    synchronous_host_configured: bool,
+    /// Non-owning bridge to the app's sole logical C4SoundSystem instance.
+    /// This is process-local presentation state and is never serialized.
+    synchronous_host: Option<SynchronousSoundHostHandle>,
     /// Filenames admitted by the active C4SoundSystem resource chain. This
     /// is client-local presentation state, not synchronized or save-persisted
     /// state; cloning the registry across callbacks is cheap.
@@ -290,6 +299,8 @@ pub struct AudioOutcome {
 impl Default for AudioRegistry {
     fn default() -> Self {
         Self {
+            synchronous_host_configured: false,
+            synchronous_host: None,
             available_samples: Arc::new(HashSet::new()),
             available_music: Arc::new(Vec::new()),
             music_playlist: None,
@@ -304,6 +315,19 @@ impl Default for AudioRegistry {
 impl AudioRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn set_synchronous_host(&mut self, host: Option<SynchronousSoundHostHandle>) {
+        self.synchronous_host_configured = true;
+        self.synchronous_host = host;
+    }
+
+    pub(crate) fn synchronous_host_configured(&self) -> bool {
+        self.synchronous_host_configured
+    }
+
+    pub(crate) fn synchronous_host(&self) -> Option<SynchronousSoundHostHandle> {
+        self.synchronous_host
     }
 
     pub(crate) fn set_available_samples<I, S>(&mut self, samples: I)

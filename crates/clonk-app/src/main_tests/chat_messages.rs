@@ -147,12 +147,21 @@ fn execute_message_speech_for_audio(
     script: &str,
     audio_snapshot: &SimulationSnapshot,
 ) -> Vec<clonk_engine::MessageSnapshot> {
+    execute_message_speech_result_for_audio(engine, audio, script, audio_snapshot).1
+}
+
+fn execute_message_speech_result_for_audio(
+    engine: &mut Engine,
+    audio: &mut AudioContext,
+    script: &str,
+    audio_snapshot: &SimulationSnapshot,
+) -> (Value, Vec<clonk_engine::MessageSnapshot>) {
     let control = clonk_engine::ScriptControlData {
         script: LegacyCString::from_bytes(script.as_bytes().to_vec()).test_value(),
         by_client: 0,
         ..clonk_engine::ScriptControlData::default()
     };
-    engine
+    let result = engine
         .execute_script_control(&control, ScriptControlPolicy::live(false))
         .expect("message script executes")
         .test_value();
@@ -161,7 +170,348 @@ fn execute_message_speech_for_audio(
     snapshot.audio = std::mem::take(&mut engine.pending_audio);
     let mut runtime_music_enabled = false;
     let outcomes = audio.process_audio_with_viewports(&snapshot, &[], &mut runtime_music_enabled);
-    engine.apply_speech_playback_outcomes(outcomes)
+    (result, engine.apply_speech_playback_outcomes(outcomes))
+}
+
+fn execute_message_speech_result_for_shared_audio(
+    engine: &mut Engine,
+    audio: &SharedAudioContext,
+    script: &str,
+    audio_snapshot: &SimulationSnapshot,
+) -> (Value, Vec<clonk_engine::MessageSnapshot>) {
+    execute_message_speech_result_for_shared_audio_on(
+        engine,
+        audio,
+        script,
+        audio_snapshot,
+        clonk_engine::SCRIPT_SCOPE_GLOBAL,
+    )
+}
+
+fn execute_message_speech_result_for_shared_audio_on(
+    engine: &mut Engine,
+    audio: &SharedAudioContext,
+    script: &str,
+    audio_snapshot: &SimulationSnapshot,
+    target_object: i32,
+) -> (Value, Vec<clonk_engine::MessageSnapshot>) {
+    let control = clonk_engine::ScriptControlData {
+        script: LegacyCString::from_bytes(script.as_bytes().to_vec()).test_value(),
+        target_object,
+        by_client: 0,
+        ..clonk_engine::ScriptControlData::default()
+    };
+    let result = engine
+        .execute_script_control(&control, ScriptControlPolicy::live(false))
+        .expect("message script executes")
+        .test_value();
+
+    let mut snapshot = audio_snapshot.clone();
+    main_assert!(engine.pending_audio.is_empty(), "unexpected deferred audio: {:?}", engine.pending_audio);
+    snapshot.audio = std::mem::take(&mut engine.pending_audio);
+    let mut runtime_music_enabled = false;
+    let outcomes = audio.borrow_mut().process_audio_with_viewports(
+        &snapshot,
+        &[],
+        &mut runtime_music_enabled,
+    );
+    (result, engine.apply_speech_playback_outcomes(outcomes))
+}
+
+#[test]
+fn action_sound_precedes_rejected_message_speech_and_formatter_abort() {
+    let dir = tempdir();
+    let scenario = dir.path().join("Speech.c4s");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("Speech.wav"), silent_pcm_wav(10_000)).test_value();
+
+    let mut audio = AudioContext::try_new(AudioOptions {
+        max_channels: 2,
+        ..AudioOptions::default()
+    })
+    .test_value();
+    audio.configure_scenario(Some(&scenario));
+    let samples = audio.available_sound_samples();
+    let mut engine = message_speech_test_engine(&samples);
+    let mut speaker = test_definition("SPKR", "Speaker", "#strict 3\n");
+    speaker.configure_actions(
+        Some("Idle".to_string()),
+        HashMap::from([
+            ("Idle".to_string(), ActionSpec::default()),
+            (
+                "Speaking".to_string(),
+                ActionSpec::default().with_sound("Speech"),
+            ),
+        ]),
+    );
+    engine.register_test_definition(speaker);
+    let speaker = engine.spawn_test_object(SpawnConfig::new("SPKR"));
+    let target_object = i32::try_from(speaker.as_u64()).test_value();
+    let audio = connect_audio_context(&mut engine, audio);
+
+    let (result, messages) = execute_message_speech_result_for_shared_audio_on(
+        &mut engine,
+        &audio,
+        r#"SetAction("Speaking") && Message("broken %d%d%d%d%d%d%d%d%d$Speech") && Message("continued")"#,
+        &make_snapshot(Vec::new(), Vec::new()),
+        target_object,
+    );
+
+    // SetAction stops the old sound and starts the new looping action sound
+    // before OCF/callback work. The near speech reject then exposes the fixed
+    // formatter error and aborts before the final operand
+    // (C4Object.cpp:4121-4165; C4Script.cpp:120-126,2415-2432).
+    let audio = audio.borrow();
+    main_assert_eq!(audio.active_channels.len() => 1);
+    main_assert!(audio.active_channels.values().next().test_value().looped);
+    main_assert!(messages.is_empty());
+    main_assert_eq!(result => Value::Nil);
+}
+
+#[test]
+fn natural_action_sound_precedes_rejected_start_call_speech() {
+    let dir = tempdir();
+    let scenario = dir.path().join("Speech.c4s");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("Speech.wav"), silent_pcm_wav(10_000)).test_value();
+
+    let mut audio = AudioContext::try_new(AudioOptions {
+        max_channels: 1,
+        ..AudioOptions::default()
+    })
+    .test_value();
+    audio.configure_scenario(Some(&scenario));
+    let samples = audio.available_sound_samples();
+    let mut engine = message_speech_test_engine(&samples);
+    let mut speaker = test_definition(
+        "NSPK",
+        "Natural speaker",
+        r#"#strict 3
+protected func OnSpeaking()
+{
+    Message("broken %d%d%d%d%d%d%d%d%d$Speech");
+    Message("continued");
+}
+"#,
+    );
+    speaker.configure_actions(
+        Some("Waiting".to_string()),
+        HashMap::from([
+            (
+                "Waiting".to_string(),
+                ActionSpec::default()
+                    .with_delay(1)
+                    .with_length(1)
+                    .with_next("Speaking"),
+            ),
+            (
+                "Speaking".to_string(),
+                ActionSpec::default()
+                    .with_sound("Speech")
+                    .with_start_call("OnSpeaking"),
+            ),
+        ]),
+    );
+    engine.register_test_definition(speaker);
+    let speaker = engine.spawn_test_object(
+        SpawnConfig::new("NSPK").with_action(ActionState::new("Waiting")),
+    );
+    let audio = connect_audio_context(&mut engine, audio);
+
+    let snapshot = engine.test_tick();
+
+    // Phase-end SetAction starts the incoming loop before SetOCF and StartCall.
+    // Its near-duplicate rejection exposes the malformed speech fallback and
+    // aborts the callback before "continued" (C4Object.cpp:4155-4197;
+    // C4SoundSystem.cpp:339-355; C4Script.cpp:120-126,2415-2432).
+    main_assert_eq!(snapshot.object(speaker).test_value().action.name => "Speaking");
+    main_assert!(snapshot.hud.messages.is_empty());
+    let audio = audio.borrow();
+    let instance = audio
+        .active_channels
+        .get(&SoundInstanceKey::new("Speech", Some(speaker)))
+        .test_value();
+    main_assert!(instance.looped);
+}
+
+#[test]
+fn near_rejected_message_family_speech_aborts_before_continuation() {
+    let dir = tempdir();
+    let scenario = dir.path().join("Speech.c4s");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("Speech.wav"), silent_pcm_wav(10_000)).test_value();
+    let empty_snapshot = make_snapshot(Vec::new(), Vec::new());
+
+    for spoken_call in [
+        r#"Message("broken %d%d%d%d%d%d%d%d%d$Speech")"#,
+        r#"PlayerMessage(0,"broken %d%d%d%d%d%d%d%d$Speech")"#,
+        r#"PlrMessage("broken %d%d%d%d%d%d%d%d%d$Speech",0)"#,
+    ] {
+        let mut audio = AudioContext::try_new(AudioOptions {
+            max_channels: 2,
+            ..AudioOptions::default()
+        })
+        .test_value();
+        audio.configure_scenario(Some(&scenario));
+        let samples = audio.available_sound_samples();
+        let mut engine = message_speech_test_engine(&samples);
+        let audio = connect_audio_context(&mut engine, audio);
+        let script = format!(
+            r#"Sound("Speech",true,nil,100,0,1) && {spoken_call} && Message("continued")"#
+        );
+
+        let (result, messages) = execute_message_speech_result_for_shared_audio(
+            &mut engine,
+            &audio,
+            &script,
+            &empty_snapshot,
+        );
+
+        // StartSoundEffect returns the complete NewInstance result before
+        // FnStringFormat runs. A second global instance is rejected as near,
+        // so exhausting the native's fixed format slots raises before the
+        // next short-circuit operand
+        // (C4SoundSystem.cpp:54-57,342-355; C4Script.cpp:120-126,2395-2462).
+        let audio = audio.borrow();
+        main_assert_eq!(audio.active_channels.len() => 1, "{spoken_call}");
+        main_assert!(
+            audio.active_channels.values().next().test_value().looped,
+            "{spoken_call}"
+        );
+        main_assert!(messages.is_empty(), "{spoken_call}");
+        main_assert_eq!(result => Value::Nil, "{spoken_call}");
+    }
+}
+
+#[test]
+fn missing_audio_system_rejects_speech_before_formatter_abort() {
+    let mut engine = message_speech_test_engine(&["Speech.wav".to_string()]);
+    engine.configure_synchronous_sound_host(None);
+    let control = clonk_engine::ScriptControlData {
+        script: LegacyCString::from_bytes(
+            br#"Message("broken %d%d%d%d%d%d%d%d%d$Speech") && Message("continued")"#
+                .to_vec(),
+        )
+        .test_value(),
+        by_client: 0,
+        ..clonk_engine::ScriptControlData::default()
+    };
+
+    let result = engine
+        .execute_script_control(&control, ScriptControlPolicy::live(false))
+        .expect("message script executes")
+        .test_value();
+
+    // An advertised sample cannot create an instance without the local audio
+    // system. NewInstance rejects before FnMessage formats its fallback, whose
+    // exhausted slots abort the script (C4SoundSystem.cpp:301-306;
+    // C4Script.cpp:120-126,2415-2432).
+    main_assert_eq!(result => Value::Nil);
+    main_assert!(engine.pending_audio.is_empty());
+    main_assert!(engine.snapshot().hud.messages.is_empty());
+}
+
+#[test]
+fn channel_rejected_speech_exposes_formatter_abort_synchronously() {
+    let dir = tempdir();
+    let scenario = dir.path().join("Speech.c4s");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("Speech.wav"), silent_pcm_wav(10_000)).test_value();
+    fs::write(scenario.join("Blocker.wav"), silent_pcm_wav(10_000)).test_value();
+    let empty_snapshot = make_snapshot(Vec::new(), Vec::new());
+    let mut audio = AudioContext::try_new(AudioOptions {
+        max_channels: 1,
+        ..AudioOptions::default()
+    })
+    .test_value();
+    audio.configure_scenario(Some(&scenario));
+    audio
+        .start_sound(
+            "Blocker",
+            None,
+            100,
+            false,
+            true,
+            None,
+            &empty_snapshot,
+            &[],
+        )
+        .test_value();
+    let samples = audio.available_sound_samples();
+    let mut engine = message_speech_test_engine(&samples);
+    let audio = connect_audio_context(&mut engine, audio);
+
+    let (result, messages) = execute_message_speech_result_for_shared_audio(
+        &mut engine,
+        &audio,
+        r#"Message("broken %d%d%d%d%d%d%d%d%d$Speech") && Message("continued")"#,
+        &empty_snapshot,
+    );
+
+    // NewInstance removes an instance whose first Execute cannot allocate a
+    // mixer channel, then FnMessage formats the fallback in the same script
+    // frame (C4SoundSystem.cpp:351-355; C4Script.cpp:120-126,2415-2432).
+    let audio = audio.borrow();
+    main_assert_eq!(audio.active_channels.len() => 1);
+    main_assert!(audio.active_channel_key("Blocker", None).is_some());
+    main_assert!(audio.active_channel_key("Speech", None).is_none());
+    main_assert!(messages.is_empty());
+    main_assert_eq!(result => Value::Nil);
+}
+
+#[test]
+fn frontend_muted_initialization_speech_skips_channel_rejection_and_formatter() {
+    let dir = tempdir();
+    let scenario = dir.path().join("Speech.c4s");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("Speech.wav"), silent_pcm_wav(10_000)).test_value();
+    fs::write(scenario.join("Blocker.wav"), silent_pcm_wav(10_000)).test_value();
+    let empty_snapshot = make_snapshot(Vec::new(), Vec::new());
+    let mut audio = AudioContext::try_new(AudioOptions {
+        max_channels: 1,
+        sound_enabled: true,
+        menu_sound_enabled: false,
+        ..AudioOptions::default()
+    })
+    .test_value();
+    audio.configure_scenario(Some(&scenario));
+    audio
+        .start_sound(
+            "Blocker",
+            None,
+            100,
+            false,
+            true,
+            None,
+            &empty_snapshot,
+            &[],
+        )
+        .test_value();
+    let samples = audio.available_sound_samples();
+    let mut engine = message_speech_test_engine(&samples);
+    let audio = connect_audio_context(&mut engine, audio);
+
+    let (result, messages) = execute_message_speech_result_for_shared_audio(
+        &mut engine,
+        &audio,
+        r#"Message("broken %d%d%d%d%d%d%d%d%d$Speech") && Message("continued")"#,
+        &empty_snapshot,
+    );
+
+    // Before Game.IsRunning, C4SoundSystem uses FESamples rather than
+    // RXSound. Muting frontend effects therefore keeps an accepted logical
+    // speech instance channel-less even when the mixer is full, and the
+    // malformed fallback is never formatted (C4SoundSystem.cpp:290-293,
+    // 351-355; C4Script.cpp:2415-2432).
+    let audio = audio.borrow();
+    main_assert_eq!(result => Value::Bool(true));
+    main_assert_eq!(messages.len() => 1);
+    main_assert_eq!(messages[0].lines => ["continued"]);
+    let speech = audio
+        .active_channels
+        .get(&SoundInstanceKey::new("Speech", None))
+        .test_value();
+    main_assert!(speech.channel.is_none());
 }
 
 #[test]
@@ -1102,10 +1452,10 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
     }
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     main_assert_eq!(app.running_chat_text() => Some("Sender"));
-    let sound_enabled = app.audio.test_ref().options.sound_enabled;
+    let sound_enabled = app.test_audio_ref().options.sound_enabled;
     app.keyboard_modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    main_assert_eq!(app.audio.as_ref().expect("sandbox audio context").options.sound_enabled => sound_enabled);
+    main_assert_eq!(app.audio.as_ref().expect("sandbox audio context").borrow().options.sound_enabled => sound_enabled);
     app.keyboard_modifiers = ModifiersState::empty();
 }
 

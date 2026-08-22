@@ -35,6 +35,8 @@ impl Engine {
             magic_energy,
             construction,
             action,
+            action_sound_dispatched,
+            action_sound_selection,
             direction,
             command_direction,
             effects,
@@ -517,6 +519,12 @@ impl Engine {
             shape_template,
             own_shape_vertices,
         );
+        if action_sound_dispatched {
+            if let Some(selection) = action_sound_selection {
+                object.active_action_sound = selection;
+            }
+            object.action_sound_initialized = true;
+        }
         if native_compiled_object_defaults {
             // C4Object::Clear seeds Mass=0 and CompileFunc overwrites it only
             // when the naming is present.
@@ -836,7 +844,11 @@ impl Engine {
             // still need an engine-side deferred transition.
             if let Some(change) = outcome.action_change {
                 if !callbacks_dispatched {
-                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                    object.record_action_event(
+                        change.previous,
+                        ActionTransitionKind::Forced,
+                        &callback_action_library,
+                    );
                 }
             }
             if let Some(change) = outcome.container_change {
@@ -864,7 +876,7 @@ impl Engine {
             pending_nested_outcomes
                 .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
             if !audio.is_empty() {
-                self.pending_audio.extend(audio);
+                self.emit_audio_commands(audio);
             }
             if !messages.is_empty() {
                 for command in messages {
@@ -1043,7 +1055,11 @@ impl Engine {
             // already completed its synchronous Start/Abort sequence.
             if let Some(change) = outcome.action_change {
                 if !callbacks_dispatched {
-                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                    object.record_action_event(
+                        change.previous,
+                        ActionTransitionKind::Forced,
+                        &callback_action_library,
+                    );
                 }
             }
             if let Some(change) = outcome.container_change {
@@ -1071,7 +1087,7 @@ impl Engine {
             pending_nested_outcomes
                 .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
             if !audio.is_empty() {
-                self.pending_audio.extend(audio);
+                self.emit_audio_commands(audio);
             }
             if !messages.is_empty() {
                 for command in messages {
@@ -1163,7 +1179,7 @@ impl Engine {
                 self.apply_landscape_operations(landscape_ops);
             }
             if !audio_events.is_empty() {
-                self.pending_audio.extend(audio_events);
+                self.emit_audio_commands(audio_events);
             }
             if !event_messages.is_empty() {
                 for command in event_messages {
@@ -1267,6 +1283,17 @@ impl Engine {
             self.clear_destroyed_object_layers();
         }
         self.actualize_object_fow_view_range(id);
+        self.dispatch_pending_action_sounds(index, false);
+        if loaded {
+            // Objects.txt restores Action directly; C4GameObjects::Load only
+            // refreshes faces and OCF afterwards, so no SetAction Sound= loop
+            // is created for the restored slot (C4GameObjects.cpp:575-675;
+            // C4Object.cpp:4159-4163). Mark it observed so the presentation
+            // reconciliation pass cannot invent that missing transition.
+            self.objects[index].action_sound_initialized = true;
+        } else {
+            self.initialize_action_sound(index, false);
+        }
         self.refresh_object_ocf(index);
         // Loaded objects restore their action WITHOUT callbacks. Native
         // host creation marked `initialized` already ran every SetAction
