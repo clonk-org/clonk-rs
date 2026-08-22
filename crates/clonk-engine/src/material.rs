@@ -1645,7 +1645,6 @@ fn build_custom_reactions(
 
             let Some(target_raw) = reaction_def
                 .value("targetspec")
-                .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
             else {
                 continue;
@@ -1701,7 +1700,6 @@ fn parse_custom_reaction_kind(
         "Script" => {
             let name = definition
                 .value("scriptfunc")
-                .map(str::trim)
                 .unwrap_or_default()
                 .to_string();
             let index = u16::try_from(script_reactions.len()).ok()?;
@@ -1712,15 +1710,15 @@ fn parse_custom_reaction_kind(
             let depth = definition.int("depth").filter(|value| *value != 0);
             let target = definition
                 .value("convertmat")
-                .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
-                .map(normalize_key)
                 .and_then(|name| {
-                    if clonk_resources::material::c4_names_equal(&name, SKY_KEY) {
-                        Some(None)
-                    } else {
-                        by_name.get(&material_name_key(&name)).copied().map(Some)
-                    }
+                    by_name
+                        .get(&material_name_key(name))
+                        .copied()
+                        .map(Some)
+                        .or_else(|| {
+                            clonk_resources::material::c4_names_equal(name, SKY_KEY).then_some(None)
+                        })
                 })
                 .unwrap_or(None);
             Some(MaterialReactionKind::Convert { target, depth })
@@ -1749,7 +1747,7 @@ fn resolve_reaction_targets(
     materials: &[Material],
     by_name: &HashMap<String, MaterialId>,
 ) -> Vec<Option<MaterialId>> {
-    let normalized = normalize_key(target_spec);
+    let normalized = target_spec.to_ascii_lowercase();
     // C4MaterialMap::CrossMapMaterials tries a literal material first and
     // only interprets TargetSpec as a category keyword when Get() fails
     // (C4Material.cpp:392-411). Thus a real material named "Solid", "Sky",
@@ -2552,6 +2550,43 @@ mod tests {
     }
 
     #[test]
+    fn custom_reaction_script_func_preserves_quoted_trailing_space() {
+        // C4MaterialReaction::CompileFunc stores ScriptFunc verbatim
+        // (C4Material.cpp:60-75), and StdCompilerINIRead::String preserves a
+        // quoted trailing space (StdCompiler.cpp:936-998).
+        let mut group = MutableGroup::new("Material.c4g");
+        group
+            .add_file(
+                "Source.c4m",
+                b"[Material]\r\nName=Source\r\nDensity=25\r\n\r\n[Reaction]\r\nType=Script\r\nScriptFunc=\"Callback \"\r\nTargetSpec=Target\r\n"
+                    .to_vec(),
+            )
+            .expect("source material adds");
+        group
+            .add_file(
+                "Target.c4m",
+                b"[Material]\r\nName=Target\r\nDensity=50\r\n".to_vec(),
+            )
+            .expect("target material adds");
+        let packed = group.pack_raw().expect("material group packs");
+        let group = clonk_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Material.c4g"),
+            packed,
+        )
+        .expect("material group reopens");
+        let library = MaterialLibrary::from_group(&group).expect("native materials compile");
+        let set = MaterialSet::from_resource_library(&library);
+        let source = set.id_of("Source").expect("source material");
+        let target = set.id_of("Target").expect("target material");
+        let MaterialReactionKind::Script { func } = set.reaction(Some(source), Some(target)).kind
+        else {
+            panic!("expected script reaction");
+        };
+
+        assert_eq!(set.script_reaction_name(func), Some("Callback "));
+    }
+
+    #[test]
     fn unknown_reaction_types_install_overriding_no_reaction_like_cpp() {
         // ReactionFuncMap (C4Material.cpp:38-46) names only Script/Convert/
         // Poof/Corrode/Insert; any other Type — including "Incinerate" and
@@ -2713,6 +2748,42 @@ mod tests {
     }
 
     #[test]
+    fn custom_reaction_target_spec_preserves_quoted_leading_space() {
+        // StdCompilerINIRead::String preserves quoted bytes through the closing
+        // quote (StdCompiler.cpp:936-998), and CrossMapMaterials compares that
+        // stored TargetSpec directly (C4Material.cpp:393-470). A leading space
+        // therefore prevents this from naming the Solid keyword.
+        let mut group = MutableGroup::new("Material.c4g");
+        group
+            .add_file(
+                "Source.c4m",
+                b"[Material]\r\nName=Source\r\nDensity=25\r\n\r\n[Reaction]\r\nType=Poof\r\nTargetSpec=\" Solid\"\r\n"
+                    .to_vec(),
+            )
+            .expect("source material adds");
+        group
+            .add_file(
+                "Rock.c4m",
+                b"[Material]\r\nName=Rock\r\nDensity=80\r\n".to_vec(),
+            )
+            .expect("rock material adds");
+        let packed = group.pack_raw().expect("material group packs");
+        let group = clonk_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Material.c4g"),
+            packed,
+        )
+        .expect("material group reopens");
+        let library = MaterialLibrary::from_group(&group).expect("native materials compile");
+        let set = MaterialSet::from_resource_library(&library);
+        let source = set.id_of("Source").expect("source material");
+        let rock = set.id_of("Rock").expect("rock material");
+        let reaction = set.reaction(Some(source), Some(rock));
+
+        assert_eq!(reaction.kind, MaterialReactionKind::Insert);
+        assert!(!reaction.user_defined);
+    }
+
+    #[test]
     fn custom_reaction_poof_with_reverse_category_target() {
         let set = build_material_set(
             r#"
@@ -2773,6 +2844,90 @@ mod tests {
                 depth: Some(2),
             },
             "explicit convert reaction should override default behavior",
+        );
+    }
+
+    #[test]
+    fn custom_reaction_convert_mat_literal_sky_shadows_sky_sentinel() {
+        // C4MaterialMap::CrossMapMaterials resolves sConvertMat through Get
+        // before storing its id (C4Material.cpp:386-390), so a real material
+        // named Sky wins over the otherwise-special sky target.
+        let set = build_material_set(
+            r#"
+            [Material Source]
+            Name=Source
+            Density=25
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Target
+            ConvertMat=sKy
+
+            [Material Target]
+            Name=Target
+            Density=50
+
+            [Material Sky]
+            Name=Sky
+            Density=10
+            "#,
+        );
+        let source = set.id_of("Source").expect("source material");
+        let target = set.id_of("Target").expect("target material");
+        let literal_sky = set.id_of("Sky").expect("literal Sky material");
+
+        assert_eq!(
+            set.reaction(Some(source), Some(target)).kind,
+            MaterialReactionKind::Convert {
+                target: Some(literal_sky),
+                depth: None,
+            },
+        );
+    }
+
+    #[test]
+    fn custom_reaction_convert_mat_preserves_quoted_trailing_space() {
+        // CrossMapMaterials passes the stored sConvertMat buffer directly to
+        // Get (C4Material.cpp:386-390). StdCompilerINIRead::String preserves a
+        // quoted trailing space (StdCompiler.cpp:936-998), so "Water " is not
+        // the material named Water.
+        let mut group = MutableGroup::new("Material.c4g");
+        group
+            .add_file(
+                "Source.c4m",
+                b"[Material]\r\nName=Source\r\nDensity=25\r\n\r\n[Reaction]\r\nType=Convert\r\nTargetSpec=Target\r\nConvertMat=\"Water \"\r\n"
+                    .to_vec(),
+            )
+            .expect("source material adds");
+        group
+            .add_file(
+                "Target.c4m",
+                b"[Material]\r\nName=Target\r\nDensity=50\r\n".to_vec(),
+            )
+            .expect("target material adds");
+        group
+            .add_file(
+                "Water.c4m",
+                b"[Material]\r\nName=Water\r\nDensity=25\r\n".to_vec(),
+            )
+            .expect("water material adds");
+        let packed = group.pack_raw().expect("material group packs");
+        let group = clonk_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Material.c4g"),
+            packed,
+        )
+        .expect("material group reopens");
+        let library = MaterialLibrary::from_group(&group).expect("native materials compile");
+        let set = MaterialSet::from_resource_library(&library);
+        let source = set.id_of("Source").expect("source material");
+        let target = set.id_of("Target").expect("target material");
+
+        assert_eq!(
+            set.reaction(Some(source), Some(target)).kind,
+            MaterialReactionKind::Convert {
+                target: None,
+                depth: None,
+            },
         );
     }
 
