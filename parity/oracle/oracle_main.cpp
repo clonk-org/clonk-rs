@@ -79,6 +79,11 @@
 //   * `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp`
 //     (10 trivial lines around the real `Random()`); kept in sync via the
 //     provenance comment below.
+//   * The integrated PXS lifecycle mechanically combines C4PXS::Execute,
+//     C4PXSSystem's allocation/execution/synchronization methods, mrfInsert's
+//     user gate and insertion check, and FindMatSlide. A 16x12 material grid
+//     records slot tombstones, landscape insertions, and the complete
+//     synchronized RNG state across two system ticks.
 //
 // Regenerate the golden with `parity/oracle/gen_golden.sh`.
 
@@ -88,6 +93,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cctype>
+#include <cstring>
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
@@ -5927,6 +5933,505 @@ struct C4PXS
 } // namespace pxs_exec
 
 // ---------------------------------------------------------------------------
+// Integrated PXS lifecycle. Unlike the focused `pxs_execute`, `insert_check`,
+// and `pxs_slots` sections, this runs all of their production transitions in
+// one fixture. The mechanically lifted bodies are:
+//
+//   * C4PXS::Execute and Deactivate (src/C4PXS.cpp:28-149),
+//   * C4PXSSystem::New/Create/Execute/Synchronize/Delete
+//     (src/C4PXS.cpp:181-240, 401-404, 426-437),
+//   * mrfInsertCheck/mrfUserCheck/mrfInsert
+//     (src/C4Material.cpp:567-624, 773-798), and
+//   * C4Landscape::FindMatSlide (src/C4Landscape.cpp:1247-1277).
+//
+// InsertMaterial itself is covered byte-for-byte by `insert_material`; here it
+// is the observable boundary of mrfInsert, so the scaffold applies the result
+// to the shared grid and emits its changes in scan order. `saved_slots` emits
+// the same five raw fields C4PXSSystem::Save writes for every slot in each
+// allocated chunk when any live PXS exists (src/C4PXS.cpp:324-349), including
+// Mat==-1 tombstones.
+namespace pxs_lifecycle
+{
+const int32_t GridWdt = 16;
+const int32_t GridHgt = 12;
+const int32_t MNone = -1;
+const size_t PXSChunkSize = 500, PXSMaxChunk = 20;
+const int32_t GBackWdt = GridWdt;
+const int32_t GBackHgt = GridHgt;
+
+enum MaterialInteractionEvent
+{
+    meePXSPos = 0,
+    meePXSMove = 1,
+    meeMassMove = 2,
+};
+
+struct C4MaterialReaction;
+using C4MaterialReactionFunc = bool (*)(C4MaterialReaction *, int32_t &, int32_t &,
+                                        int32_t, int32_t, C4Fixed &, C4Fixed &,
+                                        int32_t &, int32_t, MaterialInteractionEvent,
+                                        bool *);
+
+struct C4MaterialReaction
+{
+    C4MaterialReactionFunc pFunc;
+    bool fUserDefined;
+    uint32_t iExecMask;
+    bool fInsertionCheck;
+};
+
+struct MaterialCore
+{
+    int32_t Density;
+    int32_t WindDrift;
+    int32_t SplashRate;
+    int32_t MaxSlide;
+    int32_t Incindiary;
+};
+
+struct C4MaterialMap
+{
+    static bool mrfInsert(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY,
+                          int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir,
+                          C4Fixed &fYDir, int32_t &iPxsMat, int32_t iLsMat,
+                          MaterialInteractionEvent evEvent, bool *pfPosChanged);
+
+    // 0 Vacuum, 1 Earth, 2 user InsertWater, 3 builtin SplashWater,
+    // 4 user MaskedWater. All three waters have the same physical density;
+    // only the authored reaction properties differ.
+    MaterialCore Map[5] = {
+        {0, 0, 0, 0, 0},
+        {50, 0, 0, 0, 0},
+        {25, 20, 0, 0, 0},
+        {25, 20, 1, 0, 0},
+        {25, 20, 0, 0, 0},
+    };
+
+    C4MaterialReaction insert_water{&C4MaterialMap::mrfInsert, true, 0x7u, false};
+    C4MaterialReaction splash_water{&C4MaterialMap::mrfInsert, false, ~0u, true};
+    C4MaterialReaction masked_water{&C4MaterialMap::mrfInsert, true, 0x1u, false};
+
+    C4MaterialReaction *GetReactionUnsafe(int32_t pxs_mat, int32_t landscape_mat)
+    {
+        if (landscape_mat != 1) return nullptr;
+        switch (pxs_mat)
+        {
+        case 2: return &insert_water;
+        case 3: return &splash_water;
+        case 4: return &masked_water;
+        default: return nullptr;
+        }
+    }
+};
+
+static int32_t g_grid[GridHgt][GridWdt];
+static int32_t g_coarse_count = 0;
+static bool g_create_pxs_during_insert = false;
+
+struct C4Landscape
+{
+    C4Fixed Gravity{itofix(20, 100)};
+
+    bool _PathFree(int32_t x, int32_t y, int32_t x2, int32_t y2)
+    {
+        // A 16x12 landscape occupies one production 17x15 path cell. The
+        // Earth floor therefore makes that one coarse cell occupied.
+        return C4LandscapePath::IsFree(x, y, x2, y2,
+            [](int32_t cell_x, int32_t cell_y)
+            {
+                return cell_x != 0 || cell_y != 0 || g_coarse_count != 0;
+            });
+    }
+
+    int32_t GetDensity(int32_t x, int32_t y);
+    bool FindMatSlide(int32_t &fx, int32_t &fy, int32_t ydir,
+                      int32_t mdens, int32_t mslide);
+    bool InsertMaterial(int32_t mat, int32_t x, int32_t y);
+};
+
+struct C4PXS
+{
+    int32_t Mat{MNone};
+    C4Fixed x{itofix(0)}, y{itofix(0)}, xdir{itofix(0)}, ydir{itofix(0)};
+
+    void Execute();
+    void Deactivate();
+};
+
+// Save's production signature takes the group by reference; the bounded
+// in-memory implementation is supplied below before the extracted body.
+struct C4Group;
+
+struct C4PXSSystem
+{
+    int32_t Count = 0;
+    C4PXS *Chunk[PXSMaxChunk] = {};
+    size_t iChunkPXS[PXSMaxChunk] = {};
+
+    C4PXS *New();
+    bool Create(int32_t mat, C4Fixed ix, C4Fixed iy,
+                C4Fixed ixdir = itofix(0), C4Fixed iydir = itofix(0));
+    void Execute();
+    void Synchronize();
+    void Delete(C4PXS *pPXS);
+    bool Save(C4Group &hGroup);
+
+    void reset()
+    {
+        for (size_t chunk = 0; chunk < PXSMaxChunk; chunk++)
+        {
+            delete[] Chunk[chunk];
+            Chunk[chunk] = nullptr;
+            iChunkPXS[chunk] = 0;
+        }
+        Count = 0;
+    }
+};
+
+// C4PXSSystem::Save writes `PXSChunkSize * sizeof(C4PXS)` raw bytes
+// (src/C4PXS.cpp:346-349). The production record is exactly Mat followed by
+// four raw C4Fixed words (src/C4PXS.h:25-38).
+static_assert(sizeof(C4PXS) == 5 * sizeof(int32_t), "C4PXS save record must be 20 bytes");
+
+struct GameStub
+{
+    int32_t FrameCounter = 0;
+    C4MaterialMap Material;
+    C4Landscape Landscape;
+    C4PXSSystem PXS;
+};
+
+static GameStub Game;
+
+// Minimal in-memory surfaces for the exact Save body. They model only the
+// methods Save invokes; the bytes passed to CStdFile::Write are retained
+// verbatim and C4Group::Move installs that temporary file as the PXS component.
+static std::vector<uint8_t> g_save_temp;
+static std::vector<uint8_t> g_save_component;
+static bool g_save_present = false;
+
+struct ConfigStub
+{
+    const char *AtTempPath(const char *filename) const { return filename; }
+};
+
+static ConfigStub Config;
+
+struct CStdFile
+{
+    bool Create(const char *)
+    {
+        g_save_temp.clear();
+        return true;
+    }
+
+    bool Write(const void *data, size_t size)
+    {
+        const auto *bytes = static_cast<const uint8_t *>(data);
+        g_save_temp.insert(g_save_temp.end(), bytes, bytes + size);
+        return true;
+    }
+
+    bool Close() { return true; }
+};
+
+struct C4Group
+{
+    bool Delete(const char *, bool = false)
+    {
+        g_save_component.clear();
+        g_save_present = false;
+        return true;
+    }
+
+    bool Move(const char *, const char *)
+    {
+        g_save_component = g_save_temp;
+        g_save_present = true;
+        return true;
+    }
+};
+
+static C4Group g_save_group;
+
+#define GravAccel (Game.Landscape.Gravity)
+
+static FILE *LcRngTraceFile() { return nullptr; }
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 5; }
+static void Smoke(int32_t, int32_t, int32_t) {}
+static const C4Fixed WindDrift_Factor = itofix(1, 800);
+
+static int32_t GBackMat(int32_t x, int32_t y)
+{
+    // The focused map uses a closed Earth border. Every PXS is kept inside by
+    // C4PXS::Execute's own bounds check; only FindMatSlide can probe outside.
+    if (x < 0 || x >= GridWdt || y < 0 || y >= GridHgt) return 1;
+    return g_grid[y][x];
+}
+
+static int32_t GBackDensity(int32_t x, int32_t y)
+{
+    return Game.Material.Map[GBackMat(x, y)].Density;
+}
+
+static int32_t GBackWind(int32_t, int32_t) { return 0; }
+
+int32_t C4Landscape::GetDensity(int32_t x, int32_t y)
+{
+    return Game.Material.Map[GBackMat(x, y)].Density;
+}
+
+bool C4Landscape::InsertMaterial(int32_t mat, int32_t x, int32_t y)
+{
+    // C4Landscape::InsertMaterial can synchronously turn a slide destination
+    // back into PXS (src/C4Landscape.cpp:1178-1183). The bounded scaffold
+    // exposes that re-entry point so the real PXS system walk below can pin
+    // what happens when it revives a later, currently empty chunk.
+    if (g_create_pxs_during_insert)
+    {
+        g_create_pxs_during_insert = false;
+        Game.PXS.Create(2, itofix(4), itofix(9), itofix(0), itofix(1));
+    }
+    if (x < 0 || x >= GridWdt || y < 0 || y >= GridHgt) return false;
+    if (g_grid[y][x] == 0 && mat != 0) g_coarse_count++;
+    if (g_grid[y][x] != 0 && mat == 0) g_coarse_count--;
+    g_grid[y][x] = mat;
+    return true;
+}
+
+static void resetGrid()
+{
+    g_coarse_count = 0;
+    for (int32_t y = 0; y < GridHgt; y++)
+        for (int32_t x = 0; x < GridWdt; x++)
+            g_grid[y][x] = 0;
+    for (int32_t x = 0; x < GridWdt; x++)
+    {
+        g_grid[10][x] = 1;
+        g_coarse_count++;
+    }
+}
+
+#include "mrf_insert_check.inc"
+#include "mrf_user_check.inc"
+#include "mrf_insert.inc"
+#include "find_mat_slide.inc"
+#include "pxs_execute.inc"
+#include "pxs_deactivate.inc"
+#include "pxs_new.inc"
+#include "pxs_create.inc"
+#include "pxs_delete.inc"
+#include "pxs_system_execute.inc"
+#include "pxs_synchronize.inc"
+#include "pxs_save.inc"
+
+#undef GravAccel
+
+static size_t liveCount()
+{
+    size_t live = 0;
+    for (size_t chunk = 0; chunk < PXSMaxChunk; chunk++)
+        live += Game.PXS.iChunkPXS[chunk];
+    return live;
+}
+
+static void printSlot(size_t slot)
+{
+    const C4PXS *pxs = Game.PXS.Chunk[0] ? &Game.PXS.Chunk[0][slot] : nullptr;
+    printf("{\"slot\":%zu,\"mat\":%d,\"x\":%d,\"y\":%d,\"xdir\":%d,\"ydir\":%d}",
+           slot, pxs ? pxs->Mat : MNone, pxs ? pxs->x.val : 0,
+           pxs ? pxs->y.val : 0, pxs ? pxs->xdir.val : 0,
+           pxs ? pxs->ydir.val : 0);
+}
+
+static void printSelectedSlots()
+{
+    for (size_t slot = 0; slot < 4; slot++)
+    {
+        if (slot) printf(",");
+        printSlot(slot);
+    }
+}
+
+static int32_t savedI32(size_t offset)
+{
+    int32_t value = 0;
+    if (offset + sizeof(value) <= g_save_component.size())
+        std::memcpy(&value, g_save_component.data() + offset, sizeof(value));
+    return value;
+}
+
+static void printSavedSlots()
+{
+    // The component begins with the production number-format tag, followed by
+    // raw 20-byte C4PXS records (src/C4PXS.cpp:343-349).
+    constexpr size_t tag_size = sizeof(int32_t);
+    for (size_t slot = 0; slot < 4; slot++)
+    {
+        if (slot) printf(",");
+        const size_t record = tag_size + slot * sizeof(C4PXS);
+        printf("{\"slot\":%zu,\"mat\":%d,\"x\":%d,\"y\":%d,\"xdir\":%d,\"ydir\":%d}",
+               slot, savedI32(record), savedI32(record + 4),
+               savedI32(record + 8), savedI32(record + 12),
+               savedI32(record + 16));
+    }
+}
+
+static uint64_t savedHash()
+{
+    // FNV-1a over the complete component, including the tag and all 500 raw
+    // records. An absent component hashes the empty byte sequence.
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (uint8_t byte : g_save_component)
+    {
+        hash ^= byte;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static void printInsertions()
+{
+    bool first = true;
+    for (int32_t y = 0; y < GridHgt; y++)
+        for (int32_t x = 0; x < GridWdt; x++)
+        {
+            const int32_t initial_mat = y == 10 ? 1 : 0;
+            if (g_grid[y][x] == initial_mat) continue;
+            if (!first) printf(",");
+            first = false;
+            printf("{\"x\":%d,\"y\":%d,\"mat\":%d}", x, y, g_grid[y][x]);
+        }
+}
+
+static void printStep(const char *step)
+{
+    const bool save_ok = Game.PXS.Save(g_save_group);
+    const int32_t save_tag = g_save_present && g_save_component.size() >= sizeof(int32_t)
+        ? savedI32(0) : -1;
+    const uint64_t save_hash = savedHash();
+
+    printf("{\"step\":\"%s\",\"execute_count\":%d,\"live\":%zu,"
+           "\"chunk0_allocated\":%s,\"chunk0_count\":%zu,\"slots\":[",
+           step, Game.PXS.Count, liveCount(), Game.PXS.Chunk[0] ? "true" : "false",
+           Game.PXS.iChunkPXS[0]);
+    printSelectedSlots();
+    printf("],\"insertions\":[");
+    printInsertions();
+    printf("],\"random_count\":%d,\"random_hold\":%u,\"rnd3_ptr\":%d,"
+           "\"save_ok\":%s,\"save_present\":%s,\"save_len\":%zu,"
+           "\"save_tag\":%d,\"save_hash\":%llu,\"saved_slots\":[",
+           RandomCount, RandomHold, FRndPtr3, save_ok ? "true" : "false",
+           g_save_present ? "true" : "false", g_save_component.size(), save_tag,
+           static_cast<unsigned long long>(save_hash));
+    // Decode from the installed component, never from Chunk memory. Save first
+    // omits an all-dead system; otherwise it writes all allocated chunks,
+    // including tombstones (src/C4PXS.cpp:328-349).
+    if (g_save_present) printSavedSlots();
+    printf("]}");
+}
+
+static void printChunkRevival()
+{
+    Game.PXS.reset();
+    resetGrid();
+
+    // Chunk 0 is full when its first PXS enters InsertMaterial. Chunk 1 was
+    // allocated earlier but is now empty, retaining a distinctive tombstone.
+    // Execute must not delete that later chunk until its own outer-loop turn;
+    // the synchronous Create therefore revives it and preserves slot 7.
+    Game.PXS.Create(2, itofix(2), itofix(9), itofix(0), itofix(1));
+    for (size_t slot = 1; slot < PXSChunkSize; slot++)
+        Game.PXS.Create(0, itofix(0), itofix(-9), itofix(0), itofix(0));
+    for (size_t slot = 0; slot <= 7; slot++)
+        Game.PXS.Create(0, itofix(0), itofix(-9), itofix(0), itofix(0));
+
+    for (size_t slot = 0; slot <= 7; slot++)
+    {
+        C4PXS &dead = Game.PXS.Chunk[1][slot];
+        if (slot == 7)
+        {
+            dead.x.val = 0x11223344;
+            dead.y.val = -17;
+            dead.xdir.val = 0x55667788;
+            dead.ydir.val = INT32_MIN + 31;
+        }
+        dead.Deactivate();
+    }
+
+    g_create_pxs_during_insert = true;
+    Game.PXS.Execute();
+    const bool save_ok = Game.PXS.Save(g_save_group);
+    constexpr size_t record = sizeof(int32_t) + (PXSChunkSize + 7) * sizeof(C4PXS);
+    printf("\"chunk_revival\":{\"execute_count\":%d,\"chunk1_allocated\":%s,"
+           "\"save_ok\":%s,\"save_present\":%s,\"save_len\":%zu,"
+           "\"saved_slot7\":{\"mat\":%d,\"x\":%d,\"y\":%d,"
+           "\"xdir\":%d,\"ydir\":%d}}",
+           Game.PXS.Count, Game.PXS.Chunk[1] ? "true" : "false",
+           save_ok ? "true" : "false", g_save_present ? "true" : "false",
+           g_save_component.size(), savedI32(record), savedI32(record + 4),
+           savedI32(record + 8), savedI32(record + 12), savedI32(record + 16));
+}
+
+static void printCase()
+{
+    constexpr int32_t Seed = 0x5100;
+    printf("\"pxs_lifecycle\":{\"seed\":%d,\"steps\":[", Seed);
+
+    Game.PXS.reset();
+    resetGrid();
+    FixedRandom(Seed);
+    Randomize3();
+
+    // Randomize3 deliberately precedes all creates. New/Create themselves draw
+    // nothing, so slot order and the first lifecycle draw both start from a
+    // state shared with a real initialized game (src/C4Random.cpp:29-33).
+    Game.PXS.Create(2, itofix(2), itofix(9), itofix(0), itofix(1));
+    Game.PXS.Create(3, itofix(6), itofix(9), itofix(0), itofix(1));
+    Game.PXS.Create(3, itofix(10), itofix(9), itofix(0), itofix(1));
+    Game.PXS.Create(4, itofix(13), itofix(9), itofix(0), itofix(1));
+
+    Game.PXS.Execute();
+    printStep("after_first_execute");
+
+    printf(",");
+    Game.PXS.Synchronize();
+    printStep("after_synchronize");
+
+    // New scans from slot zero, so this must overwrite the first tombstone
+    // rather than append after slot three (src/C4PXS.cpp:195-202).
+    printf(",");
+    Game.PXS.Create(2, itofix(4), itofix(9), itofix(0), itofix(1));
+    printStep("after_reuse");
+
+    printf(",");
+    Game.PXS.Execute();
+    printStep("after_second_execute");
+
+    // A particle that dies during Execute leaves its zero-count chunk allocated
+    // in memory. Only the following Execute sees the chunk empty at tick start
+    // and releases it (src/C4PXS.cpp:218-239); Save itself omits an all-dead
+    // system (src/C4PXS.cpp:328-337).
+    Game.PXS.reset();
+    resetGrid();
+    Game.PXS.Create(2, itofix(8), itofix(9), itofix(0), itofix(1));
+    printf(",");
+    Game.PXS.Execute();
+    printStep("cleanup_after_death");
+
+    printf(",");
+    Game.PXS.Execute();
+    printStep("cleanup_after_following_execute");
+
+    printf("],");
+    printChunkRevival();
+    Game.PXS.reset();
+    printf("}");
+}
+
+} // namespace pxs_lifecycle
+
+// ---------------------------------------------------------------------------
 // mrfInsertCheck (src/C4Material.cpp:567-609) with the C4Landscape::FindMatSlide
 // it calls (src/C4Landscape.cpp:1247-1277). This is the arm every falling pixel
 // takes on landing, and it is worth pinning for two reasons: its RNG ledger is
@@ -8241,13 +8746,15 @@ static void printPxsLoadCases()
     printf("]");
 }
 
-static void printPxsSlotStep(const char *step, int32_t draws)
+static void printPxsSlotStep(const char *step, int32_t draws, int32_t result = -1)
 {
     size_t live = 0;
     for (size_t cnt = 0; cnt < pxs_slots::PXSMaxChunk; cnt++)
         live += pxs_slots::Game.PXS.iChunkPXS[cnt];
 
-    printf("{\"step\":\"%s\",\"draws\":%d,\"live\":%zu,\"chunks\":[", step, draws, live);
+    printf("{\"step\":\"%s\",\"draws\":%d", step, draws);
+    if (result >= 0) printf(",\"result\":%s", result ? "true" : "false");
+    printf(",\"live\":%zu,\"chunks\":[", live);
     for (size_t cnt = 0; cnt < 3; cnt++)
     {
         if (cnt) printf(",");
@@ -8281,8 +8788,16 @@ static void printPxsSlotCases()
     Randomize3();
     int32_t mark = RandomCount;
 
+    // 0. Create rejects an invalid material before New, so it neither draws nor
+    //    allocates chunk zero (src/C4PXS.cpp:207-215).
+    const bool invalid_created = pxs_slots::Game.PXS.Create(
+        99, itofix(1), itofix(2), itofix(3), itofix(4));
+    printPxsSlotStep("invalid_create", RandomCount - mark, invalid_created ? 1 : 0);
+    mark = RandomCount;
+
     // 1. Three cast particles take slots 0, 1, 2 of a freshly allocated chunk,
     //    and their velocities record which random went where.
+    printf(",");
     pxs_slots::Game.PXS.Cast(2, 3, 30, 40, 20);
     printPxsSlotStep("cast_three", RandomCount - mark);
     mark = RandomCount;
@@ -8544,9 +9059,9 @@ static void printPxsExecuteCases()
             pix.Execute();
             if (f) printf(",");
             printf("{\"x\":%d,\"y\":%d,\"xdir\":%d,\"ydir\":%d,\"mat\":%d,"
-                   "\"deactivated\":%s,\"random_count\":%d}",
+                   "\"deactivated\":%s,\"random_count\":%d,\"random_hold\":%u}",
                    pix.x.val, pix.y.val, pix.xdir.val, pix.ydir.val, pix.Mat,
-                   pix.deactivated ? "true" : "false", RandomCount);
+                   pix.deactivated ? "true" : "false", RandomCount, RandomHold);
         }
         printf("]}");
     }
@@ -11167,6 +11682,11 @@ int main()
     //      `movement` above deliberately excludes and `pxs_allocation` does not
     //      reach.
     printPxsExecuteCases();
+    printf(",\n");
+
+    // 22b2. Integrated allocation/reaction/system lifecycle, including dead
+    //        slot serialization and next-tick empty-chunk reclamation.
+    pxs_lifecycle::printCase();
     printf(",\n");
 
     // 22c. insert_check: mrfInsertCheck, the landing arm pxs_execute

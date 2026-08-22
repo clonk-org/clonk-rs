@@ -533,6 +533,38 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4PXS.cpp" > "$gen/pxs_delete.inc"
 
+# Execute and Synchronize are kept as distinct extracts rather than folded into
+# the Create/Cast/Load loop below. The integrated lifecycle fixture includes
+# both at once: Execute walks live slots in stable chunk/slot order and frees
+# each chunk only if it is empty when its outer-loop turn begins
+# (src/C4PXS.cpp:218-240), while Synchronize resets only the public execution
+# count (src/C4PXS.cpp:401-404).
+awk '
+  /^void C4PXSSystem::Execute\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4PXS.cpp" > "$gen/pxs_system_execute.inc"
+
+awk '
+  /^void C4PXSSystem::Synchronize\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4PXS.cpp" > "$gen/pxs_synchronize.inc"
+
+# Save is extracted separately because the lifecycle fixture executes the real
+# whole-component serialization after every transition. Its two-pass policy is
+# the parity point: no live chunk deletes the component, but if any live chunk
+# exists every allocated chunk is written byte-for-byte in slot order
+# (src/C4PXS.cpp:324-360).
+awk '
+  /^bool C4PXSSystem::Save\(C4Group &hGroup\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4PXS.cpp" > "$gen/pxs_save.inc"
+
 # 3y. Lift C4MaterialMap::mrfPoof. Its mass-move and PXS-position arms consume
 #     the synchronised RNG twice through Rnd3 and gate a smoke puff and a sound
 #     on those draws, so the *order and count* of the draws is parity state, not
