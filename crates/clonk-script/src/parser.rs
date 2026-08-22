@@ -12,6 +12,17 @@ use crate::value::Literal;
 /// parameter slots at most (C4Aul.h; C4AulParse.cpp:1624-1640).
 const MAX_FUNCTION_PARAMETERS: usize = 10;
 
+/// How deeply expressions may nest before the parser reports an error instead
+/// of recursing further.
+///
+/// This is a deliberate Rust safety limit, not a C++ boundary: `C4AulParse` is
+/// recursive descent with no depth guard, so it overflows its own stack on the
+/// same input rather than accepting it. Measured here, the Rust parser
+/// overflows between 256 and 384 nested parentheses, so this leaves ample
+/// headroom below the cliff while sitting far above any real script — the
+/// deepest shipped content nests in single digits (clonk-org/clonk-rs#962).
+const MAX_EXPRESSION_DEPTH: usize = 128;
+
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     peeked: Option<Token>,
@@ -26,6 +37,9 @@ pub struct Parser<'a> {
     /// broken function's remaining body without swallowing the next
     /// top-level declaration.
     brace_depth: usize,
+    /// Nested `parse_expression` calls in flight, against
+    /// [`MAX_EXPRESSION_DEPTH`].
+    expression_depth: usize,
     /// Logical stream progress, excluding speculative tokens that were put
     /// back. C4Aul advances past an offending top-level token only when the
     /// failed parse attempt itself made no progress.
@@ -83,6 +97,7 @@ impl<'a> Parser<'a> {
             speculative_tokens: None,
             strict_level: 0,
             brace_depth: 0,
+            expression_depth: 0,
             consumed_tokens: 0,
             script_var_decls: Vec::new(),
             global_script: false,
@@ -1538,7 +1553,22 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_assignment()
+        // This is the single entry every nested expression passes through, so
+        // one counter here bounds the whole recursive-descent chain.
+        if self.expression_depth >= MAX_EXPRESSION_DEPTH {
+            let (line, column) = self
+                .peek()
+                .map_or((0, 0), |token| (token.line, token.column));
+            return Err(ParseError::new(
+                format!("expression nested deeper than {MAX_EXPRESSION_DEPTH} levels"),
+                line,
+                column,
+            ));
+        }
+        self.expression_depth += 1;
+        let parsed = self.parse_assignment();
+        self.expression_depth -= 1;
+        parsed
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
