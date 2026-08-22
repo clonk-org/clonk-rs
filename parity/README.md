@@ -47,14 +47,17 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `contact_action_bottom_flight` | complete bottom `DFA_FLIGHT` arm of `C4Object::ContactAction` + action helpers | the `(OCF_HitSpeed4 \|\| fDisabled)` FlatUp gate, including low-speed disabled actions |
 | `contact_action_top_side_flight` | complete top/left/right `DFA_FLIGHT` arms + action helpers + unresolved-flight tail | the `(OCF_HitSpeed3 \|\| fDisabled)` Tumble gates, exact transient wall kicks, enabled Hangle/Scale controls, and final slide-free state |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
+| `shape_contact_check` / `target_bounds` | complete `C4Shape::ContactCheck` and `C4Object::TargetBounds` bodies | ordered vertex masks/materials and closed-border MCVehic rules before movement response |
+| `contact_vtx_helpers` | complete `ContactVtxCNAT`, `ContactVtxWeight`, and `ContactVtxFriction` bodies | authored vertex ordering, including skipping a contacted zero-weight centre vertex |
+| `do_movement_collision_matrix` | mechanically extracted unattached translation block plus `ContactCheck`, bounds, redirection, and friction helpers (`src/C4Movement.cpp:42-95,128-213,254-322`) | every pixel candidate and raw fixed state, both axes/directions, bounds and open/closed borders, multi-contact aggregation/friction, callbacks/RNG, and a live Rust solid-mask wall's MCVehic density |
+| `do_movement_rotation_matrix` | mechanically extracted rotation block plus complete `C4Shape::Rotate` (`src/C4Movement.cpp:372-436`; `src/C4Shape.cpp:41-101`) | absolute-shape one-degree turns, rotation limits, contact rollback, rdir redirection, and raw `fix_r` accumulation |
+| `do_movement_contact_action_handoff` | `src/C4Movement.cpp:467-472` handoff plus the exact bottom `DFA_FLIGHT` arm | the aggregate contact mask replaces the last-probe mask and changes Flight to Walk with bottom precedence |
 
-**Out of scope (Phase 2):** the C++ per-pixel collision/contact *detection* loop
-(`C4Movement.cpp` `while (x != ctcox)` with `ContactCheck`/friction/redirection,
-item 4) and evolving landscape/material state beyond the isolated `_PathFree`
-and `BlastFree` fixtures above. The isolated flight `ContactAction`
-transitions after detection are covered. Validating the remaining loop requires
-running the full C++ engine on a content scenario via the `RustEngineBridge`
-live shadow-diff — see "Phase 2" below.
+The bounded ordinary, non-attached per-pixel collision loop is covered. Still
+out of scope for this phase are attached movement and evolving content-driven
+landscape/material state beyond the isolated fixtures above. Full-scenario
+interactions still require running the C++ engine through the
+`RustEngineBridge` live shadow-diff — see "Phase 2" below.
 
 ## Accepted safety divergences
 

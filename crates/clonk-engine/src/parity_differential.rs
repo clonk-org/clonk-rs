@@ -16,14 +16,17 @@
 //! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
 //! `BlastFreePix`, `BlastFree`, `ExecuteScan`, and `DoScan` bodies and the
 //! `C4SGame::ConvertGoals`, `C4Game::InitRules`/`InitGoals`, and
-//! bottom/top/side-flight `C4Object::ContactAction` arms) by
+//! bottom/top/side-flight `C4Object::ContactAction` arms, and the ordinary
+//! unattached `C4Object::DoMovement` translation/rotation blocks with complete
+//! `ContactCheck`, `TargetBounds`, `C4Shape::Rotate`, redirection and friction
+//! helpers) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
 //! This gates Theme C (wiring fixed precision through physics): the gravity /
-//! velocity sub-pixel accumulation the harness exercises is exactly the
-//! arithmetic Theme C extends. The C++ per-pixel collision loop (item 4) is out
-//! of scope here and is the subject of a future live-bridge differential.
+//! velocity sub-pixel accumulation and bounded per-pixel collision matrices are
+//! exactly the arithmetic and ordering Theme C extends. Full content scenarios
+//! remain the subject of a future live-bridge differential.
 //!
 //! On any divergence the test panics with the first mismatch (section, index,
 //! field, C++ value vs Rust value).
@@ -7721,8 +7724,68 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
-    // 16b9. do_movement: the unattached half of `C4Object::DoMovement`
-    //       (C4Movement.cpp:253-321) — the per-pixel collision loop.
+    // 16b9. ContactVtxCNAT/Weight/Friction (C4Movement.cpp:58-95), the
+    //        ordered vertex helpers the per-pixel collision response reads.
+    //        Weight deliberately differs from friction: a contacted centre
+    //        vertex has weight zero, so C++ continues to the first later
+    //        contacted vertex whose x is non-zero; friction always returns
+    //        the first contacted slot.
+    for (index, case) in golden["contact_vtx_helpers"]
+        .as_array()
+        .expect("contact_vtx_helpers is an array")
+        .iter()
+        .enumerate()
+    {
+        let vertices = case["vertices"]
+            .as_array()
+            .expect("contact_vtx_helpers.vertices is an array");
+        let mut definition =
+            Definition::from_script("CVTX", "Contact vertex helper oracle", "#strict\n")
+                .expect("contact vertex helper oracle compiles");
+        definition.set_shape_vertices(
+            vertices
+                .iter()
+                .map(|vertex| {
+                    crate::ObjectVertex::new(i(vertex, "x") as i32, 0)
+                        .with_friction(i(vertex, "friction") as i32)
+                })
+                .collect(),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("contact vertex helper oracle registers");
+        let object_id = engine
+            .spawn_object(SpawnConfig::new("CVTX"))
+            .expect("contact vertex helper oracle spawns");
+        let object_index = engine
+            .find_object_index(object_id)
+            .expect("contact vertex helper oracle object exists");
+        engine.objects[object_index].frame_vertex_contacts = vertices
+            .iter()
+            .map(|vertex| i(vertex, "contact") as u32)
+            .collect();
+
+        let object = &engine.objects[object_index];
+        for (field, actual) in [
+            ("weight", i64::from(object.live_contact_first_weight())),
+            ("friction", i64::from(object.live_contact_first_friction())),
+            (
+                "has_left",
+                i64::from(object.live_contact_has_vertex_cnat(crate::CNAT_LEFT)),
+            ),
+            (
+                "has_right",
+                i64::from(object.live_contact_has_vertex_cnat(crate::CNAT_RIGHT)),
+            ),
+        ] {
+            expect_eq("contact_vtx_helpers", index, field, i(case, field), actual);
+        }
+    }
+
+    // 16b10. do_movement: the unattached half of `C4Object::DoMovement`
+    //       (C4Movement.cpp:254-322) — the per-pixel collision loop.
     //
     //       Each axis accumulates its fixed target, clamps it through
     //       Side/VerticalBounds, and then walks ONE PIXEL AT A TIME with a
@@ -7888,6 +7951,717 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i(case, "ydir"),
             i64::from(object.fixed_velocity.y.val()),
         );
+    }
+
+    // 16b11. A differential matrix over the complete unattached per-pixel
+    //         translation stage (C4Movement.cpp:254-322). Unlike the compact
+    //         smoke block above, these rows record every ContactCheck candidate
+    //         and cover both directions on both axes, raw fixed snapping,
+    //         border material rules, ordered multi-vertex friction/weight,
+    //         horizontal-before-vertical aggregation, synchronous Contact*
+    //         ordering and RNG, and a real stationary C4SolidMask wall.
+    for (case_index, case) in golden["do_movement_collision_matrix"]
+        .as_array()
+        .expect("do_movement_collision_matrix is an array")
+        .iter()
+        .enumerate()
+    {
+        const WIDTH: u32 = 24;
+        const HEIGHT: i32 = 16;
+        const EARTH: u8 = 1;
+        const VEHICLE: u8 = 3;
+
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("do_movement_collision_matrix[{name}]");
+        let callback_return_mask = i(case, "callback_return_mask") as u32;
+        let callback_random = i(case, "callback_random") != 0;
+        let random_call = if callback_random { "Random(17);" } else { "" };
+        let callback_result = |cnat| i32::from(callback_return_mask & cnat != 0);
+        let script = format!(
+            r#"#strict 2
+local callback_order, callback_count;
+
+protected func ContactLeft()
+{{
+    callback_order = callback_order * 16 + 1;
+    callback_count++;
+    {random_call}
+    return {left_result};
+}}
+
+protected func ContactRight()
+{{
+    callback_order = callback_order * 16 + 2;
+    callback_count++;
+    {random_call}
+    return {right_result};
+}}
+
+protected func ContactTop()
+{{
+    callback_order = callback_order * 16 + 4;
+    callback_count++;
+    {random_call}
+    return {top_result};
+}}
+
+protected func ContactBottom()
+{{
+    callback_order = callback_order * 16 + 8;
+    callback_count++;
+    {random_call}
+    return {bottom_result};
+}}
+"#,
+            left_result = callback_result(crate::CNAT_LEFT),
+            right_result = callback_result(crate::CNAT_RIGHT),
+            top_result = callback_result(crate::CNAT_TOP),
+            bottom_result = callback_result(crate::CNAT_BOTTOM),
+        );
+        let mut definition = Definition::from_script("MOVM", "Movement matrix", &script)
+            .expect("movement matrix definition compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_contact_function_calls(i(case, "callbacks") != 0);
+        definition.set_border_bound(i(case, "border_bound") as i32);
+        definition.set_rotateable(i32::from(i(case, "rotatable") != 0));
+        definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 5, 5)));
+        definition.set_shape_vertices(
+            case["vertices"]
+                .as_array()
+                .expect("movement matrix vertices")
+                .iter()
+                .map(|vertex| crate::ObjectVertex {
+                    friction: i(vertex, "friction") as i32,
+                    ..crate::ObjectVertex::new(i(vertex, "x") as i32, i(vertex, "y") as i32)
+                        .with_cnat(i(vertex, "cnat") as u32)
+                })
+                .collect(),
+        );
+
+        let mut engine = Engine::with_seed(i(case, "seed") as u64);
+        engine.configure_materials_from_library(&contact_oracle_materials());
+        let floor_y = i(case, "floor_y") as i32;
+        let ceiling_y = i(case, "ceiling_y") as i32;
+        let wall_x = i(case, "wall_x") as i32;
+        let wall_material = i(case, "wall_material") as u8;
+        let mut bytes = vec![0_u8; WIDTH as usize * HEIGHT as usize];
+        if floor_y >= 0 {
+            for y in floor_y..HEIGHT {
+                for x in 0..WIDTH as usize {
+                    bytes[y as usize * WIDTH as usize + x] = EARTH;
+                }
+            }
+        }
+        if ceiling_y >= 0 {
+            for y in 0..=ceiling_y {
+                for x in 0..WIDTH as usize {
+                    bytes[y as usize * WIDTH as usize + x] = EARTH;
+                }
+            }
+        }
+        if wall_x >= 0 && wall_material != VEHICLE {
+            for y in 0..HEIGHT {
+                bytes[y as usize * WIDTH as usize + wall_x as usize] = wall_material;
+            }
+        }
+        let mut densities = vec![0; 128];
+        densities[EARTH as usize] = 50;
+        densities[VEHICLE as usize] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[EARTH as usize] = Some("Earth".to_string());
+        material_names[VEHICLE as usize] = Some("Vehicle".to_string());
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT as u32,
+            bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        ));
+        landscape.set_world_height(HEIGHT);
+        landscape.set_border_open(
+            i(case, "left_open") as i32,
+            i(case, "right_open") as i32,
+            i(case, "top_open") != 0,
+            i(case, "bottom_open") != 0,
+        );
+        let vehicle = engine
+            .materials
+            .id_of("Vehicle")
+            .expect("movement matrix declares Vehicle");
+        landscape.set_vehicle_material(Some(vehicle));
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("movement matrix definition registers");
+
+        if wall_material == VEHICLE {
+            assert_eq!(
+                engine
+                    .landscape()
+                    .and_then(|landscape| landscape.grid_byte_at(wall_x, i(case, "y0") as i32)),
+                Some(0),
+                "{label}: vehicle wall must not be prepainted terrain"
+            );
+            let mut blocker = Definition::from_script("MSKB", "Mask blocker", "#strict 2\n")
+                .expect("movement mask blocker compiles");
+            blocker.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, HEIGHT, 0, 0)));
+            engine
+                .register_definition(blocker)
+                .expect("movement mask blocker registers");
+            let blocker_id = engine
+                .spawn_object(
+                    SpawnConfig::new("MSKB").with_position(crate::Vector2::new(wall_x, 0)),
+                )
+                .expect("movement mask blocker spawns");
+            let blocker_index = engine
+                .find_object_index(blocker_id)
+                .expect("movement mask blocker remains");
+            assert!(
+                engine.objects[blocker_index].solid_mask_bake.is_some(),
+                "{label}: stationary blocker must own a live baked mask"
+            );
+            assert_eq!(
+                engine
+                    .landscape()
+                    .and_then(|landscape| landscape.grid_byte_at(wall_x, i(case, "y0") as i32)),
+                Some(VEHICLE),
+                "{label}: the stationary object must contribute the wall through its live solid mask"
+            );
+        }
+
+        let x0 = i(case, "x0") as i32;
+        let y0 = i(case, "y0") as i32;
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("MOVM")
+                    .with_position(crate::Vector2::new(x0, y0))
+                    .with_fixed_position(FixedVec2::new(
+                        itofix(x0) + C4Fixed::from_raw(i(case, "fix_x_offset") as i32),
+                        itofix(y0) + C4Fixed::from_raw(i(case, "fix_y_offset") as i32),
+                    ))
+                    .with_fixed_velocity(FixedVec2::new(
+                        itofix_prec(i(case, "xdir_n") as i32, i(case, "xdir_d") as i32),
+                        itofix_prec(i(case, "ydir_n") as i32, i(case, "ydir_d") as i32),
+                    )),
+            )
+            .expect("movement matrix object spawns");
+        let object_index = engine
+            .find_object_index(object_id)
+            .expect("movement matrix object remains");
+        {
+            let object = &mut engine.objects[object_index];
+            // Programmatic spawn performs the initial construction bottom
+            // adjustment; the extracted C++ fixture starts from the authored
+            // C4Object coordinates directly.
+            object.state.position = crate::Vector2::new(x0, y0);
+            object.fixed_position = FixedVec2::new(
+                itofix(x0) + C4Fixed::from_raw(i(case, "fix_x_offset") as i32),
+                itofix(y0) + C4Fixed::from_raw(i(case, "fix_y_offset") as i32),
+            );
+            object.state.alive = i(case, "alive") != 0;
+        }
+        engine.objects[object_index]
+            .state
+            .local_vars
+            .insert("callback_order".to_string(), ScriptValue::Int(0));
+        engine.objects[object_index]
+            .state
+            .local_vars
+            .insert("callback_count".to_string(), ScriptValue::Int(0));
+
+        let (outcome, trace) = engine
+            .parity_advance_live_position_per_pixel(object_index)
+            .expect("movement matrix translation succeeds");
+        let traces = &trace.probes;
+        let object = &engine.objects[object_index];
+        for (field, actual) in [
+            ("x", i64::from(object.state.position.x)),
+            ("y", i64::from(object.state.position.y)),
+            ("fix_x", i64::from(object.fixed_position.x.val())),
+            ("fix_y", i64::from(object.fixed_position.y.val())),
+            ("xdir", i64::from(object.fixed_velocity.x.val())),
+            ("ydir", i64::from(object.fixed_velocity.y.val())),
+            ("rdir", i64::from(object.rotation_velocity.val())),
+            ("motion_x", i64::from(object.motion_x)),
+            ("motion_y", i64::from(object.motion_y)),
+            ("any_contact", i64::from(outcome.any_contact)),
+            ("contacts", i64::from(outcome.contact_cnat)),
+            ("redirect_yr", i64::from(outcome.redirect_yr)),
+            ("t_contact", i64::from(object.frame_t_contact)),
+            ("contact_count", i64::from(object.frame_shape_contact_count)),
+            ("contact_cnat", i64::from(object.frame_shape_contact_cnat)),
+        ] {
+            expect_eq(&label, case_index, field, i(case, field), actual);
+        }
+        expect_json_eq(
+            &label,
+            case_index,
+            "vertex_contacts",
+            case["vertex_contacts"].clone(),
+            serde_json::json!(object.frame_vertex_contacts),
+        );
+
+        let expected_traces = case["probes"].as_array().expect("movement matrix probes");
+        expect_eq(
+            &label,
+            case_index,
+            "probe_count",
+            expected_traces.len() as i64,
+            traces.len() as i64,
+        );
+        for (probe_index, (expected, actual)) in expected_traces.iter().zip(traces).enumerate() {
+            let probe_label = format!("{label}.probe[{probe_index}]");
+            for (field, actual_value) in [
+                ("x", i64::from(actual.position.x)),
+                ("y", i64::from(actual.position.y)),
+                ("object_x", i64::from(actual.object_position.x)),
+                ("object_y", i64::from(actual.object_position.y)),
+                ("fix_x", i64::from(actual.fixed_position.x.val())),
+                ("fix_y", i64::from(actual.fixed_position.y.val())),
+                ("rotation", i64::from(actual.rotation)),
+                ("fix_r", i64::from(actual.fixed_rotation.val())),
+                ("xdir", i64::from(actual.fixed_velocity.x.val())),
+                ("ydir", i64::from(actual.fixed_velocity.y.val())),
+                ("rdir", i64::from(actual.rotation_velocity.val())),
+                ("motion_x", i64::from(actual.motion_x)),
+                ("motion_y", i64::from(actual.motion_y)),
+                ("result", i64::from(actual.contact_count)),
+                ("t_contact", i64::from(actual.t_contact)),
+                ("contact_count", i64::from(actual.contact_count)),
+                ("contact_cnat", i64::from(actual.contact_cnat)),
+                ("random_count", i64::from(actual.random_count)),
+            ] {
+                expect_eq(
+                    &probe_label,
+                    case_index,
+                    field,
+                    i(expected, field),
+                    actual_value,
+                );
+            }
+            expect_json_eq(
+                &probe_label,
+                case_index,
+                "vertex_contacts",
+                expected["vertex_contacts"].clone(),
+                serde_json::json!(actual.vertex_contacts),
+            );
+            expect_eq_u64(
+                &probe_label,
+                case_index,
+                "random_hold",
+                u(expected, "random_hold"),
+                u64::from(actual.random_hold),
+            );
+            expect_eq(
+                &probe_label,
+                case_index,
+                "result_is_contact",
+                i64::from(i(expected, "result") != 0),
+                i64::from(actual.result),
+            );
+        }
+
+        let expected_callback_order = case["callback_order"]
+            .as_array()
+            .expect("movement matrix callback_order");
+        let encoded_callback_order = expected_callback_order.iter().fold(0_i64, |order, cnat| {
+            order * 16 + cnat.as_i64().expect("callback direction is an integer")
+        });
+        expect_eq(
+            &label,
+            case_index,
+            "callback_order",
+            encoded_callback_order,
+            action_callback_local(&engine, object_id, "callback_order"),
+        );
+        expect_eq(
+            &label,
+            case_index,
+            "callback_count",
+            expected_callback_order.len() as i64,
+            action_callback_local(&engine, object_id, "callback_count"),
+        );
+        expect_eq(
+            &label,
+            case_index,
+            "contact_invocations",
+            i(case, "contact_invocations"),
+            trace.contact_invocations as i64,
+        );
+        expect_rng_state_at(&label, case_index, case, &engine.rng);
+    }
+
+    // 16b12. C4Object::DoMovement's rotation walk (C4Movement.cpp:372-436).
+    //         Rotation advances one whole degree at a time from an absolute
+    //         definition shape, probes each result, restores the last accepted
+    //         shape on collision, and conditionally redirects rdir into ydir.
+    for (case_index, case) in golden["do_movement_rotation_matrix"]
+        .as_array()
+        .expect("do_movement_rotation_matrix is an array")
+        .iter()
+        .enumerate()
+    {
+        const WIDTH: u32 = 24;
+        const HEIGHT: i32 = 16;
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("do_movement_rotation_matrix[{name}]");
+        let mut definition = Definition::from_script("ROTM", "Rotation matrix", "#strict 2\n")
+            .expect("rotation matrix definition compiles");
+        definition.set_rotateable(i(case, "rotateable") as i32);
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 3, 12)));
+        definition.set_shape_vertices(
+            case["vertices"]
+                .as_array()
+                .expect("rotation matrix vertices")
+                .iter()
+                .map(|vertex| crate::ObjectVertex {
+                    friction: i(vertex, "friction") as i32,
+                    ..crate::ObjectVertex::new(i(vertex, "x") as i32, i(vertex, "y") as i32)
+                        .with_cnat(i(vertex, "cnat") as u32)
+                })
+                .collect(),
+        );
+
+        let mut engine = Engine::with_seed(i(case, "seed") as u64);
+        engine.configure_materials_from_library(&contact_oracle_materials());
+        let wall_x = i(case, "wall_x") as i32;
+        let mut bytes = vec![0_u8; WIDTH as usize * HEIGHT as usize];
+        if wall_x >= 0 {
+            for y in 0..HEIGHT {
+                bytes[y as usize * WIDTH as usize + wall_x as usize] = 1;
+            }
+        }
+        let mut densities = vec![0; 128];
+        densities[1] = 50;
+        densities[3] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        material_names[3] = Some("Vehicle".to_string());
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT as u32,
+            bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        ));
+        landscape.set_world_height(HEIGHT);
+        landscape.set_border_open(0, 0, true, false);
+        let vehicle = engine
+            .materials
+            .id_of("Vehicle")
+            .expect("rotation matrix declares Vehicle");
+        landscape.set_vehicle_material(Some(vehicle));
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("rotation matrix definition registers");
+
+        let x0 = i(case, "x0") as i32;
+        let y0 = i(case, "y0") as i32;
+        let rotation0 = i(case, "rotation0") as i32;
+        let fixed_rotation = itofix(rotation0) + C4Fixed::from_raw(i(case, "fix_r_raw") as i32);
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("ROTM")
+                    .with_position(crate::Vector2::new(x0, y0))
+                    .with_fixed_position(FixedVec2::new(itofix(x0), itofix(y0)))
+                    .with_rotation(rotation0)
+                    .with_fixed_rotation(fixed_rotation)
+                    .with_rotation_velocity(itofix_prec(
+                        i(case, "rdir_n") as i32,
+                        i(case, "rdir_d") as i32,
+                    ))
+                    .with_fixed_velocity(FixedVec2::new(
+                        C4Fixed::ZERO,
+                        itofix_prec(i(case, "ydir_n") as i32, i(case, "ydir_d") as i32),
+                    )),
+            )
+            .expect("rotation matrix object spawns");
+        let object_index = engine
+            .find_object_index(object_id)
+            .expect("rotation matrix object remains");
+        {
+            let object = &mut engine.objects[object_index];
+            object.state.position = crate::Vector2::new(x0, y0);
+            object.fixed_position = FixedVec2::new(itofix(x0), itofix(y0));
+            object.state.rotation = rotation0;
+            object.fixed_rotation = fixed_rotation;
+            object.rotation_velocity =
+                itofix_prec(i(case, "rdir_n") as i32, i(case, "rdir_d") as i32);
+            object.fixed_velocity.y =
+                itofix_prec(i(case, "ydir_n") as i32, i(case, "ydir_d") as i32);
+            object.refresh_shape_geometry();
+        }
+
+        let ((rotation_contact, rotation_contacts, turned), trace) = engine
+            .parity_advance_live_rotation(object_index, i(case, "redirect_yr") != 0)
+            .expect("rotation matrix walk succeeds");
+        let traces = &trace.probes;
+        let object = &engine.objects[object_index];
+        let shape = object
+            .current_shape_rect()
+            .expect("rotation matrix shape remains");
+        for (field, actual) in [
+            ("x", i64::from(object.state.position.x)),
+            ("y", i64::from(object.state.position.y)),
+            ("fix_x", i64::from(object.fixed_position.x.val())),
+            ("fix_y", i64::from(object.fixed_position.y.val())),
+            ("rotation", i64::from(object.state.rotation)),
+            ("fix_r", i64::from(object.fixed_rotation.val())),
+            ("rdir", i64::from(object.rotation_velocity.val())),
+            ("ydir", i64::from(object.fixed_velocity.y.val())),
+            ("motion_x", i64::from(object.motion_x)),
+            ("motion_y", i64::from(object.motion_y)),
+            ("any_contact", i64::from(rotation_contact)),
+            ("contacts", i64::from(rotation_contacts)),
+            ("turned", i64::from(turned)),
+            ("t_contact", i64::from(object.frame_t_contact)),
+            ("contact_count", i64::from(object.frame_shape_contact_count)),
+            ("contact_cnat", i64::from(object.frame_shape_contact_cnat)),
+            ("shape_x", i64::from(shape.x)),
+            ("shape_y", i64::from(shape.y)),
+            ("shape_wdt", i64::from(shape.width)),
+            ("shape_hgt", i64::from(shape.height)),
+        ] {
+            expect_eq(&label, case_index, field, i(case, field), actual);
+        }
+        expect_json_eq(
+            &label,
+            case_index,
+            "final_vertices",
+            case["final_vertices"].clone(),
+            Value::Array(
+                object
+                    .state
+                    .vertices
+                    .iter()
+                    .map(|vertex| {
+                        serde_json::json!({
+                            "x": vertex.x,
+                            "y": vertex.y,
+                            "cnat": vertex.cnat,
+                            "friction": vertex.friction,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+        expect_eq(
+            &label,
+            case_index,
+            "update_pos_calls",
+            i(case, "update_pos_calls"),
+            trace.update_pos_calls as i64,
+        );
+
+        let expected_traces = case["probes"].as_array().expect("rotation matrix probes");
+        expect_eq(
+            &label,
+            case_index,
+            "probe_count",
+            expected_traces.len() as i64,
+            traces.len() as i64,
+        );
+        for (probe_index, (expected, actual)) in expected_traces.iter().zip(traces).enumerate() {
+            let probe_label = format!("{label}.probe[{probe_index}]");
+            for (field, actual_value) in [
+                ("x", i64::from(actual.position.x)),
+                ("y", i64::from(actual.position.y)),
+                ("object_x", i64::from(actual.object_position.x)),
+                ("object_y", i64::from(actual.object_position.y)),
+                ("fix_x", i64::from(actual.fixed_position.x.val())),
+                ("fix_y", i64::from(actual.fixed_position.y.val())),
+                ("rotation", i64::from(actual.rotation)),
+                ("fix_r", i64::from(actual.fixed_rotation.val())),
+                ("xdir", i64::from(actual.fixed_velocity.x.val())),
+                ("ydir", i64::from(actual.fixed_velocity.y.val())),
+                ("rdir", i64::from(actual.rotation_velocity.val())),
+                ("motion_x", i64::from(actual.motion_x)),
+                ("motion_y", i64::from(actual.motion_y)),
+                ("result", i64::from(actual.contact_count)),
+                ("t_contact", i64::from(actual.t_contact)),
+                ("contact_count", i64::from(actual.contact_count)),
+                ("contact_cnat", i64::from(actual.contact_cnat)),
+                ("random_count", i64::from(actual.random_count)),
+            ] {
+                expect_eq(
+                    &probe_label,
+                    case_index,
+                    field,
+                    i(expected, field),
+                    actual_value,
+                );
+            }
+            expect_json_eq(
+                &probe_label,
+                case_index,
+                "vertex_contacts",
+                expected["vertex_contacts"].clone(),
+                serde_json::json!(actual.vertex_contacts),
+            );
+            expect_eq_u64(
+                &probe_label,
+                case_index,
+                "random_hold",
+                u(expected, "random_hold"),
+                u64::from(actual.random_hold),
+            );
+        }
+        expect_rng_state_at(&label, case_index, case, &engine.rng);
+    }
+
+    // 16b13. The DoMovement tail bridges its aggregate contact mask into
+    //         ContactAction (C4Movement.cpp:467-472). A wall probe followed by
+    //         a floor probe leaves the last-probe mask at Bottom but hands
+    //         Right|Bottom to ContactAction; the exact DFA_FLIGHT bottom arm
+    //         takes precedence and changes Flight to Walk
+    //         (C4Object.cpp:4336-4351).
+    for (case_index, case) in golden["do_movement_contact_action_handoff"]
+        .as_array()
+        .expect("do_movement_contact_action_handoff is an array")
+        .iter()
+        .enumerate()
+    {
+        const WIDTH: u32 = 24;
+        const HEIGHT: i32 = 16;
+        let label = "do_movement_contact_action_handoff";
+        let mut definition = Definition::from_script("MCAH", "Movement handoff", "#strict 2\n")
+            .expect("movement handoff definition compiles");
+        definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 5, 5)));
+        definition.set_physical(PhysicalInfo {
+            can_scale: 1,
+            ..PhysicalInfo::default()
+        });
+        definition.set_shape_vertices(vec![
+            crate::ObjectVertex::new(0, 1).with_cnat(crate::CNAT_BOTTOM),
+            crate::ObjectVertex::new(1, 0).with_cnat(crate::CNAT_RIGHT),
+        ]);
+        definition.configure_actions(
+            Some("Flight".to_string()),
+            HashMap::from([
+                (
+                    "Flight".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+                ("FlatUp".to_string(), ActionSpec::default()),
+                ("KneelDown".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Scale".to_string(),
+                    ActionSpec::default().with_procedure("SCALE"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(i(case, "seed") as u64);
+        engine.configure_materials_from_library(&contact_oracle_materials());
+        let mut bytes = vec![0_u8; WIDTH as usize * HEIGHT as usize];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH as i32 {
+                if y >= 10 || x == 12 {
+                    bytes[y as usize * WIDTH as usize + x as usize] = 1;
+                }
+            }
+        }
+        let mut densities = vec![0; 128];
+        densities[1] = 50;
+        densities[3] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        material_names[3] = Some("Vehicle".to_string());
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT as u32,
+            bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        ));
+        landscape.set_world_height(HEIGHT);
+        landscape.set_border_open(0, 0, true, false);
+        let vehicle = engine
+            .materials
+            .id_of("Vehicle")
+            .expect("movement handoff declares Vehicle");
+        landscape.set_vehicle_material(Some(vehicle));
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("movement handoff definition registers");
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("MCAH")
+                    .with_position(crate::Vector2::new(8, 6))
+                    .with_fixed_position(FixedVec2::new(itofix(8), itofix(6)))
+                    .with_fixed_velocity(FixedVec2::new(itofix(4), itofix(4)))
+                    .with_action(ActionState::new("Flight"))
+                    .with_direction(Direction::Right)
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("movement handoff object spawns");
+        let object_index = engine
+            .find_object_index(object_id)
+            .expect("movement handoff object remains");
+        {
+            let object = &mut engine.objects[object_index];
+            object.state.position = crate::Vector2::new(8, 6);
+            object.fixed_position = FixedVec2::new(itofix(8), itofix(6));
+            object.state.ocf = 0;
+        }
+        let definition_id = engine.objects[object_index].definition_id.clone();
+        let action_library = engine
+            .definitions
+            .get(&definition_id)
+            .expect("movement handoff definition remains")
+            .action_library()
+            .clone();
+        let (_, trace) = engine
+            .parity_exec_object_movement(object_index, &action_library, &definition_id, &[])
+            .expect("movement handoff full DoMovement succeeds");
+
+        let object = &engine.objects[object_index];
+        let action_after = match object.state.action.name.as_str() {
+            "Flight" => 0,
+            "FlatUp" => 1,
+            "KneelDown" => 2,
+            "Walk" => 3,
+            "Scale" => 4,
+            action => panic!("unexpected movement-handoff action `{action}`"),
+        };
+        for (field, actual) in [
+            ("x", i64::from(object.state.position.x)),
+            ("y", i64::from(object.state.position.y)),
+            ("fix_x", i64::from(object.fixed_position.x.val())),
+            ("fix_y", i64::from(object.fixed_position.y.val())),
+            ("motion_x", i64::from(object.motion_x)),
+            ("motion_y", i64::from(object.motion_y)),
+            (
+                "pre_tail_t_contact",
+                i64::from(trace.pre_contact_action_t_contact.unwrap_or(u32::MAX)),
+            ),
+            ("contacts", i64::from(object.frame_t_contact)),
+            ("final_t_contact", i64::from(object.frame_t_contact)),
+            ("contact_action_called", i64::from(action_after != 0)),
+            ("action_after", action_after),
+            (
+                "direction_after",
+                i64::from(object.state.direction.to_script_value()),
+            ),
+            ("xdir_after", i64::from(object.fixed_velocity.x.val())),
+            ("ydir_after", i64::from(object.fixed_velocity.y.val())),
+        ] {
+            expect_eq(label, case_index, field, i(case, field), actual);
+        }
+        expect_rng_state_at(label, case_index, case, &engine.rng);
     }
 
     // 16b8. cross_map_reactions: which builtin reaction each (PXS material,
