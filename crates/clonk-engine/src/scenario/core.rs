@@ -282,8 +282,17 @@ pub(crate) struct ScenarioScriptSource {
 pub(in crate::scenario) fn scenario_may_need_map_callbacks(
     group: &Group,
 ) -> Result<bool, ScenarioError> {
-    if group.exists("Landscape.txt") {
-        return Ok(true);
+    if let Some(source) = try_read_group_file_case_insensitive(group, "Landscape.txt")? {
+        // False positives are harmless: comments and values containing these
+        // spellings merely retain the linker. Exact field-name bytes cannot
+        // be split by whitespace in the S2 grammar, so a miss proves that the
+        // parser cannot reach C4MCV_ScriptFunc for this source.
+        if [b"evalFn".as_slice(), b"drawFn".as_slice()]
+            .into_iter()
+            .any(|field| source.windows(field.len()).any(|window| window == field))
+        {
+            return Ok(true);
+        }
     }
     Ok(group
         .entries()?
@@ -4093,6 +4102,9 @@ impl Scenario {
         else {
             return Ok(());
         };
+        if !creator.requires_live_script_render() {
+            return Ok(());
+        }
 
         let bitmap = {
             let mut call = |rng: &mut crate::rng::LcgRng, function: &str, args: [i32; 4]| {

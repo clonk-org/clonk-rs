@@ -1036,6 +1036,40 @@
     }
 
     #[test]
+    fn plain_s2_map_renders_once_during_initial_activation() {
+        // C4Landscape::CreateMapS2 performs one RenderTo after script linking
+        // (C4Landscape.cpp:530-546). The eager Rust resource preview is that
+        // render when no algo=script node needs the live scenario host.
+        let dir = test_tempdir();
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// plain map\n");
+        write_test_file(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=One render\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=2,0,2,2\nMapHeight=1,0,1,1\nMapZoom=5\n",
+        );
+        write_test_file(
+            scenario_dir.join("Landscape.txt"),
+            "map Plain { seed=1; mat=Earth; tex=Rough; sub=0; };\n",
+        );
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(materials.join("TexMap.txt"), "1=Earth-Rough\n");
+        write_test_file(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        );
+        write_test_texture(&materials, "Rough");
+
+        crate::map_creator_s2::S2_MAP_RENDER_COUNT.with(|count| count.set(0));
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
+        let mut engine = Engine::with_seed(0);
+        apply_test_scenario(&scenario, &mut engine);
+
+        crate::map_creator_s2::S2_MAP_RENDER_COUNT.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
     fn script_algorithm_uses_cpp_truthiness_and_catches_per_pixel_errors() {
         let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(

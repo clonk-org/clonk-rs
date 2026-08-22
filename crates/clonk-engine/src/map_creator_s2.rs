@@ -18,6 +18,8 @@ use crate::map_creator::evaluate_map_size;
 use crate::rng::LcgRng;
 use crate::scenario::{LegacyC4SVal, MapPixelClassifier};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::HashSet;
 
 /// `C4MC_SizeRes` — positions in percent (C4MapCreatorS2.h:29).
@@ -33,6 +35,12 @@ type CallbackId = usize;
 /// Passing that ledger through the seam keeps script-side `Random()` calls in
 /// exact render traversal order without coupling this parser to clonk-script.
 pub(crate) type ScriptAlgoCall<'a> = dyn FnMut(&mut LcgRng, &str, [i32; 4]) -> bool + 'a;
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static S2_MAP_RENDER_COUNT: Cell<usize> = const { Cell::new(0) };
+    static S2_MASK_CHECK_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn noop_script_algo(_: &mut LcgRng, _: &str, _: [i32; 4]) -> bool {
@@ -443,6 +451,10 @@ impl MapCreatorS2State {
         self.skyparcour_water_exposure_guard
     }
 
+    pub(crate) fn requires_live_script_render(&self) -> bool {
+        self.tree.has_script_algorithm()
+    }
+
     pub(crate) fn set_callback_map_zoom(&mut self, map_zoom: i32) {
         self.callbacks.set_map_zoom(map_zoom);
     }
@@ -569,6 +581,25 @@ struct PixelRenderTrace {
     rendered_overlay: Option<NodeId>,
 }
 
+/// Per-render memoization for coordinate probes. Script algorithms can make
+/// probes observable through callbacks and RNG draws, so any script-bearing
+/// tree keeps the C++ evaluation order and disables the cache entirely.
+struct PeekMemo {
+    enabled: bool,
+    values: rustc_hash::FxHashMap<(NodeId, i32, i32), bool>,
+    masks: rustc_hash::FxHashMap<(NodeId, i32, i32), bool>,
+}
+
+impl PeekMemo {
+    fn for_tree(tree: &Tree) -> Self {
+        Self {
+            enabled: !tree.has_script_algorithm(),
+            values: rustc_hash::FxHashMap::default(),
+            masks: rustc_hash::FxHashMap::default(),
+        }
+    }
+}
+
 impl Tree {
     fn new() -> Self {
         Self {
@@ -580,6 +611,15 @@ impl Tree {
             }],
             callbacks: Vec::new(),
         }
+    }
+
+    fn has_script_algorithm(&self) -> bool {
+        self.nodes.iter().any(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::Overlay(overlay) if overlay.algorithm == Algo::Script
+            )
+        })
     }
 
     /// C4MapCreatorS2's copy constructor clones the evaluated tree, keeping
@@ -782,12 +822,24 @@ impl Tree {
         id: NodeId,
         ix: i32,
         iy: i32,
+        peek_memo: &mut PeekMemo,
         rng: &mut LcgRng,
         script_algo: &mut ScriptAlgoCall<'_>,
     ) -> bool {
+        let key = (id, ix, iy);
+        if peek_memo.enabled {
+            if let Some(result) = peek_memo.masks.get(&key) {
+                return *result;
+            }
+        }
+        #[cfg(test)]
+        S2_MASK_CHECK_COUNT.with(|count| count.set(count.get() + 1));
         use crate::math::{fixed10, fixtoi_prec, itofix, C4Fixed};
         let overlay = self.overlay(id).expect("check_mask on overlay");
         if !overlay.loose_bounds && !overlay.in_bounds(ix, iy) {
+            if peek_memo.enabled {
+                peek_memo.masks.insert(key, false);
+            }
             return false;
         }
         let mut ix = ix;
@@ -848,9 +900,17 @@ impl Tree {
                 || ix >= (overlay.x + overlay.wdt) * overlay.zoom_x
                 || iy >= (overlay.y + overlay.hgt) * overlay.zoom_y)
         {
-            return overlay.invert;
+            let result = overlay.invert;
+            if peek_memo.enabled {
+                peek_memo.masks.insert(key, result);
+            }
+            return result;
         }
-        self.run_algorithm(id, ix, iy, rng, script_algo) ^ overlay.invert
+        let result = self.run_algorithm(id, ix, iy, peek_memo, rng, script_algo) ^ overlay.invert;
+        if peek_memo.enabled {
+            peek_memo.masks.insert(key, result);
+        }
+        result
     }
 
     /// C4MCOverlay::RenderPix (src/C4MapCreatorS2.cpp:506-553).
@@ -864,11 +924,12 @@ impl Tree {
         last_set: bool,
         draw: bool,
         mut trace: Option<&mut PixelRenderTrace>,
+        peek_memo: &mut PeekMemo,
         rng: &mut LcgRng,
         script_algo: &mut ScriptAlgoCall<'_>,
     ) -> bool {
         let overlay = self.overlay(id).expect("render_pix on overlay");
-        let set_this = self.check_mask(id, ix, iy, rng, script_algo);
+        let set_this = self.check_mask(id, ix, iy, peek_memo, rng, script_algo);
         let mut do_set = match last_op {
             Op::And => set_this && last_set,
             Op::Or => set_this || last_set,
@@ -899,6 +960,7 @@ impl Tree {
                         last_set_c,
                         draw,
                         trace.as_deref_mut(),
+                        peek_memo,
                         rng,
                         script_algo,
                     );
@@ -923,9 +985,16 @@ impl Tree {
         start: NodeId,
         ix: i32,
         iy: i32,
+        peek_memo: &mut PeekMemo,
         rng: &mut LcgRng,
         script_algo: &mut ScriptAlgoCall<'_>,
     ) -> bool {
+        let key = (start, ix, iy);
+        if peek_memo.enabled {
+            if let Some(result) = peek_memo.values.get(&key) {
+                return *result;
+            }
+        }
         let mut current = start;
         let mut last_set = false;
         let mut last_op = Op::None;
@@ -940,6 +1009,7 @@ impl Tree {
                 last_set,
                 false,
                 None,
+                peek_memo,
                 rng,
                 script_algo,
             );
@@ -957,6 +1027,9 @@ impl Tree {
                 None => break,
             }
         }
+        if peek_memo.enabled {
+            peek_memo.values.insert(key, last_set);
+        }
         last_set
     }
 
@@ -966,6 +1039,7 @@ impl Tree {
         id: NodeId,
         ix: i32,
         iy: i32,
+        peek_memo: &mut PeekMemo,
         rng: &mut LcgRng,
         script_algo: &mut ScriptAlgoCall<'_>,
     ) -> bool {
@@ -1006,7 +1080,7 @@ impl Tree {
                 let pxa = overlay.alpha.evaluate(overlay.wdt);
                 modulo((ix + modulo(s, 4738)).abs(), pxb * z + 1) < pxa * z + 1
             }
-            Algo::Border => self.algo_border(id, ix, iy, rng, script_algo),
+            Algo::Border => self.algo_border(id, ix, iy, peek_memo, rng, script_algo),
             Algo::Mandel => {
                 let mut iter = overlay.alpha.evaluate(SIZE_RES);
                 if iter == 0 {
@@ -1073,6 +1147,7 @@ impl Tree {
         id: NodeId,
         ix: i32,
         iy: i32,
+        peek_memo: &mut PeekMemo,
         rng: &mut LcgRng,
         script_algo: &mut ScriptAlgoCall<'_>,
     ) -> bool {
@@ -1092,12 +1167,16 @@ impl Tree {
         let chain = self.first_of_chain(owner);
         let top_overlay = self.overlay(top).expect("top overlay");
         for x in (ix - la)..=(ix + la) {
-            if top_overlay.in_bounds(x, iy) && !self.peek_pix(chain, x, iy, rng, script_algo) {
+            if top_overlay.in_bounds(x, iy)
+                && !self.peek_pix(chain, x, iy, peek_memo, rng, script_algo)
+            {
                 return true;
             }
         }
         for y in (iy - lb)..=(iy + lb) {
-            if top_overlay.in_bounds(ix, y) && !self.peek_pix(chain, ix, y, rng, script_algo) {
+            if top_overlay.in_bounds(ix, y)
+                && !self.peek_pix(chain, ix, y, peek_memo, rng, script_algo)
+            {
                 return true;
             }
         }
@@ -2078,6 +2157,7 @@ fn render_map(
     }
 
     let mut bytes = vec![0u8; (wdt * hgt) as usize];
+    let mut peek_memo = PeekMemo::for_tree(tree);
     for iy in 0..hgt {
         for ix in 0..wdt {
             let pix = &mut bytes[(iy * wdt + ix) as usize];
@@ -2091,6 +2171,7 @@ fn render_map(
                 false,
                 true,
                 None,
+                &mut peek_memo,
                 rng,
                 script_algo,
             );
@@ -2109,6 +2190,8 @@ fn render_map_with_callbacks(
     rng: &mut LcgRng,
     script_algo: &mut ScriptAlgoCall<'_>,
 ) -> Option<(clonk_resources::bitmap::IndexedBitmap, PostInitMapCallbacks)> {
+    #[cfg(test)]
+    S2_MAP_RENDER_COUNT.with(|count| count.set(count.get() + 1));
     if tree.callbacks.is_empty() {
         return render_map(tree, map, rng, script_algo)
             .map(|bitmap| (bitmap, PostInitMapCallbacks::default()));
@@ -2137,6 +2220,7 @@ fn render_map_recording_callbacks(
     // C4MCMap::RenderTo (src/C4MapCreatorS2.cpp:646-674).
     let mut bytes = vec![0u8; (wdt * hgt) as usize];
     let mut trace = PixelRenderTrace::default();
+    let mut peek_memo = PeekMemo::for_tree(tree);
     for iy in 0..hgt {
         for ix in 0..wdt {
             let pix = &mut bytes[(iy * wdt + ix) as usize];
@@ -2152,6 +2236,7 @@ fn render_map_recording_callbacks(
                 false,
                 true,
                 Some(&mut trace),
+                &mut peek_memo,
                 rng,
                 script_algo,
             );
@@ -2384,7 +2469,100 @@ mod tests {
         let (tree, node) = algorithm_tree(algorithm, alpha, seed, wdt, hgt, zoom_x, zoom_y);
         let mut rng = LcgRng::seed_from_u64(0);
         let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
-        tree.run_algorithm(node, ix, iy, &mut rng, &mut missing_script_algo)
+        let mut peek_memo = PeekMemo::for_tree(&tree);
+        tree.run_algorithm(
+            node,
+            ix,
+            iy,
+            &mut peek_memo,
+            &mut rng,
+            &mut missing_script_algo,
+        )
+    }
+
+    #[test]
+    fn repeated_pure_peeks_reuse_the_first_result() {
+        // C4MCOverlay::PeekPix and AlgoBorder may revisit the same operator
+        // chain coordinate (C4MapCreatorS2.cpp:555-571, 1408-1420). A chain
+        // without AlgoScript is immutable during one RenderTo.
+        let (tree, node) = algorithm_tree(Algo::Solid, 0, 1, 10, 10, 100, 100);
+        let mut rng = LcgRng::seed_from_u64(0);
+        let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+        let mut peek_memo = PeekMemo::for_tree(&tree);
+
+        S2_MASK_CHECK_COUNT.with(|count| count.set(0));
+        assert!(tree.peek_pix(
+            node,
+            2,
+            3,
+            &mut peek_memo,
+            &mut rng,
+            &mut missing_script_algo,
+        ));
+        assert!(tree.peek_pix(
+            node,
+            2,
+            3,
+            &mut peek_memo,
+            &mut rng,
+            &mut missing_script_algo,
+        ));
+        S2_MASK_CHECK_COUNT.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    fn repeated_pure_mask_checks_reuse_the_first_result() {
+        // CheckMask is coordinate-pure without AlgoScript
+        // (C4MapCreatorS2.cpp:448-504), and border peeks can revisit an
+        // overlay coordinate already evaluated by RenderTo.
+        let (tree, node) = algorithm_tree(Algo::Solid, 0, 1, 10, 10, 100, 100);
+        let mut rng = LcgRng::seed_from_u64(0);
+        let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+        let mut peek_memo = PeekMemo::for_tree(&tree);
+
+        S2_MASK_CHECK_COUNT.with(|count| count.set(0));
+        assert!(tree.check_mask(
+            node,
+            2,
+            3,
+            &mut peek_memo,
+            &mut rng,
+            &mut missing_script_algo,
+        ));
+        assert!(tree.check_mask(
+            node,
+            2,
+            3,
+            &mut peek_memo,
+            &mut rng,
+            &mut missing_script_algo,
+        ));
+        S2_MASK_CHECK_COUNT.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    fn script_algorithm_peeks_keep_every_call_and_rng_draw() {
+        // C4MCOverlay::PeekPix re-enters AlgoScript on every evaluation
+        // (C4MapCreatorS2.cpp:555-571, 1547-1564), so script-bearing trees
+        // cannot reuse a prior result even at the same coordinate.
+        let (tree, node) = algorithm_tree(Algo::Script, 0, 1, 10, 10, 100, 100);
+        let mut rng = LcgRng::seed_from_u64(0);
+        let initial_count = rng.count;
+        let mut calls = 0;
+        {
+            let mut script_algo = |rng: &mut LcgRng, _: &str, _: [i32; 4]| {
+                calls += 1;
+                rng.random(2);
+                true
+            };
+            let mut peek_memo = PeekMemo::for_tree(&tree);
+
+            assert!(tree.peek_pix(node, 2, 3, &mut peek_memo, &mut rng, &mut script_algo));
+            assert!(tree.peek_pix(node, 2, 3, &mut peek_memo, &mut rng, &mut script_algo));
+        }
+
+        assert_eq!(calls, 2);
+        assert_eq!(rng.count, initial_count + 2);
     }
 
     fn cpp_mandel_formula(
@@ -3322,6 +3500,39 @@ mod tests {
             vec![2; 6],
             "truthy ScriptAlgo results paint every reached pixel"
         );
+    }
+
+    #[test]
+    fn only_script_algorithm_maps_require_a_live_host_render() {
+        // C4Landscape::CreateMapS2 renders once after script linking
+        // (C4Landscape.cpp:530-546). Rust's eager resource preview may stand
+        // in for that render unless an algo=script node needs the live host.
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let (width, height) = params();
+        let plain = create_s2_map_with_state_and_functions(
+            "map Plain { seed=1; mat=Earth; tex=Rough; sub=0; };",
+            &mut classifier,
+            width,
+            height,
+            false,
+            1,
+            &mut rng,
+            &HashSet::new(),
+        );
+        assert!(!plain.creator.requires_live_script_render());
+
+        let scripted = create_s2_map_with_state_and_functions(
+            "map Scripted { seed=1; overlay Probe { seed=2; algo=script; }; };",
+            &mut classifier,
+            width,
+            height,
+            false,
+            1,
+            &mut rng,
+            &HashSet::new(),
+        );
+        assert!(scripted.creator.requires_live_script_render());
     }
 
     #[test]

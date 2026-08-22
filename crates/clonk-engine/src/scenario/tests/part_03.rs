@@ -1487,6 +1487,39 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn plain_s2_scenario_does_not_build_a_scripted_map_callback_linker() {
+        // Only evalFn/drawFn fields resolve through Game.Script.GetSFunc
+        // while parsing an S2 map (C4MapCreatorS2.cpp:367-378, 1615-1616).
+        // A plain Landscape.txt therefore needs no callback-name linker.
+        let directory = test_tempdir();
+        let scenario_path = directory.path().join("PlainS2.c4s");
+        std::fs::create_dir(&scenario_path).test_value();
+        write_test_file(
+            scenario_path.join("Landscape.txt"),
+            "map Plain { overlay Earth { algo=solid; }; };\n",
+        );
+        let group = Group::open_indexed(&scenario_path).test_value();
+
+        assert!(!scenario_may_need_map_callbacks(&group).test_value());
+    }
+
+    #[test]
+    fn s2_callback_field_keeps_the_scripted_map_callback_linker() {
+        // C4MCV_ScriptFunc validates evalFn/drawFn through the linked scenario
+        // host while parsing (C4MapCreatorS2.cpp:367-378, 1615-1616).
+        let directory = test_tempdir();
+        let scenario_path = directory.path().join("CallbackS2.c4s");
+        std::fs::create_dir(&scenario_path).test_value();
+        write_test_file(
+            scenario_path.join("Landscape.txt"),
+            "map Callback { overlay Earth { evalFn=Probe; }; };\n",
+        );
+        let group = Group::open_indexed(&scenario_path).test_value();
+
+        assert!(scenario_may_need_map_callbacks(&group).test_value());
+    }
+
+    #[test]
     fn corrupt_static_map_precedes_invalid_section_name_validation() {
         // C4Landscape::Init decodes Map.bmp before InitScenarioSections scans
         // section names (src/C4Game.cpp:2643-2694), so the callback-linker

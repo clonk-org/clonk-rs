@@ -94,3 +94,17 @@ fn scenario_activation_profile_over_a_small_tutorial() {
     report_load("Tutorial 1", load);
     report("Tutorial 1", wall, engine.activation_timings());
 }
+
+/// The full-source S2 workload pinned by `skies_of_fire_activation`; keeping
+/// measurement here ensures the correctness gate itself stays timing-free.
+#[test]
+#[ignore = "manual profiling probe; reports timings and asserts nothing"]
+fn scenario_activation_profile_over_skies_of_fire() {
+    let started = std::time::Instant::now();
+    let prepared = prepare_installed_scenario("Fantasy.c4f/SkiesOfFire.c4s", 424_242);
+    let load = prepared.load_timings();
+    let engine = prepared.instantiate();
+    let wall = started.elapsed();
+    report_load("Fantasy Skies of Fire", load);
+    report("Fantasy Skies of Fire", wall, engine.activation_timings());
+}
