@@ -3731,6 +3731,8 @@ pub enum EngineError {
     DuplicateObjectId(ObjectId),
     #[error("invalid scenario-section landscape: {0}")]
     InvalidScenarioSectionLandscape(String),
+    #[error("invalid PXS component in engine state: {0}")]
+    InvalidPxsComponent(String),
     #[error(transparent)]
     RuntimeJoinPlayerRestore(#[from] RuntimeJoinPlayerRestoreError),
     #[error("failed to persist scenario section `{section}`: {detail}")]

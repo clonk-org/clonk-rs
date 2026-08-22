@@ -710,6 +710,7 @@ impl Engine {
             object_order: self.exec_list.clone(),
             inactive_object_order: self.inactive_exec_list.clone(),
             particles,
+            pxs_component: self.pxs_system.to_c4b(),
             players,
             player_crew_rosters_authoritative: true,
             last_player_info_id: self.last_player_info_id,
@@ -756,6 +757,13 @@ impl Engine {
         state: &EngineState,
         reset_local_sound_instances: bool,
     ) -> Result<(), EngineError> {
+        let restored_pxs = state
+            .pxs_component
+            .as_deref()
+            .map(pxs::PxsSystem::from_c4b)
+            .transpose()
+            .map_err(|error| EngineError::InvalidPxsComponent(error.to_string()))?;
+        let restore_pxs_from_particles = restored_pxs.is_none();
         // C4Def::pFairCrewPhysical is derived runtime state. A restored game
         // must lazily rebuild it from the restored parameters and RNG epoch.
         self.clear_fair_crew_physicals();
@@ -981,11 +989,14 @@ impl Engine {
         );
         self.global_effects = state.global_effects.clone();
         self.particles.clear();
-        self.pxs_system.clear();
+        self.pxs_system = restored_pxs.unwrap_or_default();
         self.particle_system.clear_particles();
         for snapshot in &state.particles {
             if snapshot.definition_id.starts_with("material/pxs/") && snapshot.parameter_b >= 0 {
-                if let Some(material) = MaterialId::new(snapshot.parameter_b as usize) {
+                if restore_pxs_from_particles {
+                    let Some(material) = MaterialId::new(snapshot.parameter_b as usize) else {
+                        continue;
+                    };
                     // raw C4Fixed state when present (lossless save/load);
                     // float projections only for legacy snapshots
                     let [x, y, xdir, ydir] = snapshot.pxs_fixed.unwrap_or([
@@ -1014,8 +1025,14 @@ impl Engine {
                             );
                         }
                         None => {
-                            self.pxs_system
-                                .create(material, pixel.x, pixel.y, pixel.xdir, pixel.ydir);
+                            self.pxs_system.create(
+                                &self.materials,
+                                material,
+                                pixel.x,
+                                pixel.y,
+                                pixel.xdir,
+                                pixel.ydir,
+                            );
                         }
                     }
                 }

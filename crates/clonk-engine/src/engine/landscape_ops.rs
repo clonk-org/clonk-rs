@@ -325,9 +325,15 @@ impl Engine {
                 } => {
                     // FnCastPXS already consumed the synced r2/r1 draws
                     // while the VM call was live; preserve their order as
-                    // PXS slots are allocated (C4PXS.cpp:309-321).
+                    // PXS slots are allocated (C4PXS.cpp:309-321). Create
+                    // rejects an invalid material before New can allocate a
+                    // chunk (C4PXS.cpp:207-215).
+                    if self.materials.get_by_id(material).is_none() {
+                        continue;
+                    }
                     for velocity in velocities {
                         self.pxs_system.create(
+                            &self.materials,
                             material,
                             math::itofix(position.x),
                             math::itofix(position.y),
@@ -848,6 +854,7 @@ impl Engine {
                             cleared_solid_pixels.push(Vector2::new(x, y));
                         }
                         self.pxs_system.create(
+                            &self.materials,
                             material,
                             itofix(x),
                             itofix(y),
@@ -872,6 +879,7 @@ impl Engine {
                 });
                 if cleared == Some(material) {
                     self.pxs_system.create(
+                        &self.materials,
                         material,
                         itofix(position.x),
                         itofix(position.y),
@@ -936,6 +944,7 @@ impl Engine {
             // positions, like DigFreePix → PXS.Create (C4Landscape.cpp:947-954).
             for offset in 0..count {
                 self.pxs_system.create(
+                    &self.materials,
                     material_id,
                     itofix(column),
                     itofix(previous_height.saturating_add(offset as i32)),
@@ -1027,6 +1036,7 @@ impl Engine {
             if let Some(ratio) = pxs_ratio {
                 if ratio != 0 {
                     self.pxs_system.cast(
+                        &self.materials,
                         &mut self.rng,
                         material_id,
                         count / ratio,
@@ -1209,32 +1219,40 @@ impl Engine {
         }
     }
 
-    /// `C4PXSSystem::Execute` (C4PXS.cpp:212-234): free empty chunks, then
-    /// run every live PXS in chunk-major slot order, IN PLACE — the slot
-    /// stays occupied while its PXS executes, so a PXS created inside a
-    /// reaction can never be handed the executing slot (New(),
-    /// C4PXS.cpp:195-202).
+    /// `C4PXSSystem::Execute` (C4PXS.cpp:218-240): visit chunks in order,
+    /// freeing each one only when its turn begins, then run every live PXS in
+    /// slot order, IN PLACE. The slot stays occupied while its PXS executes,
+    /// so a PXS created inside a reaction can never be handed the executing
+    /// slot (New(), C4PXS.cpp:195-202).
     #[doc(hidden)]
     pub fn tick_pxs(&mut self) {
         // C4PXSSystem::Execute resets Count before visiting slots. Count is
         // incremented after every live slot's Execute, even if that call
-        // deactivates the pixel (C4PXS.cpp:212-234).
+        // deactivates the pixel (C4PXS.cpp:218-240).
         self.pxs_system.begin_execute();
-        self.pxs_system.free_empty_chunks();
         let mut inspected = 0_usize;
-        let mut cursor = 0_usize;
-        while let Some(index) = self.pxs_system.next_live_slot(cursor) {
-            let (chunk, slot) = (index / pxs::PXS_CHUNK_SIZE, index % pxs::PXS_CHUNK_SIZE);
-            cursor = index + 1;
-            inspected += 1;
-            let Some(pixel) = self.pxs_system.peek_slot(chunk, slot) else {
-                continue;
-            };
-            match self.execute_pxs(pixel) {
-                Some(updated) => self.pxs_system.put_slot(chunk, slot, updated),
-                None => self.pxs_system.clear_slot(chunk, slot),
+        for chunk in 0..pxs::PXS_MAX_CHUNK {
+            self.pxs_system.free_empty_chunk(chunk);
+            let mut cursor = chunk * pxs::PXS_CHUNK_SIZE;
+            let end = cursor + pxs::PXS_CHUNK_SIZE;
+            while let Some(index) = self.pxs_system.next_live_slot(cursor) {
+                if index >= end {
+                    break;
+                }
+                let slot = index % pxs::PXS_CHUNK_SIZE;
+                cursor = index + 1;
+                inspected += 1;
+                let Some(pixel) = self.pxs_system.peek_slot(chunk, slot) else {
+                    continue;
+                };
+                match self.execute_pxs_lifecycle(pixel) {
+                    Ok(updated) => self.pxs_system.put_slot(chunk, slot, updated),
+                    Err(deactivated) => {
+                        self.pxs_system.deactivate_slot(chunk, slot, deactivated);
+                    }
+                }
+                self.pxs_system.note_executed();
             }
-            self.pxs_system.note_executed();
         }
         self.pxs_system.note_inspected_slots(inspected);
     }
@@ -1250,7 +1268,13 @@ impl Engine {
 
     /// `C4PXS::Execute` (C4PXS.cpp:28-127). Returns the surviving PXS, or
     /// `None` when it deactivates.
-    pub(crate) fn execute_pxs(&mut self, mut pixel: pxs::Pxs) -> Option<pxs::Pxs> {
+    pub(crate) fn execute_pxs(&mut self, pixel: pxs::Pxs) -> Option<pxs::Pxs> {
+        self.execute_pxs_lifecycle(pixel).ok()
+    }
+
+    /// Preserve the final mutated payload on the deactivation side while the
+    /// public differential helper retains its historical `Option` shape.
+    fn execute_pxs_lifecycle(&mut self, mut pixel: pxs::Pxs) -> Result<pxs::Pxs, pxs::Pxs> {
         // Frame first: this runs once per live PXS, and `env::var` takes a
         // global lock and allocates before it can answer.
         if (17..=19).contains(&self.frame) && std::env::var("LC_RUST_RNG_TRACE").is_ok() {
@@ -1266,7 +1290,7 @@ impl Engine {
         }
         // Safety (C4PXS.cpp:40-43)
         if self.materials.get_by_id(pixel.mat).is_none() {
-            return None;
+            return Err(pixel);
         }
         // Out of bounds (C4PXS.cpp:45-49)
         let (back_wdt, back_hgt) = self
@@ -1279,7 +1303,7 @@ impl Engine {
             || pixel.y < itofix(-10)
             || pixel.y >= itofix(back_hgt)
         {
-            return None;
+            return Err(pixel);
         }
         // Material conversion: meePXSPos check before movement (C4PXS.cpp:51-57)
         let mut ix = fixtoi(pixel.x);
@@ -1306,14 +1330,16 @@ impl Engine {
                 MaterialInteractionEvent::PxsPos,
                 &mut pos_changed,
             ) {
-                return None;
+                return Err(pixel);
             }
         }
         // `Mat` is passed by reference to the PXSPos reaction. Both
         // mrfConvert and mrfScript may replace it, and C++ reads the density
         // and WindDrift from that replacement for this same tick
         // (C4PXS.cpp:59-80; C4Material.cpp:643-649, 822-832).
-        let material = self.materials.get_by_id(pixel.mat)?;
+        let Some(material) = self.materials.get_by_id(pixel.mat) else {
+            return Err(pixel);
+        };
         let density = material.density();
         let wind_drift_param = material.wind_drift();
         // Gravity (C4PXS.cpp:60)
@@ -1355,7 +1381,7 @@ impl Engine {
         {
             pixel.x = ctcox;
             pixel.y = ctcoy;
-            return Some(pixel);
+            return Ok(pixel);
         }
         // Step toward the target (C4PXS.cpp:91-117), do-while
         loop {
@@ -1381,13 +1407,13 @@ impl Engine {
                     &mut pos_changed,
                 ) {
                     // destructive contact
-                    return None;
+                    return Err(pixel);
                 }
                 if pos_changed {
                     // speed or position changed: stop moving for now
                     pixel.x = itofix(ix);
                     pixel.y = itofix(iy);
-                    return Some(pixel);
+                    return Ok(pixel);
                 }
                 // reaction did nothing — continue movement
             }
@@ -1400,7 +1426,7 @@ impl Engine {
         // No contact: free movement (C4PXS.cpp:119-120)
         pixel.x = ctcox;
         pixel.y = ctcoy;
-        Some(pixel)
+        Ok(pixel)
     }
 
     /// Reaction proc dispatch for the PXS events, mirroring the mrf*
@@ -1927,7 +1953,7 @@ impl Engine {
                 .unwrap_or(0)
         };
         // Try slide: while a slide position exists and the pixel below is
-        // free, the material continues as PXS (C4Landscape.cpp:1192-1196)
+        // free, the material continues as PXS (C4Landscape.cpp:1178-1183)
         loop {
             let slid = self
                 .landscape
@@ -1951,8 +1977,14 @@ impl Engine {
             tx = slid.1;
             ty = slid.2;
             if density_at(self, tx, ty + 1) < mdens {
-                self.pxs_system
-                    .create(mat, itofix(tx), itofix(ty), fixed10(vx), fixed10(vy));
+                self.pxs_system.create(
+                    &self.materials,
+                    mat,
+                    itofix(tx),
+                    itofix(ty),
+                    fixed10(vx),
+                    fixed10(vy),
+                );
                 return true;
             }
         }

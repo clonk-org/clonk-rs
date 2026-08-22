@@ -972,7 +972,7 @@ fn pxs_wind_drift_dies_in_tunnel_background() {
         }
         engine.set_landscape(landscape);
         engine.set_environment(EnvironmentSettings::new(80));
-        unit_assert!(engine.pxs_system.create(dust, math::itofix(2), math::itofix(5), math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
+        unit_assert!(engine.create_pxs(dust, math::itofix(2), math::itofix(5), math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
         engine
     };
 
@@ -1032,7 +1032,7 @@ fn pxs_wind_drift_uses_the_grid_ift_bit() {
         landscape.set_pixel_grid(grid);
         engine.set_landscape(landscape);
         engine.set_environment(EnvironmentSettings::new(80));
-        unit_assert!(engine.pxs_system.create(dust, math::itofix(2), math::itofix(5), math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
+        unit_assert!(engine.create_pxs(dust, math::itofix(2), math::itofix(5), math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
         engine
     };
 

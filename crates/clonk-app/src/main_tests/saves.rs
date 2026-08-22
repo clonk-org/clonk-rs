@@ -1834,7 +1834,15 @@ fn runtime_pxs_graphics_reload_is_live_and_presentation_only() {
     main_assert!(app.display_flags.pxs_gfx);
     main_assert!(app.graphics.pxs_graphics_enabled());
 
-    main_assert!(app.engine.pxs_system.create(
+    // C4PXSSystem::Create accepts only a material in the loaded map
+    // (src/C4PXS.cpp:207-215), so give this running-game fixture one.
+    let library = clonk_resources::MaterialLibrary::parse(
+        "[Material Earth]\nName=Earth\nDensity=100\nFriction=25\n",
+    )
+    .test_value();
+    app.engine
+        .set_materials(clonk_engine::MaterialSet::from_resource_library(&library));
+    main_assert!(app.engine.create_pxs(
         clonk_engine::MaterialId::new(0).test_value(),
         clonk_engine::math::C4Fixed::from_raw(0x12345),
         clonk_engine::math::C4Fixed::from_raw(0x23456),

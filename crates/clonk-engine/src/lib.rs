@@ -5508,6 +5508,13 @@ pub struct EngineState {
     pub inactive_object_order: Vec<ObjectId>,
     #[serde(default)]
     pub particles: Vec<ParticleSnapshot>,
+    /// Raw `PXS.c4b` component. Particle snapshots project only live PXS;
+    /// this preserves allocated slots and their dead payload exactly. `Some`
+    /// is authoritative over PXS-shaped entries in `particles`; `None` keeps
+    /// the legacy projection-based restore path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub pxs_component: Option<Vec<u8>>,
     #[serde(default)]
     pub players: Vec<PlayerState>,
     /// States written before ordered C4Player::Crew persistence omitted the
@@ -5737,6 +5744,7 @@ impl EngineState {
             object_order: snapshot.render_order.clone(),
             inactive_object_order: Vec::new(),
             particles: snapshot.particles.clone(),
+            pxs_component: None,
             players,
             player_crew_rosters_authoritative: true,
             last_player_info_id: snapshot

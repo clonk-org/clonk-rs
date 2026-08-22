@@ -1,13 +1,11 @@
 //! `impl Engine` — materials, landscape, sectors and the game-settings accessors.
 //!
-//! Moved verbatim from the root `impl Engine` block in `lib.rs`.
-//! Structural only: same crate, same type, same method bodies.
-
 use super::*;
 
 impl Engine {
     pub fn set_materials(&mut self, materials: MaterialSet) {
         self.materials = materials;
+        self.materials_shared.borrow_mut().take();
         let capacity = self.materials.len();
         for object in &mut self.objects {
             object.ensure_material_capacity(capacity);
@@ -23,7 +21,22 @@ impl Engine {
     }
 
     pub fn materials_mut(&mut self) -> &mut MaterialSet {
+        self.materials_shared.borrow_mut().take();
         &mut self.materials
+    }
+
+    /// `C4PXSSystem::Create` (C4PXS.cpp:207-215), with `MatValid` evaluated
+    /// against this engine's current material map on every call.
+    pub fn create_pxs(
+        &mut self,
+        mat: MaterialId,
+        x: C4Fixed,
+        y: C4Fixed,
+        xdir: C4Fixed,
+        ydir: C4Fixed,
+    ) -> bool {
+        self.pxs_system
+            .create(&self.materials, mat, x, y, xdir, ydir)
     }
 
     pub(crate) fn materials_shared(&self) -> Rc<MaterialSet> {
