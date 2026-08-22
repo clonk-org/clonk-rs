@@ -1246,8 +1246,13 @@ fn ini_named_value(line: &str) -> Option<(&str, &str)> {
     {
         delimiter += 1;
     }
+    // `then_some` evaluates its argument EAGERLY, so the value slice was taken
+    // even when the byte is not `=` — and when the whitespace scan above stops
+    // at the end of the line, `delimiter + 1` is past it and the slice panics.
+    // `then` defers it to the branch that can be taken
+    // (clonk-org/clonk-rs#961).
     (line.as_bytes().get(delimiter) == Some(&b'='))
-        .then_some((&line[..name_end], &line[delimiter + 1..]))
+        .then(|| (&line[..name_end], &line[delimiter + 1..]))
 }
 
 fn ini_name_end(value: &str) -> Option<usize> {
@@ -1503,6 +1508,34 @@ impl MessageBoardCommandRestriction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key with no `=`, padded to the end of the line, must not panic
+    /// (clonk-org/clonk-rs#961).
+    ///
+    /// An INI name may contain spaces (`ini_name_end` accepts them alongside
+    /// alphanumerics and underscores), so a line that is *only* a padded name
+    /// runs `name_end` all the way to the end of the line. `ini_named_value`
+    /// then leaves `delimiter == line.len()`, the guard
+    /// `get(delimiter) == Some(&b'=')` is false — and `then_some` evaluates its
+    /// argument EAGERLY, so `&line[delimiter + 1..]` was still taken and sliced
+    /// one past the end.
+    ///
+    /// Scenario and save components reach this parser from downloads, records
+    /// and peers, so a malformed line was a reachable panic. `then` defers the
+    /// slice to the branch that can actually be taken.
+    #[test]
+    fn a_name_that_runs_to_the_end_of_line_has_no_value() {
+        assert_eq!(ini_named_value("abc  "), None);
+        assert_eq!(ini_named_value("abc"), None);
+        assert_eq!(ini_named_value("a"), None);
+        assert_eq!(ini_named_value("a_b 1"), None);
+        // The ordinary forms still parse. Note the name keeps its padding —
+        // spaces are name characters here, which is the same reason the scan
+        // above can reach the end of the line.
+        assert_eq!(ini_named_value("abc=x"), Some(("abc", "x")));
+        assert_eq!(ini_named_value("abc  =x"), Some(("abc  ", "x")));
+        assert_eq!(ini_named_value("abc="), Some(("abc", "")));
+    }
 
     #[test]
     fn pristine_initial_state_matches_clean_cpp_dynamic_payload() {
