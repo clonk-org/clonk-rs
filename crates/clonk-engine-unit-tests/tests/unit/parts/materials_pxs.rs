@@ -1639,6 +1639,22 @@
         // a no-op (null pScriptFunc, C4Material.cpp:809-811).
         let materials = materials_pxs_with_earth(
             r#"
+            [Material Dummy0]
+            Name=Dummy0
+            Density=0
+
+            [Material Dummy1]
+            Name=Dummy1
+            Density=0
+
+            [Material Dummy2]
+            Name=Dummy2
+            Density=0
+
+            [Material Dummy3]
+            Name=Dummy3
+            Density=0
+
             [Material Goo]
             Name=Goo
             Density=25
@@ -1671,25 +1687,24 @@
         let mut world = Landscape::flat_with_material(5, 10, Some(earth));
         world.set_world_height(20);
         engine.set_landscape(world);
-        // The reaction function records its parameters in a global effect
-        // variable store via AddEffect... keep it simpler: return the kill
-        // flag computed from the parameters so the call is observable both
-        // ways (kill for goo's column, survive elsewhere is not reachable
-        // in this fixture — the unresolvable arm covers the no-op path).
+        // Give all nine arguments distinct values, then make the truthy return
+        // conditional on the complete C++ order. This keeps every slot
+        // observable, including the two landscape coordinates and both
+        // material ids that the old four-field predicate could not distinguish.
         unit_assert_eq!(
             engine.install_global_scripts(&[(
                 "System.c4g/MaterialReaction.c".to_string(),
-                r#"
-                global func GooHitsEarth(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {
-                    // meePXSMove = 1; falling straight down: xdir 0, ydir 100
-                    if (event != 1) { return 0; }
-                    if (xdir != 0) { return 0; }
-                    if (ydir != 100) { return 0; }
-                    if (ls_mat < 0) { return 0; }
-                    return 1;
-                }
-                "#
-                .to_string(),
+                format!(
+                    r#"
+                    global func GooHitsEarth(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {{
+                        return x == 2 && y == 9 && lsx == 3 && lsy == 10
+                            && xdir == 200 && ydir == 100
+                            && pxs_mat == {} && ls_mat == {} && event == 1;
+                    }}
+                    "#,
+                    goo.index(),
+                    earth.index()
+                ),
             )]) =>
             1,
             "System.c4g reaction script installs without a scenario host"
@@ -1699,9 +1714,13 @@
             .test_value();
 
         let mirror = engine.rng.clone();
-        unit_assert!(create_test_pxs(&mut engine, goo, 2, 9, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, goo, 2, 9, 2, 1));
         engine.tick_pxs();
-        unit_assert_eq!(engine.pxs_system.iter().count() => 0, "a truthy script return kills the PXS");
+        unit_assert_eq!(
+            engine.pxs_system.iter().count() =>
+            0,
+            "a truthy return proves mrfScript passed X, Y, LSPosX, LSPosY, XDir, YDir, PxsMat, LsMat, and Event in C++ order"
+        );
         unit_assert_eq!(engine.rng => mirror, "no synced draws on this path");
 
         // An ordinary scenario-local function is not owned by
