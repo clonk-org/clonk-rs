@@ -755,7 +755,7 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/extract_material.inc"
 
-# 3q3f. Lift C4Landscape::DigFree and DigFreePix.
+# 3q3f. Lift C4Landscape::DigFree, DigFreeMat and DigFreePix.
 #       DigFree walks a circle row by row, and two of its details are easy to
 #       "tidy" into something that digs a different shape:
 #
@@ -784,6 +784,16 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/dig_free.inc"
 
+#       DigFreeMat is a separate exact-material rectangle walk. Its outer
+#       MatValid guard, x-major/y-minor order and GetMat prefilter are all part
+#       of the production body rather than reimplemented in the oracle.
+awk '
+  /^void C4Landscape::DigFreeMat\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/dig_free_mat.inc"
+
 # 3q3g. Lift the builtin reaction-selection loop out of CrossMapMaterials.
 #       This is the decision every arm section above depends on: which builtin
 #       reaction a (PXS material, landscape material) pair gets in the first
@@ -796,7 +806,7 @@ awk '
 #       its order is the behaviour: InMatConvert wins over everything, then
 #       poof, then incinerate, then corrode, then insert. And every branch but
 #       the convert one sits behind `MatDensity(PXS) <= MatDensity(LS)`, so a
-#       lighter material hitting a heavier one gets NO reaction at all -- a gate
+#       heavier PXS hitting lighter landscape gets NO reaction at all -- a gate
 #       that is easy to lose when the ladder is rewritten as a match.
 awk '
   /^void C4MaterialMap::CrossMapMaterials\(\)/ { p = 1 }
@@ -807,7 +817,38 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Material.cpp" > "$gen/cross_map_reactions.inc"
 
-# 3q3h. Lift the unattached half of C4Object::DoMovement and the force helpers
+# 3q3h. Lift the custom-reaction overlay and SetMatReaction from
+#       C4MaterialMap::CrossMapMaterials. The overlay resolves ConvertMat,
+#       expands literal/category TargetSpec values (including inverse specs),
+#       and applies reactions in authored order. SetMatReaction supplies the
+#       Reverse swap and the landscape-major flat-table layout.
+awk '
+  /^[[:space:]]*\/\/ evaluate reactions for that material$/ { p = 1 }
+  p {
+    print
+    line = $0
+    opens += gsub(/{/, "{", line)
+    closes += gsub(/}/, "}", line)
+    if (opens && opens == closes) { found = 1; exit }
+  }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/custom_reaction_overlay.inc"
+
+awk '
+  /^void C4MaterialMap::SetMatReaction\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/set_mat_reaction.inc"
+
+awk '
+  /^bool mrfUserCheck\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/material_user_check.inc"
+
+# 3q3i. Lift the unattached half of C4Object::DoMovement and the force helpers
 #       it drives. This is the per-pixel collision loop: the fixed-point target
 #       is accumulated first, clamped by SideBounds/VerticalBounds, and then
 #       walked ONE PIXEL AT A TIME with a ContactCheck at each step.

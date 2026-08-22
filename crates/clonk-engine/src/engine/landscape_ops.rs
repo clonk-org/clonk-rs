@@ -5,6 +5,12 @@
 
 use super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static MATERIAL_INCINERATE_PROBES: std::cell::RefCell<Vec<(i32, i32)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Engine {
     pub(crate) fn process_dig_material_conversions(&mut self, idx: usize, requested: bool) {
         if idx >= self.objects.len() || self.materials.is_empty() {
@@ -1576,6 +1582,10 @@ impl Engine {
                 {
                     return false;
                 }
+                #[cfg(test)]
+                MATERIAL_INCINERATE_PROBES.with(|probes| {
+                    probes.borrow_mut().push((*x, *y));
+                });
                 let can_incinerate = self
                     .landscape
                     .as_ref()

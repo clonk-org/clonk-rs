@@ -28,7 +28,7 @@
 //! On any divergence the test panics with the first mismatch (section, index,
 //! field, C++ value vs Rust value).
 
-use clonk_resources::Group;
+use clonk_resources::{Group, MaterialLibrary, MutableGroup};
 use clonk_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue, ValueMap};
 use serde_json::Value;
 
@@ -69,6 +69,23 @@ fn load_golden() -> Value {
         )
     });
     serde_json::from_str(&text).expect("golden parity JSON parses")
+}
+
+fn native_material_set(files: &[(&str, &[u8])]) -> MaterialSet {
+    let mut packed_group = MutableGroup::new("Material.c4g");
+    for (name, bytes) in files {
+        packed_group
+            .add_file(*name, bytes.to_vec())
+            .unwrap_or_else(|error| panic!("native parity material {name} adds: {error}"));
+    }
+    let packed = packed_group
+        .pack_raw()
+        .expect("native parity material group packs");
+    let group = Group::from_raw_memory(PathBuf::from("Material.c4g"), packed)
+        .expect("native parity material group reopens");
+    let library = MaterialLibrary::from_group(&group)
+        .expect("native parity material group compiles as C4MaterialCore files");
+    MaterialSet::from_resource_library(&library)
 }
 
 fn i(v: &Value, key: &str) -> i64 {
@@ -128,6 +145,97 @@ fn expect_eq_u64(section: &str, index: usize, field: &str, cpp: u64, rust: u64) 
         "PARITY DIVERGENCE in `{section}` entry {index} field `{field}`: \
          C++ golden = {cpp}, Rust = {rust}"
     );
+}
+
+fn expect_rng_state(section: &str, case: &Value, rng: &LcgRng) {
+    expect_eq(
+        section,
+        0,
+        "random_count",
+        i(case, "random_count"),
+        i64::from(rng.count),
+    );
+    expect_eq_u64(
+        section,
+        0,
+        "random_hold",
+        u(case, "random_hold"),
+        u64::from(rng.hold),
+    );
+}
+
+fn register_smoke_probe(engine: &mut Engine) {
+    engine
+        .register_particle_definition(
+            crate::particles::ParticleDefCore {
+                name: "Smoke".into(),
+                init_fn: "SmokeInit".into(),
+                exec_fn: "SmokeExec".into(),
+                draw_fn: "Smoke".into(),
+                min_lifetime: 10,
+                max_lifetime: 10,
+                ..Default::default()
+            },
+            4,
+            1.0,
+        )
+        .expect("parity Smoke particle definition registers");
+}
+
+fn smoke_probe_count(engine: &Engine) -> i64 {
+    engine
+        .particle_system()
+        .particles()
+        .iter()
+        .filter(|particle| particle.def_name == "Smoke")
+        .count() as i64
+}
+
+fn landscape_material_snapshot(
+    engine: &Engine,
+    width: u32,
+    height: u32,
+) -> Vec<Option<crate::material::MaterialId>> {
+    let landscape = engine
+        .landscape()
+        .expect("parity landscape remains available");
+    (0..height as i32)
+        .flat_map(|y| (0..width as i32).map(move |x| (x, y)))
+        .map(|(x, y)| landscape.material_at(x, y))
+        .collect()
+}
+
+fn landscape_material_changes(
+    before: &[Option<crate::material::MaterialId>],
+    engine: &Engine,
+    width: u32,
+    height: u32,
+) -> Vec<(
+    i32,
+    i32,
+    Option<crate::material::MaterialId>,
+    Option<crate::material::MaterialId>,
+)> {
+    let landscape = engine
+        .landscape()
+        .expect("parity landscape remains available");
+    (0..height as i32)
+        .flat_map(|y| (0..width as i32).map(move |x| (x, y)))
+        .enumerate()
+        .filter_map(|(index, (x, y))| {
+            let after = landscape.material_at(x, y);
+            (before[index] != after).then_some((x, y, before[index], after))
+        })
+        .collect()
+}
+
+fn clear_instability_probe_trace() {
+    crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow_mut().clear());
+}
+
+fn take_instability_probe_trace() -> Vec<(i32, i32, Option<crate::material::MaterialId>)> {
+    crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES
+        .with(|probes| std::mem::take(&mut *probes.borrow_mut()))
 }
 
 /// The 8x40 material grid `parity/oracle/oracle_main.cpp`'s `splash_effect`
@@ -1668,48 +1776,141 @@ fn parity_differential_matches_cpp_golden() {
         .enumerate()
     {
         let seed = i(e, "seed") as i32;
-        let mut rng = crate::LcgRng::new(seed as u32);
-        rng.randomize3();
-        expect_eq(
-            "material_poof_reaction",
-            idx,
-            "random_count",
-            i(e, "random_count"),
-            i64::from(rng.count),
-        );
-        expect_eq(
-            "material_poof_reaction",
-            idx,
-            "random_hold",
-            i(e, "random_hold"),
-            i64::from(rng.hold),
-        );
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
 
-        // The two draws the arm makes, in order.
-        let smoke = i32::from(rng.rnd3() == 0);
-        let sound = i32::from(rng.rnd3() == 0);
+            [Material Water]
+            Name=Water
+            Density=25
+
+            [Material Granite]
+            Name=Granite
+            Density=50
+            "#,
+        )
+        .expect("poof RNG oracle materials parse");
+        const WDT: u32 = 5;
+        const HGT: u32 = 5;
+        const PX: i32 = 2;
+        const PY: i32 = 2;
+        let mut bytes = vec![0; WDT as usize * HGT as usize];
+        bytes[PY as usize * WDT as usize + PX as usize] = 2;
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 50;
+        let mut names = vec![None; 128];
+        names[1] = Some("Water".to_string());
+        names[2] = Some("Granite".to_string());
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        register_smoke_probe(&mut engine);
+        let mut landscape = Landscape::flat(WDT, HGT as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WDT,
+            HGT,
+            bytes,
+            densities,
+            names,
+            vec![None; 128],
+        ));
+        landscape.set_world_height(HGT as i32);
+        engine.set_landscape(landscape);
+        engine.rng = LcgRng::new(seed as u32);
+        engine.rng.randomize3();
+
+        let water = crate::material::MaterialId::new(1).expect("poof Water material");
+        let granite = crate::material::MaterialId::new(2).expect("poof Granite material");
+        let mut pixel = crate::pxs::Pxs {
+            mat: water,
+            x: itofix(PX),
+            y: itofix(PY),
+            xdir: C4Fixed::ZERO,
+            ydir: C4Fixed::ZERO,
+        };
+        let (mut x, mut y) = (PX, PY);
+        let mut pos_changed = false;
+        let material_before = engine
+            .landscape()
+            .and_then(|landscape| landscape.material_at(PX, PY));
+        let handled = engine.execute_pxs_reaction(
+            crate::material::MaterialReaction {
+                kind: crate::material::MaterialReactionKind::Poof,
+                user_defined: false,
+                insertion_check: false,
+            },
+            &mut x,
+            &mut y,
+            PX,
+            PY,
+            &mut pixel,
+            Some(granite),
+            match i(e, "event") {
+                0 => MaterialInteractionEvent::PxsPos,
+                1 => MaterialInteractionEvent::PxsMove,
+                _ => MaterialInteractionEvent::MassMove,
+            },
+            &mut pos_changed,
+        );
+        let material_after = engine
+            .landscape()
+            .and_then(|landscape| landscape.material_at(PX, PY));
+        let extractions = i64::from(material_before.is_some() && material_after.is_none());
+        let sounds = engine
+            .pending_audio
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    crate::AudioCommand::PlaySoundAt { name, .. } if name == "Pshshsh"
+                )
+            })
+            .count() as i64;
+
+        expect_eq(
+            "material_poof_reaction",
+            idx,
+            "handled",
+            i(e, "handled"),
+            i64::from(handled),
+        );
+        expect_eq(
+            "material_poof_reaction",
+            idx,
+            "extractions",
+            i(e, "extractions"),
+            extractions,
+        );
         expect_eq(
             "material_poof_reaction",
             idx,
             "smoke",
             i(e, "smoke"),
-            smoke as i64,
+            smoke_probe_count(&engine),
         );
         expect_eq(
             "material_poof_reaction",
             idx,
             "sound",
             i(e, "sound"),
-            sound as i64,
+            sounds,
         );
-
-        // And neither draw moved the synchronised ledger.
         expect_eq(
             "material_poof_reaction",
             idx,
-            "random_count after rnd3",
+            "random_count",
             i(e, "random_count"),
-            i64::from(rng.count),
+            i64::from(engine.rng.count),
+        );
+        expect_eq_u64(
+            "material_poof_reaction",
+            idx,
+            "random_hold",
+            u(e, "random_hold"),
+            u64::from(engine.rng.hold),
         );
     }
 
@@ -7326,6 +7527,439 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b10. custom_reaction_overlay: the custom pass in
+    //       `C4MaterialMap::CrossMapMaterials` resolves ConvertMat, tries a
+    //       literal TargetSpec before its category keywords, expands direct
+    //       and inverse categories, and applies authored reactions in order
+    //       (C4Material.cpp:386-472). `SetMatReaction` then performs Reverse
+    //       and writes the landscape-major table slot (C4Material.cpp:488-494).
+    //
+    //       The runtime row also drives all three events through ExecMask=5
+    //       and CheckSlide=1, mirroring mrfUserCheck's mask-before-slide order
+    //       (C4Material.cpp:612-624). The masked PxsMove entry must lose the
+    //       insertion check before it can run, while both allowed entries keep
+    //       it; the masked user-defined no-op still suppresses natural Insert.
+    //
+    //       Quoted TargetSpec and ConvertMat fixtures deliberately travel
+    //       through a packed Material.c4g: C++ stores those compiled bytes
+    //       verbatim (C4Material.cpp:60-68; StdCompiler.cpp:734-742,936-998),
+    //       and the resolver compares them without trimming.
+    {
+        let custom = &golden["custom_reaction_overlay"];
+
+        let reaction_name = |kind: crate::material::MaterialReactionKind| match kind {
+            crate::material::MaterialReactionKind::None => "none",
+            crate::material::MaterialReactionKind::Convert { .. } => "convert",
+            crate::material::MaterialReactionKind::Poof => "poof",
+            crate::material::MaterialReactionKind::Incinerate => "incinerate",
+            crate::material::MaterialReactionKind::Corrode { .. } => "corrode",
+            crate::material::MaterialReactionKind::Insert => "insert",
+            crate::material::MaterialReactionKind::Script { .. } => "script",
+        };
+
+        for (index, case) in custom["target_masks"]
+            .as_array()
+            .expect("custom target-mask cases are an array")
+            .iter()
+            .enumerate()
+        {
+            let spec = case["spec"].as_str().expect("custom target spec");
+            let inverse = case["inverse"].as_bool().expect("custom inverse flag");
+            let source = format!(
+                "[Material]\nName=Source\nDensity=10\n\n\
+                 [Reaction]\nType=Poof\nTargetSpec={spec}\nInverseSpec={}\n\n\
+                 [Material]\nName=Vacuum\nDensity=0\nIncindiary=1\nCorrosive=1\n\n\
+                 [Material]\nName=Water\nDensity=25\nExtinguisher=1\nCorrosive=1\nCorrode=1\n\n\
+                 [Material]\nName=Rock\nDensity=50\nInflammable=1\nCorrode=1\n",
+                i32::from(inverse),
+            );
+            let library = MaterialLibrary::parse(&source)
+                .unwrap_or_else(|error| panic!("custom TargetSpec {spec} parses: {error}"));
+            let materials = MaterialSet::from_resource_library(&library);
+            let source = materials.id_of("Source").expect("custom source exists");
+            let targets = [
+                None,
+                Some(source),
+                Some(materials.id_of("Vacuum").expect("Vacuum exists")),
+                Some(materials.id_of("Water").expect("Water exists")),
+                Some(materials.id_of("Rock").expect("Rock exists")),
+            ];
+            let mask = targets
+                .into_iter()
+                .enumerate()
+                .fold(0u32, |mask, (bit, target)| {
+                    let reaction = materials.reaction_for_event(
+                        Some(source),
+                        target,
+                        MaterialInteractionEvent::PxsMove,
+                    );
+                    if reaction.user_defined {
+                        mask | (1u32 << bit)
+                    } else {
+                        mask
+                    }
+                });
+            expect_eq(
+                &format!("custom_reaction_overlay.target_masks[{spec},{inverse}]"),
+                index,
+                "mask",
+                i(case, "mask"),
+                i64::from(mask),
+            );
+        }
+
+        for (index, case) in custom["literal_keyword"]
+            .as_array()
+            .expect("literal-keyword cases are an array")
+            .iter()
+            .enumerate()
+        {
+            let inverse = case["inverse"].as_bool().expect("literal inverse flag");
+            let source = format!(
+                "[Material]\nName=Source\nDensity=10\n\n\
+                 [Reaction]\nType=Poof\nTargetSpec=sOlId\nInverseSpec={}\n\n\
+                 [Material]\nName=Solid\nDensity=10\n\n\
+                 [Material]\nName=Rock\nDensity=50\n",
+                i32::from(inverse),
+            );
+            let library =
+                MaterialLibrary::parse(&source).expect("literal keyword-shadow materials parse");
+            let materials = MaterialSet::from_resource_library(&library);
+            let source = materials.id_of("Source").expect("literal source exists");
+            let targets = [
+                None,
+                Some(source),
+                Some(materials.id_of("Solid").expect("literal Solid exists")),
+                Some(materials.id_of("Rock").expect("literal Rock exists")),
+            ];
+            let mask = targets
+                .into_iter()
+                .enumerate()
+                .fold(0u32, |mask, (bit, target)| {
+                    if materials
+                        .reaction_for_event(Some(source), target, MaterialInteractionEvent::PxsMove)
+                        .user_defined
+                    {
+                        mask | (1u32 << bit)
+                    } else {
+                        mask
+                    }
+                });
+            expect_eq(
+                &format!("custom_reaction_overlay.literal_keyword[{inverse}]"),
+                index,
+                "mask",
+                i(case, "mask"),
+                i64::from(mask),
+            );
+        }
+
+        let ordering_library = MaterialLibrary::parse(
+            r#"
+            [Material]
+            Name=Source
+            Density=10
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=All
+
+            [Reaction]
+            Type=Insert
+            TargetSpec=Target
+
+            [Material]
+            Name=Target
+            Density=50
+            "#,
+        )
+        .expect("same-source ordering materials parse");
+        let ordering = MaterialSet::from_resource_library(&ordering_library);
+        let source = ordering.id_of("Source").expect("ordering source exists");
+        let target = ordering.id_of("Target").expect("ordering target exists");
+        let got_target = reaction_name(
+            ordering
+                .reaction_for_event(
+                    Some(source),
+                    Some(target),
+                    MaterialInteractionEvent::PxsMove,
+                )
+                .kind,
+        );
+        let got_sky = reaction_name(
+            ordering
+                .reaction_for_event(Some(source), None, MaterialInteractionEvent::PxsMove)
+                .kind,
+        );
+        assert_eq!(
+            custom["ordering"]["same_source_target"]
+                .as_str()
+                .expect("same-source target tag"),
+            got_target,
+            "PARITY DIVERGENCE in `custom_reaction_overlay.ordering` field `same_source_target`",
+        );
+        assert_eq!(
+            custom["ordering"]["same_source_sky"]
+                .as_str()
+                .expect("same-source sky tag"),
+            got_sky,
+            "PARITY DIVERGENCE in `custom_reaction_overlay.ordering` field `same_source_sky`",
+        );
+
+        let reverse_library = MaterialLibrary::parse(
+            r#"
+            [Material]
+            Name=First
+            Density=10
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Later
+
+            [Material]
+            Name=Later
+            Density=50
+
+            [Reaction]
+            Type=Corrode
+            TargetSpec=First
+            Reverse=1
+            "#,
+        )
+        .expect("reverse collision materials parse");
+        let reverse = MaterialSet::from_resource_library(&reverse_library);
+        let first = reverse.id_of("First").expect("First exists");
+        let later = reverse.id_of("Later").expect("Later exists");
+        let got_reverse = reaction_name(
+            reverse
+                .reaction_for_event(Some(first), Some(later), MaterialInteractionEvent::PxsMove)
+                .kind,
+        );
+        assert_eq!(
+            custom["ordering"]["reverse_collision"]
+                .as_str()
+                .expect("reverse collision tag"),
+            got_reverse,
+            "PARITY DIVERGENCE in `custom_reaction_overlay.ordering` field `reverse_collision`",
+        );
+
+        let literal_sky_library = MaterialLibrary::parse(
+            r#"
+            [Material]
+            Name=Source
+            Density=10
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Target
+            ConvertMat=sKy
+
+            [Material]
+            Name=Target
+            Density=50
+
+            [Material]
+            Name=Sky
+            Density=0
+            "#,
+        )
+        .expect("literal Sky ConvertMat materials parse");
+        let literal_sky = MaterialSet::from_resource_library(&literal_sky_library);
+        let source = literal_sky
+            .id_of("Source")
+            .expect("literal Sky source exists");
+        let target = literal_sky
+            .id_of("Target")
+            .expect("literal Sky target exists");
+        let crate::material::MaterialReactionKind::Convert {
+            target: convert_target,
+            ..
+        } = literal_sky
+            .reaction_for_event(
+                Some(source),
+                Some(target),
+                MaterialInteractionEvent::PxsMove,
+            )
+            .kind
+        else {
+            panic!("literal Sky fixture must install Convert");
+        };
+        let convert_target_name = convert_target
+            .and_then(|id| literal_sky.get_by_id(id))
+            .map(crate::material::Material::name)
+            .unwrap_or("none");
+        assert_eq!(
+            custom["resolution"]["convert_literal_sky"]
+                .as_str()
+                .expect("literal Sky oracle target"),
+            convert_target_name,
+            "PARITY DIVERGENCE in `custom_reaction_overlay.resolution` field `convert_literal_sky`",
+        );
+
+        let quoted = native_material_set(&[
+            (
+                "ConvertSource.c4m",
+                b"[Material]\r\nName=ConvertSource\r\nDensity=10\r\n\r\n[Reaction]\r\nType=Convert\r\nTargetSpec=ConvertTarget\r\nConvertMat=\"Water \"\r\n",
+            ),
+            (
+                "TargetSource.c4m",
+                b"[Material]\r\nName=TargetSource\r\nDensity=10\r\n\r\n[Reaction]\r\nType=Poof\r\nTargetSpec=\" Solid\"\r\n",
+            ),
+            (
+                "ConvertTarget.c4m",
+                b"[Material]\r\nName=ConvertTarget\r\nDensity=50\r\n",
+            ),
+            (
+                "Water.c4m",
+                b"[Material]\r\nName=Water\r\nDensity=25\r\n",
+            ),
+            (
+                "Rock.c4m",
+                b"[Material]\r\nName=Rock\r\nDensity=50\r\n",
+            ),
+        ]);
+        let convert_source = quoted
+            .id_of("ConvertSource")
+            .expect("quoted convert source exists");
+        let convert_target = quoted
+            .id_of("ConvertTarget")
+            .expect("quoted convert target exists");
+        let crate::material::MaterialReactionKind::Convert {
+            target: spaced_target,
+            ..
+        } = quoted
+            .reaction_for_event(
+                Some(convert_source),
+                Some(convert_target),
+                MaterialInteractionEvent::PxsMove,
+            )
+            .kind
+        else {
+            panic!("quoted ConvertMat fixture must install Convert");
+        };
+        let spaced_target_name = spaced_target
+            .and_then(|id| quoted.get_by_id(id))
+            .map(crate::material::Material::name)
+            .unwrap_or("none");
+        assert_eq!(
+            custom["resolution"]["convert_trailing_space"]
+                .as_str()
+                .expect("spaced ConvertMat oracle target"),
+            spaced_target_name,
+            "PARITY DIVERGENCE in `custom_reaction_overlay.resolution` field `convert_trailing_space`",
+        );
+
+        let target_source = quoted
+            .id_of("TargetSource")
+            .expect("quoted TargetSpec source exists");
+        let rock = quoted.id_of("Rock").expect("quoted TargetSpec Rock exists");
+        let targets = [None, Some(target_source), Some(rock)];
+        let quoted_target_mask =
+            targets
+                .into_iter()
+                .enumerate()
+                .fold(0u32, |mask, (bit, target)| {
+                    if quoted
+                        .reaction_for_event(
+                            Some(target_source),
+                            target,
+                            MaterialInteractionEvent::PxsMove,
+                        )
+                        .user_defined
+                    {
+                        mask | (1u32 << bit)
+                    } else {
+                        mask
+                    }
+                });
+        expect_eq(
+            "custom_reaction_overlay.resolution",
+            0,
+            "target_leading_space_mask",
+            i(&custom["resolution"], "target_leading_space_mask"),
+            i64::from(quoted_target_mask),
+        );
+
+        let exec_mask = u(&custom["runtime"], "exec_mask");
+        let runtime_library = MaterialLibrary::parse(&format!(
+            r#"
+            [Material]
+            Name=Source
+            Density=10
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Target
+            ExecMask={exec_mask}
+            CheckSlide=1
+
+            [Material]
+            Name=Target
+            Density=50
+            "#,
+        ))
+        .expect("runtime custom-reaction materials parse");
+        let runtime_set = MaterialSet::from_resource_library(&runtime_library);
+        let source = runtime_set.id_of("Source").expect("runtime source exists");
+        let target = runtime_set.id_of("Target").expect("runtime target exists");
+        let events = [
+            MaterialInteractionEvent::PxsPos,
+            MaterialInteractionEvent::PxsMove,
+            MaterialInteractionEvent::MassMove,
+        ];
+        let mut installed_mask = 0u32;
+        let mut allowed_mask = 0u32;
+        let mut reactions = Vec::new();
+        for (bit, event) in events.into_iter().enumerate() {
+            let reaction = runtime_set.reaction_for_event(Some(source), Some(target), event);
+            if reaction.user_defined {
+                installed_mask |= 1u32 << bit;
+            }
+            if reaction.kind == crate::material::MaterialReactionKind::Poof {
+                allowed_mask |= 1u32 << bit;
+            }
+            reactions.push(reaction);
+        }
+        expect_eq(
+            "custom_reaction_overlay.runtime",
+            0,
+            "installed_mask",
+            i(&custom["runtime"], "installed_mask"),
+            i64::from(installed_mask),
+        );
+        expect_eq(
+            "custom_reaction_overlay.runtime",
+            0,
+            "allowed_mask",
+            i(&custom["runtime"], "allowed_mask"),
+            i64::from(allowed_mask),
+        );
+        assert_eq!(
+            custom["runtime"]["check_slide"]
+                .as_bool()
+                .expect("runtime CheckSlide oracle value"),
+            reactions[0].insertion_check,
+            "PARITY DIVERGENCE in `custom_reaction_overlay.runtime` field `check_slide`",
+        );
+        assert_eq!(
+            reactions[1].kind,
+            crate::material::MaterialReactionKind::None,
+            "masked PxsMove must be a user no-op, not the natural Insert",
+        );
+        assert!(reactions[1].user_defined);
+        assert!(
+            reactions[0].insertion_check && reactions[2].insertion_check,
+            "allowed custom-reaction events retain CheckSlide=true",
+        );
+        expect_eq(
+            "custom_reaction_overlay.runtime",
+            0,
+            "insert_check_calls",
+            i(&custom["runtime"], "insert_check_calls"),
+            i64::from(reactions[1].insertion_check),
+        );
+    }
+
     // 16b7. dig_free: `C4Landscape::DigFree` (C4Landscape.cpp:1023-1044) walks a
     //       circle row by row, and two of its details are easy to "tidy" into
     //       something that digs a different shape.
@@ -7464,6 +8098,185 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         );
     }
 
+    // 16b9. dig_free_mat: `C4Landscape::DigFreeMat`
+    //       (C4Landscape.cpp:1012-1020) rejects an invalid material before its
+    //       x-major/y-minor rectangle walk, compares the exact
+    //       `Pix2Mat[GetPix]` material, and hands only matches to DigFreePix.
+    //       The exact read matters for a nonzero texmap slot that resolves to
+    //       MNone: the derived column material must not make it a match
+    //       (C4Landscape.h:173-176; C4Wrappers.h:120-128).
+    //
+    //       DigFreePix clears only a material with DigFree set, but its trailing
+    //       CheckInstabilityRange runs for every match (C4Landscape.cpp:918-925).
+    //       Thus a resolved DigFree=0 target leaves Surface8 untouched while
+    //       still exposing the rectangle order. ClearPix preserves IFT and
+    //       writes the default Tunnel byte for an IFT target
+    //       (C4Landscape.cpp:881-888), so every raw byte is compared.
+    for case in golden["dig_free_mat"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("dig_free_mat[{name}]");
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vacuum]
+            Name=Vacuum
+            Density=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            DigFree=1
+
+            [Material Sand]
+            Name=Sand
+            Density=50
+            DigFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+            DigFree=1
+
+            [Material Tunnel]
+            Name=Tunnel
+            Density=0
+
+            [Material Undiggable]
+            Name=Undiggable
+            Density=100
+            DigFree=0
+            Instable=1
+            "#,
+        )
+        .expect("DigFreeMat oracle materials parse");
+
+        let width = i(case, "width") as u32;
+        let height = i(case, "height") as u32;
+        let initial_bytes = case["initial_bytes"]
+            .as_array()
+            .expect("dig_free_mat.initial_bytes is an array")
+            .iter()
+            .map(|byte| byte.as_u64().expect("DigFreeMat pixel byte") as u8)
+            .collect::<Vec<_>>();
+        let mut densities = vec![0; 128];
+        densities[1] = 25;
+        densities[2] = 50;
+        densities[3] = 100;
+        densities[5] = 100;
+        densities[6] = 100;
+        // Slot 7 is deliberately unresolved in the normal case while still
+        // carrying solid density, so the column fallback would answer Granite.
+        densities[7] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Water".to_string());
+        material_names[2] = Some("Sand".to_string());
+        material_names[3] = Some("Granite".to_string());
+        material_names[4] = Some("Tunnel".to_string());
+        material_names[5] = Some("Granite".to_string());
+        material_names[6] = Some("Undiggable".to_string());
+        material_names[7] = Some("Ghost".to_string());
+        let grid = PixelGrid::new(
+            width,
+            height,
+            initial_bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        let mut landscape = Landscape::flat(width, height as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(height as i32);
+        engine.set_landscape(landscape);
+
+        let granite = engine
+            .materials
+            .id_of("Granite")
+            .expect("DigFreeMat Granite exists");
+        engine
+            .landscape
+            .as_mut()
+            .expect("DigFreeMat landscape exists")
+            .set_default_solid_material(Some(granite));
+
+        let material_index = i(case, "material") as usize;
+        let material =
+            crate::material::MaterialId::new(material_index).expect("DigFreeMat material id fits");
+        if engine.materials.get_by_id(material).is_none() {
+            // Reproduce the stale Pix2Mat integer in the C++ invalid-material
+            // row. Engine::set_landscape normally resolves only loaded names,
+            // so this test-only remap deliberately carries the invalid id.
+            let loaded = engine.materials.clone();
+            engine
+                .landscape
+                .as_mut()
+                .expect("DigFreeMat landscape exists")
+                .resolve_grid_materials(|name| {
+                    if name == "Ghost" {
+                        Some(material)
+                    } else {
+                        loaded.id_of(name)
+                    }
+                });
+        }
+
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow_mut().clear());
+        engine.dig_free_material_rect(
+            crate::Vector2::new(i(case, "tx") as i32, i(case, "ty") as i32),
+            i(case, "wdt") as i32,
+            i(case, "hgt") as i32,
+            material,
+        );
+
+        let expected_bytes = case["final_bytes"]
+            .as_array()
+            .expect("dig_free_mat.final_bytes is an array");
+        let landscape = engine.landscape().expect("DigFreeMat landscape remains");
+        for (index, expected) in expected_bytes.iter().enumerate() {
+            let x = index as i32 % width as i32;
+            let y = index as i32 / width as i32;
+            expect_eq(
+                &label,
+                index,
+                "surface8_byte",
+                expected.as_i64().expect("golden DigFreeMat pixel byte"),
+                i64::from(
+                    landscape
+                        .grid_byte_at(x, y)
+                        .unwrap_or_else(|| panic!("DigFreeMat pixel ({x},{y}) exists")),
+                ),
+            );
+        }
+
+        let probes =
+            crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow().clone());
+        let probe_stride = i(case, "probe_stride") as usize;
+        assert_ne!(probe_stride, 0, "{label} probe stride is nonzero");
+        assert_eq!(
+            probes.len() % probe_stride,
+            0,
+            "PARITY DIVERGENCE in `{label}` field `probe_stride`: {} lower-level probes cannot be grouped by C++ stride {probe_stride}",
+            probes.len(),
+        );
+        let direct_probes = probes
+            .chunks(probe_stride)
+            .map(|chunk| format!("{},{}", chunk[0].0, chunk[0].1))
+            .collect::<Vec<_>>();
+        expect_eq(
+            &label,
+            0,
+            "probe_count",
+            i(case, "probe_count"),
+            direct_probes.len() as i64,
+        );
+        assert_eq!(
+            case["probe_order"].as_str().unwrap_or(""),
+            direct_probes.join(";"),
+            "PARITY DIVERGENCE in `{label}` field `probe_order`",
+        );
+    }
+
     // 16b6. extract_material: `C4Landscape::ExtractMaterial` (C4Landscape.cpp:
     //       1191-1199) and the `FindMatTop` walk it depends on
     //       (C4Landscape.cpp:1161-1189).
@@ -7556,39 +8369,73 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         engine.set_landscape(landscape);
 
         let (fx, fy) = (i(case, "fx") as i32, i(case, "fy") as i32);
-        let materials = engine.materials.clone();
-        let probe = engine
-            .landscape
-            .as_mut()
-            .and_then(|landscape| landscape.extract_material_probe(fx, fy, &materials));
+        let before = landscape_material_snapshot(&engine, WDT, HGT);
+        clear_instability_probe_trace();
+        let extracted = engine.extract_material(fx, fy);
+        let changes = landscape_material_changes(&before, &engine, WDT, HGT);
+        let cleared = changes
+            .iter()
+            .find(|(_, _, before, after)| before.is_some() && after.is_none());
+        let lower_probes = take_instability_probe_trace();
+        const PROBE_STRIDE: usize = 5;
+        assert_eq!(
+            lower_probes.len() % PROBE_STRIDE,
+            0,
+            "PARITY DIVERGENCE in `{label}`: ExtractMaterial lower-level instability probes do not form C++ CheckInstabilityRange calls",
+        );
+        let direct_probes = lower_probes
+            .chunks(PROBE_STRIDE)
+            .map(|chunk| (chunk[0].0, chunk[0].1))
+            .collect::<Vec<_>>();
 
         expect_eq(
             &label,
             0,
             "result",
             i(case, "result"),
-            probe.map_or(-1, |(material, _, _)| material.index() as i64),
+            extracted.map_or(-1, |material| material.index() as i64),
         );
         expect_eq(
             &label,
             0,
             "cleared",
             i(case, "cleared"),
-            i64::from(probe.is_some()),
+            i64::from(cleared.is_some()),
         );
         expect_eq(
             &label,
             0,
             "clear_x",
             i(case, "clear_x"),
-            probe.map_or(-1, |(_, x, _)| i64::from(x)),
+            cleared.map_or(-1, |(x, _, _, _)| i64::from(*x)),
         );
         expect_eq(
             &label,
             0,
             "clear_y",
             i(case, "clear_y"),
-            probe.map_or(-1, |(_, _, y)| i64::from(y)),
+            cleared.map_or(-1, |(_, y, _, _)| i64::from(*y)),
+        );
+        expect_eq(
+            &label,
+            0,
+            "probes",
+            i(case, "probes"),
+            direct_probes.len() as i64,
+        );
+        expect_eq(
+            &label,
+            0,
+            "probe_x",
+            i(case, "probe_x"),
+            direct_probes.first().map_or(-1, |(x, _)| i64::from(*x)),
+        );
+        expect_eq(
+            &label,
+            0,
+            "probe_y",
+            i(case, "probe_y"),
+            direct_probes.first().map_or(-1, |(_, y)| i64::from(*y)),
         );
     }
 
@@ -7707,8 +8554,8 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
                 .expect("oracle insert material"),
             i(case, "tx") as i32,
             i(case, "ty") as i32,
-            0,
-            0,
+            i(case, "vx") as i32,
+            i(case, "vy") as i32,
         );
 
         // The delta is emitted in row-major order as `y,x,mat` triples, which
@@ -7771,6 +8618,41 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i(case, "pxs_y"),
             pxs.first().map_or(-1, |pixel| i64::from(fixtoi(pixel.y))),
         );
+        expect_eq(
+            &label,
+            0,
+            "pxs_mat",
+            i(case, "pxs_mat"),
+            pxs.first().map_or(-1, |pixel| pixel.mat.index() as i64),
+        );
+        expect_eq(
+            &label,
+            0,
+            "pxs_x_raw",
+            i(case, "pxs_x_raw"),
+            pxs.first().map_or(-1, |pixel| pixel.x.val() as i64),
+        );
+        expect_eq(
+            &label,
+            0,
+            "pxs_y_raw",
+            i(case, "pxs_y_raw"),
+            pxs.first().map_or(-1, |pixel| pixel.y.val() as i64),
+        );
+        expect_eq(
+            &label,
+            0,
+            "pxs_xdir",
+            i(case, "pxs_xdir"),
+            pxs.first().map_or(-1, |pixel| pixel.xdir.val() as i64),
+        );
+        expect_eq(
+            &label,
+            0,
+            "pxs_ydir",
+            i(case, "pxs_ydir"),
+            pxs.first().map_or(-1, |pixel| pixel.ydir.val() as i64),
+        );
     }
 
     // 16b4. corrode_arm: `mrfCorrode`'s movement arm (C4Material.cpp:691-745),
@@ -7825,13 +8707,13 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         const WDT: u32 = 16;
         const HGT: u32 = 12;
         const GRANITE: u8 = 3;
-        const PX: i32 = 8;
-        const PY: i32 = 9;
+        let px = i(case, "x0") as i32;
+        let py = i(case, "y0") as i32;
 
         let mut bytes = vec![0u8; WDT as usize * HGT as usize];
         for gy in 0..HGT as usize {
             for gx in 0..WDT as usize {
-                if gx != PX as usize {
+                if gx != px as usize {
                     bytes[gy * WDT as usize + gx] = GRANITE;
                 }
             }
@@ -7839,9 +8721,13 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         for gx in 0..WDT as usize {
             bytes[10 * WDT as usize + gx] = GRANITE;
         }
-        // The corroded pixel is the landscape cell the arm clears, so it has to
-        // hold a material for the clear to be observable.
-        bytes[PY as usize * WDT as usize + PX as usize] = GRANITE;
+        // Successful corrosion needs a real pixel to clear. On the rows where
+        // C++ instead records an InsertMaterial call, leave the target cell as
+        // sky so the port's real insertion becomes observable rather than
+        // being refused by the denser Granite collision material passed below.
+        if i(case, "inserted") == 0 {
+            bytes[py as usize * WDT as usize + px as usize] = GRANITE;
+        }
 
         let mut densities = vec![0; 128];
         densities[1] = 25;
@@ -7855,6 +8741,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
 
         let mut engine = Engine::with_seed(0);
         engine.configure_materials_from_library(&library);
+        register_smoke_probe(&mut engine);
         engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
         let mut landscape = Landscape::flat(WDT, HGT as i32);
         landscape.set_pixel_grid(grid);
@@ -7866,7 +8753,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
 
         let material_before = engine
             .landscape()
-            .and_then(|landscape| landscape.border_material_at(PX, PY));
+            .and_then(|landscape| landscape.border_material_at(px, py));
 
         let user_defined = case["user_defined"].as_bool().unwrap_or(false);
         let pxs_mat = i(case, "pxs_mat") as i32;
@@ -7883,19 +8770,20 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         };
         let mut pixel = crate::pxs::Pxs {
             mat: crate::material::MaterialId::new(pxs_mat as usize).expect("oracle pxs material"),
-            x: itofix(PX),
-            y: itofix(PY),
+            x: itofix(px),
+            y: itofix(py),
             xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
             ydir: C4Fixed::from_raw(i(case, "ydir0") as i32),
         };
-        let (mut x, mut y) = (PX, PY);
+        let (mut x, mut y) = (px, py);
         let mut pos_changed = false;
+        clear_instability_probe_trace();
         let handled = engine.execute_pxs_reaction(
             reaction,
             &mut x,
             &mut y,
-            PX,
-            PY,
+            px,
+            py,
             &mut pixel,
             crate::material::MaterialId::new(i(case, "ls_mat") as usize),
             match i(case, "event") {
@@ -7909,8 +8797,28 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         // The clear is observable as the landscape pixel going empty.
         let material_after = engine
             .landscape()
-            .and_then(|landscape| landscape.border_material_at(PX, PY));
+            .and_then(|landscape| landscape.border_material_at(px, py));
         let cleared = i64::from(material_before.is_some() && material_after != material_before);
+        let lower_probes = take_instability_probe_trace();
+        const PROBE_STRIDE: usize = 5;
+        assert_eq!(
+            lower_probes.len() % PROBE_STRIDE,
+            0,
+            "PARITY DIVERGENCE in `{label}`: Corrode lower-level instability probes do not form C++ CheckInstabilityRange calls",
+        );
+        let instability_probes = lower_probes.len() / PROBE_STRIDE;
+        let sounds = engine
+            .pending_audio
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    crate::AudioCommand::PlaySoundAt { name, .. } if name == "Corrode"
+                )
+            })
+            .count();
+        let inserted =
+            i64::from(material_before != Some(pixel.mat) && material_after == Some(pixel.mat));
 
         expect_eq(
             &label,
@@ -7920,6 +8828,33 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i64::from(handled),
         );
         expect_eq(&label, 0, "cleared", i(case, "cleared"), cleared);
+        expect_eq(&label, 0, "x", i(case, "x"), i64::from(x));
+        expect_eq(&label, 0, "y", i(case, "y"), i64::from(y));
+        expect_eq(&label, 0, "xdir", i(case, "xdir"), pixel.xdir.val() as i64);
+        expect_eq(&label, 0, "ydir", i(case, "ydir"), pixel.ydir.val() as i64);
+        expect_eq(
+            &label,
+            0,
+            "pos_changed",
+            i64::from(case["pos_changed"].as_bool().unwrap_or(false)),
+            i64::from(pos_changed),
+        );
+        expect_eq(
+            &label,
+            0,
+            "instability_probes",
+            i(case, "instability_probes"),
+            instability_probes as i64,
+        );
+        expect_eq(
+            &label,
+            0,
+            "smoke",
+            i(case, "smoke"),
+            smoke_probe_count(&engine),
+        );
+        expect_eq(&label, 0, "sounds", i(case, "sounds"), sounds as i64);
+        expect_eq(&label, 0, "inserted", i(case, "inserted"), inserted);
         expect_eq(
             &label,
             0,
@@ -7927,14 +8862,15 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i(case, "draws"),
             i64::from(engine.rng.count - draws_before),
         );
+        expect_rng_state(&label, case, &engine.rng);
     }
 
     // 16b3. poof_arm: `mrfPoof`'s movement arm (C4Material.cpp:663-688).
     //
-    //       `material_poof_reaction` pins the two Rnd3 draws, but it re-derives
-    //       them from the seed rather than running the reaction, and every one
-    //       of its rows is `handled: 1` — so the **unhandled** outcome and the
-    //       extraction itself were never compared against the port at all.
+    //       `material_poof_reaction` runs the position and mass-move arms and
+    //       pins their extraction plus both Rnd3 effects, but every row is
+    //       `handled: 1`. The movement-only insertion check is where the
+    //       **unhandled** outcome lives, so it needs this separate matrix.
     //
     //       `meePXSMove` is where the unhandled outcome lives. A non-user
     //       reaction runs `mrfInsertCheck` first, and a splash that prevents
@@ -7976,13 +8912,13 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         const WDT: u32 = 16;
         const HGT: u32 = 12;
         const GRANITE: u8 = 3;
-        const PX: i32 = 8;
-        const PY: i32 = 9;
+        let px = i(case, "x0") as i32;
+        let py = i(case, "y0") as i32;
 
         let mut bytes = vec![0u8; WDT as usize * HGT as usize];
         for gy in 0..HGT as usize {
             for gx in 0..WDT as usize {
-                if gx != PX as usize {
+                if gx != px as usize {
                     bytes[gy * WDT as usize + gx] = GRANITE;
                 }
             }
@@ -7993,7 +8929,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         // The arm extracts at the LANDSCAPE position, which the oracle passes
         // as (iLSPosX, iLSPosY) = the pixel's own cell. Put a material there so
         // the extraction is observable as the pixel going empty.
-        bytes[PY as usize * WDT as usize + PX as usize] = GRANITE;
+        bytes[py as usize * WDT as usize + px as usize] = GRANITE;
 
         let mut densities = vec![0; 128];
         densities[1] = 25;
@@ -8016,9 +8952,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         engine.rng.randomize3();
         let draws_before = engine.rng.count;
 
-        let material_before = engine
-            .landscape()
-            .and_then(|landscape| landscape.border_material_at(PX, PY));
+        let before = landscape_material_snapshot(&engine, WDT, HGT);
 
         let reaction = crate::material::MaterialReaction {
             kind: crate::material::MaterialReactionKind::Poof,
@@ -8028,19 +8962,19 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         let mut pixel = crate::pxs::Pxs {
             mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
                 .expect("oracle pxs material"),
-            x: itofix(PX),
-            y: itofix(PY),
+            x: itofix(px),
+            y: itofix(py),
             xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
             ydir: C4Fixed::from_raw(i(case, "ydir0") as i32),
         };
-        let (mut x, mut y) = (PX, PY);
+        let (mut x, mut y) = (px, py);
         let mut pos_changed = false;
         let handled = engine.execute_pxs_reaction(
             reaction,
             &mut x,
             &mut y,
-            PX,
-            PY,
+            px,
+            py,
             &mut pixel,
             crate::material::MaterialId::new(i(case, "ls_mat") as usize),
             match i(case, "event") {
@@ -8051,11 +8985,14 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             &mut pos_changed,
         );
 
-        // The extraction is observable as the landscape pixel going empty.
-        let material_after = engine
-            .landscape()
-            .and_then(|landscape| landscape.border_material_at(PX, PY));
-        let extracted = i64::from(material_before.is_some() && material_after != material_before);
+        // The extraction is observable as one landscape pixel going empty;
+        // deriving its coordinates from the complete delta keeps the oracle's
+        // ExtractMaterial recorder fields load-bearing.
+        let changes = landscape_material_changes(&before, &engine, WDT, HGT);
+        let extracted = changes
+            .iter()
+            .filter(|(_, _, before, after)| before.is_some() && after.is_none())
+            .collect::<Vec<_>>();
 
         expect_eq(
             &label,
@@ -8064,7 +9001,31 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i64::from(case["handled"].as_bool().unwrap_or(false)),
             i64::from(handled),
         );
-        expect_eq(&label, 0, "extractions", i(case, "extractions"), extracted);
+        expect_eq(
+            &label,
+            0,
+            "extractions",
+            i(case, "extractions"),
+            extracted.len() as i64,
+        );
+        expect_eq(&label, 0, "x", i(case, "x"), i64::from(x));
+        expect_eq(&label, 0, "y", i(case, "y"), i64::from(y));
+        expect_eq(&label, 0, "xdir", i(case, "xdir"), pixel.xdir.val() as i64);
+        expect_eq(&label, 0, "ydir", i(case, "ydir"), pixel.ydir.val() as i64);
+        expect_eq(
+            &label,
+            0,
+            "extract_x",
+            i(case, "extract_x"),
+            extracted.first().map_or(-1, |(x, _, _, _)| i64::from(*x)),
+        );
+        expect_eq(
+            &label,
+            0,
+            "extract_y",
+            i(case, "extract_y"),
+            extracted.first().map_or(-1, |(_, y, _, _)| i64::from(*y)),
+        );
         expect_eq(
             &label,
             0,
@@ -8072,6 +9033,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i(case, "draws"),
             i64::from(engine.rng.count - draws_before),
         );
+        expect_rng_state(&label, case, &engine.rng);
         expect_eq(
             &label,
             0,
@@ -8132,13 +9094,13 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         const WDT: u32 = 16;
         const HGT: u32 = 12;
         const GRANITE: u8 = 3;
-        const PX: i32 = 8;
-        const PY: i32 = 9;
+        let px = i(case, "x0") as i32;
+        let py = i(case, "y0") as i32;
 
         let mut bytes = vec![0u8; WDT as usize * HGT as usize];
         for gy in 0..HGT as usize {
             for gx in 0..WDT as usize {
-                if gx != PX as usize {
+                if gx != px as usize {
                     bytes[gy * WDT as usize + gx] = GRANITE;
                 }
             }
@@ -8147,7 +9109,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             bytes[10 * WDT as usize + gx] = GRANITE;
         }
         // The target pixel is whatever this row is about.
-        bytes[PY as usize * WDT as usize + PX as usize] = i(case, "target_mat") as u8;
+        bytes[py as usize * WDT as usize + px as usize] = i(case, "target_mat") as u8;
 
         let mut densities = vec![0; 128];
         densities[1] = 25;
@@ -8180,7 +9142,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             engine
                 .spawn_object(
                     crate::SpawnConfig::new(crate::FIRE_DEFINITION_ID)
-                        .with_position(crate::Vector2::new(PX, PY)),
+                        .with_position(crate::Vector2::new(px, py)),
                 )
                 .expect("the suppressing FLAM spawns");
         }
@@ -8194,6 +9156,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             .iter()
             .filter(|object| object.definition_id == crate::FIRE_DEFINITION_ID)
             .count();
+        let landscape_before = landscape_material_snapshot(&engine, WDT, HGT);
 
         // mrfIncinerate is not available as a user reaction (C++ asserts it),
         // so there is no user-defined row.
@@ -8205,19 +9168,21 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         let mut pixel = crate::pxs::Pxs {
             mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
                 .expect("oracle pxs material"),
-            x: itofix(PX),
-            y: itofix(PY),
+            x: itofix(px),
+            y: itofix(py),
             xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
             ydir: C4Fixed::from_raw(i(case, "ydir0") as i32),
         };
-        let (mut x, mut y) = (PX, PY);
+        let (mut x, mut y) = (px, py);
         let mut pos_changed = false;
+        crate::engine_landscape_ops::MATERIAL_INCINERATE_PROBES
+            .with(|probes| probes.borrow_mut().clear());
         let handled = engine.execute_pxs_reaction(
             reaction,
             &mut x,
             &mut y,
-            PX,
-            PY,
+            px,
+            py,
             &mut pixel,
             crate::material::MaterialId::new(i(case, "ls_mat") as usize),
             match i(case, "event") {
@@ -8235,6 +9200,19 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             .filter(|object| object.definition_id == crate::FIRE_DEFINITION_ID)
             .count()
             - flams_before;
+        let incinerate_probes = crate::engine_landscape_ops::MATERIAL_INCINERATE_PROBES
+            .with(|probes| std::mem::take(&mut *probes.borrow_mut()));
+        assert!(
+            incinerate_probes
+                .iter()
+                .all(|&(probe_x, probe_y)| (probe_x, probe_y) == (x, y)),
+            "PARITY DIVERGENCE in `{label}`: Incinerate probe coordinates differ from the reaction's final position",
+        );
+        let landscape_changes = landscape_material_changes(&landscape_before, &engine, WDT, HGT);
+        let inserted = landscape_changes
+            .iter()
+            .filter(|(_, _, before, after)| *before != Some(pixel.mat) && *after == Some(pixel.mat))
+            .collect::<Vec<_>>();
 
         expect_eq(
             &label,
@@ -8249,6 +9227,44 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             "flams_created",
             i(case, "flams_created"),
             flams_created as i64,
+        );
+        expect_eq(
+            &label,
+            0,
+            "incinerate_calls",
+            i(case, "incinerate_calls"),
+            incinerate_probes.len() as i64,
+        );
+        expect_eq(
+            &label,
+            0,
+            "inserted",
+            i(case, "inserted"),
+            inserted.len() as i64,
+        );
+        expect_eq(
+            &label,
+            0,
+            "inserted_mat",
+            i(case, "inserted_mat"),
+            inserted
+                .first()
+                .and_then(|(_, _, _, material)| *material)
+                .map_or(-1, |material| material.index() as i64),
+        );
+        expect_eq(
+            &label,
+            0,
+            "inserted_x",
+            i(case, "inserted_x"),
+            inserted.first().map_or(-1, |(x, _, _, _)| i64::from(*x)),
+        );
+        expect_eq(
+            &label,
+            0,
+            "inserted_y",
+            i(case, "inserted_y"),
+            inserted.first().map_or(-1, |(_, y, _, _)| i64::from(*y)),
         );
         expect_eq(&label, 0, "x", i(case, "x"), i64::from(x));
         expect_eq(&label, 0, "y", i(case, "y"), i64::from(y));
@@ -8268,6 +9284,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i(case, "draws"),
             i64::from(engine.rng.count - draws_before),
         );
+        expect_rng_state(&label, case, &engine.rng);
     }
 
     // 16c. insert_check: `mrfInsertCheck` (C4Material.cpp:567-609) with the
@@ -8336,6 +9353,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
 
         let mut engine = Engine::with_seed(0);
         engine.configure_materials_from_library(&library);
+        register_smoke_probe(&mut engine);
         engine.set_physics(PhysicsSettings::new(100, 1000, -1000));
         let mut landscape = Landscape::flat(WDT, HGT as i32);
         landscape.set_pixel_grid(grid);
@@ -8382,10 +9400,18 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         expect_eq(
             &label,
             0,
+            "smoke",
+            i(case, "smoke"),
+            smoke_probe_count(&engine),
+        );
+        expect_eq(
+            &label,
+            0,
             "draws",
             i(case, "draws"),
             i64::from(engine.rng.count - draws_before),
         );
+        expect_rng_state(&label, case, &engine.rng);
     }
 
     // 16d. convert_check: `mrfConvert` (C4Material.cpp:626-661) with the
@@ -8441,8 +9467,10 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
 
         const WDT: u32 = 16;
         const HGT: u32 = 12;
-        const PX: i32 = 8;
-        const PY: i32 = 6;
+        let x0 = i(case, "x0") as i32;
+        let y0 = i(case, "y0") as i32;
+        let xdir0 = C4Fixed::from_raw(i(case, "xdir0") as i32);
+        let ydir0 = C4Fixed::from_raw(i(case, "ydir0") as i32);
         let user_defined = case["user_defined"].as_bool().unwrap_or(false);
         // Hardcoded conversions read the depth off the material; user ones
         // carry their own, and every user case here leaves it at 0.
@@ -8461,10 +9489,10 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         let mut bytes = vec![0u8; WDT as usize * HGT as usize];
         if event == MaterialInteractionEvent::MassMove {
             // The mass-move entry derives its own reaction from the landscape
-            // material under the mover, so the pixel goes at (PX, PY).
-            bytes[PY as usize * WDT as usize + PX as usize] = ls_mat as u8;
+            // material under the mover, so the pixel goes at (x0, y0).
+            bytes[y0 as usize * WDT as usize + x0 as usize] = ls_mat as u8;
         } else if case["matching_above"].as_bool().unwrap_or(false) && depth != 0 {
-            bytes[(PY - depth) as usize * WDT as usize + PX as usize] = ls_mat as u8;
+            bytes[(y0 - depth) as usize * WDT as usize + x0 as usize] = ls_mat as u8;
         }
         let mut densities = vec![0; 128];
         densities[ls_mat] = 50;
@@ -8478,12 +9506,15 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         landscape.set_pixel_grid(grid);
         landscape.set_world_height(HGT as i32);
         engine.set_landscape(landscape);
+        engine.rng = LcgRng::new(i(case, "seed") as u32);
+        engine.rng.randomize3();
+        let draws_before = engine.rng.count;
 
         let pxs_mat = crate::material::MaterialId::new(i(case, "pxs_mat0") as usize)
             .expect("oracle pxs material");
 
         if event == MaterialInteractionEvent::MassMove {
-            let execution = engine.execute_mass_move_reaction(pxs_mat, PX, PY, PX, PY);
+            let execution = engine.execute_mass_move_reaction(pxs_mat, x0, y0, x0, y0);
             let (created, created_mat) = match execution {
                 crate::material::MaterialReactionExecution::Converted(mat) => {
                     (1, mat.index() as i64)
@@ -8499,6 +9530,32 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
                     execution,
                     crate::material::MaterialReactionExecution::Unhandled
                 )),
+            );
+            expect_eq(&label, 0, "x", i(case, "x"), i64::from(x0));
+            expect_eq(&label, 0, "y", i(case, "y"), i64::from(y0));
+            expect_eq(&label, 0, "xdir", i(case, "xdir"), xdir0.val() as i64);
+            expect_eq(&label, 0, "ydir", i(case, "ydir"), ydir0.val() as i64);
+            expect_eq(
+                &label,
+                0,
+                "pos_changed",
+                i64::from(case["pos_changed"].as_bool().unwrap_or(false)),
+                0,
+            );
+            expect_eq(
+                &label,
+                0,
+                "draws",
+                i(case, "draws"),
+                i64::from(engine.rng.count - draws_before),
+            );
+            expect_rng_state(&label, case, &engine.rng);
+            expect_eq(
+                &label,
+                0,
+                "pxs_mat",
+                i(case, "pxs_mat"),
+                pxs_mat.index() as i64,
             );
             expect_eq(&label, 0, "pxs_created", i(case, "pxs_created"), created);
             expect_eq(
@@ -8529,19 +9586,19 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         };
         let mut pixel = crate::pxs::Pxs {
             mat: pxs_mat,
-            x: itofix(PX),
-            y: itofix(PY),
-            xdir: itofix_prec(1, 2),
-            ydir: itofix_prec(1, 2),
+            x: itofix(x0),
+            y: itofix(y0),
+            xdir: xdir0,
+            ydir: ydir0,
         };
-        let (mut x, mut y) = (PX, PY);
+        let (mut x, mut y) = (x0, y0);
         let mut pos_changed = false;
         let handled = engine.execute_pxs_reaction(
             reaction,
             &mut x,
             &mut y,
-            PX,
-            PY,
+            x0,
+            y0,
             &mut pixel,
             crate::material::MaterialId::new(ls_mat),
             event,
@@ -8555,6 +9612,8 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i64::from(case["handled"].as_bool().unwrap_or(false)),
             i64::from(handled),
         );
+        expect_eq(&label, 0, "x", i(case, "x"), i64::from(x));
+        expect_eq(&label, 0, "y", i(case, "y"), i64::from(y));
         expect_eq(&label, 0, "xdir", i(case, "xdir"), pixel.xdir.val() as i64);
         expect_eq(&label, 0, "ydir", i(case, "ydir"), pixel.ydir.val() as i64);
         expect_eq(
@@ -8563,6 +9622,29 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             "pos_changed",
             i64::from(case["pos_changed"].as_bool().unwrap_or(false)),
             i64::from(pos_changed),
+        );
+        expect_eq(
+            &label,
+            0,
+            "draws",
+            i(case, "draws"),
+            i64::from(engine.rng.count - draws_before),
+        );
+        expect_rng_state(&label, case, &engine.rng);
+        let created = engine.pxs_system.iter().collect::<Vec<_>>();
+        expect_eq(
+            &label,
+            0,
+            "pxs_created",
+            i(case, "pxs_created"),
+            created.len() as i64,
+        );
+        expect_eq(
+            &label,
+            0,
+            "pxs_created_mat",
+            i(case, "pxs_created_mat"),
+            created.first().map_or(-1, |pixel| pixel.mat.index() as i64),
         );
         // C++ assigns the target id *before* validating it, so a failed
         // conversion leaves `iPxsMat` holding an unloaded index
@@ -8627,14 +9709,14 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         const WDT: u32 = 16;
         const HGT: u32 = 12;
         const GRANITE: u8 = 3;
-        const PX: i32 = 8;
-        const PY: i32 = 9;
+        let px = i(case, "x0") as i32;
+        let py = i(case, "y0") as i32;
         // Boxed in over a solid floor, so `FindMatSlide` has no target and the
         // check's verdict is decided by the splash arm alone.
         let mut bytes = vec![0u8; WDT as usize * HGT as usize];
         for gy in 0..HGT as usize {
             for gx in 0..WDT as usize {
-                if gx != PX as usize {
+                if gx != px as usize {
                     bytes[gy * WDT as usize + gx] = GRANITE;
                 }
             }
@@ -8662,6 +9744,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         engine.rng = LcgRng::new(i(case, "seed") as u32);
         engine.rng.randomize3();
         let draws_before = engine.rng.count;
+        let landscape_before = landscape_material_snapshot(&engine, WDT, HGT);
 
         let reaction = crate::material::MaterialReaction {
             kind: crate::material::MaterialReactionKind::Insert,
@@ -8671,19 +9754,19 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         let mut pixel = crate::pxs::Pxs {
             mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
                 .expect("oracle pxs material"),
-            x: itofix(PX),
-            y: itofix(PY),
+            x: itofix(px),
+            y: itofix(py),
             xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
             ydir: C4Fixed::from_raw(i(case, "ydir0") as i32),
         };
-        let (mut x, mut y) = (PX, PY);
+        let (mut x, mut y) = (px, py);
         let mut pos_changed = false;
         let handled = engine.execute_pxs_reaction(
             reaction,
             &mut x,
             &mut y,
-            PX,
-            PY,
+            px,
+            py,
             &mut pixel,
             crate::material::MaterialId::new(i(case, "ls_mat") as usize),
             match i(case, "event") {
@@ -8719,33 +9802,48 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i(case, "draws"),
             i64::from(engine.rng.count - draws_before),
         );
+        expect_rng_state(&label, case, &engine.rng);
         // The oracle stubs `InsertMaterial` to a recorder — that mutation is a
         // whole landscape operation of its own and earns its own section — so
-        // what is compared here is that the port reached it with the same
-        // material at the same pixel. The port runs the real insertion, and
-        // this fixture's boxed-in column leaves the material exactly where it
-        // was placed.
-        let landed = engine
-            .landscape
-            .as_ref()
-            .and_then(|landscape| {
-                landscape.material_at(i(case, "inserted_x") as i32, i(case, "inserted_y") as i32)
-            })
-            .map(|id| id.index() as i64);
-        if i(case, "inserted") == 0 {
-            // Read the pixel itself, not the recorder's unset (-1, -1).
-            let at_pixel = engine
-                .landscape
-                .as_ref()
-                .and_then(|landscape| landscape.material_at(PX, PY));
-            expect_eq(&label, 0, "inserted", 0, i64::from(at_pixel.is_some()));
-        } else {
+        // the fixture makes the real insertion a single visible landscape
+        // delta. Comparing the complete delta catches an extra or misplaced
+        // insertion as well as a missing call.
+        let changes = landscape_material_changes(&landscape_before, &engine, WDT, HGT);
+        expect_eq(
+            &label,
+            0,
+            "inserted",
+            i(case, "inserted"),
+            changes.len() as i64,
+        );
+        if let Some((inserted_x, inserted_y, before, after)) = changes.first().copied() {
+            expect_eq(
+                &label,
+                0,
+                "inserted_before",
+                -1,
+                before.map_or(-1, |id| id.index() as i64),
+            );
             expect_eq(
                 &label,
                 0,
                 "inserted_mat",
                 i(case, "inserted_mat"),
-                landed.unwrap_or(-1),
+                after.map_or(-1, |id| id.index() as i64),
+            );
+            expect_eq(
+                &label,
+                0,
+                "inserted_x",
+                i(case, "inserted_x"),
+                i64::from(inserted_x),
+            );
+            expect_eq(
+                &label,
+                0,
+                "inserted_y",
+                i(case, "inserted_y"),
+                i64::from(inserted_y),
             );
         }
     }

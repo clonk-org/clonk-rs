@@ -48,6 +48,9 @@
 //   * `C4PlayerList::GetCount` and the capacity block in `C4PlayerList::Join`
 //     are mechanically extracted; a linked-player scaffold records the exact
 //     admission boundary and too-many-player diagnostic argument.
+//   * The custom-material reaction overlay, SetMatReaction and mrfUserCheck are
+//     mechanically extracted from `C4Material.cpp`; a compact material cohort
+//     records target expansion, authored overwrite order and event masking.
 //   * The complete bottom/top/side DFA_FLIGHT arms of
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
@@ -6238,14 +6241,22 @@ static int32_t g_setpix = 0;
 static int32_t g_setpix_x = -1, g_setpix_y = -1, g_setpix_mat = -1;
 static int32_t g_pxs_created = 0;
 static int32_t g_pxs_x = -1, g_pxs_y = -1;
+static int32_t g_pxs_mat = -1;
+static int32_t g_pxs_x_raw = -1, g_pxs_y_raw = -1;
+static int32_t g_pxs_xdir = -1, g_pxs_ydir = -1;
 
 struct PxsStub
 {
-    void Create(int32_t, C4Fixed x, C4Fixed y, C4Fixed, C4Fixed)
+    void Create(int32_t mat, C4Fixed x, C4Fixed y, C4Fixed xdir, C4Fixed ydir)
     {
         g_pxs_created++;
+        g_pxs_mat = mat;
         g_pxs_x = fixtoi(x);
         g_pxs_y = fixtoi(y);
+        g_pxs_x_raw = x.val;
+        g_pxs_y_raw = y.val;
+        g_pxs_xdir = xdir.val;
+        g_pxs_ydir = ydir.val;
     }
 };
 
@@ -6436,9 +6447,10 @@ int32_t C4Landscape::GetMat(int32_t x, int32_t y) { return GBackMat(x, y); }
 
 } // namespace extract_material_check
 
-// C4Landscape::DigFree (src/C4Landscape.cpp:1023-1044) and DigFreePix
-// (src/C4Landscape.cpp:979-987), with DigFreeSinglePix from the header
-// (C4Landscape.h:255-259) beside them.
+// C4Landscape::DigFree (src/C4Landscape.cpp:962-983), DigFreeMat
+// (src/C4Landscape.cpp:1012-1020), and DigFreePix
+// (src/C4Landscape.cpp:918-925), with DigFreeSinglePix from the header
+// (src/C4Landscape.h:236-240) beside them.
 //
 // DigFree walks a circle row by row, and two of its details are easy to "tidy"
 // into something that digs a different shape:
@@ -6467,29 +6479,45 @@ namespace dig_free_check
 {
 
 constexpr int32_t GridWdt = 16, GridHgt = 12;
-static int32_t g_grid[GridHgt][GridWdt];
+constexpr uint8_t IFT = 0x80;
+constexpr uint8_t WaterPix = 1;
+constexpr uint8_t SandPix = 2;
+constexpr uint8_t GranitePix = 3;
+constexpr uint8_t TunnelPix = 4;
+constexpr uint8_t GraniteAltPix = 5;
+constexpr uint8_t UndiggablePix = 6;
+constexpr uint8_t UnresolvedPix = 7;
+static uint8_t g_grid[GridHgt][GridWdt];
+static int32_t g_width = GridWdt, g_height = GridHgt;
 
 struct MaterialCore
 {
     int32_t Density;
     int32_t DigFree;
 };
-static MaterialCore Map[4] = {
+static MaterialCore Map[6] = {
     {0, 0},     // Vacuum
     {25, 1},    // Water
     {50, 1},    // Sand
     {100, 1},   // Granite -- diggable, so the circle actually clears
+    {0, 0},     // Tunnel
+    {100, 0},   // Undiggable -- still reaches DigFreePix and its probe
 };
 constexpr int32_t MVehic = 3;
+constexpr int32_t MTunnel = 4;
+constexpr int32_t MUndiggable = 5;
 
 constexpr int32_t MNone = -1;
-static bool MatValid(int32_t mat) { return mat >= 0 && mat < 4; }
+static int32_t g_unresolved_material = MNone;
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 6; }
 
 // DigFreePix fires the instability probe once per pixel it is handed, whether or
 // not anything cleared. It is recorded so the extracted code has somewhere to
-// call, but not emitted: see the note above printDigFreeCases.
+// call. DigFree's circle section still leaves it out, while DigFreeMat emits the
+// direct call coordinates to pin that rectangle's x-major/y-minor walk.
 static int32_t g_instability_probes = 0;
 static int32_t g_cleared = 0;
+static std::vector<std::pair<int32_t, int32_t>> g_instability_probe_positions;
 
 // pByObj is null in every case here, so the material-contents accounting and
 // the Tick5 material cast are both unreachable; they have callers of their own.
@@ -6508,14 +6536,16 @@ struct C4MaterialMapStub
 struct C4Landscape
 {
     int32_t Width = GridWdt, Height = GridHgt;
+    uint8_t GetPix(int32_t x, int32_t y);
     int32_t GetMat(int32_t x, int32_t y);
     int32_t GetDensity(int32_t x, int32_t y);
-    void CheckInstabilityRange(int32_t, int32_t) { g_instability_probes++; }
-    void ClearPix(int32_t x, int32_t y)
+    void CheckInstabilityRange(int32_t x, int32_t y)
     {
-        g_cleared++;
-        if (x >= 0 && x < GridWdt && y >= 0 && y < GridHgt) g_grid[y][x] = 0;
+        g_instability_probes++;
+        g_instability_probe_positions.emplace_back(x, y);
     }
+    bool SetPix(int32_t x, int32_t y, uint8_t pixel);
+    bool ClearPix(int32_t x, int32_t y);
     int32_t DigFreePix(int32_t tx, int32_t ty);
     void DigFreeSinglePix(int32_t x, int32_t y, int32_t dx, int32_t dy)
     {
@@ -6523,6 +6553,7 @@ struct C4Landscape
             DigFreePix(x, y);
     }
     void DigFree(int32_t tx, int32_t ty, int32_t rad, bool fRequest, C4Object *pByObj);
+    void DigFreeMat(int32_t tx, int32_t ty, int32_t wdt, int32_t hgt, int32_t mat);
 };
 
 struct GameStub
@@ -6534,24 +6565,55 @@ struct GameStub
 static GameStub Game;
 
 // Sides and bottom closed, top open -- the default border.
-static int32_t GBackMat(int32_t x, int32_t y)
+uint8_t C4Landscape::GetPix(int32_t x, int32_t y)
 {
-    if (y < 0) return MNone; // TopOpen
-    if (x < 0 || x >= GridWdt || y >= GridHgt) return MVehic;
-    const int32_t mat = g_grid[y][x];
-    return mat ? mat : MNone;
+    if (y < 0) return 0; // TopOpen
+    if (x < 0 || x >= g_width || y >= g_height) return GranitePix; // MCVehic
+    return g_grid[y][x];
 }
 
-int32_t C4Landscape::GetMat(int32_t x, int32_t y) { return GBackMat(x, y); }
+static int32_t Pix2Mat(uint8_t pixel)
+{
+    switch (pixel & (IFT - 1))
+    {
+    case WaterPix: return 1;
+    case SandPix: return 2;
+    case GranitePix:
+    case GraniteAltPix: return 3;
+    case TunnelPix: return MTunnel;
+    case UndiggablePix: return MUndiggable;
+    case UnresolvedPix: return g_unresolved_material;
+    default: return MNone;
+    }
+}
+
+int32_t C4Landscape::GetMat(int32_t x, int32_t y) { return Pix2Mat(GetPix(x, y)); }
 
 int32_t C4Landscape::GetDensity(int32_t x, int32_t y)
 {
-    const int32_t mat = GBackMat(x, y);
+    const int32_t mat = GetMat(x, y);
     return mat < 0 ? 0 : Map[mat].Density;
 }
 
+bool C4Landscape::SetPix(int32_t x, int32_t y, uint8_t pixel)
+{
+    if (x < 0 || x >= g_width || y < 0 || y >= g_height) return false;
+    g_cleared++;
+    g_grid[y][x] = pixel;
+    return true;
+}
+
+static uint8_t Mat2PixColDefault(int32_t material)
+{
+    return material == MTunnel ? TunnelPix : 0;
+}
+
+#define GBackIFT(x, y) (GetPix((x), (y)) & IFT)
+#include "landscape_clear_pix.inc"
 #include "dig_free_pix.inc"
 #include "dig_free.inc"
+#include "dig_free_mat.inc"
+#undef GBackIFT
 
 } // namespace dig_free_check
 
@@ -6671,6 +6733,358 @@ static bool SEqualNoCase(const char *a, const char *b)
 
 } // namespace cross_map_check
 
+// The custom-reaction overlay from C4MaterialMap::CrossMapMaterials
+// (src/C4Material.cpp:386-472), the Reverse/table-layout helper
+// (src/C4Material.cpp:488-494), and the runtime user check
+// (src/C4Material.cpp:612-624). The fixtures below exercise the extracted code
+// over a compact material cohort; only the surrounding data types are stubs.
+namespace custom_reaction_map_check
+{
+
+struct StrBuf
+{
+    std::string value;
+
+    StrBuf() = default;
+    StrBuf(const char *value) : value(value ? value : "") {}
+    int32_t getLength() const { return static_cast<int32_t>(value.size()); }
+    const char *getData() const { return value.c_str(); }
+};
+
+enum ReactionTag
+{
+    ReactBuiltin = 0,
+    ReactPoof = 1,
+    ReactInsert = 2,
+    ReactCorrode = 3,
+    ReactConvert = 4,
+};
+
+struct C4MaterialReaction
+{
+    StrBuf TargetSpec;
+    StrBuf sConvertMat;
+    int32_t iConvertMat = -1;
+    uint32_t iExecMask = ~0u;
+    bool fReverse = false;
+    bool fInverseSpec = false;
+    bool fInsertionCheck = true;
+    ReactionTag tag = ReactPoof;
+};
+
+struct C4Material
+{
+    const char *Name = "";
+    int32_t Density = 0;
+    int32_t Incindiary = 0;
+    int32_t Extinguisher = 0;
+    int32_t Inflammable = 0;
+    int32_t Corrosive = 0;
+    int32_t Corrode = 0;
+    std::vector<C4MaterialReaction> CustomReactionList;
+
+    C4Material() = default;
+    C4Material(const char *name, int32_t density, int32_t incindiary = 0,
+               int32_t extinguisher = 0, int32_t inflammable = 0,
+               int32_t corrosive = 0, int32_t corrode = 0)
+        : Name(name), Density(density), Incindiary(incindiary),
+          Extinguisher(extinguisher), Inflammable(inflammable),
+          Corrosive(corrosive), Corrode(corrode)
+    {
+    }
+};
+
+static int32_t g_material_count = 0;
+static int32_t g_insert_check_calls = 0;
+
+static bool MatValid(int32_t material)
+{
+    return material >= 0 && material < g_material_count;
+}
+
+static bool DensitySolid(int32_t density) { return density >= 50; }
+static bool DensitySemiSolid(int32_t density) { return density >= 25; }
+
+static bool SEqualNoCase(const char *a, const char *b)
+{
+    if (!a || !b) return false;
+    while (*a && *b)
+    {
+        if (tolower(static_cast<unsigned char>(*a)) !=
+            tolower(static_cast<unsigned char>(*b)))
+            return false;
+        ++a;
+        ++b;
+    }
+    return !*a && !*b;
+}
+
+struct C4MaterialMap
+{
+    C4Material *Map = nullptr;
+    int32_t Num = 0;
+    std::vector<C4MaterialReaction *> reaction_storage;
+    C4MaterialReaction **ppReactionMap = nullptr;
+
+    int32_t Get(const char *name) const
+    {
+        for (int32_t index = 0; index < Num; ++index)
+            if (SEqualNoCase(name, Map[index].Name)) return index;
+        return -1;
+    }
+
+    void SetMatReaction(int32_t iPXSMat, int32_t iLSMat,
+                        C4MaterialReaction *pReact);
+
+    void Reset(C4Material *materials, int32_t count,
+               C4MaterialReaction *builtin)
+    {
+        Map = materials;
+        Num = count;
+        g_material_count = count;
+        reaction_storage.assign((Num + 1) * (Num + 1), builtin);
+        ppReactionMap = reaction_storage.data();
+    }
+
+    void EvaluateMaterial(int32_t cnt)
+    {
+        C4Material *pMat = Map + cnt;
+#include "custom_reaction_overlay.inc"
+    }
+
+    void EvaluateAll()
+    {
+        for (int32_t cnt = 0; cnt < Num; ++cnt) EvaluateMaterial(cnt);
+    }
+
+    C4MaterialReaction *At(int32_t pxs, int32_t landscape) const
+    {
+        return ppReactionMap[(landscape + 1) * (Num + 1) + pxs + 1];
+    }
+};
+
+#include "set_mat_reaction.inc"
+
+enum MaterialInteractionEvent
+{
+    meePXSPos = 0,
+    meePXSMove = 1,
+    meeMassMove = 2,
+};
+
+static bool mrfInsertCheck(int32_t &, int32_t &, C4Fixed &, C4Fixed &,
+                           int32_t &, int32_t, bool *)
+{
+    ++g_insert_check_calls;
+    return false;
+}
+
+#include "material_user_check.inc"
+
+static C4MaterialReaction reaction(const char *target,
+                                   bool inverse = false,
+                                   ReactionTag tag = ReactPoof,
+                                   bool reverse = false)
+{
+    C4MaterialReaction result;
+    result.TargetSpec = StrBuf(target);
+    result.fInverseSpec = inverse;
+    result.fReverse = reverse;
+    result.tag = tag;
+    return result;
+}
+
+static std::vector<C4Material> cohort()
+{
+    return {
+        // Name       density  Inc Ext Infl Corrosive Corrode
+        {"Source",        10,   0,  0,   0,        0,      0},
+        {"Vacuum",         0,   1,  0,   0,        1,      0},
+        {"Water",         25,   0,  1,   0,        1,      1},
+        {"Rock",          50,   0,  0,   1,        0,      1},
+    };
+}
+
+static uint32_t targetMask(const C4MaterialMap &map, int32_t source,
+                           const C4MaterialReaction *needle)
+{
+    uint32_t mask = 0;
+    for (int32_t target = -1; target < map.Num; ++target)
+        if (map.At(source, target) == needle) mask |= 1u << (target + 1);
+    return mask;
+}
+
+static const char *tagName(ReactionTag tag)
+{
+    switch (tag)
+    {
+    case ReactBuiltin: return "builtin";
+    case ReactPoof: return "poof";
+    case ReactInsert: return "insert";
+    case ReactCorrode: return "corrode";
+    case ReactConvert: return "convert";
+    }
+    return "unknown";
+}
+
+} // namespace custom_reaction_map_check
+
+namespace custom_reaction_map_check
+{
+
+static void printCustomReactionOverlayCases()
+{
+    C4MaterialReaction builtin;
+    builtin.tag = ReactBuiltin;
+
+    printf("%s", "\"custom_reaction_overlay\":{");
+    printf("%s", "\"target_masks\":[");
+    static const char *const specs[] = {
+        "Water", "All", "Solid", "SemiSolid", "Background", "Sky",
+        "Incindiary", "Extinguisher", "Inflammable", "Corrosive", "Corrode",
+    };
+    bool first = true;
+    for (const char *spec : specs)
+        for (bool inverse : {false, true})
+        {
+            std::vector<C4Material> materials = cohort();
+            materials[0].CustomReactionList.push_back(reaction(spec, inverse));
+            C4MaterialReaction *custom = &materials[0].CustomReactionList[0];
+            C4MaterialMap map;
+            map.Reset(materials.data(), static_cast<int32_t>(materials.size()), &builtin);
+            map.EvaluateAll();
+            if (!first) printf(",");
+            first = false;
+            printf("{\"spec\":\"%s\",\"inverse\":%s,\"mask\":%u}",
+                   spec, inverse ? "true" : "false", targetMask(map, 0, custom));
+        }
+    printf("],");
+
+    printf("%s", "\"literal_keyword\":[");
+    for (int inverse = 0; inverse <= 1; ++inverse)
+    {
+        std::vector<C4Material> materials = {
+            {"Source", 10}, {"Solid", 10}, {"Rock", 50},
+        };
+        materials[0].CustomReactionList.push_back(reaction("sOlId", inverse));
+        C4MaterialReaction *custom = &materials[0].CustomReactionList[0];
+        C4MaterialMap map;
+        map.Reset(materials.data(), static_cast<int32_t>(materials.size()), &builtin);
+        map.EvaluateAll();
+        if (inverse) printf(",");
+        printf("{\"inverse\":%s,\"mask\":%u}", inverse ? "true" : "false",
+               targetMask(map, 0, custom));
+    }
+    printf("],");
+
+    const char *same_target_tag;
+    const char *same_sky_tag;
+    {
+        std::vector<C4Material> materials = {{"Source", 10}, {"Target", 50}};
+        materials[0].CustomReactionList.push_back(reaction("All", false, ReactPoof));
+        materials[0].CustomReactionList.push_back(reaction("Target", false, ReactInsert));
+        C4MaterialMap map;
+        map.Reset(materials.data(), static_cast<int32_t>(materials.size()), &builtin);
+        map.EvaluateAll();
+        same_target_tag = tagName(map.At(0, 1)->tag);
+        same_sky_tag = tagName(map.At(0, -1)->tag);
+    }
+
+    const char *reverse_collision_tag;
+    {
+        std::vector<C4Material> materials = {{"First", 10}, {"Later", 50}};
+        materials[0].CustomReactionList.push_back(reaction("Later", false, ReactPoof));
+        materials[1].CustomReactionList.push_back(
+            reaction("First", false, ReactCorrode, true));
+        C4MaterialMap map;
+        map.Reset(materials.data(), static_cast<int32_t>(materials.size()), &builtin);
+        map.EvaluateAll();
+        reverse_collision_tag = tagName(map.At(0, 1)->tag);
+    }
+    printf("\"ordering\":{\"same_source_target\":\"%s\","
+           "\"same_source_sky\":\"%s\",\"reverse_collision\":\"%s\"},",
+           same_target_tag, same_sky_tag, reverse_collision_tag);
+
+    const char *literal_sky_target;
+    {
+        std::vector<C4Material> materials = {
+            {"Source", 10}, {"Target", 50}, {"Sky", 0},
+        };
+        materials[0].CustomReactionList.push_back(reaction("Target", false, ReactConvert));
+        materials[0].CustomReactionList[0].sConvertMat = StrBuf("sKy");
+        C4MaterialReaction *custom = &materials[0].CustomReactionList[0];
+        C4MaterialMap map;
+        map.Reset(materials.data(), static_cast<int32_t>(materials.size()), &builtin);
+        map.EvaluateAll();
+        literal_sky_target = MatValid(custom->iConvertMat)
+            ? materials[custom->iConvertMat].Name : "none";
+    }
+
+    const char *spaced_convert_target;
+    {
+        std::vector<C4Material> materials = {
+            {"Source", 10}, {"Target", 50}, {"Water", 25},
+        };
+        materials[0].CustomReactionList.push_back(reaction("Target", false, ReactConvert));
+        materials[0].CustomReactionList[0].sConvertMat = StrBuf("Water ");
+        C4MaterialReaction *custom = &materials[0].CustomReactionList[0];
+        C4MaterialMap map;
+        map.Reset(materials.data(), static_cast<int32_t>(materials.size()), &builtin);
+        map.EvaluateAll();
+        spaced_convert_target = MatValid(custom->iConvertMat)
+            ? materials[custom->iConvertMat].Name : "none";
+    }
+
+    uint32_t spaced_target_mask;
+    {
+        std::vector<C4Material> materials = {{"Source", 10}, {"Rock", 50}};
+        materials[0].CustomReactionList.push_back(reaction(" Solid"));
+        C4MaterialReaction *custom = &materials[0].CustomReactionList[0];
+        C4MaterialMap map;
+        map.Reset(materials.data(), static_cast<int32_t>(materials.size()), &builtin);
+        map.EvaluateAll();
+        spaced_target_mask = targetMask(map, 0, custom);
+    }
+    printf("\"resolution\":{\"convert_literal_sky\":\"%s\","
+           "\"convert_trailing_space\":\"%s\","
+           "\"target_leading_space_mask\":%u},",
+           literal_sky_target, spaced_convert_target, spaced_target_mask);
+
+    uint32_t allowed_mask = 0;
+    uint32_t installed_mask = 0;
+    bool check_slide = true;
+    g_insert_check_calls = 0;
+    {
+        std::vector<C4Material> materials = {{"Source", 10}, {"Target", 50}};
+        materials[0].CustomReactionList.push_back(reaction("Target", false, ReactPoof));
+        C4MaterialReaction *custom = &materials[0].CustomReactionList[0];
+        custom->iExecMask = 5;
+        custom->fInsertionCheck = true;
+        check_slide = custom->fInsertionCheck;
+        C4MaterialMap map;
+        map.Reset(materials.data(), static_cast<int32_t>(materials.size()), &builtin);
+        map.EvaluateAll();
+        C4MaterialReaction *installed = map.At(0, 1);
+        for (int32_t event = meePXSPos; event <= meeMassMove; ++event)
+        {
+            if (installed == custom) installed_mask |= 1u << event;
+            int32_t x = 0, y = 0, pxs_mat = 0;
+            C4Fixed xdir{Fix0}, ydir{Fix0};
+            bool changed = false;
+            if (mrfUserCheck(installed, x, y, 0, 0, xdir, ydir, pxs_mat, 1,
+                             static_cast<MaterialInteractionEvent>(event), &changed))
+                allowed_mask |= 1u << event;
+        }
+    }
+    printf("\"runtime\":{\"exec_mask\":5,\"installed_mask\":%u,"
+           "\"allowed_mask\":%u,\"check_slide\":%s,"
+           "\"insert_check_calls\":%d}}",
+           installed_mask, allowed_mask, check_slide ? "true" : "false",
+           g_insert_check_calls);
+}
+
+} // namespace custom_reaction_map_check
+
 // Builds the builtin reaction map once over a material set chosen so that every
 // rung of the ladder fires, and emits the whole (PXS, LS) matrix including sky
 // on both axes.
@@ -6741,6 +7155,9 @@ static void printCrossMapCases()
 static void printDigFreeCases()
 {
     printf("%s", "\"dig_free\":[");
+    dig_free_check::g_width = dig_free_check::GridWdt;
+    dig_free_check::g_height = dig_free_check::GridHgt;
+    dig_free_check::g_unresolved_material = dig_free_check::MNone;
     struct Case
     {
         const char *name;
@@ -6773,7 +7190,9 @@ static void printDigFreeCases()
         for (int32_t gy = 0; gy < dig_free_check::GridHgt; gy++)
             for (int32_t gx = 0; gx < dig_free_check::GridWdt; gx++)
                 dig_free_check::g_grid[gy][gx] =
-                    (c.sky_from_row >= 0 && gy >= c.sky_from_row) ? 0 : 3;
+                    (c.sky_from_row >= 0 && gy >= c.sky_from_row)
+                        ? 0
+                        : dig_free_check::GranitePix;
         if (c.sky_column >= 0)
             for (int32_t gy = 0; gy < dig_free_check::GridHgt; gy++)
                 dig_free_check::g_grid[gy][c.sky_column] = 0;
@@ -6803,6 +7222,121 @@ static void printDigFreeCases()
                "\"sky_from_row\":%d,\"sky_column\":%d,"
                "\"changed_count\":%d,\"changed\":\"%s\"}",
                c.name, c.tx, c.ty, c.rad, c.sky_from_row, c.sky_column, changed, delta);
+    }
+    printf("]");
+}
+
+// C4Landscape::DigFreeMat (src/C4Landscape.cpp:1012-1020) is not DigFree's
+// rectangle-shaped cousin: it first rejects an invalid material, then walks x
+// outside y and hands ONLY exact GetMat matches to DigFreePix. DigFreePix
+// (src/C4Landscape.cpp:918-925) still probes an exact match whose DigFree is 0,
+// and ClearPix (src/C4Landscape.cpp:881-888) clears an IFT pixel to the default
+// Tunnel byte plus IFT rather than to raw sky.
+//
+// The probe recorder observes calls into CheckInstabilityRange, so it pins the
+// outer walk's order without reimplementing that walk. The Rust comparator
+// reduces its lower-level CheckInstability trace back to the direct calls: five
+// checks per cleared, non-instability fixture pixel (C4Landscape.cpp:870-878),
+// and one for an undiggable target that is itself Instable.
+static void printDigFreeMatCases()
+{
+    using namespace dig_free_check;
+    printf("%s", "\"dig_free_mat\":[");
+    struct Case
+    {
+        const char *name;
+        int32_t tx, ty, wdt, hgt, mat;
+        int32_t setup;
+        int32_t probe_stride;
+    };
+    const Case cases[] = {
+        // The subrect mixes two Granite texture bytes, surface and IFT pixels,
+        // another loaded material, and an unresolved nonzero slot. Granite just
+        // past the right and bottom bounds must remain untouched.
+        {"resolved_matches_preserve_surface8_semantics", 1, 1, 3, 2, 3, 0, 5},
+        // DigFree=0 suppresses ClearPix, not DigFreePix. Each exact match is
+        // Instable on the Rust side, so one lower-level probe exposes the direct
+        // x-major/y-minor call order.
+        {"undiggable_matches_still_probe_x_then_y", 1, 1, 2, 2, MUndiggable, 1, 1},
+        // A stale Pix2Mat slot can carry an integer outside Material.Num. The
+        // outer MatValid check must reject it before even entering the walk.
+        {"invalid_material_skips_the_rectangle", 1, 1, 1, 1, 99, 2, 5},
+    };
+
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        g_width = 5;
+        g_height = 4;
+        Game.Landscape.Width = g_width;
+        Game.Landscape.Height = g_height;
+        for (int32_t gy = 0; gy < GridHgt; gy++)
+            for (int32_t gx = 0; gx < GridWdt; gx++)
+                g_grid[gy][gx] = 0;
+        g_unresolved_material = c.setup == 2 ? c.mat : MNone;
+
+        if (c.setup == 0)
+        {
+            g_grid[1][1] = GranitePix;
+            g_grid[2][1] = GraniteAltPix | IFT;
+            g_grid[1][2] = SandPix;
+            g_grid[2][2] = GranitePix | IFT;
+            g_grid[1][3] = GraniteAltPix;
+            g_grid[2][3] = UnresolvedPix;
+            g_grid[1][4] = GranitePix; // outside right
+            g_grid[3][1] = GranitePix; // outside bottom
+        }
+        else if (c.setup == 1)
+        {
+            g_grid[1][1] = UndiggablePix;
+            g_grid[2][1] = UndiggablePix | IFT;
+            g_grid[1][2] = UndiggablePix;
+            g_grid[2][2] = GranitePix;
+            g_grid[1][3] = UndiggablePix; // outside right
+        }
+        else
+        {
+            g_grid[1][1] = UnresolvedPix;
+        }
+
+        uint8_t initial[5 * 4];
+        for (int32_t gy = 0; gy < g_height; gy++)
+            for (int32_t gx = 0; gx < g_width; gx++)
+                initial[gy * g_width + gx] = g_grid[gy][gx];
+
+        g_cleared = 0;
+        g_instability_probes = 0;
+        g_instability_probe_positions.clear();
+        Game.Landscape.DigFreeMat(c.tx, c.ty, c.wdt, c.hgt, c.mat);
+
+        printf("{\"name\":\"%s\",\"width\":%d,\"height\":%d,"
+               "\"tx\":%d,\"ty\":%d,\"wdt\":%d,\"hgt\":%d,"
+               "\"material\":%d,\"probe_stride\":%d,\"initial_bytes\":[",
+               c.name, g_width, g_height, c.tx, c.ty, c.wdt, c.hgt,
+               c.mat, c.probe_stride);
+        for (int32_t index = 0; index < g_width * g_height; index++)
+        {
+            if (index) printf(",");
+            printf("%u", static_cast<unsigned int>(initial[index]));
+        }
+        printf("],\"final_bytes\":[");
+        for (int32_t gy = 0; gy < g_height; gy++)
+            for (int32_t gx = 0; gx < g_width; gx++)
+            {
+                if (gy || gx) printf(",");
+                printf("%u", static_cast<unsigned int>(g_grid[gy][gx]));
+            }
+        printf("],\"probe_count\":%d,\"probe_order\":\"", g_instability_probes);
+        for (size_t index = 0; index < g_instability_probe_positions.size(); index++)
+        {
+            if (index) printf(";");
+            printf("%d,%d", g_instability_probe_positions[index].first,
+                   g_instability_probe_positions[index].second);
+        }
+        printf("\"}");
     }
     printf("]");
 }
@@ -6913,6 +7447,7 @@ static void printInsertMaterialCases()
         const char *name;
         int32_t mat;
         int32_t tx, ty;
+        int32_t vx, vy;
         bool insert_thrust;
         // Column of sky punched through the floor, or -1 for a solid floor.
         int32_t gap_x;
@@ -6927,40 +7462,39 @@ static void printInsertMaterialCases()
     constexpr int32_t GridHgt = insert_material_check::GridHgt;
     const Case cases[] = {
         // A density-0 material returns TRUE having written nothing.
-        // A density-0 material returns TRUE having written nothing.
-        {"vacuum_succeeds_without_writing", 0, 8, 5, false, -1, false},
+        {"vacuum_succeeds_without_writing", 0, 8, 5, 0, 0, false, -1, false},
         // Off the left edge, and past the last column.
-        {"x_below_zero_fails", 2, -1, 5, false, -1, false},
-        {"x_at_width_fails", 2, GridWdt, 5, false, -1, false},
+        {"x_below_zero_fails", 2, -1, 5, 0, 0, false, -1, false},
+        {"x_at_width_fails", 2, GridWdt, 5, 0, 0, false, -1, false},
         // The bounds pair. `ty == Height` is one past the last row and C++
         // deliberately lets it through: Granite matches the border's density,
         // climbs back into the grid and writes. `Height + 1` is rejected by the
         // bounds test itself and writes nothing -- so the two differ in the
         // landscape, not just in the return value.
-        {"y_at_height_is_accepted", 3, 8, GridHgt, false, -1, false},
-        {"y_above_height_fails", 3, 8, GridHgt + 1, false, -1, false},
+        {"y_at_height_is_accepted", 3, 8, GridHgt, 0, 0, false, -1, false},
+        {"y_above_height_fails", 3, 8, GridHgt + 1, 0, 0, false, -1, false},
         // Sand into open sky: nothing to climb, and the slide hands it to the
         // PXS system rather than writing a pixel.
-        {"lands_in_open_sky", 2, 8, 5, false, -1, false},
+        {"lands_in_open_sky", 2, 8, 5, 0, 0, false, -1, false},
         // Water (25) onto the Granite floor (100): stuck in higher density.
-        {"stuck_in_higher_density_fails", 1, 8, 11, false, -1, false},
+        {"stuck_in_higher_density_fails", 1, 8, 11, 0, 0, false, -1, false},
         // Granite into Granite: equal density, so it climbs. It stops on the
         // row whose neighbours are BOTH sky, where the two independent `if`s
         // move it left and then straight back -- an `else if` would leave it
         // one column to the left.
-        {"equal_density_climbs_without_drifting", 3, 8, 11, false, -1, false},
+        {"equal_density_climbs_without_drifting", 3, 8, 11, 0, 0, false, -1, false},
         // The same climb with the left neighbour carved out: only one `if`
         // fires, so it really does drift, and then slides down the carved
         // column.
-        {"climb_drifts_into_a_carved_column", 3, 8, 11, false, 7, false},
+        {"climb_drifts_into_a_carved_column", 3, 8, 11, 0, 0, false, 7, false},
         // A gap in the floor gives the slide somewhere to go, and the material
         // is handed to the PXS system instead of being written.
-        {"slides_into_a_gap_as_pxs", 2, 8, 9, false, 9, false},
+        {"slides_into_a_gap_as_pxs", 2, 8, 9, 13, -7, false, 9, false},
         // The insert-thrust pair. Identical but for the flag: with it the
         // displaced Water is re-inserted one row up, changing two cells;
         // without it the Water is simply overwritten, changing one.
-        {"insert_thrust_recurses_one_row_up", 2, 8, 9, true, -1, true},
-        {"without_insert_thrust_nothing_recurses", 2, 8, 9, false, -1, true},
+        {"insert_thrust_recurses_one_row_up", 2, 8, 9, 0, 0, true, -1, true},
+        {"without_insert_thrust_nothing_recurses", 2, 8, 9, 0, 0, false, -1, true},
     };
     bool first = true;
     for (const auto &c : cases)
@@ -6991,10 +7525,16 @@ static void printInsertMaterialCases()
         insert_material_check::g_pxs_created = 0;
         insert_material_check::g_pxs_x = -1;
         insert_material_check::g_pxs_y = -1;
+        insert_material_check::g_pxs_mat = -1;
+        insert_material_check::g_pxs_x_raw = -1;
+        insert_material_check::g_pxs_y_raw = -1;
+        insert_material_check::g_pxs_xdir = -1;
+        insert_material_check::g_pxs_ydir = -1;
         insert_material_check::Game.C4S.Game.Realism.LandscapeInsertThrust = c.insert_thrust;
         insert_material_check::Game.C4S.Game.Realism.LandscapePushPull = false;
 
-        const bool ok = insert_material_check::Game.Landscape.InsertMaterial(c.mat, c.tx, c.ty, 0, 0);
+        const bool ok = insert_material_check::Game.Landscape.InsertMaterial(
+            c.mat, c.tx, c.ty, c.vx, c.vy);
 
         char delta[512];
         int32_t used = 0, changed = 0;
@@ -7009,14 +7549,19 @@ static void printInsertMaterialCases()
                                      insert_material_check::g_grid[gy][gx]);
                 }
 
-        printf("{\"name\":\"%s\",\"mat\":%d,\"tx\":%d,\"ty\":%d,"
+        printf("{\"name\":\"%s\",\"mat\":%d,\"tx\":%d,\"ty\":%d,\"vx\":%d,\"vy\":%d,"
                "\"insert_thrust\":%s,\"gap_x\":%d,\"water_row\":%s,\"result\":%s,"
                "\"changed_count\":%d,\"changed\":\"%s\","
-               "\"pxs_created\":%d,\"pxs_x\":%d,\"pxs_y\":%d}",
-               c.name, c.mat, c.tx, c.ty, c.insert_thrust ? "true" : "false", c.gap_x,
+               "\"pxs_created\":%d,\"pxs_mat\":%d,\"pxs_x\":%d,\"pxs_y\":%d,"
+               "\"pxs_x_raw\":%d,\"pxs_y_raw\":%d,\"pxs_xdir\":%d,\"pxs_ydir\":%d}",
+               c.name, c.mat, c.tx, c.ty, c.vx, c.vy,
+               c.insert_thrust ? "true" : "false", c.gap_x,
                c.water_row ? "true" : "false", ok ? "true" : "false", changed, delta,
                insert_material_check::g_pxs_created,
-               insert_material_check::g_pxs_x, insert_material_check::g_pxs_y);
+               insert_material_check::g_pxs_mat, insert_material_check::g_pxs_x,
+               insert_material_check::g_pxs_y, insert_material_check::g_pxs_x_raw,
+               insert_material_check::g_pxs_y_raw, insert_material_check::g_pxs_xdir,
+               insert_material_check::g_pxs_ydir);
     }
     printf("]");
 }
@@ -7106,6 +7651,7 @@ static void printInsertCases()
                "\"event\":%d,\"pxs_mat\":%d,\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,"
                "\"xdir0\":%d,\"ydir0\":%d,\"seed\":%d,\"handled\":%s,\"x\":%d,"
                "\"y\":%d,\"xdir\":%d,\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,"
+               "\"random_count\":%d,\"random_hold\":%u,"
                "\"inserted\":%d,\"inserted_mat\":%d,\"inserted_x\":%d,"
                "\"inserted_y\":%d}",
                c.name, c.user_defined ? "true" : "false",
@@ -7113,6 +7659,7 @@ static void printInsertCases()
                8, 9, itofix(0, 1).val, itofix(c.ydir_n, c.ydir_p).val, seed,
                handled ? "true" : "false", iX, iY, xdir.val, ydir.val,
                pos_changed ? "true" : "false", RandomCount - draws_before,
+               RandomCount, static_cast<unsigned>(RandomHold),
                insert_check::g_inserted, insert_check::g_inserted_mat,
                insert_check::g_inserted_x, insert_check::g_inserted_y);
     }
@@ -7213,13 +7760,15 @@ static void printCorrodeCases()
                "\"event\":%d,\"pxs_mat\":%d,\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,"
                "\"xdir0\":%d,\"ydir0\":%d,\"seed\":%d,\"handled\":%s,\"x\":%d,"
                "\"y\":%d,\"xdir\":%d,\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,"
+               "\"random_count\":%d,\"random_hold\":%u,"
                "\"cleared\":%d,\"instability_probes\":%d,\"smoke\":%d,"
                "\"sounds\":%d,\"inserted\":%d}",
                c.name, c.user_defined ? "true" : "false", c.corrosion_rate, c.event,
                c.pxs_mat, ls_mat, 8, 9, itofix(0, 1).val,
                itofix(c.ydir_n, c.ydir_p).val, seed, handled ? "true" : "false",
                iX, iY, xdir.val, ydir.val, pos_changed ? "true" : "false",
-               RandomCount - draws_before, insert_check::g_cleared,
+               RandomCount - draws_before, RandomCount, static_cast<unsigned>(RandomHold),
+               insert_check::g_cleared,
                insert_check::g_instability_probes, insert_check::g_smoke,
                insert_check::g_sounds, insert_check::g_inserted);
     }
@@ -7313,12 +7862,14 @@ static void printPoofMoveCases()
         printf("{\"name\":\"%s\",\"user_defined\":%s,\"event\":%d,\"pxs_mat\":%d,"
                "\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,\"xdir0\":%d,\"ydir0\":%d,"
                "\"seed\":%d,\"handled\":%s,\"x\":%d,\"y\":%d,\"xdir\":%d,"
-               "\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,\"extractions\":%d,"
+               "\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,"
+               "\"random_count\":%d,\"random_hold\":%u,\"extractions\":%d,"
                "\"extract_x\":%d,\"extract_y\":%d}",
                c.name, c.user_defined ? "true" : "false", c.event, c.pxs_mat, ls_mat,
                8, 9, itofix(0, 1).val, itofix(c.ydir_n, c.ydir_p).val, seed,
                handled ? "true" : "false", iX, iY, xdir.val, ydir.val,
                pos_changed ? "true" : "false", RandomCount - draws_before,
+               RandomCount, static_cast<unsigned>(RandomHold),
                insert_check::g_extractions, insert_check::g_extract_x,
                insert_check::g_extract_y);
     }
@@ -7426,13 +7977,15 @@ static void printIncinerateCases()
                "\"pxs_mat\":%d,\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,\"xdir0\":%d,"
                "\"ydir0\":%d,\"seed\":%d,\"handled\":%s,\"x\":%d,\"y\":%d,"
                "\"xdir\":%d,\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,"
+               "\"random_count\":%d,\"random_hold\":%u,"
                "\"incinerate_calls\":%d,\"flams_created\":%d,\"inserted\":%d,"
                "\"inserted_mat\":%d,\"inserted_x\":%d,\"inserted_y\":%d}",
                c.name, c.event, c.target_mat, c.flam_here ? "true" : "false",
                c.pxs_mat, ls_mat, 8, 9, itofix(0, 1).val,
                itofix(c.ydir_n, c.ydir_p).val, seed, handled ? "true" : "false",
                iX, iY, xdir.val, ydir.val, pos_changed ? "true" : "false",
-               RandomCount - draws_before, insert_check::g_incinerate_calls,
+               RandomCount - draws_before, RandomCount, static_cast<unsigned>(RandomHold),
+               insert_check::g_incinerate_calls,
                insert_check::g_flams_created, insert_check::g_inserted,
                insert_check::g_inserted_mat, insert_check::g_inserted_x,
                insert_check::g_inserted_y);
@@ -7826,18 +8379,27 @@ static void printConvertCases()
         C4Fixed xdir = itofix(1, 2), ydir = itofix(1, 2);
         int32_t pxs_mat = c.pxs_mat;
         bool pos_changed = false;
+        const int32_t seed = 0x3333;
+        FixedRandom(seed);
+        Randomize3();
+        const int32_t draws_before = RandomCount;
         const bool handled = insert_check::Game.Material.mrfConvert(
             &reaction, iX, iY, iX, iY, xdir, ydir, pxs_mat, c.ls_mat,
             static_cast<insert_check::MaterialInteractionEvent>(c.event), &pos_changed);
 
         printf("{\"name\":\"%s\",\"user_defined\":%s,\"depth\":%d,\"convert_mat\":%d,"
                "\"event\":%d,\"pxs_mat0\":%d,\"ls_mat\":%d,\"matching_above\":%s,"
-               "\"handled\":%s,\"pxs_mat\":%d,\"xdir\":%d,\"ydir\":%d,"
-               "\"pos_changed\":%s,\"pxs_created\":%d,\"pxs_created_mat\":%d}",
+               "\"x0\":%d,\"y0\":%d,\"xdir0\":%d,\"ydir0\":%d,\"seed\":%d,"
+               "\"handled\":%s,\"pxs_mat\":%d,\"x\":%d,\"y\":%d,"
+               "\"xdir\":%d,\"ydir\":%d,\"pos_changed\":%s,\"draws\":%d,"
+               "\"random_count\":%d,\"random_hold\":%u,"
+               "\"pxs_created\":%d,\"pxs_created_mat\":%d}",
                c.name, c.user_defined ? "true" : "false", c.depth, c.convert_mat,
                c.event, c.pxs_mat, c.ls_mat, c.matching_above ? "true" : "false",
-               handled ? "true" : "false", pxs_mat, xdir.val, ydir.val,
-               pos_changed ? "true" : "false", insert_check::g_pxs_created,
+               px, py, itofix(1, 2).val, itofix(1, 2).val, seed,
+               handled ? "true" : "false", pxs_mat, iX, iY, xdir.val, ydir.val,
+               pos_changed ? "true" : "false", RandomCount - draws_before,
+               RandomCount, static_cast<unsigned>(RandomHold), insert_check::g_pxs_created,
                insert_check::g_pxs_created_mat);
     }
     printf("]");
@@ -7906,13 +8468,15 @@ static void printInsertCheckCases()
         printf("{\"name\":\"%s\",\"pxs_mat\":%d,\"ls_mat\":%d,\"x0\":%d,\"y0\":%d,"
                "\"xdir0\":%d,\"ydir0\":%d,\"seed\":%d,\"floor\":%s,\"walled\":%s,"
                "\"verdict\":%s,\"x\":%d,\"y\":%d,\"xdir\":%d,\"ydir\":%d,"
-               "\"pos_changed\":%s,\"smoke\":%d,\"draws\":%d,\"hole\":%d}",
+               "\"pos_changed\":%s,\"smoke\":%d,\"draws\":%d,"
+               "\"random_count\":%d,\"random_hold\":%u,\"hole\":%d}",
                c.name, c.pxs_mat, c.ls_mat, c.x, c.y,
                itofix(c.xdir_n, c.xdir_p).val, itofix(c.ydir_n, c.ydir_p).val, c.seed,
                c.floor ? "true" : "false", c.walled ? "true" : "false",
                verdict ? "true" : "false", iX, iY, xdir.val, ydir.val,
                pos_changed ? "true" : "false", insert_check::g_smoke,
-               RandomCount - rnd3_before, c.hole);
+               RandomCount - rnd3_before, RandomCount,
+               static_cast<unsigned>(RandomHold), c.hole);
     }
     printf("]");
 }
@@ -10653,10 +11217,21 @@ int main()
     printDigFreeCases();
     printf(",\n");
 
-    // 22e8. cross_map_reactions: which builtin reaction each (PXS, landscape)
+    // 22e8. dig_free_mat: exact-material rectangle filtering, raw Surface8
+    //       clearing (including IFT), probe order, and the outer MatValid gate.
+    printDigFreeMatCases();
+    printf(",\n");
+
+    // 22e9. cross_map_reactions: which builtin reaction each (PXS, landscape)
     //       material pair gets — the if/else-if ladder's order, and the
     //       same-or-higher-density gate every rung but convert sits behind.
     printCrossMapCases();
+    printf(",\n");
+
+    // 22e10. custom_reaction_overlay: literal/category TargetSpec expansion,
+    //        inverse and Reverse handling, overwrite order, ConvertMat lookup,
+    //        and the ExecMask/CheckSlide user gate.
+    custom_reaction_map_check::printCustomReactionOverlayCases();
     printf(",\n");
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.
