@@ -4443,6 +4443,21 @@ impl Landscape {
         Some(slot | if ift { 0x80 } else { 0 })
     }
 
+    /// Exact `Pix2Mat[GetPix]` material read used by the native dig helpers.
+    /// Unlike [`Self::material_at`], this deliberately has no column-model
+    /// fallback for an unresolved in-bounds Surface8 slot.
+    pub(crate) fn dig_free_pixel_material_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        self.pixels.as_ref()?;
+        match self.border_pixel(x, y) {
+            Some(BorderPixel::Sky) => None,
+            Some(BorderPixel::Vehicle) => self.vehicle_material,
+            None => self
+                .pixels
+                .as_ref()
+                .and_then(|grid| grid.material_id_at(x, y)),
+        }
+    }
+
     /// Resolve the grid's Pix2Mat table once the engine materials exist
     /// (UpdatePixMaps, C4Landscape.cpp:2832-2839).
     /// C4Landscape::DigFreePix (C4Landscape.cpp:936-944) on the pixel
@@ -4451,15 +4466,7 @@ impl Landscape {
     /// clears only DigFree materials. `None` when no grid exists — callers
     /// keep the column-model fallback.
     pub fn dig_free_pix(&mut self, x: i32, y: i32, materials: &MaterialSet) -> Option<MaterialId> {
-        self.pixels.as_ref()?;
-        let material_id = match self.border_pixel(x, y) {
-            Some(BorderPixel::Sky) => None,
-            Some(BorderPixel::Vehicle) => self.vehicle_material,
-            None => self
-                .pixels
-                .as_ref()
-                .and_then(|grid| grid.material_id_at(x, y)),
-        };
+        let material_id = self.dig_free_pixel_material_at(x, y);
         if let Some(id) = material_id {
             if materials
                 .get_by_id(id)
