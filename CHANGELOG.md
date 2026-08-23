@@ -4,6 +4,22 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.3] - 2026-08-23
+
+### Bug fixes
+
+- Refresh saved games before reopening scenario browser (#995)
+- Skip zero-weight vertices in collision redirection (#994)
+- Preserve material reaction lookup parity (#991)
+
+### Performance
+
+- Complete initial lobby joins within 500ms (#996)
+
+### Testing
+
+- Differential-check PXS lifecycle and execution order (#993)
+
 ## [0.19.2] - 2026-08-22
 
 ### Bug fixes
