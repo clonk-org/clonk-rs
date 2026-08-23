@@ -915,6 +915,12 @@ pub(crate) enum ClientBootstrapRegistration {
     UnavailableNonLoadable,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct LoadedAuthoritativePlayerResources {
+    pub(crate) local_sources: Vec<(PathBuf, clonk_engine::NetworkResourceCore)>,
+    pub(crate) newly_loading_resource_ids: Vec<i32>,
+}
+
 fn add_resolved_resource(
     catalog: &mut crate::ResourceCatalog,
     backend: Option<&mut crate::ResourceTransferBackend>,
@@ -976,8 +982,8 @@ pub(crate) fn load_authoritative_player_resources(
     catalog: &mut crate::ResourceCatalog,
     mut backend: Option<&mut crate::ResourceTransferBackend>,
     info: &mut clonk_engine::PlayerInfoControlData,
-) -> Vec<(PathBuf, clonk_engine::NetworkResourceCore)> {
-    let mut local_sources = Vec::new();
+) -> LoadedAuthoritativePlayerResources {
+    let mut loaded = LoadedAuthoritativePlayerResources::default();
     for player in &mut info.players {
         let flags = player.flags;
         if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
@@ -1005,10 +1011,17 @@ pub(crate) fn load_authoritative_player_resources(
                 let registration =
                     add_resolved_resource(catalog, backend.as_deref_mut(), &resource).ok()?;
                 if registration == ClientBootstrapRegistration::Registered {
-                    if let crate::ClientBootstrapResourceSource::Local(local) = &resource.source {
-                        if let Some(path) = local_resource_lookup_path(local) {
-                            local_sources.push((path, resource.core.clone()));
+                    match &resource.source {
+                        crate::ClientBootstrapResourceSource::Local(local) => {
+                            if let Some(path) = local_resource_lookup_path(local) {
+                                loaded.local_sources.push((path, resource.core.clone()));
+                            }
                         }
+                        crate::ClientBootstrapResourceSource::Download => {
+                            loaded.newly_loading_resource_ids.push(resource.core.id);
+                        }
+                        crate::ClientBootstrapResourceSource::TrustedLocalSystem(_)
+                        | crate::ClientBootstrapResourceSource::UnavailableNonLoadable(_) => {}
                     }
                 }
                 Some(registration)
@@ -1020,7 +1033,7 @@ pub(crate) fn load_authoritative_player_resources(
             crate::client_bootstrap::clear_player_resource(player);
         }
     }
-    local_sources
+    loaded
 }
 
 impl ClientResourceState {
@@ -1269,15 +1282,15 @@ impl ClientResourceState {
         &mut self,
         info: &mut clonk_engine::PlayerInfoControlData,
     ) -> Vec<(PathBuf, clonk_engine::NetworkResourceCore)> {
-        let local_sources = load_authoritative_player_resources(
+        let loaded = load_authoritative_player_resources(
             &self.resource_resolver,
             &mut self.catalog,
             self.backend.as_mut(),
             info,
         );
         self.local_resource_sources
-            .extend(local_sources.iter().cloned());
-        local_sources
+            .extend(loaded.local_sources.iter().cloned());
+        loaded.local_sources
     }
 
     #[cfg(test)]

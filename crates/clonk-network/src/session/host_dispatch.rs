@@ -1410,15 +1410,20 @@ async fn dispatch_packet(
                 }
             };
             let mut local_data = data.clone();
+            let mut prompt_player_resource_discovery = Vec::new();
             retain_lobby_chat_message(delivery, &control, &data, state);
             if let clonk_engine::ControlPacket::PlayerInfo(info) = &mut control {
-                let local_sources = load_authoritative_player_resources(
+                let resource_owner = info.client_id;
+                let resource_owner_client_id = ClientId::try_from(resource_owner).ok();
+                let resource_owner_is_authorized =
+                    origin.is_none() || origin == resource_owner_client_id;
+                let loaded = load_authoritative_player_resources(
                     &state.resource_resolver,
                     &mut state.resource_catalog,
                     state.resource_backend.as_mut(),
                     info,
                 );
-                for (path, core) in &local_sources {
+                for (path, core) in &loaded.local_sources {
                     let _ = state
                         .event_tx
                         .send(HostEvent::ResourceComplete {
@@ -1429,7 +1434,29 @@ async fn dispatch_packet(
                         })
                         .await;
                 }
-                state.published_player_sources.extend(local_sources);
+                state.published_player_sources.extend(loaded.local_sources);
+                if relay_to_clients
+                    && state.status_barrier.status.state == NETWORK_STATE_LOBBY
+                    && resource_owner != HOST_CLIENT_ID as i32
+                    && !loaded.newly_loading_resource_ids.is_empty()
+                    && resource_owner_client_id
+                        .is_some_and(|client_id| state.clients.contains_key(&client_id))
+                    && resource_owner_is_authorized
+                    && loaded
+                        .newly_loading_resource_ids
+                        .iter()
+                        .all(|resource_id| resource_id >> 16 == resource_owner)
+                {
+                    // OnClientConnect uses this same targeted stock discovery
+                    // packet. Reusing it here keeps the 15-ID wire cap and
+                    // puts the just-added resource first.
+                    let catalog = state
+                        .resource_backend
+                        .as_ref()
+                        .map(|backend| backend.catalog())
+                        .unwrap_or(&state.resource_catalog);
+                    prompt_player_resource_discovery = catalog.on_peer_connected(resource_owner);
+                }
                 if let Ok(normalized) = crate::encode_control_entry_payload(&control) {
                     local_data = normalized;
                 }
@@ -1445,6 +1472,10 @@ async fn dispatch_packet(
                     origin,
                 );
             }
+            // Queue the authoritative PlayerInfo for every other participant
+            // before asking its owner for resource status. The owner's answer
+            // can then only be relayed after peers know what the ID denotes.
+            dispatch_host_resource_actions(prompt_player_resource_discovery, state).await;
             let _ = state
                 .event_tx
                 .send(HostEvent::Direct {

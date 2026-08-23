@@ -5981,6 +5981,329 @@ fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
 }
 
 #[test]
+fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
+    // C++ enters DoLobby only after network initialization, initial PlayerInfo
+    // publication, and resource registration, then reaches and acknowledges
+    // GS_Lobby with MainDlg alive (src/C4Game.cpp:361-409,3823-3844;
+    // src/C4Network2.cpp:445-461,1574-1620,2017-2058;
+    // src/C4Network2Players.cpp:38-49,78-136;
+    // src/C4GameLobby.cpp:141-218,781-790).
+    let _lock = env_lock().lock();
+    let host_user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    fs::write(
+        scenario
+            .path
+            .as_ref()
+            .expect("minimal prepared host scenario has a path")
+            .join("Scenario.txt"),
+        "[Head]\nTitle=Fixture\nIcon=2\nMaxPlayer=2\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\n",
+    )
+    .test_value();
+    let (_host_guard, host_paths) =
+        exact_loader_test_paths(host_user_data.path(), Some(content.path()));
+    configure_test_startup_participant(&host_paths, host_user_data.path());
+    persist_config_value(&host_paths, "Network", "PortUDP", "0").test_value();
+    persist_config_value(&host_paths, "Network", "PortDiscovery", "0").test_value();
+    persist_config_value(&host_paths, "Network", "EnableUPnP", "0").test_value();
+    persist_config_value(&host_paths, "General", "Preloading", "0").test_value();
+    let reference_port = std::net::TcpListener::bind("[::1]:0")
+        .expect("reserve initial-join host reference port")
+        .local_addr()
+        .test_value()
+        .port();
+    persist_config_value(
+        &host_paths,
+        "Network",
+        "PortRefServer",
+        reference_port.to_string(),
+    )
+    .test_value();
+    let mut host = new_menu_app_with_paths(640, 480, &host_paths);
+    host.staged_network_host_scenario = Some(prepare_minimal_host_lobby(&host, scenario.clone()));
+
+    let client_user_data = tempdir();
+    let mut client = {
+        let (_client_guard, client_paths) = exact_loader_test_paths(client_user_data.path(), None);
+        persist_config_value(&client_paths, "Network", "LocalName", "Initial Client").test_value();
+        persist_config_value(&client_paths, "Network", "Nick", "Initial Client").test_value();
+        persist_config_value(&client_paths, "Network", "PortUDP", "0").test_value();
+        persist_config_value(&client_paths, "Network", "PortDiscovery", "0").test_value();
+        persist_config_value(&client_paths, "Network", "EnableUPnP", "0").test_value();
+        persist_config_value(&client_paths, "Network", "MasterServerSignUp", "0").test_value();
+        let client_tcp_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("reserve initial-join client TCP port")
+            .local_addr()
+            .test_value()
+            .port();
+        persist_config_value(
+            &client_paths,
+            "Network",
+            "PortTCP",
+            client_tcp_port.to_string(),
+        )
+        .test_value();
+        let client_player_path = client_user_data.path().join("Joining.c4p");
+        let mut client_player = clonk_resources::MutableGroup::new("Joining.c4p");
+        client_player
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Joining Player\n\n[Preferences]\nControl=0\nMouse=1\nAutoStopControl=0\nColorDw=65280\n"
+                    .to_vec(),
+                1,
+                false,
+            )
+            .test_value();
+        client_player
+            .add_file_with_metadata(
+                "BigIcon.png",
+                encode_screenshot_png(1, 1, &[231, 72, 19, 255])
+                    .expect("encode joining player icon"),
+                1,
+                false,
+            )
+            .test_value();
+        fs::write(&client_player_path, client_player.pack().test_value()).test_value();
+        persist_config_value(
+            &client_paths,
+            "General",
+            "PlayerPath",
+            client_user_data.path().to_string_lossy().into_owned(),
+        )
+        .test_value();
+        persist_config_value(
+            &client_paths,
+            "General",
+            "Participants",
+            client_player_path.to_string_lossy().into_owned(),
+        )
+        .test_value();
+        new_menu_app_with_paths(640, 480, &client_paths)
+    };
+    client.open_network_game_dialog();
+    main_assert!(client.startup_game_search.is_some());
+    let mut client_frame = vec![0x73; 640 * 480 * 4];
+
+    host.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
+    let host_deadline = Instant::now() + Duration::from_secs(30);
+    while host.startup_network_connection.is_some() {
+        host.test_update();
+        main_assert!(
+            Instant::now() < host_deadline,
+            "prepared host did not reach its lobby: {}",
+            host.status_text
+        );
+        thread::yield_now();
+    }
+    main_assert!(host.classic_host_lobby_active(), "{}", host.status_text);
+    let host_reference = some(&host.advertised_game_reference).summary().clone();
+    main_assert!(host_reference.join_allowed);
+    main_assert!(host_reference
+        .addresses
+        .iter()
+        .any(|address| address.protocol == clonk_network::NetworkProtocol::Tcp));
+    client.startup_game_references = vec![host_reference];
+    client.sync_startup_network_game_rows();
+    let selected_reference = client.startup_game_references[0].clone();
+    client.focus_startup_game_reference(&selected_reference);
+    main_assert_eq!(client.startup_network_dialog.test_ref().selected_game() => Some(0));
+
+    let started = Instant::now();
+    client
+        .process_network_dialog_actions(vec![
+            clonk_frontend::startup_netdlg::NetDlgAction::JoinGame { address: None },
+        ])
+        .test_value();
+    let timeout = started + Duration::from_secs(10);
+    let mut checkpoints = [None; 8];
+    let mut lobby_rendered = false;
+    loop {
+        host.test_update();
+        client.test_update();
+
+        let local_client_id = client
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let lobby_visible =
+            client.joined_network_lobby_active() && client.message_dialogs.is_empty();
+        let scenario_identity = client
+            .pending_network_join_data
+            .as_ref()
+            .is_some_and(|join| {
+                join.parameters.title.as_bytes() == b"Fixture"
+                    && join.parameters.scenario.filename.as_bytes()
+                        == scenario.identifier.as_bytes()
+                    && client
+                        .network_lobby
+                        .as_ref()
+                        .is_some_and(|lobby| lobby.scenario_label() == "Fixture")
+            });
+        let roster_propagated = local_client_id.is_some_and(|local_client_id| {
+            let client_ids = |rows: &[LobbyRosterRow]| {
+                rows.iter()
+                    .filter_map(|row| match row {
+                        LobbyRosterRow::Client(client) => Some(client.id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            client.control_clients.contains(0)
+                && client.control_clients.contains(local_client_id)
+                && client.control_clients.is_activated(0)
+                && client.control_clients.is_activated(local_client_id)
+                && host.control_clients.contains(local_client_id)
+                && host.control_clients.is_activated(local_client_id)
+                && client.network_lobby.as_ref().is_some_and(|lobby| {
+                    lobby.roster_rows_authoritative
+                        && client_ids(lobby.controller.rows()) == [0, local_client_id]
+                })
+                && host.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                    client_ids(lobby.controller.rows()) == [0, local_client_id]
+                })
+        });
+        let player_info_propagated = local_client_id.is_some_and(|local_client_id| {
+            [0, local_client_id].into_iter().all(|client_id| {
+                let player_resource_available = |app: &GameApp| {
+                    let ids = app.control_player_infos.client_info_ids(client_id);
+                    let expected_name = if client_id == 0 {
+                        b"Exact Player".as_slice()
+                    } else {
+                        b"Joining Player".as_slice()
+                    };
+                    ids.len() == 1
+                        && app.control_player_infos.get(ids[0]).is_some_and(|player| {
+                            player.name.as_bytes() == expected_name
+                                && player.resource.as_ref().is_some_and(|core| {
+                                    app.admission_resources.complete_path(core.id).is_some()
+                                })
+                        })
+                };
+                player_resource_available(&client) && player_resource_available(&host)
+            })
+        });
+        let resources_available = local_client_id.is_some_and(|local_client_id| {
+            let every_loadable_resource_is_complete = |app: &GameApp| {
+                !app.admission_resources.resource_cores.is_empty()
+                    && app.admission_resources.resource_cores.values().all(|core| {
+                        !core.loadable || app.admission_resources.complete_path(core.id).is_some()
+                    })
+            };
+            let player_resources = [0, local_client_id]
+                .into_iter()
+                .filter_map(|client_id| {
+                    let ids = client.control_player_infos.client_info_ids(client_id);
+                    let [id] = ids.as_slice() else {
+                        return None;
+                    };
+                    client
+                        .control_player_infos
+                        .get(*id)
+                        .and_then(|player| player.resource.as_ref())
+                        .map(|core| (client_id, core.id))
+                })
+                .collect::<Vec<_>>();
+            client
+                .pending_network_join_data
+                .as_ref()
+                .is_some_and(|join| {
+                    std::iter::once(&join.parameters.scenario)
+                        .chain(join.parameters.game_resources.iter())
+                        .chain(std::iter::once(&join.dynamic))
+                        .all(|core| {
+                            !core.loadable
+                                || client.admission_resources.complete_path(core.id).is_some()
+                        })
+                        && client.admission_resources.lobby_ready_available()
+                })
+                && every_loadable_resource_is_complete(&client)
+                && every_loadable_resource_is_complete(&host)
+                && player_resources.len() == 2
+                && player_resources
+                    .iter()
+                    .all(|(client_id, resource_id)| resource_id >> 16 == *client_id)
+                && player_resources[0].1 != player_resources[1].1
+                && client.network_lobby.as_ref().is_some_and(|lobby| {
+                    !lobby.resource_rows.is_empty()
+                        && lobby
+                            .resource_rows
+                            .values()
+                            .all(|row| row.present_percent == 100)
+                        && player_resources.iter().all(|(_, resource_id)| {
+                            lobby
+                                .resource_rows
+                                .get(resource_id)
+                                .is_some_and(|row| row.present_percent == 100)
+                        })
+                })
+                && host.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                    !lobby.resource_rows.is_empty()
+                        && lobby
+                            .resource_rows
+                            .values()
+                            .all(|row| row.present_percent == 100)
+                        && player_resources.iter().all(|(_, resource_id)| {
+                            lobby
+                                .resource_rows
+                                .get(resource_id)
+                                .is_some_and(|row| row.present_percent == 100)
+                        })
+                })
+        });
+        let status_acknowledged =
+            client.pending_network_join_data.is_some() && !client.initial_lobby_status_ack_pending;
+        let startup_connection_finished =
+            client.startup_network_connection.is_none() && client.network.is_some();
+        let state_ready = [
+            lobby_visible,
+            scenario_identity,
+            roster_propagated,
+            player_info_propagated,
+            resources_available,
+            status_acknowledged,
+            startup_connection_finished,
+        ];
+        if state_ready.into_iter().all(|ready| ready) && !lobby_rendered {
+            lobby_rendered = client.test_render(&mut client_frame);
+        }
+        let ready = [
+            lobby_visible,
+            scenario_identity,
+            roster_propagated,
+            player_info_propagated,
+            resources_available,
+            status_acknowledged,
+            startup_connection_finished,
+            lobby_rendered,
+        ];
+        let elapsed = started.elapsed();
+        for (checkpoint, ready) in checkpoints.iter_mut().zip(ready) {
+            if ready && checkpoint.is_none() {
+                *checkpoint = Some(elapsed);
+            }
+        }
+        if ready.into_iter().all(|ready| ready) {
+            break;
+        }
+        main_assert!(
+            Instant::now() < timeout,
+            "initial network game join did not fully load the lobby after {elapsed:?}; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}; host status = {:?}; client status = {:?}",
+            host.status_text,
+            client.status_text,
+        );
+        thread::yield_now();
+    }
+
+    let elapsed = started.elapsed();
+    eprintln!("initial full-lobby network game join completed in {elapsed:?}");
+    main_assert!(
+        elapsed <= Duration::from_millis(500),
+        "initial network game join took {elapsed:?}, exceeding the inclusive 500ms lobby budget; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}"
+    );
+}
+
+#[test]
 fn selected_network_scenario_installs_prepared_host_before_admission() {
     // OpenScenario and InitHost finish before Players.Init authors the
     // empty Initial PlayerInfo; AllowJoin follows that direct local
