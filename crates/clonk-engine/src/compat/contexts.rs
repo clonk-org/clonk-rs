@@ -3575,6 +3575,11 @@ impl EffectHostContext {
                     .as_deref()
                     .and_then(|id| world.definition_metadata(id))
                     .map_or(0, |metadata| metadata.fire.contact_incinerate);
+                scope.current_constructable = scope
+                    .definition_id
+                    .as_deref()
+                    .and_then(|id| world.definition_metadata(id))
+                    .is_some_and(|metadata| metadata.constructable);
                 scope.configure_fair_crew(&world);
                 // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358).
                 scope.cached_ocf = Some(ocf);
@@ -6094,6 +6099,7 @@ impl EffectHostContext {
         scope.definition_id = Some(object.definition_id().to_string());
         scope.current_contact_incinerate =
             metadata.map_or(0, |metadata| metadata.fire.contact_incinerate);
+        scope.current_constructable = metadata.is_some_and(|metadata| metadata.constructable);
         scope.configure_fair_crew(&self.world);
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
@@ -8351,6 +8357,9 @@ pub(crate) struct ObjectScopeContext {
     /// DefCore ContactIncinerate drives OCF_Inflammable after a same-call
     /// SetOnFire(false), just as C4Object::SetOCF does.
     current_contact_incinerate: i32,
+    /// DefCore Constructable drives OCF_Construct after a same-call
+    /// SetOnFire(false), just as C4Object::SetOCF does.
+    current_constructable: bool,
     /// The object's CACHED OCF at call entry — FnGetOCF returns pObj->OCF
     /// verbatim (C4Script.cpp:1354-1358). None for bare fixture scopes,
     /// which fall back to the preview-grade recompute.
@@ -8498,6 +8507,7 @@ impl ObjectScopeContext {
             current_category: category,
             ocf_base,
             current_contact_incinerate: 0,
+            current_constructable: false,
             cached_ocf: None,
             persist_final_ocf: false,
             crew_member,
@@ -8553,6 +8563,7 @@ impl ObjectScopeContext {
         self.definition_physical = metadata.physical;
         self.ocf_base = metadata.ocf_base;
         self.current_contact_incinerate = metadata.fire.contact_incinerate;
+        self.current_constructable = metadata.constructable;
         self.crew_member = metadata.crew_member;
         self.walk_rotation.rotateable = metadata.rotateable;
 
@@ -9392,10 +9403,21 @@ impl ObjectScopeContext {
                 // must not survive a same-call ignition.
                 mask &= !ocf::CONSTRUCT;
                 mask |= ocf::ON_FIRE;
-            } else if self.current_contact_incinerate > 0
-                && (self.category() & crate::CATEGORY_LIVING == 0 || self.alive())
-            {
-                mask |= ocf::INFLAMMABLE;
+            } else {
+                // SetOCF rebuilds OCF_Construct from the live definition,
+                // construction and raw fixed rotation once OnFire clears
+                // (C4Object.cpp:552-554).
+                if self.current_constructable
+                    && self.construction() < FULL_CON
+                    && self.fixed_rotation() == C4Fixed::ZERO
+                {
+                    mask |= ocf::CONSTRUCT;
+                }
+                if self.current_contact_incinerate > 0
+                    && (self.category() & crate::CATEGORY_LIVING == 0 || self.alive())
+                {
+                    mask |= ocf::INFLAMMABLE;
+                }
             }
         }
         if self
