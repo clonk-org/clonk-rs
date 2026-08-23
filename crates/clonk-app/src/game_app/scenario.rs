@@ -751,6 +751,7 @@ impl GameApp {
     }
 
     pub(crate) fn open_scenario_browser_with_mode(&mut self, selector_mode: ScenarioSelectorMode) {
+        let reload = std::mem::replace(&mut self.scenario_selector_reload_on_next_show, true);
         self.cancel_scenario_selector_discovery();
         self.menu_state.abort_renaming();
         self.close_context_menu_silently();
@@ -810,6 +811,12 @@ impl GameApp {
         self.sync_scenario_game_option_constraint();
         self.scenario_label = self.menu_state.label_path();
         self.status_text.clear();
+        if reload && self.app_paths.is_some() {
+            if let Err(error) = self.reload_scenario_selector(None, true, false) {
+                tracing::error!(%error, "failed to refresh shown scenario selector");
+                self.status_text = format!("Unable to refresh scenarios: {error}");
+            }
+        }
     }
 
     pub(crate) fn finish_scenario_loading_failure(

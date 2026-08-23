@@ -4663,6 +4663,62 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
 }
 
 #[test]
+fn scenario_selector_reopen_discovers_savegame_created_during_session() {
+    // C4StartupScenSelDlg::OnShown reloads ExePath each time the scenario
+    // selector is shown (C4StartupScenSelDlg.cpp:1431-1439).
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let fixture = tempdir();
+    let user_data = fixture.path().join("user-data");
+    let save_root = fixture.path().join("Savegames.c4f");
+    let saved_scenario = save_root.join("Missions.c4f/Missions1.c4s");
+    let (_guard, paths) = exact_loader_test_paths(&user_data, None);
+    persist_config_value(
+        &paths,
+        "General",
+        "SaveGameFolder",
+        save_root.to_string_lossy().into_owned(),
+    )
+    .test_value();
+
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    main_assert!(!app
+        .scenario_catalog
+        .values()
+        .any(|entry| entry.path.as_deref() == Some(saved_scenario.as_path())));
+    app.open_scenario_browser();
+    app.close_scenario_browser();
+
+    fs::create_dir_all(saved_scenario.parent().test_value()).test_value();
+    fs::write(save_root.join("Title.txt"), b"US:Savegames").test_value();
+    fs::write(
+        save_root.join("Missions.c4f/Title.txt"),
+        b"US:Mission saves",
+    )
+    .test_value();
+    let mut saved = MutableGroup::new("Missions1.c4s");
+    saved
+        .add_file(
+            "Scenario.txt",
+            b"[Head]\nTitle=Same-session save\nSaveGame=1\nNoInitialize=1\n".to_vec(),
+        )
+        .test_value();
+    saved
+        .add_file("Game.txt", b"[Game]\nFrame=37\n".to_vec())
+        .test_value();
+    fs::write(&saved_scenario, saved.pack().test_value()).test_value();
+
+    app.open_scenario_browser();
+    wait_for_scenario_selector_discovery(&mut app);
+
+    main_assert!(app
+        .scenario_catalog
+        .values()
+        .any(|entry| entry.path.as_deref() == Some(saved_scenario.as_path())));
+    reset_cached_app_paths();
+}
+
+#[test]
 fn savegame_slot_probe_uses_c4group_validity() {
     let fixture = tempdir();
     let user_data = fixture.path().join("user-data");
