@@ -747,6 +747,7 @@ impl GameApp {
             &folder_save_journal,
             self.process_group_maker.as_bytes(),
         )?;
+        self.scenario_selector_reload_on_next_show = true;
         if retarget_active_scenario {
             let success = match kind {
                 ConsoleSaveKind::Scenario => {

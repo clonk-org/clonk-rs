@@ -2656,6 +2656,7 @@ impl GameApp {
             mode: AppMode::Loading,
             scenario_catalog,
             scenario_selector_discovery: None,
+            scenario_selector_reload_on_next_show: false,
             scenario_entry_enabled: HashMap::new(),
             active_scenario: None,
             active_definition_load: None,

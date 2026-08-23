@@ -296,6 +296,10 @@ pub(crate) struct GameApp {
     /// menu tree remains live but hidden until this worker supplies the
     /// replacement vector, making completion one atomic book rebuild.
     pub(crate) scenario_selector_discovery: Option<ScenarioSelectorDiscoveryState>,
+    /// The constructor has already populated the first selector generation.
+    /// Later shows must rediscover disk changes made while that generation was
+    /// hidden, including savegames written by the running round.
+    pub(crate) scenario_selector_reload_on_next_show: bool,
     /// Cached `C4ScenarioListLoader::Entry::CanOpen` result for the current
     /// selector mode. Rows stay actionable; this controls label color only.
     pub(crate) scenario_entry_enabled: HashMap<String, bool>,
