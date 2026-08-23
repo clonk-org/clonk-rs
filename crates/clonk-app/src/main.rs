@@ -2012,7 +2012,8 @@ fn run() -> Result<()> {
             // which is where an IME puts it when nobody says otherwise.
             if let Some(caret) = app.ime_caret_area() {
                 let (x, y) = presenter.gui_to_position(f64::from(caret.x), f64::from(caret.y));
-                let (w, h) = presenter.gui_to_position(f64::from(caret.w), f64::from(caret.h));
+                let scale = f64::from(presenter.scale().max(f32::EPSILON));
+                let (w, h) = (f64::from(caret.w) * scale, f64::from(caret.h) * scale);
                 window.set_ime_cursor_area(
                     winit::dpi::PhysicalPosition::new(x, y),
                     winit::dpi::PhysicalSize::new(w.max(1.0), h.max(1.0)),
