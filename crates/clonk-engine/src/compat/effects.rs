@@ -3887,7 +3887,8 @@ pub(crate) fn flame_consume_material(args: &[Value]) -> Result<Value, RuntimeErr
 /// FnOnFire (C4Script.cpp:1866-1877): burning when the OnFire flag is set
 /// or any *Fire* effect (C4Fx_AnyFire) sits on the object; nil without one.
 /// Staged same-call writes (Incinerate/Extinguish/RemoveEffect) win over
-/// the world snapshot like C++'s live flag.
+/// the world snapshot like C++'s live flag; dead effect nodes are skipped
+/// like C4Effect::Get (C4Effect.cpp:215-240).
 pub(crate) fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target_id =
@@ -3913,7 +3914,7 @@ pub(crate) fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
                     .effects
                     .snapshot()
                     .iter()
-                    .any(|effect| effect.name.contains("Fire"));
+                    .any(|effect| effect.priority != 0 && effect.name.contains("Fire"));
             return Ok(Value::Bool(burning));
         }
         match context.get_world_object(target) {
@@ -3922,7 +3923,7 @@ pub(crate) fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
                     || state
                         .effects
                         .iter()
-                        .any(|effect| effect.name.contains("Fire"))
+                        .any(|effect| effect.priority != 0 && effect.name.contains("Fire"))
             }))),
             None => Ok(Value::Nil),
         }
