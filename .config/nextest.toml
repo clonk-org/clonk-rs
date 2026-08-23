@@ -39,6 +39,13 @@ filter = 'package(clonk-app) and test(selected_network_scenario_installs_prepare
 retries = 2
 slow-timeout = { period = "60s", terminate-after = 1 }
 
+# This is a wall-clock product contract over a real host/client join. Reserve
+# the same capacity as the workspace's memory-heavy tests so unrelated process
+# contention cannot spend the 500ms budget on the join's behalf.
+[[profile.default.overrides]]
+filter = 'package(clonk-app) and test(initial_network_game_join_fully_loads_the_client_lobby_within_500ms)'
+threads-required = 12
+
 [[profile.default.overrides]]
 filter = 'package(clonk-network) and test(control_sync_and_reconnect_smoke)'
 retries = 2
