@@ -9396,20 +9396,19 @@ impl ObjectScopeContext {
             // rebuilding both fire-dependent bits before the next script
             // statement or foreign-object lookup.
             let on_fire = self.pending_update.staged_on_fire().unwrap_or(false);
-            mask &= !(ocf::ON_FIRE | ocf::INFLAMMABLE);
+            // SetOCF rebuilds OCF_Construct from the same live definition,
+            // construction and integer rotation state, so discard any stale
+            // cached bit before the !OnFire reconstruction below.
+            mask &= !(ocf::ON_FIRE | ocf::INFLAMMABLE | ocf::CONSTRUCT);
             if on_fire {
-                // SetOCF's construct gate also rejects burning objects
-                // (C4Object.cpp:549-552); an existing cached construct bit
-                // must not survive a same-call ignition.
-                mask &= !ocf::CONSTRUCT;
                 mask |= ocf::ON_FIRE;
             } else {
                 // SetOCF rebuilds OCF_Construct from the live definition,
-                // construction and raw fixed rotation once OnFire clears
+                // construction and integer rotation once OnFire clears
                 // (C4Object.cpp:552-554).
                 if self.current_constructable
                     && self.construction() < FULL_CON
-                    && self.fixed_rotation() == C4Fixed::ZERO
+                    && self.rotation() == 0
                 {
                     mask |= ocf::CONSTRUCT;
                 }

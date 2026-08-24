@@ -3710,7 +3710,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         // incomplete, unrotated object once OnFire is cleared
         // (C4Object.cpp:552-554). FnGetOCF returns that cache verbatim
         // (C4Script.cpp:1354-1358), so a foreign target must regain the bit
-        // before the caller's next statement.
+        // before the caller's next statement. The loaded fixture also keeps
+        // r=0 independent from FixR=90 to pin the integer C++ gate
+        // (C4Object.cpp:552-554; C4Object.cpp:2791).
         let mut target_definition = test_definition("HUT", "Hut", "");
         target_definition.set_constructable(true);
         target_definition.set_fire_properties(1, false, false);
@@ -3726,8 +3728,10 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
         let hut = engine.spawn_test_object(
             SpawnConfig::new("HUT")
+                .with_loaded(true)
                 .with_construction(FULL_CON - 1)
-                .with_rotation(0),
+                .with_rotation(0)
+                .with_fixed_rotation(itofix(90)),
         );
         let actor_idx = engine.test_object_index(actor);
         let hut_idx = engine.test_object_index(hut);
@@ -3744,6 +3748,47 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         unit_assert_ne!(
             (mask as u32) & ocf::CONSTRUCT => 0,
             "Extinguish restores OCF_Construct immediately",
+        );
+    }
+
+    #[test]
+    fn extinguish_clears_construct_ocf_after_same_call_rotation() {
+        // SetR refreshes the target's cached OCF synchronously before the
+        // following Extinguish (C4Script.cpp:738-746; C4Object.cpp:530-640).
+        // After the integer r becomes 90, SetOCF's construct gate must stay
+        // clear even though this callback began with an incomplete building
+        // (C4Object.cpp:552-554).
+        let mut target_definition = test_definition("HUT", "Hut", "");
+        target_definition.set_constructable(true);
+        target_definition.set_fire_properties(1, false, false);
+        let mut engine = definition_engine(
+            37,
+            test_definition(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc TurnAndQuench(pVictim) { Incinerate(pVictim); SetR(90, pVictim); Extinguish(pVictim); return GetOCF(pVictim); }\n",
+            ),
+        );
+        engine.register_test_definition(target_definition);
+        let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
+        let hut = engine.spawn_test_object(
+            SpawnConfig::new("HUT")
+                .with_construction(FULL_CON - 1)
+                .with_rotation(0),
+        );
+        let actor_idx = engine.test_object_index(actor);
+
+        let result = engine.call_test_object_function(
+            actor_idx,
+            "TurnAndQuench",
+            vec![Value::Object(hut.as_u64())],
+        );
+        let Value::Int(mask) = result else {
+            panic!("GetOCF should return an integer mask, got {result:?}");
+        };
+        unit_assert_eq!(
+            (mask as u32) & ocf::CONSTRUCT => 0,
+            "rotation 90 keeps OCF_Construct clear after Extinguish",
         );
     }
 
