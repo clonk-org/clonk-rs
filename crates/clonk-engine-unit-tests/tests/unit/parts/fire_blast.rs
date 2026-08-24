@@ -3753,8 +3753,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
     #[test]
     fn extinguish_clears_construct_ocf_after_same_call_rotation() {
-        // SetR refreshes the target's cached OCF synchronously before the
-        // following Extinguish (C4Script.cpp:738-746; C4Object.cpp:530-640).
+        // SetR changes only the target's rotation; the following Extinguish
+        // calls SetOnFire(false), which refreshes cached OCF before GetOCF
+        // resumes (C4Script.cpp:738-746; C4Object.cpp:530-640).
         // After the integer r becomes 90, SetOCF's construct gate must stay
         // clear even though this callback began with an incomplete building
         // (C4Object.cpp:552-554).
