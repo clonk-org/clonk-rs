@@ -4,6 +4,13 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-08-24
+
+### Bug fixes
+
+- Reuse completed player resources after shadow expiry (#1002)
+- Show savegame overwrite results in game (#1001)
+
 ## [0.19.3] - 2026-08-23
 
 ### Bug fixes
