@@ -2579,7 +2579,7 @@ impl Definition {
         // pre-error local writes (C4AulExec aborts the call but rolls
         // nothing back, C4AulExec.cpp:1318-1342).
         let cells = clonk_script::LocalCells::from_local_vars(&state.local_vars);
-        let (result, host_effects) = compat::with_effect_context_with_state(
+        let (result, host_effects) = compat::with_effect_context_with_state_and_spawn_previews(
             Some(self.host_object_context(state, object_id, &world)),
             global_effects,
             world,
@@ -2640,7 +2640,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
-            object_lists: _,
+            object_lists: host_object_lists,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -2698,6 +2698,7 @@ impl Definition {
             .solid_mask_operations
             .extend(host_solid_mask_operations);
         batch.host_raster_preview = host_raster_preview;
+        batch.object_lists = host_object_lists;
         if !host_particles.is_empty() {
             batch.particles.extend(host_particles);
         }
@@ -2767,7 +2768,7 @@ impl Definition {
         // Cells live OUTSIDE the session so a mid-call error keeps the
         // pre-error local writes (C4AulExec.cpp:1318-1342, no rollback).
         let cells = clonk_script::LocalCells::from_local_vars(&state.local_vars);
-        let (result, host_effects) = compat::with_effect_context_with_state(
+        let (result, host_effects) = compat::with_effect_context_with_state_and_spawn_previews(
             Some(self.host_object_context(state, object_id, &world)),
             global_effects,
             world,
@@ -2817,7 +2818,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
-            object_lists: _,
+            object_lists: host_object_lists,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -2856,6 +2857,7 @@ impl Definition {
             .solid_mask_operations
             .extend(host_solid_mask_operations);
         batch.host_raster_preview = host_raster_preview;
+        batch.object_lists = host_object_lists;
         batch.particles.extend(host_particles);
         batch.transfer_zones.extend(host_transfer_zones);
         batch.messages.extend(host_messages);

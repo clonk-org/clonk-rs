@@ -7113,6 +7113,11 @@ struct CommandBatch {
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
     next_mission_commands: Vec<NextMissionCommand>,
+    /// Exact callback-final `Game.Objects` order. A creation callback may
+    /// create objects synchronously — `FnAddEffect` on a live object runs
+    /// `Fx*Start` before it returns (C4Effect.cpp:118-133) — and their link
+    /// chronology cannot be recovered from the deferred spawn channel alone.
+    object_lists: Option<compat::EffectObjectListPreview>,
     trigger_game_over: bool,
     script_go: Option<bool>,
     script_counter: Option<i32>,
@@ -13715,6 +13720,10 @@ mod native_effect_clearall_live_walk;
 #[cfg(test)]
 #[path = "lib_tests/native_effect_damage_live_walk.rs"]
 mod native_effect_damage_live_walk;
+
+#[cfg(test)]
+#[path = "lib_tests/creation_phase_object_chronology_regression.rs"]
+mod creation_phase_object_chronology_regression;
 
 #[cfg(test)]
 #[path = "lib_tests/goal_rule_activate_families.rs"]

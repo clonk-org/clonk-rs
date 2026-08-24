@@ -17,6 +17,25 @@ impl Engine {
         self.spawn_single_inner(config, None)
     }
 
+    /// Re-link what the earlier creation phases already created into the
+    /// next phase's fresh world snapshot. C4Game::NewObject keeps one live
+    /// `Game.Objects` across Construction, initial DoCon and Initialize
+    /// (C4Game.cpp:1100-1142); the port takes a phase-local snapshot to keep
+    /// COW landscape generations apart, so the links have to be replayed.
+    fn seed_creation_phase_projections(
+        world: &mut compat::HostWorldContext,
+        spawns: &[compat::EffectSpawnPreview],
+        object_lists: Option<&compat::EffectObjectListPreview>,
+    ) {
+        if spawns.is_empty() {
+            return;
+        }
+        world.seed_pending_objects(spawns.to_vec());
+        if let Some(preview) = object_lists {
+            world.install_effect_object_lists(preview.clone());
+        }
+    }
+
     pub(crate) fn spawn_single_inner(
         &mut self,
         config: SpawnConfig,
@@ -679,6 +698,12 @@ impl Engine {
         // dropping it as an unknown live object.
         let mut pending_nested_outcomes = Vec::new();
         let mut pending_effect_object_lists = None;
+        // C4Game::NewObject links a synchronously created object into
+        // Game.Objects before the creating statement returns
+        // (C4Game.cpp:1100-1142). Each creation phase takes a fresh world
+        // snapshot, so carry the previous phases' projections forward
+        // explicitly or a later phase rebuilds its list without them.
+        let mut creation_spawn_previews: Vec<compat::EffectSpawnPreview> = Vec::new();
         let mut deferred_transfer_zones: Vec<TransferZoneCommand> = Vec::new();
         // C++ Init runs SetOCF before Objects.Add and before Construction
         // (C4Game.cpp:1115-1126; C4Object.cpp:198-217). Compute against the
@@ -733,6 +758,7 @@ impl Engine {
                     player_commands,
                     object_order_commands,
                     next_mission_commands,
+                    object_lists: construction_object_lists,
                     trigger_game_over,
                     script_go,
                     script_counter,
@@ -744,11 +770,15 @@ impl Engine {
             ) = {
                 let world =
                     self.host_world_context_for_pending_object(&object, initial_exec_position);
+                // The publish channel is shared with every clone, so the
+                // retained handle collects whatever the callback created
+                // synchronously for the phases that follow it.
+                let published = world.clone();
                 let definition = self
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
-                definition.call_construction(
+                let outcome = definition.call_construction(
                     &object.state,
                     id,
                     rng_state,
@@ -759,7 +789,9 @@ impl Engine {
                     world,
                     self.game_over_triggered,
                     self.audio_registry.clone(),
-                )?
+                )?;
+                creation_spawn_previews.extend(published.take_effect_spawn_previews());
+                outcome
             };
             self.stage_host_solid_mask_operations(
                 construction_solid_mask_operations,
@@ -882,6 +914,11 @@ impl Engine {
                 object.enqueue_commands(commands);
             }
             additional_spawns.extend(spawns);
+            // Only a phase that actually touched the list publishes one;
+            // a later silent phase must not erase an earlier snapshot.
+            if construction_object_lists.is_some() {
+                pending_effect_object_lists = construction_object_lists;
+            }
             pending_nested_outcomes
                 .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
             if !audio.is_empty() {
@@ -958,6 +995,7 @@ impl Engine {
                     player_commands,
                     object_order_commands,
                     next_mission_commands,
+                    object_lists: initialize_object_lists,
                     trigger_game_over,
                     script_go,
                     script_counter,
@@ -976,11 +1014,17 @@ impl Engine {
                 for command in &deferred_transfer_zones {
                     world.preview_transfer_zone_command(command);
                 }
+                Self::seed_creation_phase_projections(
+                    &mut world,
+                    &creation_spawn_previews,
+                    pending_effect_object_lists.as_ref(),
+                );
+                let published = world.clone();
                 let definition = self
                     .definitions
                     .get(&initialize_definition_id)
                     .expect("definition must exist");
-                definition.call_initialize(
+                let outcome = definition.call_initialize(
                     &object.state,
                     id,
                     random,
@@ -992,7 +1036,9 @@ impl Engine {
                     world,
                     self.game_over_triggered,
                     self.audio_registry.clone(),
-                )?
+                )?;
+                creation_spawn_previews.extend(published.take_effect_spawn_previews());
+                outcome
             };
             let initialize_host_ocf_override = delta.ocf_override();
             self.stage_host_solid_mask_operations(
@@ -1117,7 +1163,15 @@ impl Engine {
             if !commands.is_empty() {
                 object.enqueue_commands(commands);
             }
-            additional_spawns = spawns;
+            // C4Game::NewObject returns only after every phase's nested
+            // CreateObject has completed (C4Game.cpp:1100-1142), so an
+            // Initialize creation joins Construction's rather than
+            // replacing it — Basement72's Construction builds the
+            // basement that its structure's Initialize must not drop.
+            additional_spawns.extend(spawns);
+            if initialize_object_lists.is_some() {
+                pending_effect_object_lists = initialize_object_lists;
+            }
             pending_nested_outcomes
                 .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
             if !audio.is_empty() {
@@ -1136,6 +1190,11 @@ impl Engine {
             for command in &deferred_transfer_zones {
                 world.preview_transfer_zone_command(command);
             }
+            Self::seed_creation_phase_projections(
+                &mut world,
+                &creation_spawn_previews,
+                pending_effect_object_lists.as_ref(),
+            );
             let effect_definition_id = object.definition_id.clone();
             let definition = self
                 .definitions
@@ -1205,7 +1264,9 @@ impl Engine {
             additional_spawns.extend(effect_spawns);
             pending_nested_outcomes
                 .extend(self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?);
-            pending_effect_object_lists = effect_object_lists;
+            if effect_object_lists.is_some() {
+                pending_effect_object_lists = effect_object_lists;
+            }
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
