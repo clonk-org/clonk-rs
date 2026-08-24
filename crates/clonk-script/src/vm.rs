@@ -3161,6 +3161,12 @@ impl Value {
     pub fn c4_operator_equals(&self, other: &Self) -> bool {
         c4_operator_equal(self, other)
     }
+
+    /// `C4Value::Equals(MAXSTRICT)` (C4Value.cpp:823-858), used by
+    /// `C4ValueHash::KeyEqual` for map lookup (C4ValueHash.h:39-44).
+    pub(crate) fn c4_maxstrict_equals(&self, other: &Self) -> bool {
+        c4_typed_equal(self, other)
+    }
 }
 
 fn c4_values_equal(
@@ -3232,15 +3238,12 @@ fn c4_scalar_payload(value: &Value) -> Option<u64> {
 }
 
 fn c4_operator_equal(left: &Value, right: &Value) -> bool {
-    // Only a genuine C4V_Any short-circuits here. `C4Value(C4Object *)`
-    // collapses a null pointer to C4V_Any (C4Value.h:119), but `SetObject`
-    // does not (`:195`): it tags C4V_C4Object whatever the pointer is, and
-    // `C4Object::Incinerate` takes `pIncineratingObject = nullptr` by default,
-    // so a fire effect's `EffectVars[3]` really does hold a C4V_C4Object with a
-    // null payload (C4Effect.cpp:631). That value must take the object arm
-    // below, where an equal tag is required as well as an equal payload --
-    // treating it as C4V_Any made `EffectVar(3, ...) == 0` true for an
-    // uncaused fire, where C++ reports false.
+    // Only a genuine C4V_Any short-circuits here. Native object constructors
+    // and `SetObject` both canonicalize a null pointer to C4V_Any through
+    // `Set` (C4Value.h:119,195; C4Value.cpp:121-143). Rust still retains
+    // `Object(0)` as a low-level compatibility representation for an already
+    // tagged payload, so if one is supplied directly it must take the object
+    // arm below rather than being folded into Nil.
     //
     // A C4ID zero likewise retains its C4V_C4ID tag and must use the
     // asymmetric type table below (notably, neither operand order compares

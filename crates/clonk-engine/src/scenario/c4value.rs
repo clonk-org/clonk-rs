@@ -5,7 +5,7 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(in crate::scenario) enum SerializedC4Value {
+pub(crate) enum SerializedC4Value {
     Value(clonk_script::Value),
     /// Untyped legacy C4V_Any word. Values in the old enumerated-pointer
     /// range are denumerated when the referenced object exists; otherwise
@@ -22,16 +22,16 @@ pub(in crate::scenario) enum SerializedC4Value {
     },
 }
 
-pub(in crate::scenario) struct SerializedC4ValueResolution<'a> {
-    pub(in crate::scenario) object_numbers: &'a HashSet<u64>,
-    pub(in crate::scenario) string_registrations: &'a clonk_script::StringRegistrations,
+pub(crate) struct SerializedC4ValueResolution<'a> {
+    pub(crate) object_numbers: &'a HashSet<u64>,
+    pub(crate) string_registrations: &'a clonk_script::StringRegistrations,
 }
 
 impl SerializedC4Value {
     /// Mirror C4Value::DenumeratePointer and serialized-string lookup
     /// (C4Value.cpp:686-713,783-798). Serialized identities become live VM
     /// values only after the accepted object-number and string tables exist.
-    pub(in crate::scenario) fn resolve(
+    pub(crate) fn resolve(
         self,
         resolution: &SerializedC4ValueResolution<'_>,
     ) -> clonk_script::Value {
@@ -413,7 +413,7 @@ pub(in crate::scenario) fn split_outside_delimiter_limit(
 /// `I`=C4ID stored as its signed 32-bit payload, `a[size;elems]`=array with
 /// trailing nils omitted on write, and `S` indexes the scenario Strings.txt.
 /// `m[count;key=value;...]` retains arbitrary typed keys in insertion order.
-pub(in crate::scenario) fn parse_serialized_c4value(
+pub(crate) fn parse_serialized_c4value(
     encoded: &str,
     line: usize,
 ) -> Result<SerializedC4Value, ScenarioError> {

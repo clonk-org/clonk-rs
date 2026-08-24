@@ -707,7 +707,9 @@ impl ValueMapStorage {
     /// bucket. A node whose key was cleared out from under it stays reachable
     /// through its old hash and is unreachable through its new key.
     fn lookup_index(&self, key: &Value) -> Option<usize> {
-        self.bucket_position(key.c4_value_hash(), |node| node.key == *key)
+        self.bucket_position(key.c4_value_hash(), |node| {
+            node.key.c4_maxstrict_equals(key)
+        })
     }
 
     fn lookup_str_index(&self, key: &str) -> Option<usize> {
@@ -1312,6 +1314,21 @@ impl From<&str> for Value {
 }
 
 impl Value {
+    /// Construct a script value through a fresh native object-pointer slot.
+    ///
+    /// `C4Value::SetObject` delegates to `C4Value::Set`, which canonicalizes a
+    /// null pointer to `C4V_Any` (`C4Value.h:195`; `C4Value.cpp:121-143`). A
+    /// direct [`Value::Object`] remains available to represent an already
+    /// tagged object payload in low-level differential probes.
+    #[doc(hidden)]
+    pub fn from_c4_object_handle(object: u64) -> Self {
+        if object == 0 {
+            Self::Nil
+        } else {
+            Self::Object(object)
+        }
+    }
+
     /// Whether this value contains an object reference at any nesting depth.
     #[doc(hidden)]
     pub fn contains_object_reference(&self, object_id: u64) -> bool {
@@ -2085,6 +2102,35 @@ mod map_tests {
     }
 
     #[test]
+    fn map_keys_compare_boolean_payloads_by_maxstrict_truthiness() {
+        // C4ValueHash::KeyEqual delegates to C4Value::Equals(MAXSTRICT), whose
+        // C4V_Bool arm compares `_getBool()` rather than the raw union payload
+        // (C4ValueHash.h:39-44; C4Value.cpp:823-852). operator[] therefore
+        // finds and overwrites the same node for every truthy Boolean payload
+        // without moving its insertion-order position (C4ValueHash.cpp:117-136).
+        let mut map = ValueMap::new();
+        map.insert_key(Value::from_c4_bool_raw(2), Value::Int(11));
+        map.insert_key(Value::Int(0), Value::Int(99));
+
+        assert_eq!(map.get_key(&Value::Bool(true)), Some(&Value::Int(11)));
+        assert_eq!(
+            map.get_key(&Value::from_c4_bool_raw(7)),
+            Some(&Value::Int(11))
+        );
+
+        assert_eq!(
+            map.insert_key(Value::from_c4_bool_raw(7), Value::Int(22)),
+            Some(Value::Int(11))
+        );
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.keys().cloned().collect::<Vec<_>>(),
+            vec![Value::from_c4_bool_raw(2), Value::Int(0)]
+        );
+        assert_eq!(map.get_key(&Value::Bool(true)), Some(&Value::Int(22)));
+    }
+
+    #[test]
     fn arbitrary_keys_coexist_with_string_properties_in_insertion_order() {
         let mut map = ValueMap::new();
         map.insert("name".into(), Value::Int(1));
@@ -2436,6 +2482,15 @@ mod cnv_tests {
         assert_eq!(Value::String("x".into()).c4v_type(), C4VType::String);
         assert_eq!(Value::Array(vec![]).c4v_type(), C4VType::Array);
         assert_eq!(Value::Proplist(ValueMap::new()).c4v_type(), C4VType::Map);
+    }
+
+    #[test]
+    fn fresh_object_pointer_slot_canonicalizes_null_like_c4value_set() {
+        // C4Value::SetObject forwards to Set, whose zero-payload branch stores
+        // C4V_Any rather than C4V_C4Object (C4Value.h:195;
+        // C4Value.cpp:121-143).
+        assert_eq!(Value::from_c4_object_handle(0), Value::Nil);
+        assert_eq!(Value::from_c4_object_handle(42), Value::Object(42));
     }
 
     #[test]
