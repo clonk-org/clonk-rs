@@ -45,8 +45,8 @@ use crate::math::{
 };
 use crate::rng::LcgRng;
 use crate::scenario::{
-    GameParameterRuleGoalLists, LegacyDefinitionResolver, MapPixelClassifier, ScenarioError,
-    ScenarioIdListEntry,
+    parse_serialized_c4value, GameParameterRuleGoalLists, LegacyDefinitionResolver,
+    MapPixelClassifier, ScenarioError, ScenarioIdListEntry, SerializedC4ValueResolution,
 };
 use crate::{
     contact_action_wall_tumble_x, ActionSpec, ActionState, CommandDirection, Definition,
@@ -533,6 +533,492 @@ fn convert_case_value(name: &str) -> ScriptValue {
         "map" => ScriptValue::Proplist(ValueMap::new()),
         other => panic!("unknown script_value_convert case `{other}`"),
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct C4ValueStatefulConversionOutcome {
+    ok: bool,
+    value: ScriptValue,
+    is_ref: bool,
+    target: Option<ScriptValue>,
+    rng_delta: i32,
+}
+
+fn c4value_scalar_payload(value: &ScriptValue) -> i64 {
+    match value {
+        ScriptValue::Nil => 0,
+        ScriptValue::Int(value) => i64::from(*value),
+        ScriptValue::Bool(value) => i64::from(*value),
+        ScriptValue::RawBool(value) => *value as u64 as i64,
+        ScriptValue::C4Id(value) => clonk_script::c4_id_raw(value) as u64 as i64,
+        ScriptValue::Object(value) => *value as i64,
+        ScriptValue::String(_) | ScriptValue::Array(_) | ScriptValue::Proplist(_) => {
+            panic!("stateful C4Value conversion probe produced a pointer-backed payload")
+        }
+    }
+}
+
+fn run_c4value_stateful_conversion(case: &str) -> C4ValueStatefulConversionOutcome {
+    let rng = LcgRng::new(0xC4A1_0E00);
+    let random_count_before = rng.count;
+
+    let (ok, value, is_ref, target) = match case {
+        "set_object_null" => (
+            true,
+            // Fresh C4Value::SetObject(nullptr) delegates to Set and
+            // canonicalizes the zero payload to C4V_Any (C4Value.h:195;
+            // C4Value.cpp:121-143).
+            ScriptValue::from_c4_object_handle(0),
+            false,
+            None,
+        ),
+        "int_zero_to_c4id_then_set_copy" => {
+            let converted_observation = Arc::new(std::sync::Mutex::new(None));
+            let observed = Arc::clone(&converted_observation);
+            let mut script = clonk_script::Engine::new();
+            script.register_host_reference_function(
+                "ConvertZeroToId",
+                std::iter::empty::<usize>(),
+                move |args| {
+                    let argument = args.first().expect("converted argument is present");
+                    let value = argument.read()?;
+                    *observed.lock().expect("conversion observation lock") =
+                        Some((value.clone(), argument.is_reference()));
+                    Ok(ScriptValue::Bool(true))
+                },
+            );
+            assert!(script.set_host_function_parameter_types("ConvertZeroToId", [C4VType::C4Id]));
+            script.register_host_function("SetCopy", |args| {
+                Ok(args.first().cloned().unwrap_or(ScriptValue::Nil))
+            });
+            assert!(script.set_host_function_parameter_types("SetCopy", [C4VType::Any]));
+            script
+                .load_script("#strict 3\nfunc RunZeroConversion() { return ConvertZeroToId(0); }")
+                .expect("strict3 conversion driver loads");
+
+            // FnCnvInt2Id writes C4V_C4ID directly, retaining the zero tag
+            // (C4Value.cpp:469-478). A second external call initializes a
+            // fresh C4Value parameter through Set, which canonicalizes that
+            // copied zero payload back to C4V_Any (:121-143).
+            let converted_result = script.call("RunZeroConversion", &[]);
+            let converted_ok = converted_result.is_ok();
+            converted_result.expect("zero int converts to a retained zero C4ID");
+            let (observed_value, observed_is_ref) = converted_observation
+                .lock()
+                .expect("conversion observation lock")
+                .clone()
+                .expect("typed host body observed the converted value");
+            let copied_result = script.call("SetCopy", std::slice::from_ref(&observed_value));
+            let copied_ok = copied_result.is_ok();
+            let copied = copied_result.expect("ordinary C4Value::Set copy succeeds");
+            (
+                converted_ok && copied_ok,
+                observed_value,
+                observed_is_ref,
+                Some(copied),
+            )
+        }
+        "reference_int_seven_to_c4id" => {
+            let detached_observation = Arc::new(std::sync::Mutex::new(None));
+            let observed = Arc::clone(&detached_observation);
+            let mut script = clonk_script::Engine::new();
+            script.register_host_reference_function(
+                "ConvertReferenceToId",
+                std::iter::empty::<usize>(),
+                move |args| {
+                    let argument = args.first().expect("converted argument is present");
+                    let value = argument.read()?;
+                    *observed.lock().expect("reference observation lock") =
+                        Some((value.clone(), argument.is_reference()));
+                    Ok(value)
+                },
+            );
+            assert!(
+                script.set_host_function_parameter_types("ConvertReferenceToId", [C4VType::C4Id])
+            );
+
+            // A plain typed parameter receives a dereferenced copy. FnCnvDeref
+            // calls Deref (`Set(GetRefVal())`) and retries conversion, so the
+            // converted value is no longer a reference and the source cell
+            // remains Int(7) (C4Value.h:221-223; C4Value.cpp:445-451).
+            let conversion_result =
+                script.call_with_ref_args("ConvertReferenceToId", &[ScriptValue::Int(7)]);
+            let conversion_ok = conversion_result.is_ok();
+            let (converted, targets) =
+                conversion_result.expect("reference conversion detaches and succeeds");
+            let (observed_value, observed_is_ref) = detached_observation
+                .lock()
+                .expect("reference observation lock")
+                .clone()
+                .expect("typed host body observed the detached value");
+            assert_eq!(converted, observed_value);
+            (
+                conversion_ok,
+                converted,
+                observed_is_ref,
+                Some(targets.into_iter().next().expect("referent is returned")),
+            )
+        }
+        other => panic!("unknown c4value_stateful_conversion case `{other}`"),
+    };
+
+    C4ValueStatefulConversionOutcome {
+        ok,
+        value,
+        is_ref,
+        target,
+        rng_delta: rng.count - random_count_before,
+    }
+}
+
+#[test]
+fn c4value_stateful_conversion_rust_driver_uses_vm_transitions() {
+    let set_null = run_c4value_stateful_conversion("set_object_null");
+    assert_eq!(set_null.value, ScriptValue::Nil);
+    assert_eq!(set_null.target, None);
+
+    let set_copy = run_c4value_stateful_conversion("int_zero_to_c4id_then_set_copy");
+    assert_eq!(set_copy.value, ScriptValue::C4Id("NONE".into()));
+    assert!(!set_copy.is_ref);
+    assert_eq!(set_copy.target, Some(ScriptValue::Nil));
+
+    let deref = run_c4value_stateful_conversion("reference_int_seven_to_c4id");
+    assert_eq!(deref.value, ScriptValue::C4Id("0007".into()));
+    assert!(!deref.is_ref);
+    assert_eq!(deref.target, Some(ScriptValue::Int(7)));
+    assert_eq!(deref.rng_delta, 0);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct C4ValueDenumerationOutcome {
+    value: ScriptValue,
+    rng_delta: i32,
+}
+
+/// Parse and denumerate one saved C4Value after both active and inactive
+/// object lists exist. Native `C4Value::DenumeratePointer` searches those
+/// lists in that order and handles explicit object tags differently from old
+/// untyped pointer words (C4Value.cpp:684-715).
+fn run_c4value_denumeration(encoded: &str) -> C4ValueDenumerationOutcome {
+    let rng = LcgRng::new(0xC4A1_0E00);
+    let random_count_before = rng.count;
+    // 7/10 are active and 8/11 inactive in the C++ fixture. Rust resolves
+    // against the completed combined object-number table, which is the state
+    // visible after both native lookups have run.
+    let object_numbers = HashSet::from([7_u64, 8, 10, 11]);
+    let string_registrations = clonk_script::new_string_registrations();
+    let resolution = SerializedC4ValueResolution {
+        object_numbers: &object_numbers,
+        string_registrations: &string_registrations,
+    };
+    let value = parse_serialized_c4value(encoded, 1)
+        .expect("C++ denumeration fixture encoding parses")
+        .resolve(&resolution);
+    C4ValueDenumerationOutcome {
+        value,
+        rng_delta: rng.count - random_count_before,
+    }
+}
+
+#[test]
+fn c4value_denumeration_rust_driver_distinguishes_explicit_and_legacy_misses() {
+    // C4Value.cpp:684-715: explicit O misses clear, while old A+offset misses
+    // retain their word and pass through GuessType.
+    for (encoded, expected) in [
+        ("O7", ScriptValue::Object(7)),
+        ("O8", ScriptValue::Object(8)),
+        ("O9", ScriptValue::Nil),
+        ("A1000000010", ScriptValue::Object(10)),
+        ("A1000000011", ScriptValue::Object(11)),
+        ("A1000000012", ScriptValue::Int(1_000_000_012)),
+    ] {
+        let outcome = run_c4value_denumeration(encoded);
+        assert_eq!(outcome.value, expected, "denumerating {encoded}");
+        assert_eq!(outcome.rng_delta, 0);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct C4ValueRuntimeOperationOutcome {
+    result: ScriptValue,
+    aliases: i64,
+    array: ScriptValue,
+    error: String,
+    rng_delta: i32,
+}
+
+fn c4value_runtime_observation(value: ScriptValue) -> (ScriptValue, i64, ScriptValue) {
+    let ScriptValue::Array(mut returned) = value else {
+        panic!("runtime C4Value driver returned a non-array observation")
+    };
+    assert_eq!(
+        returned.len(),
+        2,
+        "runtime driver returns observation + array"
+    );
+    let array = returned.pop().expect("runtime driver returns its array");
+    let observation = returned
+        .pop()
+        .expect("runtime driver returns its operation observation");
+    let ScriptValue::Array(mut observation) = observation else {
+        panic!("runtime C4Value observation is not a result/alias pair")
+    };
+    assert_eq!(
+        observation.len(),
+        2,
+        "runtime observation returns result + alias count"
+    );
+    let aliases = observation
+        .pop()
+        .and_then(|value| value.as_c4_int())
+        .map(i64::from)
+        .expect("runtime observation alias count is an integer");
+    let result = observation
+        .pop()
+        .expect("runtime observation includes its result");
+    (result, aliases, array)
+}
+
+fn c4value_runtime_error(error: clonk_script::ScriptError) -> String {
+    match error {
+        clonk_script::ScriptError::Runtime(error) => error.message().to_owned(),
+        clonk_script::ScriptError::Parse(..) => {
+            panic!("runtime C4Value driver unexpectedly returned a parse error: {error}")
+        }
+    }
+}
+
+fn c4value_runtime_array_state(array: &ScriptValue) -> String {
+    let ScriptValue::Array(values) = array else {
+        panic!("runtime C4Value driver did not preserve an array")
+    };
+    let slots = values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| !matches!(value, ScriptValue::Nil))
+        .map(|(index, value)| {
+            format!(
+                ";slot{index}={}",
+                crate::live_c4_save::encode_value_with_current_string_ids(value)
+            )
+        })
+        .collect::<String>();
+    format!("size={}{}", values.len(), slots)
+}
+
+fn c4value_runtime_type_name(value: &ScriptValue) -> &'static str {
+    if matches!(value, ScriptValue::Nil) {
+        "any"
+    } else {
+        value.type_name()
+    }
+}
+
+/// Exercise C4ValueList element lookup and C4Value reference relocation through
+/// the public script VM. These are the Rust counterparts of C4Value.cpp:37-297
+/// and C4ValueList.cpp:28-90,143-183 used by the C++ oracle.
+fn run_c4value_runtime_operation(case: &str) -> C4ValueRuntimeOperationOutcome {
+    let rng = LcgRng::new(0xC4A1_0E00);
+    let random_count_before = rng.count;
+
+    let (result, aliases, array, error) = match case {
+        "element_refs_survive_growth" => {
+            let mut script = clonk_script::Engine::new();
+            script.register_host_reference_function("MutateRuntimeRefs", [0, 1, 2], |args| {
+                let first = args
+                    .first()
+                    .ok_or_else(|| clonk_script::RuntimeError::new("missing first array ref"))?;
+                let second = args
+                    .get(1)
+                    .ok_or_else(|| clonk_script::RuntimeError::new("missing second array ref"))?;
+                let grown = args
+                    .get(2)
+                    .ok_or_else(|| clonk_script::RuntimeError::new("missing grown array ref"))?;
+                first.write(ScriptValue::Int(7))?;
+                second.write(ScriptValue::Int(8))?;
+                grown.write(ScriptValue::Int(4))?;
+                let aliases = i32::from(first.is_reference()) + i32::from(second.is_reference());
+                let sum = [first, second, grown]
+                    .into_iter()
+                    .try_fold(0_i32, |sum, argument| {
+                        argument
+                            .read()?
+                            .as_c4_int()
+                            .and_then(|value| sum.checked_add(value))
+                            .ok_or_else(|| {
+                                clonk_script::RuntimeError::new(
+                                    "runtime array reference did not contain an integer",
+                                )
+                            })
+                    })?;
+                Ok(ScriptValue::Array(vec![
+                    ScriptValue::Int(sum),
+                    ScriptValue::Int(aliases),
+                ]))
+            });
+            assert!(script.set_host_function_parameter_types(
+                "MutateRuntimeRefs",
+                [C4VType::Ref, C4VType::Ref, C4VType::Ref]
+            ));
+            script
+                .load_script(
+                    "#strict 3\n\
+                     func RuntimeElementRefs() {\n\
+                       var values = [1, 2];\n\
+                       var observed = MutateRuntimeRefs(values[0], values[1], values[3]);\n\
+                       return [observed, values];\n\
+                     }",
+                )
+                .expect("runtime element-reference driver loads");
+            let returned = script
+                .call("RuntimeElementRefs", &[])
+                .expect("runtime element-reference driver executes");
+            let (result, aliases, array) = c4value_runtime_observation(returned);
+            (result, aliases, array, String::new())
+        }
+        "value_read_missing_no_growth" => {
+            let mut script = clonk_script::Engine::new();
+            script.register_host_reference_function(
+                "ObserveRuntimeValue",
+                std::iter::empty::<usize>(),
+                |args| {
+                    let value = args
+                        .first()
+                        .ok_or_else(|| clonk_script::RuntimeError::new("missing observed value"))?;
+                    Ok(ScriptValue::Array(vec![
+                        value.read()?,
+                        ScriptValue::Int(i32::from(value.is_reference())),
+                    ]))
+                },
+            );
+            script
+                .load_script(
+                    "#strict 3\n\
+                     func RuntimeMissingRead() {\n\
+                       var values = [1];\n\
+                       var observed = ObserveRuntimeValue(values[5]);\n\
+                       return [observed, values];\n\
+                     }",
+                )
+                .expect("runtime missing-read driver loads");
+            let returned = script
+                .call("RuntimeMissingRead", &[])
+                .expect("runtime missing-read driver executes");
+            let (result, aliases, array) = c4value_runtime_observation(returned);
+            (result, aliases, array, String::new())
+        }
+        "mutable_negative_clamps_and_grows" => {
+            let mut script = clonk_script::Engine::new();
+            script.register_host_reference_function("WriteRuntimeRef", [0], |args| {
+                let target = args
+                    .first()
+                    .ok_or_else(|| clonk_script::RuntimeError::new("missing writable array ref"))?;
+                target.write(ScriptValue::Int(6))?;
+                Ok(ScriptValue::Array(vec![
+                    target.read()?,
+                    ScriptValue::Int(i32::from(target.is_reference())),
+                ]))
+            });
+            assert!(script.set_host_function_parameter_types("WriteRuntimeRef", [C4VType::Ref]));
+            script
+                .load_script(
+                    "#strict 3\n\
+                     func RuntimeNegativeRef() {\n\
+                       var values = [];\n\
+                       var observed = WriteRuntimeRef(values[-9]);\n\
+                       return [observed, values];\n\
+                     }",
+                )
+                .expect("runtime negative-reference driver loads");
+            let returned = script
+                .call("RuntimeNegativeRef", &[])
+                .expect("runtime negative-reference driver executes");
+            let (result, aliases, array) = c4value_runtime_observation(returned);
+            (result, aliases, array, String::new())
+        }
+        "wrong_type_index_error" | "max_index_error" => {
+            let (function, statement) = if case == "wrong_type_index_error" {
+                ("RuntimeWrongType", "return runtime_values[\"bad\"];")
+            } else {
+                ("RuntimeMaxIndex", "runtime_values[1000000] = 2;")
+            };
+            let mut script = clonk_script::Engine::new();
+            script.set_global_variables(clonk_script::new_global_variables());
+            script
+                .load_script(&format!(
+                    "#strict 3\n\
+                     static runtime_values;\n\
+                     func RuntimeReset() {{ runtime_values = [1]; }}\n\
+                     func RuntimeState() {{ return runtime_values; }}\n\
+                     func {function}() {{ {statement} }}"
+                ))
+                .expect("runtime array-error driver loads");
+            script
+                .call("RuntimeReset", &[])
+                .expect("runtime array-error fixture initializes");
+            let error = script
+                .call(function, &[])
+                .expect_err("runtime array-error fixture must reject the index");
+            let array = script
+                .call("RuntimeState", &[])
+                .expect("runtime array-error fixture state remains readable");
+            (ScriptValue::Nil, 0, array, c4value_runtime_error(error))
+        }
+        other => panic!("unknown c4value_runtime_operations case `{other}`"),
+    };
+
+    C4ValueRuntimeOperationOutcome {
+        result,
+        aliases,
+        array,
+        error,
+        rng_delta: rng.count - random_count_before,
+    }
+}
+
+#[test]
+fn c4value_runtime_operations_rust_driver_uses_live_array_references() {
+    // Mirrors C4Value.cpp:37-297 and C4ValueList.cpp:28-90,143-183.
+    let growth = run_c4value_runtime_operation("element_refs_survive_growth");
+    assert_eq!(growth.result, ScriptValue::Int(19));
+    assert_eq!(growth.aliases, 2);
+    assert_eq!(
+        c4value_runtime_array_state(&growth.array),
+        "size=4;slot0=i7;slot1=i8;slot3=i4"
+    );
+
+    let missing = run_c4value_runtime_operation("value_read_missing_no_growth");
+    assert_eq!(missing.result, ScriptValue::Nil);
+    assert_eq!(missing.aliases, 0);
+    assert_eq!(
+        c4value_runtime_array_state(&missing.array),
+        "size=1;slot0=i1"
+    );
+
+    let negative = run_c4value_runtime_operation("mutable_negative_clamps_and_grows");
+    assert_eq!(negative.result, ScriptValue::Int(6));
+    assert_eq!(negative.aliases, 1);
+    assert_eq!(
+        c4value_runtime_array_state(&negative.array),
+        "size=1;slot0=i6"
+    );
+
+    let wrong_type = run_c4value_runtime_operation("wrong_type_index_error");
+    assert_eq!(
+        wrong_type.error,
+        "array access: can not convert \"string\" to int"
+    );
+    assert_eq!(
+        c4value_runtime_array_state(&wrong_type.array),
+        "size=1;slot0=i1"
+    );
+
+    let max_index = run_c4value_runtime_operation("max_index_error");
+    assert_eq!(max_index.error, "out of memory");
+    assert_eq!(
+        c4value_runtime_array_state(&max_index.array),
+        "size=1;slot0=i1"
+    );
 }
 
 fn action_direction_engine() -> (Engine, crate::ObjectId) {
@@ -4568,6 +5054,204 @@ fn parity_differential_matches_cpp_golden() {
                 "equal",
                 i(case, "equal"),
                 i64::from(left.c4_operator_equals(&right)),
+            );
+        }
+    }
+
+    // 0v. Stateful C4Value conversion/copy probes. Unlike
+    //     `script_value_convert`, these rows observe the post-operation tag,
+    //     payload, reference state, referent/destination and serialized form.
+    //     They execute C4Value::Set/ConvertTo/Deref semantics rather than only
+    //     comparing the conversion-table classification (C4Value.cpp:121-143,
+    //     :445-478; C4Value.h:195,221-223).
+    {
+        let section = golden["c4value_stateful_conversion"]
+            .as_array()
+            .expect("c4value_stateful_conversion is a C++ oracle array");
+        for (index, case) in section.iter().enumerate() {
+            let name = case["case"]
+                .as_str()
+                .expect("c4value_stateful_conversion case has a name");
+            let outcome = run_c4value_stateful_conversion(name);
+            let target_type = outcome
+                .target
+                .as_ref()
+                .map_or(-1, |value| value.c4v_type().index() as i64);
+            let target_payload = outcome.target.as_ref().map_or(0, c4value_scalar_payload);
+            let serialized =
+                crate::live_c4_save::encode_value_with_current_string_ids(&outcome.value);
+
+            for (field, actual) in [
+                ("ok", i64::from(outcome.ok)),
+                ("type", outcome.value.c4v_type().index() as i64),
+                ("payload", c4value_scalar_payload(&outcome.value)),
+                ("is_ref", i64::from(outcome.is_ref)),
+                ("target_type", target_type),
+                ("target_payload", target_payload),
+                ("rng_delta", i64::from(outcome.rng_delta)),
+            ] {
+                expect_eq(
+                    "c4value_stateful_conversion",
+                    index,
+                    field,
+                    i(case, field),
+                    actual,
+                );
+            }
+            expect_json_eq(
+                "c4value_stateful_conversion",
+                index,
+                "serialized",
+                case["serialized"].clone(),
+                serde_json::json!(serialized),
+            );
+        }
+    }
+
+    // 0w. Saved C4Value object pointers resolve through active and inactive
+    //     lists. Explicit C4V_C4ObjectEnum misses clear to nil; legacy
+    //     C4V_Any+offset misses retain their word and GuessType to int
+    //     (C4Value.cpp:684-715; C4ObjectList.h:32-34).
+    {
+        let section = golden["c4value_denumeration"]
+            .as_array()
+            .expect("c4value_denumeration is a C++ oracle array");
+        for (index, case) in section.iter().enumerate() {
+            let encoded = case["encoded"]
+                .as_str()
+                .expect("c4value_denumeration case has an encoding");
+            let outcome = run_c4value_denumeration(encoded);
+            let serialized =
+                crate::live_c4_save::encode_value_with_current_string_ids(&outcome.value);
+
+            for (field, actual) in [
+                ("type", outcome.value.c4v_type().index() as i64),
+                ("payload", c4value_scalar_payload(&outcome.value)),
+                ("rng_delta", i64::from(outcome.rng_delta)),
+            ] {
+                expect_eq("c4value_denumeration", index, field, i(case, field), actual);
+            }
+            expect_json_eq(
+                "c4value_denumeration",
+                index,
+                "serialized",
+                case["serialized"].clone(),
+                serde_json::json!(serialized),
+            );
+        }
+    }
+
+    // 0x. Stateful array operations preserve old element references across
+    //     growth, distinguish value reads from mutable indexing, clamp negative
+    //     indices and report native index failures without mutating the array
+    //     (C4Value.cpp:37-297; C4ValueList.cpp:28-90,143-183).
+    {
+        let section = golden["c4value_runtime_operations"]
+            .as_array()
+            .expect("c4value_runtime_operations is a C++ oracle array");
+        for (index, case) in section.iter().enumerate() {
+            let name = case["case"]
+                .as_str()
+                .expect("c4value_runtime_operations case has a name");
+            let outcome = run_c4value_runtime_operation(name);
+            let result = crate::live_c4_save::encode_value_with_current_string_ids(&outcome.result);
+            let mutated = c4value_runtime_array_state(&outcome.array);
+            let serialized =
+                crate::live_c4_save::encode_value_with_current_string_ids(&outcome.array);
+
+            for (field, actual) in [
+                ("result", result),
+                (
+                    "type",
+                    c4value_runtime_type_name(&outcome.result).to_owned(),
+                ),
+                ("mutated", mutated),
+                ("error", outcome.error),
+                ("serialized", serialized),
+            ] {
+                expect_json_eq(
+                    "c4value_runtime_operations",
+                    index,
+                    field,
+                    case[field].clone(),
+                    serde_json::json!(actual),
+                );
+            }
+            expect_eq(
+                "c4value_runtime_operations",
+                index,
+                "aliases",
+                i(case, "aliases"),
+                outcome.aliases,
+            );
+            expect_eq(
+                "c4value_runtime_operations",
+                index,
+                "rng_delta",
+                i(case, "rng_delta"),
+                i64::from(outcome.rng_delta),
+            );
+        }
+    }
+
+    // 0y. C4ValueHash hashes keys first, then compares only the matching
+    //     bucket with C4Value::Equals(MAXSTRICT) (C4ValueHash.h:39-48;
+    //     C4ValueHash.cpp:77-80,117-136). For C4V_Bool, both operations use
+    //     `_getBool()`, so every nonzero raw payload is the same map key even
+    //     though C4Value::operator== compares those raw payloads exactly
+    //     (C4Value.cpp:823-852,862-919,965-988).
+    {
+        use clonk_script::{Value, ValueMap};
+
+        fn named(name: &str) -> Value {
+            match name {
+                "bool_false" => Value::Bool(false),
+                "bool_true" => Value::Bool(true),
+                "bool_two" => Value::from_c4_bool_raw(2),
+                "bool_seven" => Value::from_c4_bool_raw(7),
+                "int_one" => Value::Int(1),
+                other => panic!("unknown c4value_map_key_lookup operand `{other}`"),
+            }
+        }
+
+        for (idx, case) in golden["c4value_map_key_lookup"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let inserted = named(case["inserted"].as_str().unwrap());
+            let probe = named(case["probe"].as_str().unwrap());
+            expect_eq(
+                "c4value_map_key_lookup",
+                idx,
+                "inserted_hash",
+                u(case, "inserted_hash") as i64,
+                inserted.c4_value_hash() as i64,
+            );
+            expect_eq(
+                "c4value_map_key_lookup",
+                idx,
+                "probe_hash",
+                u(case, "probe_hash") as i64,
+                probe.c4_value_hash() as i64,
+            );
+            expect_eq(
+                "c4value_map_key_lookup",
+                idx,
+                "operator_equal",
+                i(case, "operator_equal"),
+                i64::from(inserted.c4_operator_equals(&probe)),
+            );
+
+            let mut map = ValueMap::new();
+            map.insert_key(inserted, Value::Int(1));
+            expect_eq(
+                "c4value_map_key_lookup",
+                idx,
+                "found",
+                i(case, "found"),
+                i64::from(map.get_key(&probe).is_some()),
             );
         }
     }

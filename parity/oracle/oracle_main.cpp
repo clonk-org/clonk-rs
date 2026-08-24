@@ -96,12 +96,15 @@
 #include <cstring>
 #include <cstdio>
 #include <functional>
+#include <compare>
 #include <initializer_list>
 #include <memory>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -129,6 +132,11 @@ template <typename... Args>
 string format(const char *, Args &&...)
 {
     return {};
+}
+
+inline string c4value_runtime_format(const char *, const char *type)
+{
+    return "array access: can not convert \"" + string(type) + "\" to int";
 }
 } // namespace std
 
@@ -2568,6 +2576,23 @@ static bool g_first_in_array = true;
 static void arr_begin(const char *name) { printf("\"%s\":[", name); g_first_in_array = true; }
 static void arr_end() { printf("]"); }
 static void sep() { if (!g_first_in_array) printf(","); g_first_in_array = false; }
+static void json_string(const std::string &value)
+{
+    putchar('"');
+    for (const unsigned char character : value)
+    {
+        switch (character)
+        {
+        case '"': printf("\\\""); break;
+        case '\\': printf("\\\\"); break;
+        case '\n': printf("\\n"); break;
+        case '\r': printf("\\r"); break;
+        case '\t': printf("\\t"); break;
+        default: putchar(character); break;
+        }
+    }
+    putchar('"');
+}
 
 static void consume_corrode_effect_rng()
 {
@@ -6011,7 +6036,17 @@ enum C4V_Type
 	C4V_String,
 	C4V_Array,
 	C4V_Map,
-	C4V_Ref,
+	C4V_pC4Value,
+	C4V_C4ObjectEnum,
+};
+
+enum class C4AulScriptStrict : std::uint8_t
+{
+	NONSTRICT = 0,
+	STRICT1 = 1,
+	STRICT2 = 2,
+	STRICT3 = 3,
+	MAXSTRICT = STRICT3,
 };
 
 struct C4Value;
@@ -6036,6 +6071,8 @@ struct C4ValueMapData
 union C4V_Data
 {
 	std::intptr_t Int;
+	std::uintptr_t ID;
+	void *Obj;
 	C4String *Str;
 	C4ValueArray *Array;
 	C4ValueMapData *Map;
@@ -6050,10 +6087,14 @@ struct C4Value
 	C4V_Type Type;
 
 	C4V_Data GetData() const { return Data; }
+	std::intptr_t _getRaw() const { return Data.Int; }
+	bool _getBool() const { return Data.Int != 0; }
 	bool operator==(const C4Value &Value2) const;
+	bool Equals(const C4Value &other, C4AulScriptStrict strict) const;
 };
 
 #include "c4value_operator_equal.inc"
+#include "c4value_equals.inc"
 
 inline bool C4ValueArray::operator==(const C4ValueArray &other) const
 {
@@ -6090,6 +6131,651 @@ inline C4Value array_value(C4ValueArray *array)
 }
 
 } // namespace c4value_equal
+
+// Stateful C4Value/C4ValueArray operations, backed by mechanically extracted
+// production bodies. This focuses on the reference-list and relocation rules
+// in C4Value.cpp:37-297 and the indexing/growth rules in
+// C4ValueList.cpp:28-90,143-183. The scaffold supplies only the surrounding
+// type declarations and unreachable object/map/string branches.
+namespace c4value_runtime
+{
+
+using C4ValueInt = std::int32_t;
+using C4ID = unsigned long;
+
+enum C4V_Type
+{
+    C4V_Any = 0,
+    C4V_Int,
+    C4V_Bool,
+    C4V_C4ID,
+    C4V_C4Object,
+    C4V_String,
+    C4V_Array,
+    C4V_Map,
+    C4V_pC4Value,
+    C4V_C4ObjectEnum,
+};
+
+constexpr auto C4V_Last = static_cast<std::underlying_type_t<C4V_Type>>(C4V_pC4Value);
+
+class C4Value;
+
+struct C4VCnvFn
+{
+    bool (*Function)(C4Value *, C4V_Type, bool);
+    bool Warn;
+};
+
+const char *GetC4VName(C4V_Type type)
+{
+    switch (type)
+    {
+    case C4V_Any: return "any";
+    case C4V_Int: return "int";
+    case C4V_Bool: return "bool";
+    case C4V_C4ID: return "id";
+    case C4V_C4Object: return "object";
+    case C4V_String: return "string";
+    case C4V_Array: return "array";
+    case C4V_Map: return "map";
+    case C4V_pC4Value: return "&";
+    case C4V_C4ObjectEnum: return "object-enum";
+    }
+    return "unknown";
+}
+
+class C4Value;
+class C4ValueArray;
+class C4ValueHash;
+class C4ValueContainer;
+
+struct C4StringData
+{
+    std::string value;
+    const char *getData() const { return value.c_str(); }
+};
+
+struct C4String
+{
+    C4StringData Data;
+    int references{};
+    void IncRef() { ++references; }
+    void DecRef() { --references; }
+};
+
+struct C4ValueMapDataStub
+{
+    C4Value *GetItem(const char *) { return nullptr; }
+};
+
+struct C4Object
+{
+    C4ValueMapDataStub LocalNamed;
+    std::int32_t Number{};
+    int Status{1};
+    void AddRef(C4Value *) {}
+    void DelRef(C4Value *, C4Value *) {}
+    const char *GetName() const { return "runtime-operation-object"; }
+};
+
+struct C4ObjectLookupStub
+{
+    std::vector<std::pair<std::int32_t, C4Object *>> objects;
+
+    C4Object *ObjectPointer(std::int32_t number)
+    {
+        const auto found = std::find_if(objects.begin(), objects.end(), [number](const auto &entry)
+        {
+            return entry.first == number;
+        });
+        return found == objects.end() ? nullptr : found->second;
+    }
+
+    std::int32_t ObjectNumber(C4Object *object)
+    {
+        if (!object) return 0;
+        const auto found = std::find_if(objects.begin(), objects.end(), [object](const auto &entry)
+        {
+            return entry.second == object;
+        });
+        return found == objects.end() ? 0 : found->first;
+    }
+};
+
+struct C4GameObjectsStub : C4ObjectLookupStub
+{
+    C4ObjectLookupStub InactiveObjects;
+};
+
+struct C4StringLookupStub
+{
+    std::vector<C4String *> strings;
+
+    C4String *FindString(C4String *string)
+    {
+        const auto found = std::find(strings.begin(), strings.end(), string);
+        return found == strings.end() ? nullptr : *found;
+    }
+};
+
+struct C4ScriptEngineStub
+{
+    C4StringLookupStub Strings;
+};
+
+struct C4GameStub
+{
+    C4GameObjectsStub Objects;
+    C4ScriptEngineStub ScriptEngine;
+};
+
+inline C4GameStub Game;
+inline constexpr std::intptr_t C4EnumPointer1 = 1000000000;
+inline constexpr std::intptr_t C4EnumPointer2 = 1001000000;
+
+#include "c4value_runtime_looks_like_id.inc"
+
+struct C4AulContext
+{
+    C4Object *Obj{};
+};
+
+class C4AulExecError : public std::runtime_error
+{
+public:
+    C4AulExecError(C4Object *, const char *message) : std::runtime_error(message) {}
+    C4AulExecError(C4Object *, const std::string &message) : std::runtime_error(message) {}
+};
+
+union C4V_Data
+{
+    C4ValueInt Int;
+    C4ID ID;
+    C4Object *Obj;
+    C4String *Str;
+    C4Value *Ref;
+    C4ValueContainer *Container;
+    C4ValueArray *Array;
+    C4ValueHash *Map;
+    std::intptr_t Raw;
+
+    explicit operator bool() const noexcept { return Ref; }
+    bool operator==(C4V_Data other) const noexcept { return Ref == other.Ref; }
+};
+
+class C4ValueContainer
+{
+public:
+    virtual ~C4ValueContainer() = default;
+    virtual void DenumeratePointers() = 0;
+    virtual bool hasIndex(const C4Value &index) const = 0;
+    virtual C4Value &operator[](const C4Value &index) = 0;
+    virtual C4ValueContainer *IncRef() = 0;
+    virtual void DecRef() = 0;
+    virtual C4ValueContainer *IncElementRef() = 0;
+    virtual void DecElementRef() = 0;
+};
+
+#include "c4value_runtime_refcount.inc"
+
+class C4Value
+{
+public:
+    C4Value() : Type(C4V_Any), NextRef(nullptr), FirstRef(nullptr) { Data.Raw = 0; }
+    C4Value(const C4Value &value, C4ValueHash *owningMap = nullptr)
+        : Data(value.Data), Type(value.Type), NextRef(nullptr), FirstRef(nullptr),
+          OwningMap(owningMap)
+    {
+        AddDataRef();
+    }
+    C4Value(C4V_Data data, C4V_Type type)
+        : Data(data), Type(data || type == C4V_Int || type == C4V_Bool ? type : C4V_Any),
+          NextRef(nullptr), FirstRef(nullptr)
+    {
+        AddDataRef();
+    }
+    explicit C4Value(C4ValueArray *array)
+        : Type(array ? C4V_Array : C4V_Any), NextRef(nullptr), FirstRef(nullptr)
+    {
+        Data.Array = array;
+        AddDataRef();
+    }
+    explicit C4Value(C4String *string)
+        : Type(string ? C4V_String : C4V_Any), NextRef(nullptr), FirstRef(nullptr)
+    {
+        Data.Str = string;
+        AddDataRef();
+    }
+
+    C4Value &operator=(const C4Value &value);
+    ~C4Value();
+
+    void Set(const C4Value &value)
+    {
+        if (this != &value) Set(value.Data, value.Type);
+    }
+    void SetInt(C4ValueInt value)
+    {
+        C4V_Data data{};
+        data.Int = value;
+        Set(data, C4V_Int);
+    }
+    void SetRef(C4Value *value)
+    {
+        C4V_Data data{};
+        data.Ref = value;
+        Set(data, C4V_pC4Value);
+    }
+#include "c4value_runtime_inline.inc"
+    void Set0();
+    void Move(C4Value *value);
+    bool IsRef() const { return Type == C4V_pC4Value; }
+
+    C4V_Data GetData() const { return GetRefVal().Data; }
+    C4V_Data &GetData() { return GetRefVal().Data; }
+    C4V_Type GetType() const { return GetRefVal().Type; }
+    const char *GetTypeName() const { return GetC4VName(GetType()); }
+    C4ValueInt _getInt() const { return Data.Int; }
+    C4String *_getStr() const { return Data.Str; }
+    const C4Value &GetRefVal() const;
+    C4Value &GetRefVal();
+
+    void GetContainerElement(C4Value *index, C4Value &target, C4AulContext *context = nullptr,
+                             bool noref = false);
+    void SetArrayLength(std::int32_t size, C4AulContext *context);
+    void DenumeratePointer();
+
+    C4V_Data Data{};
+    union
+    {
+        C4Value *NextRef;
+        C4ValueContainer *BaseContainer;
+    };
+    C4Value *FirstRef;
+    C4ValueHash *OwningMap{};
+    C4V_Type Type : 8;
+    bool HasBaseContainer{};
+
+    C4Value *GetNextRef() { return HasBaseContainer ? nullptr : NextRef; }
+    C4ValueContainer *GetBaseContainer() { return HasBaseContainer ? BaseContainer : nullptr; }
+    C4V_Type GuessType();
+
+    void Set(C4V_Data data, C4V_Type type);
+    void AddDataRef();
+    void DelDataRef(C4V_Data data, C4V_Type type, C4Value *nextRef,
+                    C4ValueContainer *baseContainer);
+    void AddRef(C4Value *reference);
+    void DelRef(const C4Value *reference, C4Value *nextRef, C4ValueContainer *baseContainer);
+    void CheckRemoveFromMap();
+
+    static C4VCnvFn C4ScriptCnvMap[C4V_Last + 1][C4V_Last + 1];
+    static bool FnCnvInt2Id(C4Value *value, C4V_Type toType, bool strict);
+    static bool FnCnvGuess(C4Value *value, C4V_Type toType, bool strict);
+};
+
+inline bool operator==(const C4Value &left, const C4Value &right)
+{
+    const C4Value &leftValue = left.GetRefVal();
+    const C4Value &rightValue = right.GetRefVal();
+    return leftValue.Type == rightValue.Type && leftValue.Data.Raw == rightValue.Data.Raw;
+}
+
+inline const C4Value C4VNull{};
+
+class C4ValueList
+{
+public:
+    enum { MaxSize = 1000000 };
+
+    C4ValueList() = default;
+    explicit C4ValueList(std::int32_t size);
+    C4ValueList(const C4ValueList &other);
+    C4ValueList &operator=(const C4ValueList &other);
+    std::int32_t GetSize() const { return static_cast<std::int32_t>(values.size()); }
+    const C4Value &GetItem(std::int32_t index) const
+    {
+        return index >= 0 && index < GetSize() ? values[index] : C4VNull;
+    }
+    C4Value &GetItem(std::int32_t index);
+    C4Value operator[](std::int32_t index) const { return GetItem(index); }
+    C4Value &operator[](std::int32_t index) { return GetItem(index); }
+    void SetSize(std::int32_t size);
+    const std::vector<C4Value> &Items() const { return values; }
+
+protected:
+    std::vector<C4Value> values;
+};
+
+class C4ValueArray : public C4ValueList,
+                     public C4ValueStandardRefCountedContainer<C4ValueArray>
+{
+public:
+    C4ValueArray();
+    explicit C4ValueArray(std::int32_t size);
+    ~C4ValueArray();
+    C4ValueArray *SetLength(std::int32_t size);
+    void DenumeratePointers() override
+    {
+        for (C4Value &value : values) value.DenumeratePointer();
+    }
+    bool hasIndex(const C4Value &index) const override;
+    C4Value &operator[](const C4Value &index) override;
+    using C4ValueList::operator[];
+    bool operator==(const C4ValueArray &other) const { return values == other.values; }
+
+private:
+    friend C4ValueStandardRefCountedContainer<C4ValueArray>;
+    C4ValueArray(const C4ValueArray &other);
+};
+
+// Only the unreachable C4V_Map cleanup arm needs a complete type. Stateful map
+// behavior is covered by c4value_map_key_lookup and the Rust map lifecycle
+// tests, so keeping this as a no-op prevents the array fixture from becoming a
+// second implementation of C4ValueHash.
+class C4ValueHash : public C4ValueContainer
+{
+public:
+    void removeValue(C4Value *) {}
+    void DenumeratePointers() override {}
+    bool hasIndex(const C4Value &) const override { return false; }
+    C4Value &operator[](const C4Value &) override { return value; }
+    C4ValueContainer *IncRef() override { return this; }
+    void DecRef() override {}
+    C4ValueContainer *IncElementRef() override { return this; }
+    void DecElementRef() override {}
+
+private:
+    C4Value value;
+};
+
+// The extracted AddDataRef debug-only object validation reaches the global
+// game registry. It is irrelevant to these object-free rows, so suppress only
+// that #ifndef block while retaining the production method body.
+#define NDEBUG
+#include "c4value_runtime_core.inc"
+#undef NDEBUG
+
+#include "c4value_runtime_guess_type.inc"
+#include "c4value_runtime_conversion.inc"
+// The production source misspells this one undef as CvnError. Keep the
+// extracted text exact, then contain the leftover macro inside the scaffold.
+#undef CnvError
+
+#include "c4value_runtime_denumerate.inc"
+
+// oracle_main's generic std::format stub intentionally discards diagnostics.
+// Redirect only the array-index formatter so this table records the exact
+// production error text from C4ValueList.cpp:171-183.
+#define format c4value_runtime_format
+#include "c4value_runtime_list.inc"
+#undef format
+
+C4Value int_value(std::int32_t value)
+{
+    C4V_Data data{};
+    data.Int = value;
+    return C4Value{data, C4V_Int};
+}
+
+std::string serialize(const C4Value &value)
+{
+    const C4Value &resolved = value.GetRefVal();
+    switch (resolved.Type)
+    {
+    case C4V_Any: return "A" + std::to_string(resolved.Data.Int);
+    case C4V_Int: return "i" + std::to_string(resolved.Data.Int);
+    case C4V_Bool: return "b" + std::to_string(resolved.Data.Int);
+    case C4V_C4ID:
+        return "I" + std::to_string(static_cast<std::int32_t>(resolved.Data.ID));
+    case C4V_C4Object:
+        return "O" + std::to_string(resolved.Data.Obj ? resolved.Data.Obj->Number : 0);
+    case C4V_C4ObjectEnum: return "O" + std::to_string(resolved.Data.Int);
+    case C4V_Array:
+    {
+        std::string result = "a[" + std::to_string(resolved.Data.Array->GetSize()) + ";";
+        bool first = true;
+        for (const C4Value &element : resolved.Data.Array->Items())
+        {
+            if (!first) result += ',';
+            first = false;
+            result += serialize(element);
+        }
+        return result + ']';
+    }
+    default: return std::string(1, "AibIOSamV"[resolved.Type]) + "0";
+    }
+}
+
+std::int64_t payload(const C4Value &value)
+{
+    const C4Value &resolved = value.GetRefVal();
+    if (resolved.Type == C4V_C4Object)
+        return resolved.Data.Obj ? resolved.Data.Obj->Number : 0;
+    if (resolved.Type == C4V_C4ID)
+        return static_cast<std::int32_t>(resolved.Data.ID);
+    return resolved.Data.Int;
+}
+
+std::string mutated_slots(const C4ValueArray &array, std::initializer_list<int> slots)
+{
+    std::string result = "size=" + std::to_string(array.GetSize());
+    for (const int slot : slots)
+    {
+        result += ";slot" + std::to_string(slot) + '=' + serialize(array.GetItem(slot));
+    }
+    return result;
+}
+
+struct StatefulConversionResult
+{
+    const char *name;
+    int ok;
+    int type;
+    std::int64_t payload;
+    int is_ref;
+    int target_type;
+    std::int64_t target_payload;
+    std::string serialized;
+    int rng_delta;
+};
+
+std::vector<StatefulConversionResult> run_stateful_conversions()
+{
+    std::vector<StatefulConversionResult> results;
+
+    {
+        const int rng_before = RandomCount;
+        C4Value working;
+        working.SetObject(nullptr);
+        results.push_back({"set_object_null", 1, working.Type, payload(working),
+                           working.Type == C4V_pC4Value ? 1 : 0, -1, 0, serialize(working),
+                           RandomCount - rng_before});
+    }
+
+    {
+        const int rng_before = RandomCount;
+        C4Value working = int_value(0), destination;
+        const bool ok = working.ConvertTo(C4V_C4ID);
+        destination.Set(working);
+        results.push_back({"int_zero_to_c4id_then_set_copy", ok ? 1 : 0, working.Type,
+                           payload(working), working.Type == C4V_pC4Value ? 1 : 0,
+                           destination.Type, payload(destination), serialize(working),
+                           RandomCount - rng_before});
+    }
+
+    {
+        const int rng_before = RandomCount;
+        C4Value target = int_value(7), working;
+        working.SetRef(&target);
+        const bool ok = working.ConvertTo(C4V_C4ID);
+        results.push_back({"reference_int_seven_to_c4id", ok ? 1 : 0, working.Type,
+                           payload(working), working.Type == C4V_pC4Value ? 1 : 0,
+                           target.Type, payload(target), serialize(working),
+                           RandomCount - rng_before});
+    }
+
+    return results;
+}
+
+struct DenumerationResult
+{
+    const char *name;
+    std::string encoded;
+    int type;
+    std::int64_t payload;
+    std::string serialized;
+    int rng_delta;
+};
+
+std::vector<DenumerationResult> run_denumerations()
+{
+    std::vector<DenumerationResult> results;
+    C4Object active7, inactive8, active10, inactive11;
+    active7.Number = 7;
+    inactive8.Number = 8;
+    active10.Number = 10;
+    inactive11.Number = 11;
+    Game.Objects.objects = {{7, &active7}, {10, &active10}};
+    Game.Objects.InactiveObjects.objects = {{8, &inactive8}, {11, &inactive11}};
+
+    const auto run = [&results](const char *name, const char *encoded, C4V_Type type,
+                                std::intptr_t raw)
+    {
+        const int rng_before = RandomCount;
+        // CompileFunc creates these intermediate states by assigning the tag
+        // and payload directly; using Set here would canonicalize or GuessType
+        // before DenumeratePointer gets to inspect them.
+        C4Value value;
+        value.Data.Raw = raw;
+        value.Type = type;
+        value.DenumeratePointer();
+        results.push_back({name, encoded, value.Type, payload(value), serialize(value),
+                           RandomCount - rng_before});
+    };
+
+    run("explicit_enum_active", "O7", C4V_C4ObjectEnum, 7);
+    run("explicit_enum_inactive", "O8", C4V_C4ObjectEnum, 8);
+    run("explicit_enum_missing", "O9", C4V_C4ObjectEnum, 9);
+    run("legacy_any_active", "A1000000010", C4V_Any, C4EnumPointer1 + 10);
+    run("legacy_any_inactive", "A1000000011", C4V_Any, C4EnumPointer1 + 11);
+    run("legacy_any_missing", "A1000000012", C4V_Any, C4EnumPointer1 + 12);
+
+    Game.Objects.objects.clear();
+    Game.Objects.InactiveObjects.objects.clear();
+    return results;
+}
+
+struct OperationResult
+{
+    const char *name;
+    std::string result;
+    const char *type;
+    int aliases;
+    std::string mutated;
+    std::string error;
+    std::string serialized;
+    int rng_delta;
+};
+
+std::vector<OperationResult> run_operations()
+{
+    std::vector<OperationResult> results;
+    C4AulContext context{};
+
+    {
+        const int rng_before = RandomCount;
+        C4Value root{new C4ValueArray(2)};
+        root.Data.Array->GetItem(0).SetInt(1);
+        root.Data.Array->GetItem(1).SetInt(2);
+        C4Value index0 = int_value(0), index1 = int_value(1), index3 = int_value(3);
+        C4Value ref0, ref1, grown;
+        root.GetContainerElement(&index0, ref0, &context);
+        root.GetContainerElement(&index1, ref1, &context);
+        root.GetContainerElement(&index3, grown, &context);
+        ref0 = int_value(7);
+        ref1 = int_value(8);
+        grown = int_value(4);
+        const int aliases =
+            (&ref0.GetRefVal() == &root.Data.Array->GetItem(0) ? 1 : 0) +
+            (&ref1.GetRefVal() == &root.Data.Array->GetItem(1) ? 1 : 0);
+        C4Value result = int_value(ref0.GetData().Int + ref1.GetData().Int + grown.GetData().Int);
+        const std::string encoded = serialize(root);
+        results.push_back({"element_refs_survive_growth", serialize(result), result.GetTypeName(),
+                           aliases, mutated_slots(*root.Data.Array, {0, 1, 3}), "", encoded,
+                           RandomCount - rng_before});
+    }
+
+    {
+        const int rng_before = RandomCount;
+        C4Value root{new C4ValueArray(1)};
+        root.Data.Array->GetItem(0).SetInt(1);
+        C4Value index = int_value(5), target;
+        root.GetContainerElement(&index, target, &context, true);
+        const std::string encoded = serialize(root);
+        results.push_back({"value_read_missing_no_growth", serialize(target),
+                           target.GetTypeName(), 0, mutated_slots(*root.Data.Array, {0}), "",
+                           encoded, RandomCount - rng_before});
+    }
+
+    {
+        const int rng_before = RandomCount;
+        C4Value root{new C4ValueArray()};
+        C4Value index = int_value(-9), target;
+        root.GetContainerElement(&index, target, &context);
+        target = int_value(6);
+        const int aliases = &target.GetRefVal() == &root.Data.Array->GetItem(0) ? 1 : 0;
+        const std::string encoded = serialize(root);
+        results.push_back({"mutable_negative_clamps_and_grows", serialize(target),
+                           target.GetTypeName(), aliases, mutated_slots(*root.Data.Array, {0}), "",
+                           encoded, RandomCount - rng_before});
+    }
+
+    {
+        const int rng_before = RandomCount;
+        C4Value root{new C4ValueArray(1)};
+        root.Data.Array->GetItem(0).SetInt(1);
+        C4String string{{"bad"}};
+        C4Value index{&string}, target;
+        std::string error;
+        try
+        {
+            root.GetContainerElement(&index, target, &context, true);
+        }
+        catch (const C4AulExecError &exception)
+        {
+            error = exception.what();
+        }
+        const std::string encoded = serialize(root);
+        results.push_back({"wrong_type_index_error", serialize(target), target.GetTypeName(), 0,
+                           mutated_slots(*root.Data.Array, {0}), error, encoded,
+                           RandomCount - rng_before});
+    }
+
+    {
+        const int rng_before = RandomCount;
+        C4Value root{new C4ValueArray(1)};
+        root.Data.Array->GetItem(0).SetInt(1);
+        C4Value index = int_value(C4ValueList::MaxSize), target;
+        std::string error;
+        try
+        {
+            root.GetContainerElement(&index, target, &context);
+        }
+        catch (const C4AulExecError &exception)
+        {
+            error = exception.what();
+        }
+        const std::string encoded = serialize(root);
+        results.push_back({"max_index_error", serialize(target), target.GetTypeName(), 0,
+                           mutated_slots(*root.Data.Array, {0}), error, encoded,
+                           RandomCount - rng_before});
+    }
+
+    return results;
+}
+
+} // namespace c4value_runtime
 
 // ---------------------------------------------------------------------------
 // C4PXS::Execute (src/C4PXS.cpp:28-135), the per-tick movement of one
@@ -11187,6 +11873,115 @@ int main()
                        left.value == right.value ? 1 : 0);
             }
         }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("c4value_map_key_lookup");
+    {
+        using namespace c4value_equal;
+
+        struct Named
+        {
+            const char *name;
+            C4Value value;
+        };
+        const Named values[] = {
+            {"bool_false", scalar(C4V_Bool, 0)},
+            {"bool_true", scalar(C4V_Bool, 1)},
+            {"bool_two", scalar(C4V_Bool, 2)},
+            {"bool_seven", scalar(C4V_Bool, 7)},
+            {"int_one", scalar(C4V_Int, 1)},
+        };
+
+        // C4ValueHash is an unordered_map whose KeyEqual calls
+        // Equals(MAXSTRICT) (C4ValueHash.h:39-48). Drive that same container
+        // algorithm so this catches a port that hashes raw Boolean payloads
+        // or compares them with operator== after reaching the bucket.
+        struct KeyHash
+        {
+            std::size_t operator()(const C4Value &value) const
+            {
+                if (value.Type == C4V_Bool) return hashBool(value._getBool());
+                return hashInt(static_cast<int32_t>(value.Data.Int));
+            }
+        };
+        struct KeyEqual
+        {
+            bool operator()(const C4Value &left, const C4Value &right) const
+            {
+                return left.Equals(right, C4AulScriptStrict::MAXSTRICT);
+            }
+        };
+
+        for (const Named &inserted : values)
+        {
+            for (const Named &probe : values)
+            {
+                const auto inserted_hash = KeyHash{}(inserted.value);
+                const auto probe_hash = KeyHash{}(probe.value);
+                std::unordered_map<C4Value, int, KeyHash, KeyEqual> map;
+                map.emplace(inserted.value, 1);
+                sep();
+                printf("{\"inserted\":\"%s\",\"probe\":\"%s\","
+                       "\"inserted_hash\":%zu,\"probe_hash\":%zu,"
+                       "\"operator_equal\":%d,\"found\":%d}",
+                       inserted.name, probe.name, inserted_hash, probe_hash,
+                       inserted.value == probe.value ? 1 : 0,
+                       map.find(probe.value) != map.end() ? 1 : 0);
+            }
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("c4value_stateful_conversion");
+    for (const c4value_runtime::StatefulConversionResult &conversion :
+         c4value_runtime::run_stateful_conversions())
+    {
+        sep();
+        printf("{\"case\":\"%s\",\"ok\":%d,\"type\":%d,\"payload\":%lld,"
+               "\"is_ref\":%d,\"target_type\":%d,\"target_payload\":%lld,"
+               "\"serialized\":",
+               conversion.name, conversion.ok, conversion.type,
+               static_cast<long long>(conversion.payload), conversion.is_ref,
+               conversion.target_type, static_cast<long long>(conversion.target_payload));
+        json_string(conversion.serialized);
+        printf(",\"rng_delta\":%d}", conversion.rng_delta);
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("c4value_denumeration");
+    for (const c4value_runtime::DenumerationResult &denumeration :
+         c4value_runtime::run_denumerations())
+    {
+        sep();
+        printf("{\"case\":\"%s\",\"encoded\":", denumeration.name);
+        json_string(denumeration.encoded);
+        printf(",\"type\":%d,\"payload\":%lld,\"serialized\":", denumeration.type,
+               static_cast<long long>(denumeration.payload));
+        json_string(denumeration.serialized);
+        printf(",\"rng_delta\":%d}", denumeration.rng_delta);
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("c4value_runtime_operations");
+    for (const c4value_runtime::OperationResult &operation :
+         c4value_runtime::run_operations())
+    {
+        sep();
+        printf("{\"case\":\"%s\",\"result\":", operation.name);
+        json_string(operation.result);
+        printf(",\"type\":\"%s\",\"aliases\":%d,\"mutated\":", operation.type,
+               operation.aliases);
+        json_string(operation.mutated);
+        printf(",\"error\":");
+        json_string(operation.error);
+        printf(",\"serialized\":");
+        json_string(operation.serialized);
+        printf(",\"rng_delta\":%d}", operation.rng_delta);
     }
     arr_end();
     printf(",\n");

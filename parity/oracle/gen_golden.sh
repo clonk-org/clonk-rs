@@ -1402,6 +1402,122 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Value.cpp" > "$gen/c4value_operator_equal.inc"
 
+# C4ValueHash does not use operator== for its keys. Its KeyEqual calls
+# Equals(MAXSTRICT), whose Bool arm compares truthiness rather than the raw
+# union word. Lift that complete dispatcher too so the map-key lookup matrix
+# below exercises the native distinction instead of restating it.
+awk '
+  /^bool C4Value::Equals\(const C4Value &other, C4AulScriptStrict strict\) const$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Value.cpp" > "$gen/c4value_equals.inc"
+
+# C4Value's element-reference machinery and C4ValueList's relocation path are
+# stateful, so lift the complete production method bodies used by the bounded
+# runtime-operation table. The scaffold supplies only allocation/reference
+# counters, object/string stubs for unreachable switch arms, and JSON output.
+awk '
+  /^C4Value::~C4Value\(\)$/ ||
+  /^C4Value &C4Value::operator=\(const C4Value &nValue\)$/ ||
+  /^void C4Value::AddDataRef\(\)$/ ||
+  /^void C4Value::DelDataRef\(/ ||
+  /^void C4Value::Set\(C4V_Data nData, C4V_Type nType\)$/ ||
+  /^void C4Value::Set0\(\)$/ ||
+  /^void C4Value::CheckRemoveFromMap\(\)$/ ||
+  /^void C4Value::Move\(C4Value \*nValue\)$/ ||
+  /^void C4Value::GetContainerElement\(/ ||
+  /^void C4Value::SetArrayLength\(/ ||
+  /^const C4Value &C4Value::GetRefVal\(\) const$/ ||
+  /^C4Value &C4Value::GetRefVal\(\)$/ ||
+  /^void C4Value::AddRef\(/ ||
+  /^void C4Value::DelRef\(/ { p = 1; ++found }
+  p { print }
+  p && /^}$/ { p = 0 }
+  END { if (found != 14) exit 1 }
+' "$src/C4Value.cpp" > "$gen/c4value_runtime_core.inc"
+
+# Inline mutation/dispatch entry points used by the stateful conversion rows.
+# Keep their class bodies exact as well as the out-of-line converter table.
+awk '
+  /^\tvoid SetObject\(C4Object \*Obj\)/ { print; ++found; next }
+  /^\tvoid Deref\(\)/ { print; ++found; next }
+  /^\tinline bool ConvertTo\(/ { p = 1; ++found }
+  p { print }
+  p && /^\t}$/ { p = 0 }
+  END { if (found != 3) exit 1 }
+' "$src/C4Value.h" > "$gen/c4value_runtime_inline.inc"
+
+# Lift the complete conversion dispatch implementation and table. The
+# stateful rows exercise its mutations (including the reference-dereference
+# retry), not just the already-golden 9x9 classification.
+awk '
+  /^static bool FnCnvDirectOld\(/ { p = 1 }
+  p { print }
+  p && /^#undef CnvDeref$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Value.cpp" > "$gen/c4value_runtime_conversion.inc"
+
+# Serialized object references resolve active objects first, then the inactive
+# list. Lift the complete method so explicit C4V_C4ObjectEnum and legacy
+# C4V_Any+offset rows execute the production branch order.
+awk '
+  /^void C4Value::DenumeratePointer\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Value.cpp" > "$gen/c4value_runtime_denumerate.inc"
+
+# A missing legacy C4V_Any pointer passes through GuessType. Keep that fallback
+# native too, including the exact packed-ID classifier it calls, so the
+# denumeration table does not restate even its final type transition.
+awk '
+  /^C4V_Type C4Value::GuessType\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Value.cpp" > "$gen/c4value_runtime_guess_type.inc"
+
+awk '
+  /^bool LooksLikeID\(C4ID id\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Id.cpp" > "$gen/c4value_runtime_looks_like_id.inc"
+
+awk '
+  /^C4ValueList::C4ValueList\(const std::int32_t size\)$/ ||
+  /^C4ValueList::C4ValueList\(const C4ValueList &other\)$/ ||
+  /^C4ValueList &C4ValueList::operator=\(const C4ValueList &other\)$/ ||
+  /^C4Value &C4ValueList::GetItem\(std::int32_t index\)$/ ||
+  /^void C4ValueList::SetSize\(const std::int32_t size\)$/ ||
+  /^C4ValueArray::C4ValueArray\(\)$/ ||
+  /^C4ValueArray::C4ValueArray\(int32_t inSize\)$/ ||
+  /^C4ValueArray::C4ValueArray\(const C4ValueArray &Array2\)$/ ||
+  /^C4ValueArray::~C4ValueArray\(\)/ ||
+  /^C4ValueArray \*C4ValueArray::SetLength\(int32_t size\)$/ ||
+  /^bool C4ValueArray::hasIndex\(const C4Value &index\) const$/ ||
+  /^C4Value &C4ValueArray::operator\[\]\(const C4Value &index\)$/ { p = 1; ++found }
+  p {
+    print
+    braces = $0
+    opened = gsub(/{/, "", braces)
+    closed = gsub(/}/, "", braces)
+    depth += opened - closed
+    if ($0 ~ /^[[:space:]]*{/ || $0 ~ /\{\}[[:space:]]*$/) started = 1
+    if (started && depth == 0) { p = 0; started = 0 }
+  }
+  END { if (found != 12) exit 1 }
+' "$src/C4ValueList.cpp" > "$gen/c4value_runtime_list.inc"
+
+# This template is the native copy-on-write and element-reference counter used
+# by C4ValueArray. Strip only the header guard/includes and keep the class body
+# byte-for-byte.
+awk '
+  /^template <typename T>$/ { p = 1 }
+  p { print }
+' "$src/C4ValueStandardRefCountedContainer.h" > "$gen/c4value_runtime_refcount.inc"
+
 # 3u. Lift the C4Value type-character map, both directions. It is what every
 #     saved script value leads with, and three of its pairs differ only by
 #     CASE — i/I is Int vs C4ID, o/O is object vs enumerated object, a/A is
