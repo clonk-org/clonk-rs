@@ -12245,6 +12245,65 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_player_info_reuses_backend_resource_after_shadow_expiry() {
+        // AddByCore returns an existing C4Network2Res before probing or
+        // starting a second download. Rust's filesystem backend is the live
+        // resource list after its allocation-only shadow entry expires
+        // (src/C4Network2Res.cpp:1473-1516).
+        let directories = SessionResourceDirectories::new();
+        let source = directories.root.join("Returning.c4p");
+        let mut group = MutableGroup::new("Returning.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"returning player".to_vec(), 1, false)
+            .test_value();
+        fs::write(&source, group.pack().unwrap()).test_value();
+        let publication = crate::build_host_resource_core(
+            &source,
+            directories.root.join("published-returning"),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                c4(b"Returning.c4p"),
+                "Client",
+            ),
+        )
+        .test_value();
+        let core = publication.core;
+        let hosted_path = publication.standalone_path.test_value();
+        let hosted_ownership = publication.standalone_ownership.test_value();
+        let mut state = empty_client_resource_state(7, directories.client.clone());
+        state
+            .backend
+            .as_mut()
+            .test_value()
+            .register_hosted_resource(core.clone(), hosted_path, hosted_ownership, true)
+            .test_value();
+        assert!(!state.catalog.contains_resource(core.id));
+        assert_eq!(
+            state.backend.as_ref().test_value().core(core.id),
+            Some(&core)
+        );
+        let mut info = clonk_engine::PlayerInfoControlData {
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(core.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert!(state
+            .load_authoritative_player_resources(&mut info)
+            .is_empty());
+
+        assert_eq!(
+            info.players[0].flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
+        );
+        assert_eq!(info.players[0].resource, Some(core));
+    }
+
+    #[test]
     fn pending_join_data_excludes_clients_already_marked_for_removal() {
         let mut clients = BTreeMap::new();
         let mut receivers = Vec::new();
