@@ -2987,6 +2987,10 @@ fn effect_kill_temp_removes_and_readds_upper_effects() {
     // (C4Effect.cpp:404) — same bracket as the ctor, without an
     // Fx*Stop requirement on the victim.
     let script = r#"#strict 3
+        static kill_reason;
+
+        global func KillReason() { return kill_reason; }
+
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Upper", priority = 200, interval = 0 } ] };
         }
@@ -3000,6 +3004,7 @@ fn effect_kill_temp_removes_and_readds_upper_effects() {
         }
 
         global func FxLowerStop(state, effect, int reason) {
+            kill_reason = reason;
             return nil;
         }
 
@@ -3023,6 +3028,16 @@ fn effect_kill_temp_removes_and_readds_upper_effects() {
     let names = active_effect_names(&object.effects);
     unit_assert_eq!(names => vec!["Upper"], "only Lower is killed");
     unit_assert!(object.effects.iter().any(|effect| effect.name == "Lower" && effect.priority == 0));
+    let index = engine.test_object_index(id);
+    let kill_reason = engine
+        .call_object_function(index, "KillReason", Vec::new())
+        .test_value();
+    unit_assert_eq!(
+        kill_reason =>
+        Value::Int(0),
+        "C4Aul pads the omitted slot before strict-3 typed int conversion \
+             (C4AulExec.cpp:1638-1649)"
+    );
 
     let calls: Vec<(String, Vec<Value>)> = call_log
         .lock()
@@ -3044,9 +3059,9 @@ fn effect_kill_temp_removes_and_readds_upper_effects() {
     let (_, kill_stop_args) = &calls[1];
     unit_assert_eq!(
         kill_stop_args.get(2) =>
-        Some(&Value::Int(0)),
-        "C4Effect::Kill omits the raw reason slot; strict-3 typed int \
-             conversion exposes it as C4FxCall_Normal (0)"
+        None,
+        "C4Effect::Kill supplies exactly two raw arguments \
+             (C4Effect.cpp:386-392)"
     );
 
     let object = tick_test_object(&mut engine, id);

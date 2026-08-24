@@ -327,7 +327,11 @@ fn temp_remove_upper_effects(
     let uppers: Vec<EffectState> = effects
         .iter()
         .skip(acceptor_index + 1)
-        .filter(|effect| effect.priority > 0 && effect.priority != 1)
+        // A live priority-1 recursive frame returns before looking at its
+        // own successor, so it is a boundary rather than merely a node that
+        // skips callbacks (C4Effect.cpp:477-483).
+        .take_while(|effect| effect.priority != 1)
+        .filter(|effect| effect.priority > 0)
         .cloned()
         .collect();
     for upper in uppers.iter().rev() {
@@ -337,23 +341,27 @@ fn temp_remove_upper_effects(
             let Some(effect) = ctx
                 .effects
                 .iter_mut()
-                .find(|effect| effect.number == upper.number && effect.priority > 0)
+                .find(|effect| effect.number == upper.number)
             else {
-                return false;
+                return None;
             };
+            // The recursive frame was entered while this node was active.
+            // A higher Stop may kill it before this frame resumes, but C++
+            // still applies FlipActive (zero remains zero) and retains the
+            // live callback/name mutations (C4Effect.cpp:480-490).
             effect.priority = -effect.priority;
             let updated = effect.clone();
-            ctx.commands.push(EffectCommand::update(updated));
-            true
+            ctx.commands.push(EffectCommand::update(updated.clone()));
+            Some(updated)
         })?;
-        if flipped {
-            let function = format!("Fx{}Stop", upper.name);
+        if let Some(flipped) = flipped.filter(|effect| effect.priority != 1) {
+            let function = format!("Fx{}Stop", flipped.name);
             dispatch_effect_fx_callback_fail_safe(
-                upper,
+                &flipped,
                 &function,
                 &[
                     target.clone(),
-                    Value::Int(upper.number),
+                    Value::Int(flipped.number),
                     Value::Int(1),
                     Value::Bool(true),
                 ],
@@ -663,6 +671,9 @@ fn check_effect_with_policy(
         Value::Int(interval),
     ];
     add_args.extend(values);
+    // DoCall passes the defaulted rVal7 slot explicitly, so Fx*Add receives
+    // nine arguments including target and effect number (C4Effect.cpp:300-301).
+    add_args.push(Value::Nil);
     let add_result = dispatch_effect_fx_callback_fail_safe(&acceptor, &function, &add_args);
     if do_temp_calls {
         temp_readd_upper_effects(scope, &target, &uppers)?;

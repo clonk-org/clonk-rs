@@ -901,6 +901,8 @@ impl Engine {
         .with_scoreboard(Rc::clone(&self.scoreboard))
         .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
         .with_scenario_script_counter(self.scenario_script_counter)
+        .with_next_storage_index(self.objects.len())
+        .with_inactive_order(self.inactive_exec_list.iter().rev().copied())
         .with_pathfinder_settings(
             self.pathfinder_level,
             self.pathfinder_transfer_zones_enabled,

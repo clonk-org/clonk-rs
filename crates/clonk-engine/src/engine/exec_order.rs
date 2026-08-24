@@ -1219,6 +1219,74 @@ impl Engine {
         }
     }
 
+    /// Install the exact `Game.Objects` order captured at the end of one
+    /// synchronous effect callback batch. `exec_list` stores that list in
+    /// reverse and also retains inactive-object ledger slots; keep those
+    /// private slots while replacing the logical main-list links.
+    pub(crate) fn install_effect_object_lists(&mut self, preview: compat::EffectObjectListPreview) {
+        let compat::EffectObjectListPreview {
+            master_order,
+            inactive_order,
+            sectors,
+        } = preview;
+        let next_exec = self
+            .exec_cursor
+            .and_then(|cursor| self.exec_list.get(cursor).copied());
+        let previous_cursor = self.exec_cursor;
+        let retained_ledger_slots = self
+            .exec_list
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, id)| {
+                self.find_object_index(*id).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    object.destroyed || object.state.status != ObjectStatus::Normal
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut seen = HashSet::with_capacity(master_order.len());
+        let mut exact = master_order
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| {
+                seen.insert(*id)
+                    && self.find_object_index(*id).is_some_and(|index| {
+                        let object = &self.objects[index];
+                        !object.destroyed && object.state.status == ObjectStatus::Normal
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (position, id) in retained_ledger_slots {
+            exact.insert(position.min(exact.len()), id);
+        }
+        if self.exec_list != exact {
+            self.exec_list = exact;
+            self.exec_list_insert_generation = self.exec_list_insert_generation.wrapping_add(1);
+            self.exec_cursor = next_exec
+                .and_then(|id| self.exec_list.iter().position(|candidate| *candidate == id))
+                .or_else(|| previous_cursor.map(|cursor| cursor.min(self.exec_list.len())));
+        }
+        let inactive_exec_list = inactive_order
+            .into_iter()
+            .rev()
+            .filter(|id| {
+                self.find_object_index(*id).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    !object.destroyed && object.state.status == ObjectStatus::Inactive
+                })
+            })
+            .collect();
+        self.inactive_exec_list = inactive_exec_list;
+        if let Some(mut sectors) = sectors {
+            sectors.set_master_order(master_order);
+            self.sectors = Some(sectors);
+        } else if let Some(sectors) = self.sectors.as_mut() {
+            sectors.set_master_order(master_order);
+        }
+    }
+
     /// C4ObjectList::Add(stMain) for `Game.Objects.InactiveObjects`, stored
     /// in the same reversed representation as `exec_list`.
     pub(crate) fn insert_into_inactive_list(&mut self, id: ObjectId, loaded: bool) {

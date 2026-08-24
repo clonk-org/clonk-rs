@@ -1656,6 +1656,7 @@ impl Engine {
             effect_transfer_zones,
             effect_spawns,
             effect_other_objects,
+            effect_object_lists,
             effect_solid_mask_operations,
             effect_host_raster_preview,
             effect_solid_mask_changed,
@@ -1710,6 +1711,9 @@ impl Engine {
             }
             if !effect_other_objects.is_empty() {
                 self.apply_nested_object_outcomes(effect_other_objects)?;
+            }
+            if let Some(preview) = effect_object_lists {
+                self.install_effect_object_lists(preview);
             }
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
@@ -1797,6 +1801,7 @@ impl Engine {
             Vec<TransferZoneCommand>,
             Vec<SpawnConfig>,
             Vec<compat::NestedObjectOutcome>,
+            Option<compat::EffectObjectListPreview>,
             Vec<HostSolidMaskOperation>,
             Option<compat::HostRasterPreview>,
             bool,
@@ -1827,6 +1832,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
                 Vec::new(),
                 None,
                 false,
@@ -1866,6 +1872,7 @@ impl Engine {
         // model's deferred fold; C++ mutates live state mid-call): the
         // CALLER applies them via apply_nested_object_outcomes.
         let mut pending_other_objects = Vec::new();
+        let mut pending_object_lists = None;
         let mut pending_solid_mask_operations = Vec::new();
         let mut solid_mask_changed = false;
         let mut action_callbacks_dispatched = false;
@@ -2086,14 +2093,37 @@ impl Engine {
                 // keeps the node linked so GetEffect(number, include-dead)
                 // and the unique-number allocator still see it
                 // (C4Effect.cpp:407-424,55-81).
-                if let Some(effect) = object
+                let effect = object
                     .state
                     .effects
                     .iter_mut()
-                    .find(|effect| effect.number == event.effect.number)
-                {
-                    effect.priority = 0;
-                    state_snapshot.effects = object.state.effects.clone();
+                    .find(|effect| effect.number == event.effect.number);
+                match effect {
+                    Some(effect) if effect.priority != 0 => {
+                        // A higher Stop may have renamed this lower node while
+                        // ClearAll's recursive frame was suspended. C++
+                        // dispatches through its then-live callback pointers.
+                        event.effect = effect.clone();
+                        effect.priority = 0;
+                        state_snapshot.effects = object.state.effects.clone();
+                    }
+                    Some(_) => {
+                        // A higher Stop killed this still-linked node before
+                        // its recursive frame resumed (IsDead => return).
+                        continue;
+                    }
+                    None if death_stop => {
+                        // AssignDeath keeps every native node linked. If the
+                        // node disappeared, the carrier was mutated past the
+                        // frame C++ would still be able to call.
+                        continue;
+                    }
+                    None => {
+                        // Legacy deferred Clear/Destroyed commands may have
+                        // drained the Rust vector before dispatch. The owned
+                        // snapshot fallback below recreates C++'s linked dead
+                        // victim for that callback.
+                    }
                 }
             }
 
@@ -2104,16 +2134,25 @@ impl Engine {
             // an effect killed inside its temp Stop.
             match event.kind {
                 EffectEventKind::TempRemoved => {
-                    let Some(effect) =
-                        object.state.effects.iter_mut().find(|effect| {
-                            effect.number == event.effect.number && effect.priority > 0
-                        })
+                    let Some(effect) = object
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|effect| effect.number == event.effect.number)
                     else {
                         continue;
                     };
+                    // This recursive TempRemoveUpperEffects frame was entered
+                    // while the node was active. A higher Stop callback may
+                    // kill it before the frame resumes, but C++ still applies
+                    // FlipActive (zero remains zero) and dispatches FxStop
+                    // (C4Effect.cpp:480-490).
                     effect.priority = -effect.priority;
                     event.effect = effect.clone();
                     state_snapshot.effects = object.state.effects.clone();
+                    if event.effect.priority == 1 {
+                        continue;
+                    }
                 }
                 EffectEventKind::TempReadded => {
                     let Some(effect) =
@@ -2405,6 +2444,7 @@ impl Engine {
                     log_runtime_call_frames(&definition, source.call_frames());
                     rng = rng_backup;
                     current_audio = audio_backup;
+                    let _ = world.take_effect_spawn_previews();
                     continue;
                 }
                 Err(other) => return Err(other),
@@ -2465,6 +2505,7 @@ impl Engine {
                 spawns,
                 next_object_id,
                 other_objects: mut event_other_objects,
+                object_lists: event_object_lists,
                 ..
             } = outcome;
 
@@ -2493,6 +2534,8 @@ impl Engine {
                 world.preview_object_local_vars(object_id, &object.state.local_vars);
             }
 
+            let spawn_previews = world.take_effect_spawn_previews();
+            world.seed_pending_objects(spawn_previews);
             if !spawns.is_empty() {
                 pending_spawns.extend(spawns);
             }
@@ -2701,6 +2744,15 @@ impl Engine {
                 state_snapshot = object.script_state_snapshot();
             }
 
+            // Carrier updates fold after foreign-object updates in this
+            // deferred runner. Restore the callback's exact list/sector
+            // snapshot only after both channels have replayed, otherwise a
+            // collapsed final status can overwrite the chronological order.
+            if let Some(preview) = event_object_lists {
+                world.install_effect_object_lists(preview.clone());
+                pending_object_lists = Some(preview);
+            }
+
             if !global_effect_commands.is_empty() {
                 apply_effect_commands_to_stack(&mut global_view, &global_effect_commands);
                 global_commands.append(&mut global_effect_commands);
@@ -2767,6 +2819,7 @@ impl Engine {
             pending_transfer_zones,
             pending_spawns,
             pending_other_objects,
+            pending_object_lists,
             pending_solid_mask_operations,
             host_raster_preview,
             solid_mask_changed,

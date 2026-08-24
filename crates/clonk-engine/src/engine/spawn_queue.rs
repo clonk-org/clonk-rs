@@ -5,11 +5,15 @@
 
 use super::*;
 
+type SpawnSingleOutcome = (
+    ObjectId,
+    Vec<SpawnConfig>,
+    Vec<compat::NestedObjectOutcome>,
+    Option<compat::EffectObjectListPreview>,
+);
+
 impl Engine {
-    fn spawn_single(
-        &mut self,
-        config: SpawnConfig,
-    ) -> Result<(ObjectId, Vec<SpawnConfig>, Vec<compat::NestedObjectOutcome>), EngineError> {
+    fn spawn_single(&mut self, config: SpawnConfig) -> Result<SpawnSingleOutcome, EngineError> {
         self.spawn_single_inner(config, None)
     }
 
@@ -17,7 +21,7 @@ impl Engine {
         &mut self,
         config: SpawnConfig,
         initial_info_physical: Option<PhysicalInfo>,
-    ) -> Result<(ObjectId, Vec<SpawnConfig>, Vec<compat::NestedObjectOutcome>), EngineError> {
+    ) -> Result<SpawnSingleOutcome, EngineError> {
         let SpawnConfig {
             id: explicit_id,
             definition_id,
@@ -674,6 +678,7 @@ impl Engine {
         // nested outcome until the queue materializes its target instead of
         // dropping it as an unknown live object.
         let mut pending_nested_outcomes = Vec::new();
+        let mut pending_effect_object_lists = None;
         let mut deferred_transfer_zones: Vec<TransferZoneCommand> = Vec::new();
         // C++ Init runs SetOCF before Objects.Add and before Construction
         // (C4Game.cpp:1115-1126; C4Object.cpp:198-217). Compute against the
@@ -1153,6 +1158,7 @@ impl Engine {
                 effect_transfer_zones,
                 effect_spawns,
                 effect_other_objects,
+                effect_object_lists,
                 effect_solid_mask_operations,
                 effect_host_raster_preview,
                 _effect_solid_mask_changed,
@@ -1199,6 +1205,7 @@ impl Engine {
             additional_spawns.extend(effect_spawns);
             pending_nested_outcomes
                 .extend(self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?);
+            pending_effect_object_lists = effect_object_lists;
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
@@ -1347,7 +1354,12 @@ impl Engine {
             self.trigger_action_callbacks(index, previous_action)?;
         }
         self.update_sector_for_index(index);
-        Ok((id, additional_spawns, pending_nested_outcomes))
+        Ok((
+            id,
+            additional_spawns,
+            pending_nested_outcomes,
+            pending_effect_object_lists,
+        ))
     }
 
     /// BubbleOut (C4Effect.cpp:847-857): a bubble only from semi-solid
@@ -1403,9 +1415,36 @@ impl Engine {
         nested_outcomes: Vec<compat::NestedObjectOutcome>,
     ) -> Result<Vec<ObjectId>, EngineError> {
         let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
-        let result = self.process_spawn_queue_with_outcomes_inner(queue, nested_outcomes);
+        let result =
+            self.process_spawn_queue_with_outcomes_inner(queue, nested_outcomes, VecDeque::new());
         let outermost = !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
         self.finish_host_solid_mask_operations(outermost, result)
+    }
+
+    fn effect_object_lists_are_materialized(
+        &self,
+        preview: &compat::EffectObjectListPreview,
+    ) -> bool {
+        preview
+            .master_order
+            .iter()
+            .chain(&preview.inactive_order)
+            .all(|id| self.find_object_index(*id).is_some())
+    }
+
+    fn install_materialized_effect_object_lists(
+        &mut self,
+        pending: &mut VecDeque<compat::EffectObjectListPreview>,
+    ) {
+        while pending
+            .front()
+            .is_some_and(|preview| self.effect_object_lists_are_materialized(preview))
+        {
+            let preview = pending
+                .pop_front()
+                .expect("the materialized effect-list preview must still be queued");
+            self.install_effect_object_lists(preview);
+        }
     }
 
     /// Apply every held same-call `Enter` whose container has materialized,
@@ -1428,10 +1467,11 @@ impl Engine {
         Ok(())
     }
 
-    fn process_spawn_queue_with_outcomes_inner(
+    pub(crate) fn process_spawn_queue_with_outcomes_inner(
         &mut self,
         queue: Vec<SpawnConfig>,
         nested_outcomes: Vec<compat::NestedObjectOutcome>,
+        mut pending_object_lists: VecDeque<compat::EffectObjectListPreview>,
     ) -> Result<Vec<ObjectId>, EngineError> {
         let mut pending: VecDeque<_> = queue.into_iter().collect();
         let mut created = Vec::new();
@@ -1447,6 +1487,7 @@ impl Engine {
         // SpawnConfig remain deferred.
         let mut nested_outcomes =
             self.apply_nested_object_outcomes_retaining_missing(nested_outcomes)?;
+        self.install_materialized_effect_object_lists(&mut pending_object_lists);
         while let Some(mut config) = pending.pop_front() {
             if let (Some(object_id), Some(container)) = (config.id, config.container) {
                 if self.find_object_index(container).is_none()
@@ -1459,17 +1500,18 @@ impl Engine {
             // C++ CreateObject with an unknown id is C4Id2Def -> nullptr
             // (C4Script.cpp FnCreateObject): the call yields nil, never an
             // error, so unknown spawns are skipped rather than fatal.
-            let (id, additional, additional_outcomes) = match self.spawn_single(config) {
-                Ok(result) => result,
-                Err(EngineError::UnknownDefinition(definition)) => {
-                    tracing::warn!(
-                        definition,
-                        "skipping spawn of unknown definition like C++ CreateObject"
-                    );
-                    continue;
-                }
-                Err(other) => return Err(other),
-            };
+            let (id, additional, additional_outcomes, object_lists) =
+                match self.spawn_single(config) {
+                    Ok(result) => result,
+                    Err(EngineError::UnknownDefinition(definition)) => {
+                        tracing::warn!(
+                            definition,
+                            "skipping spawn of unknown definition like C++ CreateObject"
+                        );
+                        continue;
+                    }
+                    Err(other) => return Err(other),
+                };
             created.push(id);
             nested_outcomes.extend(additional_outcomes);
             // The just-created object is now a live target. Flush its
@@ -1477,11 +1519,23 @@ impl Engine {
             // preserving C++ NewObject's synchronous visibility.
             nested_outcomes =
                 self.apply_nested_object_outcomes_retaining_missing(nested_outcomes)?;
-            for spawn in additional {
-                pending.push_back(spawn);
+            if let Some(preview) = object_lists {
+                pending_object_lists.push_back(preview);
+            }
+            // NewObject does not return to its caller until every nested
+            // CreateObject has completed (C4Game.cpp:1085-1142). Process the
+            // current object's callback-produced creations before advancing
+            // to an unrelated pre-populated queue member.
+            for spawn in additional.into_iter().rev() {
+                pending.push_front(spawn);
             }
             self.apply_materialized_deferred_enters(&mut deferred_enters)?;
+            self.install_materialized_effect_object_lists(&mut pending_object_lists);
         }
+        assert!(
+            pending_object_lists.is_empty(),
+            "effect-list previews may only reference objects from their creation batch"
+        );
         // Any remainder belongs to a same-call object removed before its
         // SpawnConfig materialized; preserve the prior silent-miss behavior.
         // A held Enter whose container never materialized shares that fate:

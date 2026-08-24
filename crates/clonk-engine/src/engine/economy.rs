@@ -1705,11 +1705,12 @@ impl Engine {
         trained
     }
 
-    /// `C4Effect::DoDamage` (C4Effect.cpp:312-322): walk the object's
-    /// effects in list order; each `Fx<Name>Damage` callback (resolved via
-    /// its command-target script) receives the running damage and its
-    /// return REPLACES it (`getInt` — a nil return zeroes it); the walk
-    /// stops once the damage reaches zero.
+    /// `C4Effect::DoDamage` (C4Effect.cpp:427-437): walk the object's live
+    /// effect list; each `Fx<Name>Damage` callback (resolved via its
+    /// command-target script) receives the running damage and its return
+    /// REPLACES it (`getInt` — a nil return zeroes it). The successor is
+    /// read only after the callback, so mutations of the remaining list are
+    /// visible to the same walk.
     fn call_effects_do_damage(
         &mut self,
         idx: usize,
@@ -1717,84 +1718,117 @@ impl Engine {
         cause: i32,
         caused_by: i32,
     ) -> Result<i32, EngineError> {
-        let effects: Vec<EffectState> = self.objects[idx].state.effects.clone();
-        if effects.is_empty() {
+        if self.objects[idx].state.effects.is_empty() {
             return Ok(change);
         }
         let object_id = self.objects[idx].id;
-        let host_definition_id = self.objects[idx].definition_id.clone();
+        let mut current_number = self.objects[idx].state.effects[0].number;
         let mut first_effect = true;
-        for effect in effects {
+        loop {
             // C4Effect::DoDamage is a do/while: even an initial zero visits
             // the head node once, then zero stops the suffix.
             if change == 0 && !first_effect {
                 break;
             }
             first_effect = false;
-            if effect.priority == 0 {
-                continue;
-            }
-            let dispatch_id = effect
-                .command_target
-                .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
-                .map(|target_idx| self.objects[target_idx].definition_id.clone())
-                .or_else(|| {
-                    effect
-                        .command_id
-                        .as_ref()
-                        .filter(|id| self.definitions.contains_key(*id))
-                        .cloned()
-                })
-                .unwrap_or_else(|| host_definition_id.clone());
-            let world = self.host_world_context();
-            let callback_name = format!("Fx{}Damage", effect.name);
-            let has_callback =
-                resolve_effect_script_callback(&effect, &callback_name, &world).is_some();
-            if !has_callback {
-                continue;
-            }
-            let action_library = self
-                .definitions
-                .get(&host_definition_id)
-                .map(|definition| definition.action_library().clone())
-                .unwrap_or_default();
-            let state_snapshot = self.objects[idx].script_state_snapshot();
-            let rng_state = self.rng.clone();
-            let global_view = self.global_effects.clone();
-            let Some(definition) = self.definitions.get(&dispatch_id) else {
-                continue;
+            let Some(current_idx) = self.find_object_index(object_id) else {
+                break;
             };
-            let callback = definition.call_effect_damage(
-                Some((&state_snapshot, object_id)),
-                &effect,
-                change,
-                cause,
-                caused_by,
-                rng_state,
-                &global_view,
-                self.physics,
-                self.environment,
-                self.frame,
-                world,
-                self.game_over_triggered,
-                self.audio_registry.clone(),
-            );
-            let Some((outcome, audio_state, new_rng, result)) = tolerate_script_error(callback)?
+            let Some(effect) = self.objects[current_idx]
+                .state
+                .effects
+                .iter()
+                .find(|effect| effect.number == current_number)
+                .cloned()
             else {
-                continue;
+                break;
             };
-            self.rng = new_rng;
-            self.audio_registry = audio_state;
-            self.apply_action_callback_outcome(
-                idx,
-                outcome,
-                &action_library,
-                object_id,
-                &host_definition_id,
-            )?;
-            if let Some(value) = result.as_ref() {
-                change = compat::value_as_i32(value);
+
+            if effect.priority != 0 {
+                let host_definition_id = self.objects[current_idx].definition_id.clone();
+                let dispatch_id = effect
+                    .command_target
+                    .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
+                    .map(|target_idx| self.objects[target_idx].definition_id.clone())
+                    .or_else(|| {
+                        effect
+                            .command_id
+                            .as_ref()
+                            .filter(|id| self.definitions.contains_key(*id))
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| host_definition_id.clone());
+                let world = self.host_world_context();
+                let callback_name = format!("Fx{}Damage", effect.name);
+                let has_callback =
+                    resolve_effect_script_callback(&effect, &callback_name, &world).is_some();
+                if has_callback {
+                    let action_library = self
+                        .definitions
+                        .get(&host_definition_id)
+                        .map(|definition| definition.action_library().clone())
+                        .unwrap_or_default();
+                    let state_snapshot = self.objects[current_idx].script_state_snapshot();
+                    let rng_state = self.rng.clone();
+                    let global_view = self.global_effects.clone();
+                    if let Some(definition) = self.definitions.get(&dispatch_id) {
+                        let callback = definition.call_effect_damage(
+                            Some((&state_snapshot, object_id)),
+                            &effect,
+                            change,
+                            cause,
+                            caused_by,
+                            rng_state,
+                            &global_view,
+                            self.physics,
+                            self.environment,
+                            self.frame,
+                            world,
+                            self.game_over_triggered,
+                            self.audio_registry.clone(),
+                        );
+                        match tolerate_script_error(callback)? {
+                            Some((outcome, audio_state, new_rng, result)) => {
+                                self.rng = new_rng;
+                                self.audio_registry = audio_state;
+                                self.apply_action_callback_outcome(
+                                    current_idx,
+                                    outcome,
+                                    &action_library,
+                                    object_id,
+                                    &host_definition_id,
+                                )?;
+                                change = result
+                                    .as_ref()
+                                    .map(compat::value_as_i32)
+                                    .unwrap_or_default();
+                            }
+                            // C4Value::getInt() on a fail-safe Exec error is 0.
+                            None => change = 0,
+                        }
+                    }
+                }
             }
+
+            let Some(current_idx) = self.find_object_index(object_id) else {
+                break;
+            };
+            if self.objects[current_idx].destroyed
+                || self.objects[current_idx].state.status == ObjectStatus::Deleted
+            {
+                break;
+            }
+            let effects = &self.objects[current_idx].state.effects;
+            let Some(position) = effects
+                .iter()
+                .position(|effect| effect.number == current_number)
+            else {
+                break;
+            };
+            let Some(successor) = effects.get(position + 1) else {
+                break;
+            };
+            current_number = successor.number;
         }
         Ok(change)
     }
@@ -2247,7 +2281,6 @@ impl Engine {
                 continue;
             };
             let effect = self.objects[index].state.effects[effect_index].clone();
-            self.objects[index].state.effects[effect_index].priority = 0;
             self.dispatch_object_effect_events(
                 index,
                 &definition_id,

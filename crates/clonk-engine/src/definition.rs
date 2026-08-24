@@ -2640,6 +2640,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            object_lists: _,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -2816,6 +2817,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            object_lists: _,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -2948,6 +2950,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            object_lists: _,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -4329,6 +4332,10 @@ impl Definition {
         ];
         // rVal1-4 (C4Effect.cpp:301): always four slots, missing = nil.
         extras.extend(constructor_values.iter().cloned());
+        // DoCall supplies its defaulted rVal7 as an explicit final slot, so
+        // Fx*Add receives exactly nine arguments including target and effect number
+        // (C4Effect.cpp:300-301,439-469).
+        extras.push(Value::Nil);
         self.dispatch_effect_callback(
             carrier,
             acceptor,
@@ -4360,7 +4367,8 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
-        let mut extras = vec![effect_stop_reason_value(reason)];
+        let mut extras =
+            effect_stop_reason_value(reason).map_or_else(Vec::new, |value| vec![value]);
         if matches!(reason, EffectStopReason::Temp) {
             // fTemp = true (TempRemoveUpperEffects, C4Effect.cpp:489).
             extras.push(Value::Bool(true));
@@ -4626,115 +4634,118 @@ impl Definition {
                     })
                     .flatten()
             });
-        let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
-            ambient.map(|(state, object_id)| {
-                let ambient_walk_rotation = ambient_metadata
-                    .as_ref()
-                    .map(|metadata| compat::WalkRotationSeed {
-                        rotateable: metadata.rotateable,
-                        t_attach: state.t_attach,
-                        attach: state.shape_attach,
-                        def_attach_vtx_x: usize::try_from(state.shape_attach.vtx)
-                            .ok()
-                            .and_then(|vtx| metadata.vertices.get(vtx))
-                            .map(|vertex| vertex.x)
-                            .unwrap_or(0),
-                    })
-                    .unwrap_or_else(|| self.walk_rotation_seed(state));
-                compat::HostObjectContext::with_category(
-                    object_id,
-                    state.container,
-                    state.status,
-                    state.energy,
-                    state.damage,
-                    state.construction,
-                    state.owner,
-                    state.position,
-                    state.velocity,
-                    state.rotation,
-                    &state.effects,
-                    state.action.name.clone(),
-                    state.action.time,
-                    state.action.data,
-                    state.action.phase,
-                    ambient_metadata
+        let (result, mut commands) =
+            compat::with_effect_context_with_state_and_definition_and_spawn_previews(
+                ambient.map(|(state, object_id)| {
+                    let ambient_walk_rotation = ambient_metadata
                         .as_ref()
-                        .map(|metadata| metadata.action_library.clone())
-                        .unwrap_or_else(|| self.shared_action_library(&world)),
-                    state.direction,
-                    state.command_direction,
-                    0,
-                    state.action.target,
-                    state.action.target2,
-                    &state.vertices,
-                    state.category,
-                    ambient_metadata
+                        .map(|metadata| compat::WalkRotationSeed {
+                            rotateable: metadata.rotateable,
+                            t_attach: state.t_attach,
+                            attach: state.shape_attach,
+                            def_attach_vtx_x: usize::try_from(state.shape_attach.vtx)
+                                .ok()
+                                .and_then(|vtx| metadata.vertices.get(vtx))
+                                .map(|vertex| vertex.x)
+                                .unwrap_or(0),
+                        })
+                        .unwrap_or_else(|| self.walk_rotation_seed(state));
+                    compat::HostObjectContext::with_category(
+                        object_id,
+                        state.container,
+                        state.status,
+                        state.energy,
+                        state.damage,
+                        state.construction,
+                        state.owner,
+                        state.position,
+                        state.velocity,
+                        state.rotation,
+                        &state.effects,
+                        state.action.name.clone(),
+                        state.action.time,
+                        state.action.data,
+                        state.action.phase,
+                        ambient_metadata
+                            .as_ref()
+                            .map(|metadata| metadata.action_library.clone())
+                            .unwrap_or_else(|| self.shared_action_library(&world)),
+                        state.direction,
+                        state.command_direction,
+                        0,
+                        state.action.target,
+                        state.action.target2,
+                        &state.vertices,
+                        state.category,
+                        ambient_metadata
+                            .as_ref()
+                            .map(|metadata| metadata.ocf_base)
+                            .unwrap_or(self.ocf_base),
+                        ambient_metadata
+                            .as_ref()
+                            .map(|metadata| metadata.crew_member)
+                            .unwrap_or(self.crew_member),
+                        state.draw_transform,
+                        state.base_graphics.clone(),
+                    )
+                    .with_action_index(state.action.act_map_index)
+                    .with_shape_vertices(&state.shape_vertices)
+                    .with_definition_id(
+                        ambient_definition_id.as_deref().unwrap_or(self.id.as_str()),
+                    )
+                    .with_alive(state.alive)
+                    .with_controller(state.controller)
+                    .with_in_liquid(state.in_liquid)
+                    .with_own_mass(state.own_mass)
+                    .with_physicals(
+                        state.info_physical,
+                        state.temporary_physical,
+                        state.physical_changes.clone(),
+                        ambient_metadata
+                            .as_ref()
+                            .map(|metadata| metadata.physical)
+                            .unwrap_or(*self.physical()),
+                    )
+                    .with_base_graphics(state.base_graphics.clone())
+                    // C4Object::GetGraphicsOverlay splices a single node into the
+                    // live pGfxOverlay list (src/C4Object.cpp:5962-5977), so an
+                    // effect callback that writes one overlay leaves the object's
+                    // other overlays alone. The scope publishes its WHOLE overlay
+                    // list (compat/contexts.rs:8892), so it must start from the
+                    // calling object's real overlays or the write deletes the
+                    // rest.
+                    .with_graphics_overlays(state.graphics_overlays.clone())
+                    .with_walk_rotation(ambient_walk_rotation)
+                    .with_script_fixed_position(state.script_fixed_position)
+                    .with_script_fixed_velocity(state.script_fixed_velocity)
+                    .with_script_rotation_velocity(state.script_rotation_velocity)
+                    .with_script_fixed_rotation(state.script_fixed_rotation)
+                    .with_magic_energy(state.magic_energy)
+                    .with_breath(state.breath)
+                    .with_need_energy(state.need_energy)
+                    .with_ocf(state.ocf)
+                }),
+                callback_definition_context,
+                context_object,
+                global_effects,
+                world,
+                next_object_id,
+                game_over_triggered,
+                || {
+                    if let Some(session_id) = context_object {
+                        compat::register_session_local_cells(session_id, context_cells.clone());
+                    }
+                    if native_fire_start {
+                        return compat::fx_fire_start(&args)
+                            .map(|value| Some((value, context_cells.snapshot())))
+                            .map_err(ScriptError::from);
+                    }
+                    let callback = callback
                         .as_ref()
-                        .map(|metadata| metadata.ocf_base)
-                        .unwrap_or(self.ocf_base),
-                    ambient_metadata
-                        .as_ref()
-                        .map(|metadata| metadata.crew_member)
-                        .unwrap_or(self.crew_member),
-                    state.draw_transform,
-                    state.base_graphics.clone(),
-                )
-                .with_action_index(state.action.act_map_index)
-                .with_shape_vertices(&state.shape_vertices)
-                .with_definition_id(ambient_definition_id.as_deref().unwrap_or(self.id.as_str()))
-                .with_alive(state.alive)
-                .with_controller(state.controller)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
-                .with_physicals(
-                    state.info_physical,
-                    state.temporary_physical,
-                    state.physical_changes.clone(),
-                    ambient_metadata
-                        .as_ref()
-                        .map(|metadata| metadata.physical)
-                        .unwrap_or(*self.physical()),
-                )
-                .with_base_graphics(state.base_graphics.clone())
-                // C4Object::GetGraphicsOverlay splices a single node into the
-                // live pGfxOverlay list (src/C4Object.cpp:5962-5977), so an
-                // effect callback that writes one overlay leaves the object's
-                // other overlays alone. The scope publishes its WHOLE overlay
-                // list (compat/contexts.rs:8892), so it must start from the
-                // calling object's real overlays or the write deletes the
-                // rest.
-                .with_graphics_overlays(state.graphics_overlays.clone())
-                .with_walk_rotation(ambient_walk_rotation)
-                .with_script_fixed_position(state.script_fixed_position)
-                .with_script_fixed_velocity(state.script_fixed_velocity)
-                .with_script_rotation_velocity(state.script_rotation_velocity)
-                .with_script_fixed_rotation(state.script_fixed_rotation)
-                .with_magic_energy(state.magic_energy)
-                .with_breath(state.breath)
-                .with_need_energy(state.need_energy)
-                .with_ocf(state.ocf)
-            }),
-            callback_definition_context,
-            context_object,
-            global_effects,
-            world,
-            next_object_id,
-            game_over_triggered,
-            || {
-                if let Some(session_id) = context_object {
-                    compat::register_session_local_cells(session_id, context_cells.clone());
-                }
-                if native_fire_start {
-                    return compat::fx_fire_start(&args)
-                        .map(|value| Some((value, context_cells.snapshot())))
-                        .map_err(ScriptError::from);
-                }
-                let callback = callback
-                    .as_ref()
-                    .expect("script callback exists when native fallback is inactive");
-                if callback.engine_global_entry {
-                    if context_object.is_some() {
-                        let call = if parameter_conversion
+                        .expect("script callback exists when native fallback is inactive");
+                    if callback.engine_global_entry {
+                        if context_object.is_some() {
+                            let call = if parameter_conversion
                             == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
                         {
                             callback
@@ -4755,72 +4766,72 @@ impl Definition {
                                 context_this,
                             )
                         };
-                        return call.map(|value| Some((value, context_cells.snapshot())));
+                            return call.map(|value| Some((value, context_cells.snapshot())));
+                        }
+                        if parameter_conversion
+                            == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+                        {
+                            let cells = clonk_script::LocalCells::from_local_vars(&HashMap::new());
+                            return callback
+                                .script
+                                .call_resolved_with_cells_and_this_for_effect_callback(
+                                    &callback.resolution,
+                                    true,
+                                    &args,
+                                    &cells,
+                                    Value::Nil,
+                                )
+                                .map(|value| Some((value, HashMap::new())));
+                        }
+                        return callback
+                            .script
+                            .call_resolved_with_ref_args(&callback.resolution, true, &args)
+                            .map(|(value, _)| Some((value, HashMap::new())));
+                    }
+                    if context_object.is_some() {
+                        if parameter_conversion
+                            == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+                        {
+                            return callback
+                                .script
+                                .call_effect_callback_with_cells_and_this(
+                                    &callback_name,
+                                    &args,
+                                    &context_cells,
+                                    context_this,
+                                )
+                                .map(|value| Some((value, context_cells.snapshot())));
+                        }
+                        return callback.script.call_effect_callback_in_context_with_cells(
+                            &effect.name,
+                            event,
+                            &args,
+                            &context_cells,
+                            context_this,
+                        );
                     }
                     if parameter_conversion
                         == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
                     {
-                        let cells = clonk_script::LocalCells::from_local_vars(&HashMap::new());
                         return callback
                             .script
-                            .call_resolved_with_cells_and_this_for_effect_callback(
-                                &callback.resolution,
-                                true,
-                                &args,
-                                &cells,
-                                Value::Nil,
-                            )
-                            .map(|value| Some((value, HashMap::new())));
-                    }
-                    return callback
-                        .script
-                        .call_resolved_with_ref_args(&callback.resolution, true, &args)
-                        .map(|(value, _)| Some((value, HashMap::new())));
-                }
-                if context_object.is_some() {
-                    if parameter_conversion
-                        == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
-                    {
-                        return callback
-                            .script
-                            .call_effect_callback_with_cells_and_this(
+                            .call_effect_callback_with_locals_and_this(
                                 &callback_name,
                                 &args,
-                                &context_cells,
+                                &context_locals,
                                 context_this,
                             )
-                            .map(|value| Some((value, context_cells.snapshot())));
+                            .map(Some);
                     }
-                    return callback.script.call_effect_callback_in_context_with_cells(
+                    callback.script.call_effect_callback_in_context(
                         &effect.name,
                         event,
                         &args,
-                        &context_cells,
+                        &context_locals,
                         context_this,
-                    );
-                }
-                if parameter_conversion
-                    == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
-                {
-                    return callback
-                        .script
-                        .call_effect_callback_with_locals_and_this(
-                            &callback_name,
-                            &args,
-                            &context_locals,
-                            context_this,
-                        )
-                        .map(Some);
-                }
-                callback.script.call_effect_callback_in_context(
-                    &effect.name,
-                    event,
-                    &args,
-                    &context_locals,
-                    context_this,
-                )
-            },
-        );
+                    )
+                },
+            );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
