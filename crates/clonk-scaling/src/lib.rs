@@ -821,17 +821,21 @@ impl FramePresenter {
     }
 
     /// Window pixels to GUI coordinates, like the C++ mouse path divides by
-    /// the application scale (C4MouseControl.cpp:185).
+    /// the application scale (C4GraphicsSystem.cpp:445-449).
     pub fn position_to_gui(&self, x: f64, y: f64) -> (f64, f64) {
         let scale = f64::from(self.scale.max(f32::EPSILON));
-        (x / scale, y / scale)
+        let crop_top = f64::from(self.presentation_geometry().crop_top());
+        (x / scale, (y + crop_top) / scale)
     }
 
     /// GUI coordinates back to window pixels, which is what the platform IME
-    /// wants when it is told where the caret is.
+    /// wants when it is told where the caret is. Keep this inverse to
+    /// [`Self::position_to_gui`] so native overlays land on the same pixels as
+    /// the scaled logical frame.
     pub fn gui_to_position(&self, x: f64, y: f64) -> (f64, f64) {
         let scale = f64::from(self.scale.max(f32::EPSILON));
-        (x * scale, y * scale)
+        let crop_top = f64::from(self.presentation_geometry().crop_top());
+        (x * scale, y * scale - crop_top)
     }
 
     /// Runs `render` against the logical frame and upscales into `output`
@@ -1227,6 +1231,22 @@ mod tests {
     fn presenter_maps_positions_to_gui_space() {
         let presenter = FramePresenter::new(3.0, 6, 6);
         assert_eq!(presenter.position_to_gui(300.0, 150.0), (100.0, 50.0));
+    }
+
+    #[test]
+    fn presenter_maps_pointer_through_the_same_top_crop_as_rendering() {
+        // C4GraphicsSystem::MouseMove divides platform coordinates by the
+        // application scale before GUI/viewport routing (src/C4GraphicsSystem.cpp:445-449).
+        // Rust's fractional presenter can additionally crop the top of the
+        // ceil-sized scaled viewport, so inverse presentation must restore
+        // that crop before applying the same scale division.
+        let presenter = FramePresenter::new(1.5, 5, 4);
+        let geometry = presenter.presentation_geometry();
+        assert_eq!(geometry.logical_to_physical(2.0, 2.0), (3.0, 2.0));
+        assert_eq!(presenter.position_to_gui(3.0, 2.0), (2.0, 2.0));
+        assert_eq!(presenter.gui_to_position(2.0, 2.0), (3.0, 2.0));
+        let scale = f64::from(presenter.scale());
+        assert_eq!((2.0 * scale, 2.0 * scale), (3.0, 3.0));
     }
 
     #[test]
