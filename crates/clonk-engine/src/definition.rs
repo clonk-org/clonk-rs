@@ -2640,7 +2640,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
-            object_lists: _,
+            object_lists: host_object_lists,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -2651,6 +2651,7 @@ impl Definition {
             context_locals: _,
             menu_requests: _,
         } = host_effects;
+        batch.object_lists = host_object_lists;
         batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
         if !host_player_commands.is_empty() {
@@ -2817,7 +2818,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
-            object_lists: _,
+            object_lists: host_object_lists,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -2828,6 +2829,7 @@ impl Definition {
             context_locals: _,
             menu_requests: _,
         } = host_effects;
+        batch.object_lists = host_object_lists;
         batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
         if !host_player_commands.is_empty() {

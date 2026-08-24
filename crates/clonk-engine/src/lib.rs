@@ -7113,6 +7113,11 @@ struct CommandBatch {
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
     next_mission_commands: Vec<NextMissionCommand>,
+    /// `Game.Objects` exactly as the callback left it. A creation phase links
+    /// each object it creates chronologically (C4Game.cpp:1085-1142;
+    /// C4ObjectList.cpp:134-175), so a later category write inside the same
+    /// phase must not decide where deferred materialization inserts it.
+    object_lists: Option<compat::EffectObjectListPreview>,
     trigger_game_over: bool,
     script_go: Option<bool>,
     script_counter: Option<i32>,

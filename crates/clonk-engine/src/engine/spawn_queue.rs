@@ -5,11 +5,14 @@
 
 use super::*;
 
+/// The trailing queue holds one exact `Game.Objects` list per creation phase
+/// that mutated it, oldest first: Construction, Initialize, then the deferred
+/// effect batch. A single final list cannot describe more than one phase.
 type SpawnSingleOutcome = (
     ObjectId,
     Vec<SpawnConfig>,
     Vec<compat::NestedObjectOutcome>,
-    Option<compat::EffectObjectListPreview>,
+    VecDeque<compat::EffectObjectListPreview>,
 );
 
 impl Engine {
@@ -678,7 +681,8 @@ impl Engine {
         // nested outcome until the queue materializes its target instead of
         // dropping it as an unknown live object.
         let mut pending_nested_outcomes = Vec::new();
-        let mut pending_effect_object_lists = None;
+        let mut pending_effect_object_lists: VecDeque<compat::EffectObjectListPreview> =
+            VecDeque::new();
         let mut deferred_transfer_zones: Vec<TransferZoneCommand> = Vec::new();
         // C++ Init runs SetOCF before Objects.Add and before Construction
         // (C4Game.cpp:1115-1126; C4Object.cpp:198-217). Compute against the
@@ -733,6 +737,7 @@ impl Engine {
                     player_commands,
                     object_order_commands,
                     next_mission_commands,
+                    object_lists: phase_object_lists,
                     trigger_game_over,
                     script_go,
                     script_counter,
@@ -800,6 +805,7 @@ impl Engine {
             }
             self.pending_object_order_commands
                 .extend(object_order_commands);
+            pending_effect_object_lists.extend(phase_object_lists);
             self.apply_next_mission_commands(next_mission_commands);
             if destroy {
                 destroy_requested = true;
@@ -958,6 +964,7 @@ impl Engine {
                     player_commands,
                     object_order_commands,
                     next_mission_commands,
+                    object_lists: phase_object_lists,
                     trigger_game_over,
                     script_go,
                     script_counter,
@@ -1034,6 +1041,7 @@ impl Engine {
             }
             self.pending_object_order_commands
                 .extend(object_order_commands);
+            pending_effect_object_lists.extend(phase_object_lists);
             self.apply_next_mission_commands(next_mission_commands);
             if destroy {
                 destroy_requested = true;
@@ -1205,7 +1213,7 @@ impl Engine {
             additional_spawns.extend(effect_spawns);
             pending_nested_outcomes
                 .extend(self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?);
-            pending_effect_object_lists = effect_object_lists;
+            pending_effect_object_lists.extend(effect_object_lists);
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
@@ -1519,9 +1527,7 @@ impl Engine {
             // preserving C++ NewObject's synchronous visibility.
             nested_outcomes =
                 self.apply_nested_object_outcomes_retaining_missing(nested_outcomes)?;
-            if let Some(preview) = object_lists {
-                pending_object_lists.push_back(preview);
-            }
+            pending_object_lists.extend(object_lists);
             // NewObject does not return to its caller until every nested
             // CreateObject has completed (C4Game.cpp:1085-1142). Process the
             // current object's callback-produced creations before advancing
