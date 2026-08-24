@@ -31,6 +31,9 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `script_value_convert` | `src/C4Value.cpp:488-598` `C4ScriptCnvMap` + `ConvertTo` | type-coercion rules for `getInt`/`getStr`/… and parameter marshaling |
 | `script_killer` | `src/C4ScriptKiller.h`, called by `src/C4Script.cpp:1333-1347` | GetKiller/SetKiller fallback target, player validation, direct assignment, foreign/arrow targeting |
 | `eval_direct_exec_context` | complete `FnEval` + `C4AulScript::DirectExec` scope setup (`src/C4Script.cpp:4501-4513`; `src/C4AulExec.cpp:1674-1683`) | object-definition, definition-only, and `Game.Script` receiver selection; object `LocalNamed`, temporary Def, parent, and caller strictness |
+| `effect_check` / `effect_execute` | complete `C4Effect::Check` and `C4Effect::Execute` (`src/C4Effect.cpp:271-363`) | AddTo negotiation, priority-1 bypass, upper-effect cycling, timer cadence, kill decisions, and dead-node unlinking |
+| `effect_lifecycle` | complete `C4Effect` constructor, `GetCallbackScript`, `ClearPointers`, `Kill`, `ClearAll`, `DoDamage`, `TempRemoveUpperEffects`, and `TempReaddUpperEffects`, composed with the extracted `Check`, `Execute`, and `DoCall` bodies (`src/C4Effect.cpp:31-469`) | exact Start/Timer/Effect/Add/Damage/Stop arguments and receiver, number/order/priority/time state, object/global mutation, callback replacement/addition, false/error results, and synchronized RNG |
+| `effect_callback_conversion` | `C4Effect::Execute` / `DoCall` callback entry plus `C4AulScriptFunc::Exec` conversion (`src/C4Effect.cpp:319-456`; `src/C4AulExec.cpp:1364-1397,1610-1656`) | warning-only pre-strict3 conversion versus strict3 rejection for Timer and custom EffectCall callbacks |
 | `definition_commanded_effect_position` | complete `C4Effect::Execute` + `C4AulScriptFunc::Exec` forwarding + `C4AulExec::Exec` script-context setup + `FnGetX`/`FnGetY` (`src/C4Effect.cpp:319-363`; `src/C4AulExec.cpp:330-364,1638-1649`; `src/C4Script.cpp:1198-1202,1293-1297`) | an ID-commanded effect keeps its affected carrier argument while implicit position calls see the null command-object receiver |
 | `landscape_path` | `src/C4LandscapePath.h`, called by `src/C4Landscape.cpp:890-915` | 17×15 PixCnt traversal and authoritative pixel-plane occupancy at cell edges |
 | `action_direction` | `src/C4ActionDirection.h`, called by `C4Object::ExecAction`/`SetDir` | raw-C4Fixed facing, TurnAction fixed-position resync, and stale pre-transition phase ordering |
@@ -136,6 +139,22 @@ interactions still require running the C++ engine through the
   drives the same case through real `AddEffect` and effect-timer dispatch;
   callback lookup by command ID is also pinned by the focused engine
   regression.
+- `effect_lifecycle` mechanically extracts every callback-bearing constructor,
+  list walk, removal and command-pointer body from `C4Effect.cpp` and compiles
+  them beside one recording callback scaffold. Eleven rows cover object and
+  global lists; definition-ID and live object command receivers; priority 1 and raw
+  negative insertion; Start denial with number reservation; Effect/Add temp
+  cycling, including a no-callback kill of a lower recursive frame while its
+  TempStop call is suspended; Timer/Kill/Stop; recursive ClearAll with callback
+  replacement, insertion and Stop denial; live Damage deletion/recreation; silent command
+  target loss; and fail-safe callback error side effects. Every callback makes
+  one `Random(17)` draw, so its exact receiver, arguments, mutation order,
+  effect-chain state, `RandomCount`, and `RandomHold` are compared together.
+  This section composes with `effect_check`, `effect_execute`,
+  `effect_callback_conversion`, and `definition_commanded_effect_position`:
+  the older sections retain their deeper negotiation, cadence, conversion and
+  implicit-position matrices while this lifecycle row set joins the remaining
+  callback kinds and mutation seams end to end.
 - `landscape_path` calls the production `C4LandscapePath.h` traversal used by
   `_PathFree`. Its edge-water input is the minimized Goldrush frame-143 live
   divergence; Rust runs the same density plane through a real `PixelGrid`.
