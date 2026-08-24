@@ -649,6 +649,7 @@ class CiLatencyTests(unittest.TestCase):
                 matrix_entry(workflow, name),
             )
         expected_apt = {
+            "engine and frontend unit and parity": "libasound2-dev libudev-dev",
             "remaining workspace 2/2": "libasound2-dev libxmp4 mesa-vulkan-drivers",
             "workspace quality": "libasound2-dev libudev-dev python3-pil",
         }
@@ -662,7 +663,6 @@ class CiLatencyTests(unittest.TestCase):
             "engine integration 1/3",
             "engine integration 2/3",
             "engine integration 3/3",
-            "engine and frontend unit and parity",
             "engine contracts",
         ):
             self.assertNotIn("\n            apt:", matrix_entry(workflow, name))

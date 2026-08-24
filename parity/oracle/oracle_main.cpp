@@ -58,6 +58,10 @@
 //   * `C4MouseControl::UpdateCursorTarget`'s OCF priority cascade is
 //     mechanically extracted as a fragment; a candidate scaffold records which
 //     cursor the ladder of unconditional overwrites ends on.
+//   * `C4Game::FindVisObject`, C4MouseControl's target lookup/cache/right-up/
+//     put-release methods, C4Object's position-specific OCF overwrite and the
+//     control packet constructors are mechanically extracted; an ordered
+//     object scaffold records lookup, mutation timing and packet sequence.
 //   * `C4Object::AssignRemoval` is mechanically extracted in full; a
 //     container/contents scaffold records its teardown order and the Status
 //     re-checks between the callbacks.
@@ -5991,6 +5995,695 @@ static int32_t run(
 }
 } // namespace mouse_cursor
 
+// --- Mouse target lookup, cache lifetime and release packets ----------------
+//
+// clonk-org/clonk-rs#521 needs more than the cursor-art cascade above: the
+// target pointer is selected by C4Game::FindVisObject, narrowed at the pointer
+// by C4Object::GetOCFForPos, cached between Move calls, and only then consumed
+// by the right-click and put-release paths.  Every decision-bearing production
+// function in that chain is mechanically extracted by gen_golden.sh.  This
+// namespace supplies only the bounded object/list/control surfaces they touch.
+namespace mouse_target
+{
+// C4Def.h and C4MouseControl.cpp constants not pulled in by the oracle's light
+// header set.  Values are part of the emitted inputs so the Rust differential
+// does not need to duplicate names to reproduce a case.
+inline constexpr int32_t C4OS_NORMAL = 1;
+inline constexpr int32_t C4D_Parallax = 1 << 21;
+inline constexpr int32_t C4D_MouseSelect = 1 << 22;
+inline constexpr int32_t C4D_Foreground = 1 << 23;
+inline constexpr int32_t C4D_MouseIgnore = 1 << 24;
+inline constexpr int32_t C4D_IgnoreFoW = 1 << 25;
+inline constexpr int32_t C4D_Background = 1 << 20;
+inline constexpr int32_t C4D_BackgroundOrForeground = C4D_Background | C4D_Foreground;
+
+inline constexpr int32_t C4MC_Button_None = 0;
+inline constexpr int32_t C4MC_Button_LeftUp = 2;
+inline constexpr int32_t C4MC_Button_RightUp = 4;
+inline constexpr int32_t C4MC_Drag_None = 0;
+inline constexpr int32_t C4MC_Drag_Selecting = 1;
+inline constexpr int32_t C4MC_Drag_Moving = 2;
+inline constexpr int32_t C4MC_Drag_Construct = 5;
+inline constexpr int32_t C4MC_Cursor_Region = 0;
+inline constexpr int32_t C4MC_Cursor_Crosshair = 1;
+inline constexpr int32_t C4MC_Cursor_Select = 7;
+inline constexpr int32_t C4MC_Cursor_Object = 8;
+inline constexpr int32_t C4MC_Cursor_Drop = 20;
+inline constexpr int32_t C4MC_Cursor_ThrowRight = 21;
+inline constexpr int32_t C4MC_Cursor_Put = 22;
+inline constexpr int32_t C4MC_Cursor_Vehicle = 24;
+inline constexpr int32_t C4MC_Cursor_VehiclePut = 25;
+inline constexpr int32_t C4MC_Cursor_ThrowLeft = 26;
+inline constexpr int32_t C4MC_Cursor_Help = 29;
+inline constexpr int32_t C4MC_Cursor_Nothing = 34;
+
+inline constexpr int32_t C4CMD_None = 0;
+inline constexpr int32_t C4CMD_Throw = 7;
+inline constexpr int32_t C4CMD_Put = 13;
+inline constexpr int32_t C4CMD_Drop = 14;
+inline constexpr int32_t C4CMD_PushTo = 17;
+inline constexpr int32_t C4CMD_Context = 21;
+
+inline constexpr int32_t CID_PlrSelect = 1;
+inline constexpr int32_t CID_PlrControl = 2;
+inline constexpr int32_t CID_PlrCommand = 3;
+inline constexpr uint16_t MK_SHIFT = 1;
+inline constexpr uint16_t MK_CONTROL = 4;
+
+// Golden input/action enum values.  These are scaffold protocol, not engine
+// constants: action 1=right-up, 2=Tick5 Execute then right-up,
+// 3=fog pre-dispatch then right-up, 4=put release; mutation 0=none, 1=move,
+// 2=replace OCF, 3=delete+ClearPointers.
+// Event `acquire_mode` is 1=UpdateCursorTarget's extracted acquisition prefix,
+// 2=UpdatePutTarget(item) and 3=UpdatePutTarget(vehicle); mutation is applied
+// after acquisition, then optional Execute, then the named release action.
+inline constexpr int32_t ActionRightUp = 1;
+inline constexpr int32_t ActionTick5RightUp = 2;
+inline constexpr int32_t ActionFogRightUp = 3;
+inline constexpr int32_t ActionPutRelease = 4;
+inline constexpr int32_t MutationNone = 0;
+inline constexpr int32_t MutationMove = 1;
+inline constexpr int32_t MutationOCF = 2;
+inline constexpr int32_t MutationDelete = 3;
+
+struct C4Facet
+{
+    int32_t Wdt{320};
+    int32_t Hgt{200};
+};
+
+struct Rect
+{
+    int32_t x{};
+    int32_t y{};
+    int32_t Wdt{};
+    int32_t Hgt{};
+};
+
+struct C4Def
+{
+    Rect Entrance{};
+    Rect Collection{};
+};
+
+struct C4Object;
+
+struct PhysicalStub
+{
+    int32_t Throw{50000};
+};
+
+struct ObjectPtr
+{
+    C4Object *Value{};
+
+    C4Object *Object() const { return Value; }
+    operator C4Object *() const { return Value; }
+    C4Object *operator->() const { return Value; }
+    ObjectPtr &operator=(C4Object *object)
+    {
+        Value = object;
+        return *this;
+    }
+};
+
+struct C4ObjectLink
+{
+    C4Object *Obj{};
+    C4ObjectLink *Next{};
+    C4ObjectLink *Prev{};
+};
+
+struct C4Object
+{
+    int32_t Number{};
+    C4ID id{};
+    int32_t Status{C4OS_NORMAL};
+    int32_t Category{};
+    uint32_t OCF{OCF_Normal};
+    C4Object *Contained{};
+    int32_t Owner{NO_OWNER};
+    int32_t Visibility{};
+    bool VisibleToPlayer{true};
+    C4Object *pLayer{};
+    Rect Shape{0, 0, 20, 20};
+    int32_t x{};
+    int32_t y{};
+    bool CrewDisabled{};
+    C4Def *Def{};
+    PhysicalStub Physical;
+    const char *Name{"object"};
+    int32_t VisualList{}; // 0=main only, 1=fore, 2=back (golden input)
+
+    bool IsVisible(int32_t, bool) const { return VisibleToPlayer; }
+    // C4Object.h:340: short shapes expose a minimum 18-pixel action height.
+    int32_t addtop() const { return std::max<int32_t>(18 - Shape.Hgt, 0); }
+    const char *GetName() const { return Name; }
+    PhysicalStub *GetPhysical() { return &Physical; }
+    void ClearPointers(C4Object *) {}
+
+    // C4Object.h:401-404.  Parallax objects are deliberately absent from this
+    // fixture; normal objects expose their landscape coordinates unchanged.
+    void GetViewPos(int32_t &out_x, int32_t &out_y, int32_t, int32_t, const C4Facet &)
+    {
+        assert(!(Category & C4D_Parallax));
+        out_x = x;
+        out_y = y;
+    }
+
+    void GetOCFForPos(int32_t ctx, int32_t cty, uint32_t &ocf);
+    void GetOCFForPosTraced(int32_t ctx, int32_t cty, uint32_t &ocf);
+};
+
+class C4ObjectList
+{
+public:
+    enum SortType
+    {
+        stNone,
+    };
+
+    C4ObjectLink *First{};
+    C4ObjectLink *Last{};
+
+    void Clear()
+    {
+        First = Last = nullptr;
+        Used = 0;
+    }
+
+    void Assign(const std::vector<C4Object *> &objects)
+    {
+        Clear();
+        for (C4Object *object : objects) Add(object, stNone);
+    }
+
+    bool Add(C4Object *object, SortType)
+    {
+        assert(Used < Links.size());
+        C4ObjectLink *link = &Links[Used++];
+        *link = {object, nullptr, Last};
+        if (Last) Last->Next = link;
+        else First = link;
+        Last = link;
+        return true;
+    }
+
+    bool Remove(C4Object *object)
+    {
+        for (C4ObjectLink *link = First; link; link = link->Next)
+            if (link->Obj == object)
+            {
+                if (link->Prev) link->Prev->Next = link->Next;
+                else First = link->Next;
+                if (link->Next) link->Next->Prev = link->Prev;
+                else Last = link->Prev;
+                link->Obj = nullptr;
+                return true;
+            }
+        return false;
+    }
+
+    C4ObjectLink *GetLink(C4Object *object)
+    {
+        for (C4ObjectLink *link = First; link; link = link->Next)
+            if (link->Obj == object) return link;
+        return nullptr;
+    }
+
+    C4Object *GetObject() const { return First ? First->Obj : nullptr; }
+
+    int32_t ObjectCount() const
+    {
+        int32_t count = 0;
+        for (C4ObjectLink *link = First; link; link = link->Next) ++count;
+        return count;
+    }
+
+    int ClearPointers(C4Object *object);
+    int32_t ObjectNumber(C4Object *object);
+
+private:
+    std::array<C4ObjectLink, 32> Links{};
+    size_t Used{};
+};
+
+struct C4Player
+{
+    ObjectPtr Cursor;
+    C4ObjectList Crew;
+    bool Eliminated{};
+};
+
+struct PlayerList
+{
+    C4Player *Player{};
+
+    C4Player *Get(int32_t number) { return number == 0 ? Player : nullptr; }
+};
+
+struct TracePacket
+{
+    int32_t kind{}; // 1=select, 2=command, 3=direct player control
+    int32_t player{};
+    int32_t command{};
+    int32_t x{};
+    int32_t y{};
+    int32_t target{};
+    int32_t target2{};
+    int32_t data{};
+    int32_t add_mode{};
+};
+
+class C4ControlPacket
+{
+public:
+    virtual ~C4ControlPacket() = default;
+    virtual TracePacket Trace() const = 0;
+};
+
+class C4ControlPlayerSelect : public C4ControlPacket
+{
+public:
+    C4ControlPlayerSelect(int32_t iPlr, const C4ObjectList &Objs);
+    ~C4ControlPlayerSelect() override { delete[] pObjNrs; }
+
+    TracePacket Trace() const override
+    {
+        return {1, iPlr, 0, 0, 0, iObjCnt ? pObjNrs[0] : 0, 0, iObjCnt, 0};
+    }
+
+protected:
+    int32_t iPlr{-1};
+    int32_t iObjCnt{};
+    int32_t *pObjNrs{};
+};
+
+class C4ControlPlayerControl : public C4ControlPacket
+{
+public:
+    C4ControlPlayerControl(int32_t iPlr, int32_t iCom, int32_t iData)
+        : iPlr(iPlr), iCom(iCom), iData(iData)
+    {
+    }
+
+    TracePacket Trace() const override { return {3, iPlr, iCom, 0, 0, 0, 0, iData, 0}; }
+
+protected:
+    int32_t iPlr;
+    int32_t iCom;
+    int32_t iData;
+};
+
+class C4ControlPlayerCommand : public C4ControlPacket
+{
+public:
+    C4ControlPlayerCommand(
+        int32_t iPlr, int32_t iCmd, int32_t iX, int32_t iY, C4Object *pTarget,
+        C4Object *pTarget2, int32_t iData, int32_t iAddMode);
+
+    TracePacket Trace() const override
+    {
+        return {2, iPlr, iCmd, iX, iY, iTarget, iTarget2, iData, iAddMode};
+    }
+
+protected:
+    int32_t iPlr{-1};
+    int32_t iCmd{-1};
+    int32_t iX{};
+    int32_t iY{};
+    int32_t iTarget{};
+    int32_t iTarget2{};
+    int32_t iData{};
+    int32_t iAddMode{};
+};
+
+struct InputQueue
+{
+    std::vector<TracePacket> Packets;
+
+    void Add(int32_t, C4ControlPacket *packet)
+    {
+        std::unique_ptr<C4ControlPacket> owned(packet);
+        Packets.push_back(owned->Trace());
+    }
+
+    void Clear() { Packets.clear(); }
+};
+
+class C4Game
+{
+public:
+    C4ObjectList Objects;
+    C4ObjectList ForeObjects;
+    C4ObjectList BackObjects;
+    PlayerList Players;
+    InputQueue Input;
+
+    C4Object *FindVisObject(
+        int32_t tx, int32_t ty, int32_t iPlr, const C4Facet &fctViewport,
+        int32_t iX, int32_t iY, int32_t iWdt, int32_t iHgt, uint32_t ocf,
+        C4Object *pExclude, int32_t iOwner = ANY_OWNER, C4Object *pFindNext = nullptr);
+};
+
+static C4Game Game;
+
+static bool ValidPlr(int32_t player) { return player == 0 && Game.Players.Get(player); }
+
+struct ApplicationStub
+{
+    bool Control{};
+    bool Shift{};
+
+    bool IsControlDown() const { return Control; }
+    bool IsShiftDown() const { return Shift; }
+};
+
+static ApplicationStub Application;
+static int32_t Tick5{};
+static uint32_t g_last_lookup_ocf{};
+static int32_t g_lookup_count{};
+
+static void reset_lookup_trace()
+{
+    g_last_lookup_ocf = 0;
+    g_lookup_count = 0;
+}
+
+inline constexpr int32_t C4MaxPhysical = 100000;
+static C4Fixed ValByPhysical(int32_t percent, int32_t physical)
+{
+    return itofix(physical * (percent / 5), C4MaxPhysical * 20);
+}
+
+static int32_t GBackHgt = 1000;
+static bool GBackLiquid(int32_t, int32_t) { return false; }
+static bool GBackSolid(int32_t, int32_t) { return true; }
+static bool FindThrowingPosition(
+    int32_t, int32_t, C4Fixed, C4Fixed, int32_t, int32_t &, int32_t &)
+{
+    return false;
+}
+
+struct C4Viewport
+{
+    int32_t ViewX{};
+    int32_t ViewY{};
+};
+
+struct C4Region
+{
+    int32_t RightCom{};
+};
+
+class StdStrBuf
+{
+public:
+    void Copy(const char *value) { Value = value ? value : ""; }
+    void Ref(const char *value) { Value = value ? value : ""; }
+    const char *getData() const { return Value.c_str(); }
+
+private:
+    std::string Value;
+};
+
+enum class C4ResStrTableKey
+{
+    IDS_CON_VEHICLES,
+    IDS_CON_ITEMS,
+    IDS_CON_VEHICLEPUT,
+    IDS_CON_PUT,
+};
+
+static const char *LoadResStrChoice(bool choice, C4ResStrTableKey, C4ResStrTableKey)
+{
+    return choice ? "vehicles" : "items";
+}
+
+template <typename... Args>
+static std::string LoadResStr(C4ResStrTableKey, Args &&...)
+{
+    return {};
+}
+
+class C4MouseControl
+{
+public:
+    bool Active{true};
+    bool fMouseOwned{true};
+    int32_t Player{0};
+    C4Player *pPlayer{};
+    C4Viewport *Viewport{};
+    std::string Caption;
+    bool IsHelpCaption{};
+    int32_t Cursor{C4MC_Cursor_Nothing};
+    int32_t VpX{};
+    int32_t VpY{};
+    int32_t X{};
+    int32_t Y{};
+    int32_t ViewX{};
+    int32_t ViewY{};
+    C4Facet fctViewport;
+    int32_t ShowPointX{-1};
+    int32_t ShowPointY{-1};
+    int32_t KeepCaption{};
+    int32_t Drag{C4MC_Drag_None};
+    bool LeftButtonDown{};
+    bool RightButtonDown{};
+    bool ControlDown{};
+    bool ShiftDown{};
+    bool Scrolling{};
+    bool Help{};
+    bool FogOfWar{};
+    C4ObjectList Selection;
+    C4Object *TargetObject{};
+    C4Object *DownTarget{};
+    C4Region *TargetRegion{};
+    C4Region DownRegion;
+    bool Passive{};
+    uint32_t LastOCF{};
+
+    void Execute();
+    void ClearPointers(C4Object *object);
+    bool UpdatePutTarget(bool vehicle);
+    void ButtonUpDragMoving();
+    void SendCommand(
+        int32_t command, int32_t x = 0, int32_t y = 0, C4Object *target = nullptr,
+        C4Object *target2 = nullptr, int32_t data = 0,
+        int32_t add_mode = C4P_Command_Set);
+    void RightUpDragNone();
+    void RightUp();
+    void SendPlayerSelectNext();
+    void DragMoving();
+    C4Object *GetTargetObject(
+        int32_t x, int32_t y, uint32_t &ocf, C4Object *exclude = nullptr);
+
+    bool IsPassive() { return Passive; }
+
+    bool SendControl(int32_t command, int32_t data = 0)
+    {
+        Game.Input.Add(CID_PlrControl, new C4ControlPlayerControl(Player, command, data));
+        return true;
+    }
+
+    void Move(int32_t iButton, int32_t iX, int32_t iY, uint32_t dwKeyFlags, bool = false)
+    {
+#include "mouse_move_active.inc"
+#include "mouse_move_position_control.inc"
+        switch (iButton)
+        {
+#include "mouse_move_none_dispatch.inc"
+        }
+    }
+
+    void UpdateTargetLookup()
+    {
+#include "mouse_update_target_acquisition.inc"
+        LastOCF = ocf;
+    }
+
+    void DispatchFogRightUp()
+    {
+        int32_t iButton = C4MC_Button_RightUp;
+#include "mouse_fog_button_up.inc"
+        switch (iButton)
+        {
+#include "mouse_right_up_dispatch.inc"
+        }
+    }
+
+    // The non-right-up branches are referenced by the complete RightUp body
+    // but are outside this differential's event set.
+    void ButtonUpDragSelecting() { Drag = C4MC_Drag_None; }
+    void ButtonUpDragConstruct() { Drag = C4MC_Drag_None; }
+    void DragNone() { UpdateTargetLookup(); }
+    void DragSelect() {}
+    void DragConstruct() {}
+};
+
+#include "mouse_find_vis_object.inc"
+#include "mouse_get_ocf_for_pos.inc"
+
+void C4Object::GetOCFForPosTraced(int32_t ctx, int32_t cty, uint32_t &ocf)
+{
+    GetOCFForPos(ctx, cty, ocf);
+    g_last_lookup_ocf = ocf;
+    ++g_lookup_count;
+}
+
+#include "mouse_object_list_clear_pointers.inc"
+#include "mouse_object_number.inc"
+#include "mouse_player_select_constructor.inc"
+#include "mouse_player_command_constructor.inc"
+#include "mouse_execute.inc"
+#include "mouse_clear_pointers.inc"
+#include "mouse_update_put_target.inc"
+#include "mouse_button_up_drag_moving.inc"
+#include "mouse_drag_moving.inc"
+#include "mouse_send_command.inc"
+#include "mouse_right_up_drag_none.inc"
+#include "mouse_right_up.inc"
+#include "mouse_send_player_select_next.inc"
+#define GetOCFForPos GetOCFForPosTraced
+#include "mouse_get_target_object.inc"
+#undef GetOCFForPos
+
+struct Fixture
+{
+    std::array<C4Def, 8> Definitions{};
+    std::array<C4Object, 8> Objects{};
+    size_t Count{};
+    C4Player Player;
+    C4Viewport Viewport;
+    C4MouseControl Mouse;
+
+    Fixture()
+    {
+        Tick5 = 1;
+        Application.Control = false;
+        Application.Shift = false;
+        reset_lookup_trace();
+        Game.Objects.Clear();
+        Game.ForeObjects.Clear();
+        Game.BackObjects.Clear();
+        Game.Input.Clear();
+        Game.Players.Player = &Player;
+        Mouse.pPlayer = &Player;
+        Mouse.Viewport = &Viewport;
+        Mouse.Player = 0;
+    }
+
+    C4Object &Add(
+        int32_t number, int32_t x, int32_t y, uint32_t ocf = OCF_Normal,
+        int32_t category = 0)
+    {
+        assert(Count < Objects.size());
+        const size_t index = Count++;
+        C4Object &object = Objects[index];
+        object = C4Object{};
+        object.Number = number;
+        object.x = x;
+        object.y = y;
+        object.OCF = ocf;
+        object.Category = category;
+        object.Def = &Definitions[index];
+        object.Name = number < 200 ? "target" : number < 300 ? "crew" : "item";
+        return object;
+    }
+
+    void Link()
+    {
+        std::vector<C4Object *> master;
+        std::vector<C4Object *> fore;
+        std::vector<C4Object *> back;
+        for (size_t index = 0; index < Count; ++index)
+        {
+            C4Object *object = &Objects[index];
+            master.push_back(object);
+            if (object->VisualList == 1) fore.push_back(object);
+            if (object->VisualList == 2) back.push_back(object);
+        }
+        Game.Objects.Assign(master);
+        Game.ForeObjects.Assign(fore);
+        Game.BackObjects.Assign(back);
+    }
+};
+
+static int32_t object_number(C4Object *object) { return object ? object->Number : 0; }
+
+static std::vector<C4Object> snapshot_objects(const Fixture &fixture)
+{
+    return {fixture.Objects.begin(), fixture.Objects.begin() + fixture.Count};
+}
+
+static std::vector<int32_t> snapshot_list(const C4ObjectList &list)
+{
+    std::vector<int32_t> result;
+    for (C4ObjectLink *link = list.First; link; link = link->Next)
+        result.push_back(object_number(link->Obj));
+    return result;
+}
+
+static void print_int_array(const std::vector<int32_t> &values)
+{
+    printf("[");
+    for (size_t index = 0; index < values.size(); ++index)
+    {
+        if (index) printf(",");
+        printf("%d", values[index]);
+    }
+    printf("]");
+}
+
+static void print_objects(const std::vector<C4Object> &objects)
+{
+    printf("[");
+    for (size_t index = 0; index < objects.size(); ++index)
+    {
+        if (index) printf(",");
+        const C4Object &object = objects[index];
+        const C4Def empty_definition{};
+        const C4Def &definition = object.Def ? *object.Def : empty_definition;
+        printf(
+            "{\"id\":%d,\"order\":%zu,\"visual_list\":%d,\"x\":%d,\"y\":%d,"
+            "\"shape_x\":%d,\"shape_y\":%d,\"wdt\":%d,\"hgt\":%d,"
+            "\"addtop\":%d,\"status\":%d,\"category\":%d,\"ocf\":%u,"
+            "\"mouse_ignore\":%d,\"contained\":%d,\"owner\":%d,"
+            "\"visibility\":%d,\"visible\":%d,\"layer\":%d,\"wwng\":%d,"
+            "\"crew_disabled\":%d,"
+            "\"entrance_x\":%d,\"entrance_y\":%d,\"entrance_wdt\":%d,"
+            "\"entrance_hgt\":%d,\"collection_x\":%d,\"collection_y\":%d,"
+            "\"collection_wdt\":%d,\"collection_hgt\":%d}",
+            object.Number, index, object.VisualList, object.x, object.y, object.Shape.x,
+            object.Shape.y, object.Shape.Wdt, object.Shape.Hgt, object.addtop(), object.Status,
+            object.Category, object.OCF, (object.Category & C4D_MouseIgnore) ? 1 : 0,
+            object_number(object.Contained), object.Owner, object.Visibility,
+            object.VisibleToPlayer ? 1 : 0, object_number(object.pLayer),
+            object.id == C4Id("WWNG") ? 1 : 0, object.CrewDisabled ? 1 : 0,
+            definition.Entrance.x, definition.Entrance.y, definition.Entrance.Wdt,
+            definition.Entrance.Hgt, definition.Collection.x, definition.Collection.y,
+            definition.Collection.Wdt, definition.Collection.Hgt);
+    }
+    printf("]");
+}
+
+static void print_packets(const std::vector<TracePacket> &packets)
+{
+    printf("[");
+    for (size_t index = 0; index < packets.size(); ++index)
+    {
+        if (index) printf(",");
+        const TracePacket &packet = packets[index];
+        printf(
+            "{\"kind\":%d,\"player\":%d,\"command\":%d,\"x\":%d,\"y\":%d,\"target\":%d,"
+            "\"target2\":%d,\"data\":%d,\"add_mode\":%d}",
+            packet.kind, packet.player, packet.command, packet.x, packet.y, packet.target,
+            packet.target2, packet.data, packet.add_mode);
+    }
+    printf("]");
+}
+} // namespace mouse_target
+
 // C4GameSave's save-policy matrix. The extracted query functions read only
 // Sync, fInitial and the ctor flags, so the scaffold reproduces exactly those
 // members: the out-of-line virtuals the real class also declares
@@ -11790,6 +12483,548 @@ int main()
                    c.name, c.ocf, c.target_ocf, c.category, c.owner, c.alive ? 1 : 0,
                    c.hostile ? 1 : 0, c.in_crew ? 1 : 0, c.pushing_target ? 1 : 0, c.player,
                    c.x - ObjX, result);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // FindVisObject/GetTargetObject and the cached-target event chain
+    // (C4Game.cpp:1426-1498; C4MouseControl.cpp:133-163,742-769,
+    // 1026-1038,1171-1264,1284-1325; C4Object.cpp:1148-1162).  Object IDs are
+    // stable fixture inputs: 101-103 targets/layers, 201-202 crew cursors and
+    // 301-302 moved items/vehicles.  `visual_list` is 0=main only, 1=fore,
+    // 2=back; every object still appears in the authoritative master order.
+    arr_begin("mouse_target_lookup");
+    {
+        using namespace mouse_target;
+        using MouseObject = mouse_target::C4Object;
+
+        auto emit_lookup = [&] (
+            const char *name, Fixture &fixture, int32_t player, int32_t x, int32_t y,
+            int32_t wdt, int32_t hgt, uint32_t requested_ocf, MouseObject *exclude,
+            int32_t owner, MouseObject *find_next, bool via_get_target) {
+            fixture.Link();
+            fixture.Mouse.Player = player;
+            fixture.Mouse.X = x;
+            fixture.Mouse.Y = y;
+            const std::vector<MouseObject> objects = snapshot_objects(fixture);
+            uint32_t ocf_out = requested_ocf;
+            MouseObject *found = via_get_target
+                ? fixture.Mouse.GetTargetObject(x, y, ocf_out, exclude)
+                : Game.FindVisObject(
+                      fixture.Mouse.ViewX, fixture.Mouse.ViewY, player,
+                      fixture.Mouse.fctViewport, x, y, wdt, hgt, requested_ocf, exclude,
+                      owner, find_next);
+
+            sep();
+            printf(
+                "{\"case\":\"%s\",\"via_get_target\":%d,\"tx\":%d,\"ty\":%d,"
+                "\"viewport_wdt\":%d,\"viewport_hgt\":%d,\"player\":%d,"
+                "\"cursor\":%d,\"x\":%d,\"y\":%d,\"wdt\":%d,\"hgt\":%d,"
+                "\"requested_ocf\":%u,\"excluded\":%d,\"owner\":%d,"
+                "\"find_next\":%d,\"objects\":",
+                name, via_get_target ? 1 : 0, fixture.Mouse.ViewX, fixture.Mouse.ViewY,
+                fixture.Mouse.fctViewport.Wdt, fixture.Mouse.fctViewport.Hgt, player,
+                object_number(fixture.Player.Cursor), x, y, wdt, hgt, requested_ocf,
+                object_number(exclude), owner, object_number(find_next));
+            print_objects(objects);
+            printf(",\"found\":%d,\"ocf_out\":%u}", object_number(found), ocf_out);
+        };
+
+        {
+            Fixture fixture;
+            MouseObject &back_first = fixture.Add(101, 50, 50, OCF_Grab, C4D_Background);
+            back_first.VisualList = 2;
+            MouseObject &fore_second = fixture.Add(102, 50, 50, OCF_Grab, C4D_Foreground);
+            fore_second.VisualList = 1;
+            emit_lookup(
+                "master_order_beats_fore_list", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            fixture.Add(101, 50, 50, OCF_Grab).Status = 0;
+            fixture.Add(102, 50, 50, OCF_Grab);
+            emit_lookup(
+                "status_filter_falls_through", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            fixture.Add(101, 50, 50, OCF_Grab, C4D_MouseIgnore);
+            fixture.Add(102, 50, 50, OCF_Grab);
+            emit_lookup(
+                "mouse_ignore_filter_falls_through", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            fixture.Add(101, 50, 50, OCF_Normal);
+            fixture.Add(102, 50, 50, OCF_Grab);
+            emit_lookup(
+                "ocf_any_filter_falls_through", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            MouseObject &container = fixture.Add(103, 200, 200, OCF_Normal);
+            fixture.Add(101, 50, 50, OCF_Grab).Contained = &container;
+            fixture.Add(102, 50, 50, OCF_Grab);
+            emit_lookup(
+                "contained_filter_falls_through", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            fixture.Add(101, 50, 50, OCF_Grab).Owner = 1;
+            fixture.Add(102, 50, 50, OCF_Grab).Owner = 0;
+            emit_lookup(
+                "owner_filter_falls_through", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, 0, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            MouseObject &hidden = fixture.Add(101, 50, 50, OCF_Grab);
+            hidden.Visibility = 1;
+            hidden.VisibleToPlayer = false;
+            fixture.Add(102, 50, 50, OCF_Grab).Visibility = 1;
+            emit_lookup(
+                "visibility_filter_falls_through", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            fixture.Add(101, 50, 50, OCF_Grab);
+            fixture.Add(102, 50, 50, OCF_Grab);
+            emit_lookup(
+                "valid_player_without_cursor_rejects_all", fixture, 0, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            MouseObject &foreign_layer = fixture.Add(103, 250, 250, OCF_None);
+            fixture.Add(101, 50, 50, OCF_Grab).pLayer = &foreign_layer;
+            fixture.Add(102, 50, 50, OCF_Grab);
+            MouseObject &cursor = fixture.Add(201, 250, 250, OCF_None);
+            fixture.Player.Cursor = &cursor;
+            emit_lookup(
+                "layer_filter_falls_through", fixture, 0, 55, 55, 0, 0, OCF_Grab,
+                nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            MouseObject &raised = fixture.Add(101, 50, 50, OCF_Grab);
+            raised.Shape = {2, 4, 10, 10};
+            emit_lookup(
+                "point_geometry_uses_shape_and_addtop", fixture, NO_OWNER, 53, 46, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            MouseObject &miss = fixture.Add(101, 50, 50, OCF_Grab);
+            miss.Shape = {10, 0, 5, 5};
+            fixture.Add(102, 50, 50, OCF_Grab);
+            emit_lookup(
+                "point_geometry_miss_falls_through", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            MouseObject &far = fixture.Add(101, 500, 500, OCF_Grab);
+            far.Shape = {30, 40, 2, 2};
+            emit_lookup(
+                "zero_origin_is_full_range", fixture, NO_OWNER, 0, 0, 0, 0, OCF_Grab,
+                nullptr, ANY_OWNER, nullptr, false);
+        }
+        {
+            Fixture fixture;
+            MouseObject &first = fixture.Add(101, 50, 50, OCF_Grab);
+            fixture.Add(102, 50, 50, OCF_Grab);
+            emit_lookup(
+                "find_next_resumes_master_order", fixture, NO_OWNER, 55, 55, 0, 0,
+                OCF_Grab, nullptr, ANY_OWNER, &first, false);
+        }
+        {
+            Fixture fixture;
+            MouseObject &target = fixture.Add(
+                101, 50, 50, OCF_Normal | OCF_Container | OCF_Entrance | OCF_Collection);
+            target.Def->Entrance = {0, 0, 5, 5};
+            target.Def->Collection = {0, 0, 5, 5};
+            fixture.Mouse.Player = NO_OWNER;
+            emit_lookup(
+                "get_target_overwrites_with_full_position_ocf", fixture, NO_OWNER, 58, 58,
+                0, 0, OCF_Container, nullptr, ANY_OWNER, nullptr, true);
+        }
+        {
+            Fixture fixture;
+            fixture.Add(101, 50, 50, OCF_Normal);
+            fixture.Mouse.Player = NO_OWNER;
+            emit_lookup(
+                "get_target_miss_preserves_requested_ocf", fixture, NO_OWNER, 58, 58, 0,
+                0, OCF_Container, nullptr, ANY_OWNER, nullptr, true);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("mouse_target_events");
+    {
+        using namespace mouse_target;
+        using MouseObject = mouse_target::C4Object;
+
+        struct EventRecord
+        {
+            const char *name{};
+            int32_t action{};
+            int32_t mutation_kind{};
+            int32_t mutation_object{};
+            int32_t mutation_x{};
+            int32_t mutation_y{};
+            uint32_t mutation_ocf{};
+            int32_t tick5{1};
+            bool fog{};
+            int32_t cursor_mode{};
+            bool region{};
+            int32_t x{};
+            int32_t y{};
+            bool put_vehicle{};
+            bool shift{};
+            int32_t down_region_right_com{};
+            int32_t cached_target_before{};
+            int32_t target_after{};
+            // Zero means no successful lookup after the mutation boundary;
+            // otherwise this is GetTargetObject's position-adjusted full OCF.
+            uint32_t refill_ocf_out{};
+            int32_t crew_cursor{};
+            std::vector<int32_t> crew;
+            std::vector<int32_t> selection_before;
+            std::vector<MouseObject> objects;
+            std::vector<TracePacket> packets;
+            std::vector<int32_t> selection_after;
+            int32_t player{};
+            int32_t viewport_view_x{};
+            int32_t viewport_view_y{};
+            int32_t viewport_width{320};
+            int32_t viewport_height{200};
+            bool control{};
+        };
+
+        const Fixture *active_event_fixture = nullptr;
+        auto emit_event = [&] (EventRecord event) {
+            assert(active_event_fixture);
+            event.selection_after = snapshot_list(active_event_fixture->Mouse.Selection);
+            event.player = active_event_fixture->Mouse.Player;
+            event.viewport_view_x = active_event_fixture->Mouse.ViewX;
+            event.viewport_view_y = active_event_fixture->Mouse.ViewY;
+            event.viewport_width = active_event_fixture->Mouse.fctViewport.Wdt;
+            event.viewport_height = active_event_fixture->Mouse.fctViewport.Hgt;
+            event.control = active_event_fixture->Mouse.ControlDown;
+            event.shift = active_event_fixture->Mouse.ShiftDown;
+            event.refill_ocf_out = g_lookup_count ? g_last_lookup_ocf : 0;
+            sep();
+            printf(
+                "{\"case\":\"%s\",\"action\":%d,\"mutation_kind\":%d,"
+                "\"mutation_object\":%d,\"mutation_x\":%d,\"mutation_y\":%d,"
+                "\"mutation_ocf\":%u,\"tick5\":%d,\"fog\":%d,"
+                "\"execute_before_action\":%d,\"acquire_mode\":%d,"
+                "\"cursor_mode\":%d,\"region\":%d,\"x\":%d,\"y\":%d,"
+                "\"put_vehicle\":%d,\"control\":%d,\"shift\":%d,"
+                "\"down_region_right_com\":%d,"
+                "\"player\":%d,\"viewport_view_x\":%d,\"viewport_view_y\":%d,"
+                "\"viewport_width\":%d,\"viewport_height\":%d,"
+                "\"cached_target_before\":%d,\"crew_cursor\":%d,\"crew\":",
+                event.name, event.action, event.mutation_kind, event.mutation_object,
+                event.mutation_x, event.mutation_y, event.mutation_ocf, event.tick5,
+                event.fog ? 1 : 0, event.tick5 == 0 ? 1 : 0,
+                event.action == ActionPutRelease ? (event.put_vehicle ? 3 : 2) : 1,
+                event.cursor_mode, event.region ? 1 : 0, event.x, event.y,
+                event.put_vehicle ? 1 : 0, event.control ? 1 : 0, event.shift ? 1 : 0,
+                event.down_region_right_com, event.player, event.viewport_view_x,
+                event.viewport_view_y, event.viewport_width, event.viewport_height,
+                event.cached_target_before, event.crew_cursor);
+            print_int_array(event.crew);
+            printf(",\"selection_before\":");
+            print_int_array(event.selection_before);
+            printf(",\"objects\":");
+            print_objects(event.objects);
+            printf(",\"target_after\":%d,\"refill_ocf_out\":%u,\"packets\":",
+                   event.target_after, event.refill_ocf_out);
+            print_packets(event.packets);
+            printf(",\"selection_after\":");
+            print_int_array(event.selection_after);
+            printf("}");
+        };
+
+        auto setup_context = [&] (Fixture &fixture, uint32_t first_ocf, uint32_t second_ocf) {
+            active_event_fixture = &fixture;
+            MouseObject &first = fixture.Add(101, 50, 50, first_ocf);
+            MouseObject &second = fixture.Add(102, 50, 50, second_ocf);
+            MouseObject &crew1 = fixture.Add(201, 250, 250, OCF_None);
+            MouseObject &crew2 = fixture.Add(202, 260, 250, OCF_None);
+            fixture.Link();
+            fixture.Player.Cursor = &crew1;
+            fixture.Player.Crew.Assign({&crew1, &crew2});
+            fixture.Mouse.X = 55;
+            fixture.Mouse.Y = 56;
+            fixture.Mouse.ViewX = 10;
+            fixture.Mouse.ViewY = 20;
+            fixture.Mouse.VpX = 45;
+            fixture.Mouse.VpY = 36;
+            fixture.Mouse.Viewport->ViewX = 10;
+            fixture.Mouse.Viewport->ViewY = 20;
+            return std::array<MouseObject *, 4>{&first, &second, &crew1, &crew2};
+        };
+
+        {
+            Fixture fixture;
+            auto objects = setup_context(fixture, OCF_Grab, OCF_Grab);
+            fixture.Mouse.UpdateTargetLookup();
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            const auto initial = snapshot_objects(fixture);
+            reset_lookup_trace();
+            objects[0]->x = 150;
+            fixture.Mouse.RightUp();
+            emit_event({
+                "right_up_retains_moved_cached_target", ActionRightUp, MutationMove, 101,
+                150, 50, 0, 1, false, C4MC_Cursor_Nothing, false, 55, 56, false,
+                false, 0, before, object_number(fixture.Mouse.TargetObject), 0, 201,
+                {201, 202}, {}, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_context(fixture, OCF_Grab, OCF_Grab);
+            fixture.Mouse.UpdateTargetLookup();
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            const auto initial = snapshot_objects(fixture);
+            reset_lookup_trace();
+            objects[0]->OCF = OCF_Normal;
+            fixture.Mouse.RightUp();
+            emit_event({
+                "right_up_retains_ocf_changed_cached_target", ActionRightUp, MutationOCF,
+                101, 0, 0, OCF_Normal, 1, false, C4MC_Cursor_Nothing, false, 55, 56,
+                false, false, 0, before, object_number(fixture.Mouse.TargetObject), 0, 201,
+                {201, 202}, {}, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_context(fixture, OCF_Container, OCF_Container);
+            fixture.Mouse.UpdateTargetLookup();
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            const auto initial = snapshot_objects(fixture);
+            reset_lookup_trace();
+            objects[0]->OCF = OCF_Normal;
+            Tick5 = 0;
+            fixture.Mouse.Execute();
+            fixture.Mouse.RightUp();
+            emit_event({
+                "tick5_refresh_replaces_ocf_changed_target", ActionTick5RightUp,
+                MutationOCF, 101, 0, 0, OCF_Normal, 0, false, C4MC_Cursor_Nothing,
+                false, 55, 56, false, false, 0, before,
+                object_number(fixture.Mouse.TargetObject), fixture.Mouse.LastOCF, 201,
+                {201, 202}, {}, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_context(fixture, OCF_Grab, OCF_Grab);
+            fixture.Mouse.UpdateTargetLookup();
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            const auto initial = snapshot_objects(fixture);
+            reset_lookup_trace();
+            objects[0]->Status = 0;
+            fixture.Mouse.ClearPointers(objects[0]);
+            fixture.Mouse.RightUp();
+            emit_event({
+                "delete_clears_then_right_up_refills", ActionRightUp, MutationDelete, 101,
+                0, 0, 0, 1, false, C4MC_Cursor_Nothing, false, 55, 56, false, false,
+                0, before, object_number(fixture.Mouse.TargetObject), 0, 201, {201, 202},
+                {}, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_context(fixture, OCF_Grab, OCF_Grab);
+            objects[0]->id = C4Id("WWNG");
+            objects[1]->id = C4Id("WWNG");
+            fixture.Mouse.UpdateTargetLookup();
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            const auto initial = snapshot_objects(fixture);
+            reset_lookup_trace();
+            fixture.Mouse.RightUp();
+            emit_event({
+                "wwng_is_excluded_exactly_once", ActionRightUp, MutationNone, 0, 0, 0,
+                0, 1, false, C4MC_Cursor_Nothing, false, 55, 56, false, false, 0,
+                before, object_number(fixture.Mouse.TargetObject), 0, 201, {201, 202}, {},
+                initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            setup_context(fixture, OCF_Grab, OCF_Grab);
+            fixture.Mouse.UpdateTargetLookup();
+            C4Region region{};
+            fixture.Mouse.TargetRegion = &region;
+            fixture.Mouse.DownRegion = region;
+            fixture.Mouse.Cursor = C4MC_Cursor_Region;
+            fixture.Mouse.UpdateTargetLookup();
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            const auto initial = snapshot_objects(fixture);
+            reset_lookup_trace();
+            fixture.Mouse.RightUp();
+            emit_event({
+                "right_up_region_suppresses_object_context", ActionRightUp, MutationNone,
+                0, 0, 0, 0, 1, false, C4MC_Cursor_Region, true, 55, 56, false, false,
+                0, before, object_number(fixture.Mouse.TargetObject), 0, 201, {201, 202},
+                {}, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            setup_context(fixture, OCF_Grab, OCF_Grab);
+            fixture.Mouse.FogOfWar = true;
+            fixture.Mouse.Cursor = C4MC_Cursor_Nothing;
+            fixture.Mouse.UpdateTargetLookup();
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            const auto initial = snapshot_objects(fixture);
+            reset_lookup_trace();
+            fixture.Mouse.DispatchFogRightUp();
+            emit_event({
+                "fog_right_up_selects_then_contexts_hidden_target", ActionFogRightUp,
+                MutationNone, 0, 0, 0, 0, 1, true, C4MC_Cursor_Nothing, false, 55, 56,
+                false, false, 0, before, object_number(fixture.Mouse.TargetObject), 0, 201,
+                {201, 202}, {}, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_context(
+                fixture, OCF_Grab, OCF_Grab);
+            objects[0]->Category = C4D_IgnoreFoW | C4D_MouseSelect;
+            fixture.Mouse.FogOfWar = true;
+            fixture.Mouse.Cursor = C4MC_Cursor_Select;
+            fixture.Mouse.UpdateTargetLookup();
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            const auto initial = snapshot_objects(fixture);
+            reset_lookup_trace();
+            fixture.Mouse.DispatchFogRightUp();
+            emit_event({
+                "fog_ignore_target_selects_then_deselects_then_contexts",
+                ActionFogRightUp, MutationNone, 0, 0, 0, 0, 1, true,
+                C4MC_Cursor_Select, false, 55, 56, false, false, 0, before,
+                object_number(fixture.Mouse.TargetObject), 0, 201, {201, 202}, {}, initial,
+                Game.Input.Packets});
+        }
+
+        auto setup_put = [&] (Fixture &fixture) {
+            active_event_fixture = &fixture;
+            MouseObject &first = fixture.Add(101, 50, 50, OCF_Container);
+            MouseObject &second = fixture.Add(102, 50, 50, OCF_Container);
+            MouseObject &crew = fixture.Add(201, 250, 250, OCF_None);
+            MouseObject &item1 =
+                fixture.Add(301, 260, 250, OCF_Normal | OCF_Carryable);
+            MouseObject &item2 =
+                fixture.Add(302, 270, 250, OCF_Normal | OCF_Carryable);
+            fixture.Link();
+            fixture.Player.Cursor = &crew;
+            fixture.Player.Crew.Assign({&crew});
+            fixture.Mouse.X = 55;
+            fixture.Mouse.Y = 56;
+            fixture.Mouse.ViewX = 0;
+            fixture.Mouse.ViewY = 0;
+            fixture.Mouse.VpX = 55;
+            fixture.Mouse.VpY = 56;
+            fixture.Mouse.Selection.Assign({&item1, &item2});
+            return std::array<MouseObject *, 5>{&first, &second, &crew, &item1, &item2};
+        };
+
+        {
+            Fixture fixture;
+            auto objects = setup_put(fixture);
+            fixture.Mouse.UpdatePutTarget(false);
+            const auto initial = snapshot_objects(fixture);
+            const auto selection_before = snapshot_list(fixture.Mouse.Selection);
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            reset_lookup_trace();
+            fixture.Mouse.Drag = C4MC_Drag_Moving;
+            fixture.Mouse.ButtonUpDragMoving();
+            emit_event({
+                "item_put_fields_and_append_timing", ActionPutRelease, MutationNone, 0, 0,
+                0, 0, 1, false, C4MC_Cursor_Put, false, 55, 56, false, false, 0,
+                before, object_number(fixture.Mouse.TargetObject), 0, 201, {201},
+                selection_before, initial, Game.Input.Packets});
+            (void)objects;
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_put(fixture);
+            objects[3]->OCF = OCF_Normal;
+            fixture.Mouse.Selection.Assign({objects[3]});
+            fixture.Mouse.UpdatePutTarget(true);
+            const auto initial = snapshot_objects(fixture);
+            const auto selection_before = snapshot_list(fixture.Mouse.Selection);
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            reset_lookup_trace();
+            fixture.Mouse.Drag = C4MC_Drag_Moving;
+            fixture.Mouse.ButtonUpDragMoving();
+            emit_event({
+                "vehicle_put_preserves_release_coordinates", ActionPutRelease, MutationNone,
+                0, 0, 0, 0, 1, false, C4MC_Cursor_VehiclePut, false, 55, 56, true,
+                false, 0, before, object_number(fixture.Mouse.TargetObject), 0, 201, {201},
+                selection_before, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_put(fixture);
+            fixture.Mouse.Selection.Assign({objects[3]});
+            fixture.Mouse.UpdatePutTarget(false);
+            const auto initial = snapshot_objects(fixture);
+            const auto selection_before = snapshot_list(fixture.Mouse.Selection);
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            reset_lookup_trace();
+            objects[0]->OCF = OCF_Normal;
+            fixture.Mouse.Drag = C4MC_Drag_Moving;
+            fixture.Mouse.ButtonUpDragMoving();
+            emit_event({
+                "put_retains_target_after_ocf_change", ActionPutRelease, MutationOCF, 101,
+                0, 0, OCF_Normal, 1, false, C4MC_Cursor_Put, false, 55, 56, false,
+                false, 0, before, object_number(fixture.Mouse.TargetObject), 0, 201, {201},
+                selection_before, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_put(fixture);
+            fixture.Mouse.Selection.Assign({objects[3]});
+            fixture.Mouse.UpdatePutTarget(false);
+            const auto initial = snapshot_objects(fixture);
+            const auto selection_before = snapshot_list(fixture.Mouse.Selection);
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            reset_lookup_trace();
+            objects[0]->Status = 0;
+            fixture.Mouse.ClearPointers(objects[0]);
+            fixture.Mouse.Drag = C4MC_Drag_Moving;
+            fixture.Mouse.ButtonUpDragMoving();
+            emit_event({
+                "put_delete_clears_without_release_refill", ActionPutRelease,
+                MutationDelete, 101, 0, 0, 0, 1, false, C4MC_Cursor_Put, false, 55,
+                56, false, false, 0, before, object_number(fixture.Mouse.TargetObject), 0,
+                201, {201}, selection_before, initial, Game.Input.Packets});
+        }
+        {
+            Fixture fixture;
+            auto objects = setup_put(fixture);
+            fixture.Mouse.Selection.Assign({objects[3]});
+            fixture.Mouse.UpdatePutTarget(false);
+            const auto initial = snapshot_objects(fixture);
+            const auto selection_before = snapshot_list(fixture.Mouse.Selection);
+            const int32_t before = object_number(fixture.Mouse.TargetObject);
+            reset_lookup_trace();
+            objects[0]->OCF = OCF_Normal;
+            fixture.Mouse.Drag = C4MC_Drag_Moving;
+            Application.Control = true;
+            Tick5 = 0;
+            fixture.Mouse.Execute();
+            fixture.Mouse.ButtonUpDragMoving();
+            emit_event({
+                "tick5_put_refresh_replaces_ocf_changed_target", ActionPutRelease,
+                MutationOCF, 101, 0, 0, OCF_Normal, 0, false, C4MC_Cursor_Put, false,
+                55, 56, false, false, 0, before,
+                object_number(fixture.Mouse.TargetObject), 0, 201, {201}, selection_before,
+                initial, Game.Input.Packets});
         }
     }
     arr_end();

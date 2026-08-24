@@ -26,7 +26,7 @@ EXPECTED_SHARDS = {
     "app-test-shard-1": {"netplay_1.rs"},
     "app-test-shard-2": {"menus_1.rs"},
     "app-test-shard-3": {"scenario_routes_1.rs"},
-    "app-test-shard-4": {"audio.rs", "input.rs"},
+    "app-test-shard-4": {"audio.rs", "input.rs", "mouse_target_parity.rs"},
     "app-test-shard-5": {"chat_messages.rs", "lobby.rs"},
     "app-test-shard-6": {"game_over.rs"},
     "app-test-shard-7": {"scensel.rs", "startup.rs"},

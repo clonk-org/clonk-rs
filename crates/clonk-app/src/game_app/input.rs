@@ -7340,6 +7340,7 @@ impl GameApp {
                     self.ingame_pointer = None;
                     self.ingame_edge_scroll = None;
                     self.ingame_mouse_caption = IngameMouseCaptionState::default();
+                    self.ingame_mouse_target = None;
                     return Ok(());
                 }
                 self.update_ingame_pointer(point)?;
@@ -7364,6 +7365,7 @@ impl GameApp {
         self.ingame_pointer = None;
         self.ingame_edge_scroll = None;
         self.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.ingame_mouse_target = None;
     }
 
     pub(crate) fn ingame_edge_cursor_active(&mut self) -> bool {
@@ -7511,6 +7513,7 @@ impl GameApp {
         self.ingame_mouse_help = false;
         self.ingame_mouse_help_caption = None;
         self.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.ingame_mouse_target = None;
         self.cancel_ingame_mouse_gestures();
     }
 
@@ -7776,6 +7779,7 @@ impl GameApp {
             self.ingame_viewport_mouse = None;
             self.ingame_edge_scroll = None;
             self.ingame_mouse_caption = IngameMouseCaptionState::default();
+            self.ingame_mouse_target = None;
         }
         Ok(())
     }
@@ -8099,6 +8103,54 @@ impl GameApp {
         (!blocked).then_some(target)
     }
 
+    /// Native `ClearPointers` clears a deleted `TargetObject` without
+    /// recomputing the target or cursor (`C4MouseControl.cpp:158-163`).
+    pub(crate) fn retained_ingame_mouse_target(&self) -> Option<ObjectId> {
+        self.ingame_mouse_target.filter(|target| {
+            self.engine
+                .object_snapshot(*target)
+                .is_some_and(|object| object.status != clonk_engine::ObjectStatus::Deleted)
+        })
+    }
+
+    fn normalize_ingame_button_fog_cursor(&mut self, pointer: ViewportPointer) {
+        if !self.ingame_pointer_fog_blocked(pointer)
+            || self
+                .ingame_viewport_region(pointer.owner, pointer.screen)
+                .is_some()
+            || self.ingame_edge_scroll.is_some()
+        {
+            return;
+        }
+        let target_ignores_fog = self
+            .retained_ingame_mouse_target()
+            .and_then(|target| self.engine.object_snapshot(target))
+            .is_some_and(|target| target.category & C4D_IGNORE_FOW != 0);
+        if !target_ignores_fog {
+            self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Nothing;
+        }
+    }
+
+    fn clear_ingame_single_mouse_selection(&mut self, owner: i32) {
+        let clears_single_selection =
+            self.ingame_dragged_objects
+                .first()
+                .copied()
+                .is_some_and(|object| {
+                    self.snapshot.object(object).is_some_and(|snapshot| {
+                        snapshot.category & clonk_engine::CATEGORY_MOUSE_SELECT != 0
+                    }) || self
+                        .snapshot
+                        .players
+                        .iter()
+                        .find(|player| player.id == owner)
+                        .is_some_and(|player| player.crew.contains(&object))
+                });
+        if clears_single_selection {
+            self.ingame_dragged_objects.clear();
+        }
+    }
+
     /// Help widens C4MouseControl's ordinary interaction mask to OCF_All,
     /// while retaining the same viewport visibility and fog gates.
     pub(crate) fn ingame_help_mouse_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
@@ -8298,6 +8350,7 @@ impl GameApp {
         let Some(region) = self.ingame_viewport_region(pointer.owner, pointer.screen) else {
             return false;
         };
+        self.ingame_mouse_target = None;
         self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Region;
         match region {
             IngameViewportRegion::ViewportButton(button) => {
@@ -8369,11 +8422,19 @@ impl GameApp {
         }
 
         if over_region {
+            self.ingame_mouse_target = None;
+            if !selection_drag_before_move {
+                self.clear_ingame_single_mouse_selection(pointer.owner);
+            }
             return;
         }
 
         if let Some(scroll) = self.ingame_edge_scroll {
             self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Scrolling(scroll.edge.cursor);
+            self.ingame_mouse_target = None;
+            if !selection_drag_before_move {
+                self.clear_ingame_single_mouse_selection(pointer.owner);
+            }
             return;
         }
 
@@ -8382,6 +8443,8 @@ impl GameApp {
         }
 
         if self.ingame_mouse_help {
+            self.ingame_mouse_target = self.ingame_help_mouse_target(pointer.owner, pointer.screen);
+            self.clear_ingame_single_mouse_selection(pointer.owner);
             let show_caption = self.advance_ingame_time_on_target(IngameMouseCursorKind::Help);
             if show_caption && self.ingame_mouse_help_caption.is_none() {
                 let caption =
@@ -8397,16 +8460,25 @@ impl GameApp {
             } else {
                 IngameMouseCursorKind::Nothing
             };
+            self.ingame_mouse_target = None;
             return;
         }
         let point = ingame_pointer_world_pixel(pointer);
         let target = self.ingame_primary_mouse_target(pointer.owner, pointer.screen);
+        self.ingame_mouse_target = target;
         let cursor = self.engine.mouse_world_cursor(
             pointer.owner,
             target,
             point,
             self.keyboard_modifiers.control_key(),
         );
+        match cursor {
+            MouseWorldCursor::Select(target) => {
+                self.ingame_dragged_objects.clear();
+                self.ingame_dragged_objects.push(target);
+            }
+            _ => self.clear_ingame_single_mouse_selection(pointer.owner),
+        }
         if self.ingame_pointer_fog_blocked(pointer)
             && target.is_none()
             && !matches!(
@@ -8552,6 +8624,9 @@ impl GameApp {
             return Ok(());
         }
         self.restore_ingame_mouse_region_caption();
+        if let Some(pointer) = self.ingame_pointer {
+            self.normalize_ingame_button_fog_cursor(pointer);
+        }
         match button_state {
             ElementState::Pressed => {
                 let now = Instant::now();
@@ -9425,6 +9500,9 @@ impl GameApp {
         }
 
         self.restore_ingame_mouse_region_caption();
+        if let Some(pointer) = self.ingame_pointer {
+            self.normalize_ingame_button_fog_cursor(pointer);
+        }
 
         if button_state == ElementState::Pressed {
             let Some(pointer) = self.ingame_pointer else {
@@ -9444,11 +9522,7 @@ impl GameApp {
                 if region.is_some() {
                     return None;
                 }
-                if self.ingame_mouse_help {
-                    self.ingame_help_mouse_target(self.local_owner, pointer.screen)
-                } else {
-                    self.ingame_primary_mouse_target(self.local_owner, pointer.screen)
-                }
+                self.retained_ingame_mouse_target()
             });
             let mut state = IngameButtonMouseState::new(pointer, down_target, region.is_some());
             state.motion.down_region = region;
@@ -9526,11 +9600,10 @@ impl GameApp {
                 },
             );
         }
-        let primary_target = self.ingame_primary_mouse_target(self.local_owner, pointer.screen);
+        let primary_target = self.retained_ingame_mouse_target();
         let context_target = primary_target.or_else(|| {
             self.graphics
                 .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
-                .filter(|target| self.ingame_fog_allows_target(pointer, *target))
         });
         // RightUpDragNone makes one exact-object exclusion pass for the
         // windmill wing. Do not loop: another WWNG behind it is the target.
@@ -9551,14 +9624,39 @@ impl GameApp {
             }
             target => target,
         };
-        // A Select cursor queues its selection before the secondary context
-        // lookup, even when that lookup falls through to select-next.
-        if let Some(select_target) = primary_target
-            .filter(|target| self.ingame_mouse_selectable_object(self.local_owner, *target))
-        {
+        self.ingame_mouse_target = context_target;
+        let select_next = self
+            .engine
+            .player_mouse_select_next_object(self.local_owner);
+        if self.ingame_pointer_fog_blocked(pointer) {
+            if let Some(next) = select_next {
+                self.submit_or_execute_player_select(PlayerSelectControlData {
+                    player: self.local_owner,
+                    objects: vec![next.as_u64() as i32],
+                    by_client: -1,
+                })?;
+                self.ingame_dragged_objects.clear();
+            }
+        }
+        // Native queues Select before Context, but both target lookups finish
+        // before the queue executes. Capture them first so offline execution
+        // cannot let MouseSelection callbacks change this event's target.
+        if self.ingame_mouse_caption.cursor == IngameMouseCursorKind::Select {
             self.submit_or_execute_player_select(PlayerSelectControlData {
                 player: self.local_owner,
-                objects: vec![select_target.as_u64() as i32],
+                objects: self
+                    .ingame_dragged_objects
+                    .iter()
+                    .copied()
+                    .filter(|object| {
+                        self.engine
+                            .object_snapshot(*object)
+                            .is_some_and(|snapshot| {
+                                snapshot.status != clonk_engine::ObjectStatus::Deleted
+                            })
+                    })
+                    .map(|target| target.as_u64() as i32)
+                    .collect(),
                 by_client: -1,
             })?;
         }
@@ -9590,10 +9688,7 @@ impl GameApp {
         } else {
             // C4MouseControl::RightUpDragNone cycles crew on a free click by
             // queuing a one-object CID_PlrSelect packet.
-            if let Some(next) = self
-                .engine
-                .player_mouse_select_next_object(self.local_owner)
-            {
+            if let Some(next) = select_next {
                 self.submit_or_execute_player_select(PlayerSelectControlData {
                     player: self.local_owner,
                     objects: vec![next.as_u64() as i32],
@@ -9823,13 +9918,7 @@ impl GameApp {
         let down_target = region_target.or_else(|| {
             region
                 .is_none()
-                .then(|| {
-                    if self.ingame_mouse_help {
-                        self.ingame_help_mouse_target(pointer.owner, pointer.screen)
-                    } else {
-                        self.ingame_primary_mouse_target(pointer.owner, pointer.screen)
-                    }
-                })
+                .then(|| self.retained_ingame_mouse_target())
                 .flatten()
         });
         let mut state = IngameButtonMouseState::new(pointer, down_target, region.is_some());
@@ -9995,7 +10084,6 @@ impl GameApp {
             return Ok(());
         }
         let point = ingame_pointer_world_pixel(pointer);
-        let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
         // Move snapshots dwKeyFlags before dispatching LeftUp, and every
         // SendCommand in that event observes the same ShiftDown value.
         let add_mode = 1 | if self.keyboard_modifiers.shift_key() {
@@ -10003,39 +10091,41 @@ impl GameApp {
         } else {
             0
         };
-        // UpdateCursorTarget evaluates the nearby Jump cursor after Select,
-        // so an eligible jump zone owns the click even over another crew
-        // member (C4MouseControl.cpp:522-534,1129-1132).
-        if !fog_blocked && self.engine.mouse_jump_zone(pointer.owner, point) {
-            self.show_startup_hint = false;
-            self.submit_or_execute_player_command(PlayerCommandControlData {
-                player: pointer.owner,
-                command: CommandId::Jump as i32,
-                x: point.x,
-                y: point.y,
-                target: 0,
-                target2: 0,
-                data: 0,
-                add_mode,
-                by_client: -1,
-            })?;
-            return Ok(());
-        }
-        // C4MC_Cursor_Select queues CID_PlrSelect on LeftUp for both crew and
-        // C4D_MouseSelect objects (C4MouseControl.cpp:1106-1129).
-        if let Some(target) = self.ingame_mouse_select_target(pointer.owner, pointer.screen) {
-            self.submit_or_execute_player_select(PlayerSelectControlData {
-                player: pointer.owner,
-                objects: vec![target.as_u64() as i32],
-                by_client: -1,
-            })?;
-            self.snapshot = self.engine.snapshot();
-            self.refresh_object_menu();
-            self.refresh_focus();
-            return Ok(());
-        }
-        if fog_blocked {
-            return Ok(());
+        // LeftUp consumes the cursor and target retained by Move/Tick5 rather
+        // than re-running either lookup (`C4MouseControl.cpp:1106-1155`).
+        match self.ingame_mouse_caption.cursor {
+            IngameMouseCursorKind::JumpLeft | IngameMouseCursorKind::JumpRight => {
+                self.show_startup_hint = false;
+                self.submit_or_execute_player_command(PlayerCommandControlData {
+                    player: pointer.owner,
+                    command: CommandId::Jump as i32,
+                    x: point.x,
+                    y: point.y,
+                    target: 0,
+                    target2: 0,
+                    data: 0,
+                    add_mode,
+                    by_client: -1,
+                })?;
+                return Ok(());
+            }
+            IngameMouseCursorKind::Select => {
+                self.submit_or_execute_player_select(PlayerSelectControlData {
+                    player: pointer.owner,
+                    objects: self
+                        .retained_ingame_mouse_target()
+                        .map(|target| target.as_u64() as i32)
+                        .into_iter()
+                        .collect(),
+                    by_client: -1,
+                })?;
+                self.snapshot = self.engine.snapshot();
+                self.refresh_object_menu();
+                self.refresh_focus();
+                return Ok(());
+            }
+            IngameMouseCursorKind::Nothing => return Ok(()),
+            _ => {}
         }
         self.show_startup_hint = false;
         self.submit_or_execute_player_command(PlayerCommandControlData {
@@ -10073,15 +10163,30 @@ impl GameApp {
             return Ok(());
         }
         let point = ingame_pointer_world_pixel(pointer);
-        let target = self.ingame_primary_mouse_target(pointer.owner, pointer.screen);
-        if self.ingame_pointer_fog_blocked(pointer) && target.is_none() {
-            return Ok(());
-        }
-        let Some(command) = self.engine.mouse_left_double_command(
+        let (action, object_action) = match self.ingame_mouse_caption.cursor {
+            IngameMouseCursorKind::Attack => (MouseDoubleClickAction::Attack, true),
+            IngameMouseCursorKind::Grab => (MouseDoubleClickAction::Grab, true),
+            IngameMouseCursorKind::Ungrab => (MouseDoubleClickAction::Ungrab, true),
+            IngameMouseCursorKind::Build => (MouseDoubleClickAction::Build, true),
+            IngameMouseCursorKind::Chop => (MouseDoubleClickAction::Chop, true),
+            IngameMouseCursorKind::Enter => (MouseDoubleClickAction::Enter, true),
+            IngameMouseCursorKind::Carryable | IngameMouseCursorKind::DigObject => {
+                (MouseDoubleClickAction::Get, true)
+            }
+            IngameMouseCursorKind::Dig => (MouseDoubleClickAction::Dig { material: false }, false),
+            IngameMouseCursorKind::DigMaterial => {
+                (MouseDoubleClickAction::Dig { material: true }, false)
+            }
+            _ => return Ok(()),
+        };
+        let target = object_action
+            .then(|| self.retained_ingame_mouse_target())
+            .flatten();
+        let Some(command) = self.engine.mouse_left_double_command_for_action(
             pointer.owner,
+            action,
             target,
             point,
-            self.keyboard_modifiers.control_key(),
             self.keyboard_modifiers.shift_key(),
         ) else {
             return Ok(());
@@ -12132,6 +12237,7 @@ impl GameApp {
                 self.ingame_viewport_mouse = None;
                 self.ingame_edge_scroll = None;
                 self.ingame_mouse_caption = IngameMouseCaptionState::default();
+                self.ingame_mouse_target = None;
                 self.running_pointer_position = None;
             }
             AppMode::Loading => {}

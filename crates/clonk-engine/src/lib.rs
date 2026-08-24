@@ -139,7 +139,7 @@ pub use control_execution::{
     PrepareJoinPlayerError, RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError,
     TeamColorUpdateError,
 };
-pub use direct_com::MouseWorldCursor;
+pub use direct_com::{MouseDoubleClickAction, MouseWorldCursor};
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
 pub use landscape::{

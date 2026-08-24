@@ -221,10 +221,10 @@ use clonk_engine::{
     ControlCommand, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
     EngineState, EnvironmentSettings, JoinPlayerConfig, Landscape, LegacyCString, MaterialSet,
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageControlData, MessageKind,
-    MissionAccessStore, MouseDragCarryableCursor, MouseDragSource, MouseWorldCursor,
-    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
-    PlayerConfig, PlayerSelectControlData, RgbColor, Scenario, ScenarioError,
-    ScoreboardPresentationRequest, ScriptControlPolicy, ShowCommandsRequestStore,
+    MissionAccessStore, MouseDoubleClickAction, MouseDragCarryableCursor, MouseDragSource,
+    MouseWorldCursor, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
+    PlayerCommandControlData, PlayerConfig, PlayerSelectControlData, RgbColor, Scenario,
+    ScenarioError, ScoreboardPresentationRequest, ScriptControlPolicy, ShowCommandsRequestStore,
     SimulationSnapshot, SkyConfig, SpawnConfig, SpeechPlaybackOutcome, SyncCheckPacket,
     TeamConfiguration, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
     FLAG_HCENTER, FLAG_RIGHT, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
@@ -2842,6 +2842,7 @@ impl GameApp {
             ingame_edge_scroll: None,
             free_view_scroll_momentum: FreeViewScrollMomentum::default(),
             ingame_mouse_caption: IngameMouseCaptionState::default(),
+            ingame_mouse_target: None,
             window_mouse_position: None,
             pointer_inside_window: false,
             running_gui_mouse_owned: false,
@@ -5786,9 +5787,8 @@ impl GameApp {
         if self.ingame_pointer_fog_blocked(pointer) {
             return Some((IngameMouseCursorKind::Nothing, None));
         }
-        let target = self
-            .keyboard_modifiers
-            .control_key()
+        let control_down = self.keyboard_modifiers.control_key();
+        let target = control_down
             .then(|| {
                 self.graphics.object_at_point_with_ocf(
                     &self.snapshot,
@@ -5798,6 +5798,9 @@ impl GameApp {
                 )
             })
             .flatten();
+        if control_down {
+            self.ingame_mouse_target = target;
+        }
         let Some(target) = target else {
             let kind = match source {
                 MouseDragSource::Carryable => match self
@@ -6101,37 +6104,29 @@ impl GameApp {
             return self.finish_ingame_noop_drag(drag.motion, selected.len());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
-        let put_target = self
-            .keyboard_modifiers
-            .control_key()
-            .then(|| {
-                self.graphics.object_at_point_with_ocf(
-                    &self.snapshot,
-                    self.local_owner,
-                    drag.motion.last.screen,
-                    clonk_engine::ocf::CONTAINER,
-                )
-            })
+        let put_cursor = self.ingame_mouse_caption.cursor == IngameMouseCursorKind::Put;
+        let put_target = put_cursor
+            .then(|| self.retained_ingame_mouse_target())
             .flatten();
-        let command = if put_target.is_none() {
+        let command = if !put_cursor {
             self.engine
                 .mouse_drag_carryable_command(self.local_owner, position)
         } else {
             None
         };
-        if put_target.is_none() && command.is_none() {
+        if !put_cursor && command.is_none() {
             return Ok(());
         }
         self.show_startup_hint = false;
         let mut add_mode = 1;
         let shift_append = self.keyboard_modifiers.shift_key();
         for object in selected {
-            let (command, x, y, target, target2) = if let Some(container) = put_target {
+            let (command, x, y, target, target2) = if put_cursor {
                 (
                     CommandId::Put,
                     0,
                     0,
-                    container.as_u64() as i32,
+                    put_target.map_or(0, |container| container.as_u64() as i32),
                     object.as_u64() as i32,
                 )
             } else if let Some(command) = command {
@@ -6173,17 +6168,8 @@ impl GameApp {
             return self.finish_ingame_noop_drag(drag.motion, selected.len());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
-        let put_target = self
-            .keyboard_modifiers
-            .control_key()
-            .then(|| {
-                self.graphics.object_at_point_with_ocf(
-                    &self.snapshot,
-                    self.local_owner,
-                    drag.motion.last.screen,
-                    clonk_engine::ocf::CONTAINER,
-                )
-            })
+        let put_target = (self.ingame_mouse_caption.cursor == IngameMouseCursorKind::VehiclePut)
+            .then(|| self.retained_ingame_mouse_target())
             .flatten();
         self.show_startup_hint = false;
         let mut add_mode = 1;
@@ -8338,6 +8324,7 @@ impl GameApp {
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
         self.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -8811,6 +8798,7 @@ impl GameApp {
         self.ingame_mouse_help = false;
         self.ingame_mouse_help_caption = None;
         self.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;

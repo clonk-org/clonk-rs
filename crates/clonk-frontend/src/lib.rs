@@ -8924,6 +8924,243 @@ mod tests {
         };
     }
 
+    fn mouse_lookup_integer(case: &serde_json::Value, field: &str) -> i32 {
+        i32::try_from(
+            case[field]
+                .as_i64()
+                .unwrap_or_else(|| panic!("mouse_target_lookup.{field} is an integer")),
+        )
+        .unwrap_or_else(|_| panic!("mouse_target_lookup.{field} fits i32"))
+    }
+
+    fn mouse_lookup_unsigned(case: &serde_json::Value, field: &str) -> u32 {
+        u32::try_from(
+            case[field]
+                .as_u64()
+                .unwrap_or_else(|| panic!("mouse_target_lookup.{field} is unsigned")),
+        )
+        .unwrap_or_else(|_| panic!("mouse_target_lookup.{field} fits u32"))
+    }
+
+    fn mouse_lookup_object_id(case: &serde_json::Value, field: &str) -> Option<ObjectId> {
+        let raw = case[field]
+            .as_u64()
+            .unwrap_or_else(|| panic!("mouse_target_lookup.{field} is unsigned"));
+        (raw != 0).then(|| ObjectId::new(raw))
+    }
+
+    /// `C4Game::FindVisObject` and `C4MouseControl::GetTargetObject`
+    /// (7d43b47b `src/C4Game.cpp:1426-1498`;
+    /// `src/C4MouseControl.cpp:1318-1325`). Every fixture field comes from
+    /// the compiled C++ oracle row; case names are diagnostics only.
+    #[test]
+    fn parity_differential_matches_cpp_golden() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../../../parity/golden/parity_golden.json"))
+                .expect("C++ parity golden is valid JSON");
+        let cases = golden["mouse_target_lookup"]
+            .as_array()
+            .expect("mouse_target_lookup is a C++ oracle array");
+        assert!(!cases.is_empty(), "mouse_target_lookup has oracle rows");
+
+        for (case_index, case) in cases.iter().enumerate() {
+            let case_name = case["case"]
+                .as_str()
+                .expect("mouse_target_lookup.case is a string");
+            let objects = case["objects"]
+                .as_array()
+                .expect("mouse_target_lookup.objects is an array");
+            let player = mouse_lookup_integer(case, "player");
+            let mut snapshot = make_snapshot();
+            let template = snapshot.objects.pop().expect("snapshot object template");
+            snapshot.objects.clear();
+            snapshot.render_order.clear();
+
+            let mut sprites = HashMap::new();
+            let mut geometry = HashMap::new();
+            let mut master_order = Vec::with_capacity(objects.len());
+            for object_case in objects {
+                let id = mouse_lookup_object_id(object_case, "id")
+                    .expect("oracle objects have nonzero ids");
+                let definition_id = format!("mouse-oracle-{id}");
+                let mut object = template.clone();
+                object.id = id;
+                object.definition_id = definition_id.clone();
+                object.position = Vector2::new(
+                    mouse_lookup_integer(object_case, "x"),
+                    mouse_lookup_integer(object_case, "y"),
+                );
+                let shape = DefinitionRect::new(
+                    mouse_lookup_integer(object_case, "shape_x"),
+                    mouse_lookup_integer(object_case, "shape_y"),
+                    mouse_lookup_integer(object_case, "wdt"),
+                    mouse_lookup_integer(object_case, "hgt"),
+                );
+                object.current_shape = Some(shape);
+                object.status =
+                    ObjectStatus::from_script_value(mouse_lookup_integer(object_case, "status"))
+                        .expect("oracle object status is modeled");
+                object.category = mouse_lookup_integer(object_case, "category");
+                object.ocf = mouse_lookup_unsigned(object_case, "ocf");
+                object.container = mouse_lookup_object_id(object_case, "contained");
+                object.owner = mouse_lookup_integer(object_case, "owner");
+                object.layer = mouse_lookup_object_id(object_case, "layer");
+
+                let oracle_visibility = mouse_lookup_integer(object_case, "visibility");
+                let oracle_visible = mouse_lookup_integer(object_case, "visible") != 0;
+                object.visibility = match (oracle_visibility, oracle_visible, player) {
+                    (0, _, _) => clonk_engine::VIS_ALL,
+                    (_, false, _) => clonk_engine::VIS_NONE,
+                    (_, true, OWNER_NONE) => VIS_GOD,
+                    (_, true, visible_player) => {
+                        let slot = visible_player / 32;
+                        let bit = (visible_player % 32) as u32;
+                        object.local_vars.insert(
+                            format!("__local_{slot}"),
+                            clonk_script::Value::Int(1_i32.wrapping_shl(bit)),
+                        );
+                        VIS_LOCAL
+                    }
+                };
+                assert_eq!(
+                    object.category & CATEGORY_MOUSE_IGNORE_FLAG != 0,
+                    mouse_lookup_integer(object_case, "mouse_ignore") != 0,
+                    "mouse_target_lookup[{case_index}] {case_name}: MouseIgnore sidecar"
+                );
+
+                sprites.insert(
+                    sprite_map_key(&definition_id, None),
+                    test_shaped_sprite(ImageData::new(1, 1, vec![0; 4]), shape),
+                );
+                let oracle_rect = |prefix: &str| {
+                    let width = mouse_lookup_integer(object_case, &format!("{prefix}_wdt"));
+                    let height = mouse_lookup_integer(object_case, &format!("{prefix}_hgt"));
+                    (width > 0 && height > 0).then(|| {
+                        DefinitionRect::new(
+                            mouse_lookup_integer(object_case, &format!("{prefix}_x")),
+                            mouse_lookup_integer(object_case, &format!("{prefix}_y")),
+                            width,
+                            height,
+                        )
+                    })
+                };
+                geometry.insert(
+                    definition_id,
+                    DefinitionDebugGeometry {
+                        entrance: oracle_rect("entrance"),
+                        collection: oracle_rect("collection"),
+                        ..DefinitionDebugGeometry::default()
+                    },
+                );
+                master_order.push((mouse_lookup_integer(object_case, "order"), id));
+                snapshot.objects.push(object);
+            }
+            snapshot.objects.sort_by_key(|object| object.id);
+            master_order.sort_by_key(|(order, _)| *order);
+            snapshot.render_order = master_order
+                .iter()
+                .rev()
+                .map(|(_, object)| *object)
+                .collect();
+
+            if player >= 0 {
+                snapshot.players = vec![PlayerState {
+                    id: player,
+                    cursor: mouse_lookup_object_id(case, "cursor"),
+                    ..PlayerState::default()
+                }];
+            } else {
+                snapshot.players.clear();
+            }
+
+            let viewport_width = mouse_lookup_integer(case, "viewport_wdt");
+            let viewport_height = mouse_lookup_integer(case, "viewport_hgt");
+            let view_x = mouse_lookup_integer(case, "tx");
+            let view_y = mouse_lookup_integer(case, "ty");
+            let world_width = objects
+                .iter()
+                .map(|object| {
+                    mouse_lookup_integer(object, "x")
+                        .saturating_add(mouse_lookup_integer(object, "wdt"))
+                })
+                .max()
+                .unwrap_or(viewport_width)
+                .max(view_x.saturating_add(viewport_width))
+                .saturating_add(32);
+            let world_height = objects
+                .iter()
+                .map(|object| {
+                    mouse_lookup_integer(object, "y")
+                        .saturating_add(mouse_lookup_integer(object, "hgt"))
+                })
+                .max()
+                .unwrap_or(viewport_height)
+                .max(view_y.saturating_add(viewport_height))
+                .saturating_add(32);
+            snapshot.landscape = Some(Landscape::flat(
+                u32::try_from(world_width).expect("oracle world width is positive"),
+                world_height,
+            ));
+
+            let mut graphics = test_graphics_with_sprites(
+                (
+                    u32::try_from(viewport_width).expect("oracle viewport width is positive"),
+                    u32::try_from(viewport_height).expect("oracle viewport height is positive"),
+                    viewport_height,
+                ),
+                "Mouse target oracle",
+                Arc::new(sprites),
+            );
+            graphics.set_definition_debug_geometry(geometry);
+            let center = Vector2::new(
+                view_x.saturating_add(viewport_width / 2),
+                view_y.saturating_add(viewport_height / 2),
+            );
+            let viewport = if player == OWNER_NONE {
+                ViewportInput::ownerless(center, 1.0)
+            } else {
+                ViewportInput::owned_without_focus(player, center, 1.0)
+            };
+            graphics.render_frame(&snapshot, &[viewport]);
+
+            let world = Vector2::new(
+                mouse_lookup_integer(case, "x"),
+                mouse_lookup_integer(case, "y"),
+            );
+            let (screen_x, screen_y) = graphics.world_to_screen(player, world).test_value();
+            let result = graphics
+                .mouse_target_lookup(
+                    &snapshot,
+                    player,
+                    MouseTargetLookupQuery {
+                        screen: GuiPoint::new(screen_x, screen_y),
+                        world,
+                        width: mouse_lookup_integer(case, "wdt"),
+                        height: mouse_lookup_integer(case, "hgt"),
+                        requested_ocf: mouse_lookup_unsigned(case, "requested_ocf"),
+                        excluded: mouse_lookup_object_id(case, "excluded"),
+                        owner: match mouse_lookup_integer(case, "owner") {
+                            -2 => None,
+                            owner => Some(owner),
+                        },
+                        find_next: mouse_lookup_object_id(case, "find_next"),
+                        adjust_ocf: mouse_lookup_integer(case, "via_get_target") != 0,
+                    },
+                )
+                .unwrap_or_else(|| panic!("mouse_target_lookup[{case_index}] has a viewport"));
+            assert_eq!(
+                result.object,
+                mouse_lookup_object_id(case, "found"),
+                "mouse_target_lookup[{case_index}] {case_name}: found"
+            );
+            assert_eq!(
+                result.ocf,
+                mouse_lookup_unsigned(case, "ocf_out"),
+                "mouse_target_lookup[{case_index}] {case_name}: ocf_out"
+            );
+        }
+    }
+
     #[test]
     fn object_visibility_matches_cpp_masks_layers_and_local_bits() {
         let mut snapshot = make_snapshot();

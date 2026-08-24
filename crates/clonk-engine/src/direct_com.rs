@@ -63,6 +63,20 @@ pub enum MouseWorldCursor {
     JumpRight,
 }
 
+/// The command-bearing cursor state retained by `C4MouseControl` between
+/// target refills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseDoubleClickAction {
+    Attack,
+    Grab,
+    Ungrab,
+    Build,
+    Chop,
+    Enter,
+    Get,
+    Dig { material: bool },
+}
+
 const C4P_COMMAND_SET: i32 = 1;
 const C4P_COMMAND_ADD: i32 = 2;
 const C4P_COMMAND_APPEND: i32 = 4;
@@ -3546,7 +3560,7 @@ impl Engine {
 
     /// Build the exact `C4ControlPlayerCommand` produced by a world
     /// LeftDouble event. Selection and Jump cursors deliberately do not emit
-    /// a double-click command (C4MouseControl.cpp:1060-1102).
+    /// a double-click command (C4MouseControl.cpp:982-1007).
     pub fn mouse_left_double_command(
         &self,
         owner: i32,
@@ -3559,53 +3573,53 @@ impl Engine {
             return None;
         }
 
-        let (command, x, y, target, data) =
-            match self.mouse_world_cursor(owner, target, point, control_down) {
-                MouseWorldCursor::Attack(target) => (
-                    CommandId::Attack,
-                    point.x,
-                    point.y,
-                    target.as_u64() as i32,
-                    0,
-                ),
-                MouseWorldCursor::Grab(target) => {
-                    (CommandId::Grab, 0, 0, target.as_u64() as i32, 0)
-                }
-                MouseWorldCursor::Ungrab(target) => (
-                    CommandId::UnGrab,
-                    point.x,
-                    point.y,
-                    target.as_u64() as i32,
-                    0,
-                ),
-                MouseWorldCursor::Build(target) => (
-                    CommandId::Build,
-                    point.x,
-                    point.y,
-                    target.as_u64() as i32,
-                    0,
-                ),
-                MouseWorldCursor::Chop(target) => {
-                    (CommandId::Chop, point.x, point.y, target.as_u64() as i32, 0)
-                }
-                MouseWorldCursor::Enter(target) => (
-                    CommandId::Enter,
-                    point.x,
-                    point.y,
-                    target.as_u64() as i32,
-                    0,
-                ),
-                MouseWorldCursor::Carryable(target) | MouseWorldCursor::DigObject(target) => {
-                    (CommandId::Get, 0, 0, target.as_u64() as i32, 0)
-                }
-                MouseWorldCursor::Dig { material } => {
-                    (CommandId::Dig, point.x, point.y, 0, i32::from(material))
-                }
-                MouseWorldCursor::Crosshair
-                | MouseWorldCursor::Select(_)
-                | MouseWorldCursor::JumpLeft
-                | MouseWorldCursor::JumpRight => return None,
-            };
+        let (action, target) = match self.mouse_world_cursor(owner, target, point, control_down) {
+            MouseWorldCursor::Attack(target) => (MouseDoubleClickAction::Attack, Some(target)),
+            MouseWorldCursor::Grab(target) => (MouseDoubleClickAction::Grab, Some(target)),
+            MouseWorldCursor::Ungrab(target) => (MouseDoubleClickAction::Ungrab, Some(target)),
+            MouseWorldCursor::Build(target) => (MouseDoubleClickAction::Build, Some(target)),
+            MouseWorldCursor::Chop(target) => (MouseDoubleClickAction::Chop, Some(target)),
+            MouseWorldCursor::Enter(target) => (MouseDoubleClickAction::Enter, Some(target)),
+            MouseWorldCursor::Carryable(target) | MouseWorldCursor::DigObject(target) => {
+                (MouseDoubleClickAction::Get, Some(target))
+            }
+            MouseWorldCursor::Dig { material } => (MouseDoubleClickAction::Dig { material }, None),
+            MouseWorldCursor::Crosshair
+            | MouseWorldCursor::Select(_)
+            | MouseWorldCursor::JumpLeft
+            | MouseWorldCursor::JumpRight => return None,
+        };
+
+        self.mouse_left_double_command_for_action(owner, action, target, point, shift_down)
+    }
+
+    /// Build LeftDouble from the cursor and target identities retained by the
+    /// last Move/Tick5 refill (C4MouseControl.cpp:982-1007).
+    pub fn mouse_left_double_command_for_action(
+        &self,
+        owner: i32,
+        action: MouseDoubleClickAction,
+        target: Option<ObjectId>,
+        point: Vector2,
+        shift_down: bool,
+    ) -> Option<PlayerCommandControlData> {
+        if !self.players.contains_key(&owner) || self.is_owner_eliminated(owner) {
+            return None;
+        }
+
+        let target = target.map_or(0, |target| target.as_u64() as i32);
+        let (command, x, y, target, data) = match action {
+            MouseDoubleClickAction::Attack => (CommandId::Attack, point.x, point.y, target, 0),
+            MouseDoubleClickAction::Grab => (CommandId::Grab, 0, 0, target, 0),
+            MouseDoubleClickAction::Ungrab => (CommandId::UnGrab, point.x, point.y, target, 0),
+            MouseDoubleClickAction::Build => (CommandId::Build, point.x, point.y, target, 0),
+            MouseDoubleClickAction::Chop => (CommandId::Chop, point.x, point.y, target, 0),
+            MouseDoubleClickAction::Enter => (CommandId::Enter, point.x, point.y, target, 0),
+            MouseDoubleClickAction::Get => (CommandId::Get, 0, 0, target, 0),
+            MouseDoubleClickAction::Dig { material } => {
+                (CommandId::Dig, point.x, point.y, 0, i32::from(material))
+            }
+        };
 
         Some(PlayerCommandControlData {
             player: owner,

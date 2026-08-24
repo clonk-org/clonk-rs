@@ -70,7 +70,11 @@ pub fn command(args: &[String]) -> Result<()> {
 /// target is deliberately no longer pinned: a package is free to host its
 /// comparator in whichever target suits it, and the name filter is what selects
 /// the test.
-const PARITY_PACKAGES: &[&str] = &["clonk-engine-unit-tests"];
+const PARITY_PACKAGES: &[&str] = &[
+    "clonk-app",
+    "clonk-engine-unit-tests",
+    "clonk-frontend-unit-tests",
+];
 
 /// The comparator's test name, matched across every [`PARITY_PACKAGES`] entry.
 const PARITY_TEST_FILTER: &str = "test(parity_differential_matches_cpp_golden)";
