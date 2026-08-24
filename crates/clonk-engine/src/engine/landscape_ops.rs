@@ -2417,6 +2417,23 @@ impl Engine {
         self.finish_host_solid_mask_operations(outermost, fold_result)
     }
 
+    /// `C4Effect::ClearAll(nullptr, C4FxCall_RemoveClear)` for the global
+    /// effect list (C4Game.cpp:4202-4208; C4Effect.cpp:407-425). The traversal
+    /// is captured tail-first, but each node is resolved live when its turn is
+    /// reached. Effects created by a Stop callback are therefore outside this
+    /// clear, while the original nodes stay linked dead for the next Execute.
+    pub(crate) fn clear_global_effects_for_scenario_section(&mut self) -> Result<(), EngineError> {
+        let events = self
+            .global_effects
+            .iter()
+            .filter(|effect| effect.priority != 0)
+            .rev()
+            .cloned()
+            .map(|effect| EffectEvent::stopped(effect, EffectStopReason::Cleared))
+            .collect::<Vec<_>>();
+        self.dispatch_global_effect_events(events)
+    }
+
     /// Executes deferred Fx* events of the GLOBAL effect list — the
     /// nil-object analog of [`Self::run_effect_events_for_object`]:
     /// callbacks receive nil as the affected object (C4Effect::Execute

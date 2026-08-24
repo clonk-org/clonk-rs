@@ -3021,6 +3021,124 @@ impl Engine {
         Ok(())
     }
 
+    /// `LoadScenarioSection`'s active-list teardown before global effect
+    /// cleanup (C4Game.cpp:4190-4201). Objects already in the inactive list
+    /// survive; objects created during a departing object's destruction are
+    /// cleared without recursively running another destruction lifecycle.
+    fn remove_active_objects_for_scenario_section(
+        &mut self,
+        _preserved: &HashSet<ObjectId>,
+    ) -> Result<(), EngineError> {
+        // `Objects.First` is the reverse of Rust's execution order. Native
+        // follows the live Next link after each AssignRemoval: callbacks may
+        // unlink a future object by deactivating it or insert a new object on
+        // either side of the cursor (C4Game.cpp:4190-4193).
+        let mut current = self.exec_list.iter().rev().copied().find(|id| {
+            self.find_object_index(*id).is_some_and(|index| {
+                self.objects[index].state.status.is_active() && !self.objects[index].destroyed
+            })
+        });
+        while let Some(object) = current {
+            let _ = self.assign_object_removal(object)?;
+            current = self
+                .exec_list
+                .iter()
+                .position(|candidate| *candidate == object)
+                .and_then(|position| {
+                    self.exec_list[..position].iter().rev().copied().find(|id| {
+                        self.find_object_index(*id).is_some_and(|index| {
+                            self.objects[index].state.status.is_active()
+                                && !self.objects[index].destroyed
+                        })
+                    })
+                });
+        }
+
+        // Native warns about objects created in destruction, clears every
+        // pointer to each of them without calling AssignRemoval again, then
+        // deletes the whole active list (C4Game.cpp:4194-4201).
+        let created_during_destruction = self
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| {
+                self.find_object_index(*id).is_some_and(|index| {
+                    self.objects[index].state.status.is_active() && !self.objects[index].destroyed
+                })
+            })
+            .collect::<Vec<_>>();
+        for object in created_during_destruction {
+            self.clear_object_references_for_removal(object)?;
+            if let Some(index) = self.find_object_index(object) {
+                self.remove_solid_mask(index);
+            }
+        }
+
+        let removed = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Inactive)
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        self.objects.retain(|object| !removed.contains(&object.id));
+        self.exec_list.retain(|object| !removed.contains(object));
+        self.inactive_exec_list
+            .retain(|object| !removed.contains(object));
+        if let Some(sectors) = self.sectors.as_mut() {
+            for object in &removed {
+                sectors.remove(*object);
+            }
+        }
+        if !removed.is_empty() {
+            self.note_objects_changed();
+        }
+        Ok(())
+    }
+
+    /// `InitGameSecondPart`'s `Objects.Clear(false)`: delete the active main
+    /// list without Destruction or effect callbacks while retaining the
+    /// inactive list (C4Game.cpp:2699-2704; C4GameObjects.cpp:313-331).
+    fn clear_active_objects_for_scenario_section_init(&mut self) -> Result<(), EngineError> {
+        let active = self
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| {
+                self.find_object_index(*id).is_some_and(|index| {
+                    self.objects[index].state.status.is_active() && !self.objects[index].destroyed
+                })
+            })
+            .collect::<Vec<_>>();
+        for object in active {
+            self.clear_object_references_for_removal(object)?;
+            if let Some(index) = self.find_object_index(object) {
+                self.remove_solid_mask(index);
+            }
+        }
+
+        let removed = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Inactive)
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        self.objects.retain(|object| !removed.contains(&object.id));
+        self.exec_list.retain(|object| !removed.contains(object));
+        self.inactive_exec_list
+            .retain(|object| !removed.contains(object));
+        if let Some(sectors) = self.sectors.as_mut() {
+            for object in &removed {
+                sectors.remove(*object);
+            }
+        }
+        if !removed.is_empty() {
+            self.note_objects_changed();
+        }
+        Ok(())
+    }
+
     pub(crate) fn load_scenario_section(
         &mut self,
         name: &str,
@@ -3205,6 +3323,22 @@ impl Engine {
             self.scenario_sections.insert(departing_key, current);
         }
 
+        // Native removes the active object list through AssignRemoval and
+        // ClearPointers, then deletes that list before global ClearAll. This
+        // also clears effect command targets, so global Stop callbacks cannot
+        // dispatch through or enumerate a departing object
+        // (C4Game.cpp:4190-4208).
+        self.remove_active_objects_for_scenario_section(&preserved)?;
+
+        // ClearAll runs every original Stop callback tail-first and leaves its
+        // nodes linked dead. Capture the complete post-callback engine state:
+        // C++ keeps objects, player writes, messages, allocation state and
+        // every other synchronous side effect produced here into InitGame;
+        // InitGameSecondPart later directly deletes any active object spawn
+        // (C4Game.cpp:4202-4208; C4Effect.cpp:407-425).
+        self.clear_global_effects_for_scenario_section()?;
+        state = self.capture_state();
+
         let target = self
             .scenario_sections
             .get(&key)
@@ -3213,19 +3347,6 @@ impl Engine {
         let target_landscape_systems = target.landscape_systems.clone();
         let mut post_init_map_callbacks = map_creator_s2::PostInitMapCallbacks::default();
         let keep_map_creator = target.keep_map_creator;
-        let retained = state
-            .objects
-            .iter()
-            .filter(|object| preserved.contains(&object.snapshot.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        let retained_order = state
-            .object_order
-            .iter()
-            .copied()
-            .filter(|id| preserved.contains(id))
-            .collect::<Vec<_>>();
-
         // C4Landscape::Init repairs an unset persistent MapSeed before its
         // first FixRandom. The draw is deliberately made on the pre-reset
         // game ledger; FixRandom immediately discards its resulting state.
@@ -3488,31 +3609,11 @@ impl Engine {
         state.scenario_values = Some(target.scenario_values.clone());
         state.base_reject_entrance_enabled = Some(target.base_reject_entrance_enabled);
         state.environment = target.environment;
-        state.global_effects.clear();
         state.particles.clear();
         state.transfer_zones.clear();
         state.mass_movers.clear();
 
-        let removed_sound_targets = state
-            .objects
-            .iter()
-            .filter(|object| object.snapshot.status.is_active())
-            .filter(|object| !preserved.contains(&object.snapshot.id))
-            .map(|object| (object.snapshot.id, object.snapshot.position))
-            .collect::<Vec<_>>();
-        state.objects.clear();
-        state.objects.extend(retained);
-        state.object_order = retained_order;
-
         self.base_extinguish_enabled = target.base_extinguish_enabled;
-        // Native removes active departing objects through AssignRemoval and
-        // ClearPointers before InitGame installs the target section
-        // (C4Game.cpp:4190-4201). Detach now so target-section callbacks see
-        // the same freed sound channels while globals and inactive bindings
-        // remain in the process-local C4SoundSystem.
-        for (object, position) in removed_sound_targets {
-            self.detach_audio_for_object(object, position);
-        }
         self.restore_state_with_local_sound_reset(&state, false)?;
         match target_landscape_systems.pxs {
             Some(mut pxs) => {
@@ -3539,6 +3640,7 @@ impl Engine {
             physics.set_script_gravity(gravity);
             self.set_physics(physics);
         }
+        self.clear_active_objects_for_scenario_section_init()?;
         let target_objects = self.scenario_section_object_spawns(&target)?;
         self.spawn_scenario_section_objects(target_objects)?;
         if !target.no_initialize && landscape_loaded && keep_map_creator {

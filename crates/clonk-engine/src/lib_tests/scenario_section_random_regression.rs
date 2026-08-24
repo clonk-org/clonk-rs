@@ -75,6 +75,473 @@ fn resumed_non_main_root_engine() -> Engine {
 }
 
 #[test]
+fn scenario_section_switch_clears_global_effects_through_stop_callbacks_tail_first() {
+    // C4Game::LoadScenarioSection removes the GLOBAL effect list through
+    // C4Effect::ClearAll(nil, C4FxCall_RemoveClear), leaving the dead nodes
+    // linked until Execute reaps them (C4Game.cpp:4202-4208). ClearAll recurses
+    // through pNext before stopping the current node, so callbacks run from
+    // highest to lowest priority and receive nil, their number, and reason 3
+    // (C4Effect.cpp:407-425; C4Effects.h:49).
+    let script = r#"#strict 3
+static stop_order, stop_numbers, stop_reasons, stop_targets;
+
+global func ArmSectionClear()
+{
+    stop_order = stop_numbers = stop_reasons = stop_targets = 0;
+    return true;
+}
+
+global func FxSectionLowStop(object target, int number, int reason)
+{
+    stop_order = stop_order * 10 + 1;
+    stop_numbers = stop_numbers * 10 + number;
+    stop_reasons = stop_reasons * 10 + reason;
+    stop_targets = stop_targets * 10 + !!target;
+    return false;
+}
+
+global func FxSectionHighStop(object target, int number, int reason)
+{
+    stop_order = stop_order * 10 + 2;
+    stop_numbers = stop_numbers * 10 + number;
+    stop_reasons = stop_reasons * 10 + reason;
+    stop_targets = stop_targets * 10 + !!target;
+    return false;
+}
+"#;
+
+    let mut engine = Engine::with_seed(17);
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+    assert_eq!(
+        engine.install_global_scripts(&[("System.c4g/SectionEffects.c".into(), script.into())]),
+        1
+    );
+    assert_eq!(
+        crate::TestValueExt::test_value(engine.call_engine_global_function("ArmSectionClear", &[]),),
+        Value::Bool(true)
+    );
+    let mut low = EffectState::new("SectionLow").with_priority(100);
+    low.number = 1;
+    let mut high = EffectState::new("SectionHigh").with_priority(200);
+    high.number = 2;
+    engine.global_effects = vec![low, high];
+    assert_eq!(
+        engine
+            .global_effects()
+            .iter()
+            .map(|effect| (effect.name.as_str(), effect.number, effect.priority))
+            .collect::<Vec<_>>(),
+        vec![("SectionLow", 1, 100), ("SectionHigh", 2, 200)]
+    );
+
+    assert!(engine.load_test_section("next", 0, Vec::new()));
+
+    let globals = engine.snapshot().script_globals.named;
+    assert_eq!(globals.get("stop_order"), Some(&Value::Int(21)));
+    assert_eq!(globals.get("stop_numbers"), Some(&Value::Int(21)));
+    assert_eq!(globals.get("stop_reasons"), Some(&Value::Int(33)));
+    assert_eq!(globals.get("stop_targets"), Some(&Value::Int(0)));
+    assert_eq!(
+        engine
+            .global_effects()
+            .iter()
+            .map(|effect| (effect.name.as_str(), effect.number, effect.priority))
+            .collect::<Vec<_>>(),
+        vec![("SectionLow", 1, 0), ("SectionHigh", 2, 0)],
+        "ClearAll marks each original effect dead but does not unlink it"
+    );
+
+    crate::TestValueExt::test_value(engine.tick_without_snapshot());
+    assert!(engine.global_effects().is_empty());
+}
+
+#[test]
+fn scenario_section_global_clear_observes_mutation_denial_addition_and_rng() {
+    // ClearAll fixes only the recursive successor calls, not callback state:
+    // each resumed node is live, a Stop denial restores that same node, and
+    // effects added during Stop lie outside the original recursion
+    // (C4Effect.cpp:407-425). Fail-safe Exec also commits synchronized Random
+    // draws made by those callbacks (C4AulExec.cpp:1318-1342).
+    let script = r#"#strict 3
+static clear_trace, clear_draw;
+
+global func ArmMutatingSectionClear()
+{
+    clear_trace = clear_draw = 0;
+    return true;
+}
+
+global func FxMutatingHighStop(object target, int number, int reason)
+{
+    clear_trace = clear_trace * 10 + 1;
+    clear_draw = Random(113);
+    ChangeEffect("MutatingLow", target, 0, "MutatingRenamed", 0);
+    AddEffect("MutatingBorn", target, 150, 0);
+    return -1;
+}
+
+global func FxMutatingLowStop(object target, int number, int reason)
+{
+    clear_trace = clear_trace * 10 + 9;
+    return 0;
+}
+
+global func FxMutatingRenamedStop(object target, int number, int reason)
+{
+    clear_trace = clear_trace * 10 + 2;
+    return 0;
+}
+
+global func FxMutatingBornStop(object target, int number, int reason)
+{
+    clear_trace = clear_trace * 10 + 8;
+    return 0;
+}
+"#;
+
+    let mut engine = Engine::with_seed(41);
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+    assert_eq!(
+        engine.install_global_scripts(&[("System.c4g/MutatingEffects.c".into(), script.into())]),
+        1
+    );
+    assert_eq!(
+        crate::TestValueExt::test_value(
+            engine.call_engine_global_function("ArmMutatingSectionClear", &[]),
+        ),
+        Value::Bool(true)
+    );
+    let mut low = EffectState::new("MutatingLow").with_priority(100);
+    low.number = 1;
+    let mut high = EffectState::new("MutatingHigh").with_priority(200);
+    high.number = 2;
+    engine.global_effects = vec![low, high];
+    let mut expected_rng = engine.rng.clone();
+    let expected_draw = expected_rng.random(113);
+
+    assert!(engine.load_test_section("next", 0, Vec::new()));
+
+    let globals = engine.snapshot().script_globals.named;
+    assert_eq!(globals.get("clear_trace"), Some(&Value::Int(12)));
+    assert_eq!(globals.get("clear_draw"), Some(&Value::Int(expected_draw)));
+    assert_eq!(
+        engine
+            .global_effects()
+            .iter()
+            .map(|effect| (effect.name.as_str(), effect.number, effect.priority))
+            .collect::<Vec<_>>(),
+        vec![
+            ("MutatingRenamed", 1, 0),
+            ("MutatingHigh", 2, 200),
+            ("MutatingBorn", 3, 150),
+        ],
+        "the denied original and callback-added effect survive the clear"
+    );
+}
+
+#[test]
+fn scenario_section_global_stop_threads_its_spawn_before_target_init_deletes_it() {
+    // LoadScenarioSection finishes AssignRemoval/ClearPointers/DeleteObjects
+    // before global C4Effect::ClearAll. Stops therefore see no departing
+    // active objects and synchronously share a newly created object. The
+    // later InitGameSecondPart Objects.Clear(false) deletes that active spawn
+    // without callbacks but does not reuse its number (C4Game.cpp:4190-4208,
+    // 2642-2713; C4Effect.cpp:407-425; C4GameObjects.cpp:313-331).
+    let script = r#"#strict 3
+static clear_seen_count, clear_spawn_number, clear_seen_damage;
+
+global func FxSectionHighStop(object target, int number, int reason)
+{
+    clear_seen_count = ObjectCount();
+    clear_spawn_number = ObjectNumber(CreateObject(ITEM, 7, 9, -1));
+    return 0;
+}
+
+global func FxSectionMiddleStop(object target, int number, int reason)
+{
+    var spawned = FindObject(ITEM);
+    if (spawned) spawned->DoDamage(37);
+    return 0;
+}
+
+global func FxSectionLowStop(object target, int number, int reason)
+{
+    var spawned = FindObject(ITEM);
+    if (spawned) clear_seen_damage = spawned->GetDamage();
+    return 0;
+}
+"#;
+
+    let mut engine = Engine::with_seed(43);
+    let mut item = test_definition(
+        "ITEM",
+        "Section item",
+        r#"#strict 3
+static direct_delete_trace;
+
+func Initialize()
+{
+    AddEffect("Spawned", this(), 100, 0, this());
+    return 0;
+}
+
+func Destruction()
+{
+    ++direct_delete_trace;
+    return 0;
+}
+
+func FxSpawnedStop(object target, int number, int reason)
+{
+    direct_delete_trace += 10;
+    return 0;
+}
+
+public func ReadDirectDeleteTrace()
+{
+    if (!direct_delete_trace) return 0;
+    return direct_delete_trace;
+}
+"#,
+    );
+    item.set_c4_callback_convention(true);
+    engine.register_test_definition(item);
+    engine.register_test_definition(test_definition("DEPT", "Departing object", ""));
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+    assert_eq!(
+        engine.install_global_scripts(&[("System.c4g/SectionObserver.c".into(), script.into())]),
+        1
+    );
+    let departing = spawn_fixture!(engine, "DEPT");
+    let mut low = EffectState::new("SectionLow").with_priority(100);
+    low.number = 1;
+    let mut middle = EffectState::new("SectionMiddle").with_priority(200);
+    middle.number = 2;
+    let mut high = EffectState::new("SectionHigh").with_priority(300);
+    high.number = 3;
+    engine.global_effects = vec![low, middle, high];
+
+    assert!(engine.load_test_section("next", 0, Vec::new()));
+
+    let globals = engine.snapshot().script_globals.named;
+    assert_eq!(globals.get("clear_seen_count"), Some(&Value::Int(0)));
+    assert_eq!(globals.get("clear_seen_damage"), Some(&Value::Int(37)));
+    let spawned_number = globals
+        .get("clear_spawn_number")
+        .and_then(|value| match value {
+            Value::Int(number) => Some(*number),
+            _ => None,
+        })
+        .expect("global Stop records the spawned object number");
+    assert_ne!(spawned_number, i32::try_from(departing.as_u64()).unwrap());
+    assert!(engine.objects.iter().all(|object| {
+        object.id.as_u64() != spawned_number as u64 && object.definition_id.as_str() != "ITEM"
+    }));
+    let following = spawn_fixture!(engine, "ITEM");
+    assert_eq!(following.as_u64(), spawned_number as u64 + 1);
+    let following_index = engine.test_object_index(following);
+    assert_eq!(
+        engine.call_test_object_function(following_index, "ReadDirectDeleteTrace", Vec::new()),
+        Value::Int(0),
+        "Objects.Clear(false) invokes neither Destruction nor effect Stop"
+    );
+}
+
+#[test]
+fn scenario_section_target_init_preserves_a_global_stop_spawn_made_inactive() {
+    // The section InitGameSecondPart clear deletes only the active main list;
+    // C4OS_INACTIVE objects remain in InactiveObjects (C4Game.cpp:2699-2704;
+    // C4GameObjects.cpp:326-331).
+    let script = r#"#strict 3
+static inactive_spawn_number;
+
+global func FxInactiveSpawnStop(object target, int number, int reason)
+{
+    var spawned = CreateObject(ITEM, 11, 13, -1);
+    inactive_spawn_number = ObjectNumber(spawned);
+    SetObjectStatus(C4OS_INACTIVE, spawned);
+    return 0;
+}
+"#;
+
+    let mut engine = Engine::with_seed(44);
+    engine.register_test_definition(test_definition("ITEM", "Section item", ""));
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+    assert_eq!(
+        engine.install_global_scripts(&[("System.c4g/InactiveSpawn.c".into(), script.into())]),
+        1
+    );
+    let mut effect = EffectState::new("InactiveSpawn").with_priority(100);
+    effect.number = 1;
+    engine.global_effects = vec![effect];
+
+    assert!(engine.load_test_section("next", 0, Vec::new()));
+
+    let number = engine
+        .snapshot()
+        .script_globals
+        .named
+        .get("inactive_spawn_number")
+        .and_then(|value| match value {
+            Value::Int(number) => Some(*number),
+            _ => None,
+        })
+        .expect("global Stop records its inactive spawn");
+    assert!(engine.objects.iter().any(|object| {
+        object.id.as_u64() == number as u64
+            && object.state.status == ObjectStatus::Inactive
+            && object.state.position == Vector2::new(11, 13)
+    }));
+}
+
+#[test]
+fn scenario_section_destruction_deactivation_removes_a_future_live_link() {
+    // The first teardown loop follows the mutable Objects.First links. A
+    // Destruction callback that deactivates a future object removes that
+    // link immediately, so the loop never calls its Destruction and the
+    // inactive object survives (C4Game.cpp:4190-4201;
+    // C4Object.cpp:5987-6007; C4ObjectList.cpp:614-618).
+    let mut definition = test_definition(
+        "SDAC",
+        "Section deactivation cursor",
+        r#"#strict 3
+local deactivate_target;
+static destruction_calls;
+
+public func Arm(object target)
+{
+    deactivate_target = target;
+    destruction_calls = 0;
+    return true;
+}
+
+public func ReadDestructionCalls() { return destruction_calls; }
+
+func Destruction()
+{
+    ++destruction_calls;
+    if (deactivate_target)
+        SetObjectStatus(C4OS_INACTIVE, deactivate_target);
+    return 0;
+}
+"#,
+    );
+    definition.set_c4_callback_convention(true);
+
+    let mut engine = Engine::with_seed(45);
+    engine.register_test_definition(definition);
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+    let victim = spawn_fixture!(engine, "SDAC");
+    let killer = spawn_fixture!(engine, "SDAC");
+    let killer_index = engine.test_object_index(killer);
+    assert_eq!(
+        engine
+            .call_test_object_function(killer_index, "Arm", vec![object_reference_value(victim)],),
+        Value::Bool(true)
+    );
+
+    assert!(engine.load_test_section("next", 0, Vec::new()));
+
+    let victim_index = engine.test_object_index(victim);
+    assert_eq!(
+        engine.objects[victim_index].state.status,
+        ObjectStatus::Inactive
+    );
+    assert_eq!(
+        engine.call_test_object_function(victim_index, "ReadDestructionCalls", Vec::new()),
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn scenario_section_destruction_follows_objects_inserted_after_the_live_cursor() {
+    // C4ObjectList::stMain inserts by descending category. During the raw
+    // Objects.First walk, an object-category spawn lands before the current
+    // vehicle link and misses the cursor, while a structure spawn lands after
+    // it and receives AssignRemoval. The second pass directly deletes the
+    // missed spawn without Destruction (C4ObjectList.cpp:134-175,220-222;
+    // C4Game.cpp:4190-4201).
+    let globals = r#"#strict 3
+static section_cursor_trace;
+
+global func ResetSectionCursorTrace()
+{
+    section_cursor_trace = 0;
+    return true;
+}
+
+global func MarkSectionCursor(int mark)
+{
+    section_cursor_trace = section_cursor_trace * 10 + mark;
+    return true;
+}
+"#;
+    let mut current = test_definition(
+        "SCUR",
+        "Section cursor",
+        r#"#strict 3
+func Destruction()
+{
+    MarkSectionCursor(1);
+    CreateObject(SBFR, 0, 0, -1);
+    CreateObject(SAFT, 0, 0, -1);
+    return 0;
+}
+"#,
+    );
+    current.set_category(CATEGORY_VEHICLE);
+    current.set_c4_callback_convention(true);
+    let mut before = test_definition(
+        "SBFR",
+        "Before cursor",
+        "#strict 3\nfunc Destruction() { MarkSectionCursor(2); return 0; }\n",
+    );
+    before.set_category(CATEGORY_OBJECT);
+    before.set_c4_callback_convention(true);
+    let mut after = test_definition(
+        "SAFT",
+        "After cursor",
+        "#strict 3\nfunc Destruction() { MarkSectionCursor(3); return 0; }\n",
+    );
+    after.set_category(CATEGORY_STRUCTURE);
+    after.set_c4_callback_convention(true);
+
+    let mut engine = Engine::with_seed(46);
+    engine.register_test_definition(current);
+    engine.register_test_definition(before);
+    engine.register_test_definition(after);
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+    assert_eq!(
+        engine.install_global_scripts(&[("System.c4g/SectionCursor.c".into(), globals.into())]),
+        1
+    );
+    assert_eq!(
+        crate::TestValueExt::test_value(
+            engine.call_engine_global_function("ResetSectionCursorTrace", &[]),
+        ),
+        Value::Bool(true)
+    );
+    let _ = spawn_fixture!(engine, "SCUR");
+
+    assert!(engine.load_test_section("next", 0, Vec::new()));
+
+    assert_eq!(
+        engine
+            .snapshot()
+            .script_globals
+            .named
+            .get("section_cursor_trace"),
+        Some(&Value::Int(13))
+    );
+}
+
+#[test]
 fn synthetic_section_without_a_group_uses_its_explicit_object_fallback() {
     let mut next = section("next", 120, true);
     next.objects.push(scenario::ScenarioSpawn {
@@ -294,7 +761,7 @@ fn section_object_save_enumerates_active_and_inactive_compiler_caches() {
 
     let active = spawn_fixture!(engine, "ITEM");
     let inactive = spawn_fixture!(engine, "ITEM", with_status: ObjectStatus::Inactive);
-    let preserved = spawn_fixture!(engine, "ITEM");
+    let preserved = spawn_fixture!(engine, "ITEM", with_status: ObjectStatus::Inactive);
     let inactive_number = crate::TestValueExt::test_value(i32::try_from(inactive.as_u64()));
     let active_index = engine.test_object_index(active);
     engine.objects[active_index].state.action.target = Some(inactive);
