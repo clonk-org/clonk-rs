@@ -3667,6 +3667,163 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
     }
 
     #[test]
+    fn extinguish_refreshes_foreign_target_fire_ocf_before_the_caller_resumes() {
+        // C4Object::SetOnFire updates the cached OCF synchronously
+        // (C4Object.h:359; C4Object.cpp:530-640), and FnGetOCF returns that
+        // cache verbatim (C4Script.cpp:1354-1358). SetOCF rebuilds the fire
+        // and inflammable bits from that live state (C4Object.cpp:549-552).
+        // A foreign target must therefore stop advertising OCF_OnFire and
+        // regain OCF_Inflammable before the caller's next statement.
+        let mut target_definition = test_definition("HUT", "Hut", "");
+        target_definition.set_fire_properties(1, false, false);
+        let mut engine = definition_engine(
+            37,
+            test_definition(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc QuenchAndRead(pVictim) { Extinguish(pVictim); return GetOCF(pVictim); }\n",
+            ),
+        );
+        engine.register_test_definition(target_definition);
+        let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
+        let hut = engine.spawn_test_object(SpawnConfig::new("HUT"));
+        let actor_idx = engine.test_object_index(actor);
+        let hut_idx = engine.test_object_index(hut);
+        unit_assert!(engine.incinerate_object(hut_idx, 1, false, None).test_value());
+
+        let result = engine.call_test_object_function(
+            actor_idx,
+            "QuenchAndRead",
+            vec![Value::Object(hut.as_u64())],
+        );
+        let Value::Int(mask) = result else {
+            panic!("GetOCF should return an integer mask, got {result:?}");
+        };
+        let mask = mask as u32;
+        unit_assert_eq!(mask & ocf::ON_FIRE => 0, "Extinguish clears OCF_OnFire immediately");
+        unit_assert_ne!(mask & ocf::INFLAMMABLE => 0, "Extinguish restores OCF_Inflammable immediately");
+    }
+
+    #[test]
+    fn extinguish_restores_construct_ocf_for_incomplete_foreign_target() {
+        // C4Object::SetOCF restores OCF_Construct for a constructable,
+        // incomplete, unrotated object once OnFire is cleared
+        // (C4Object.cpp:552-554). FnGetOCF returns that cache verbatim
+        // (C4Script.cpp:1354-1358), so a foreign target must regain the bit
+        // before the caller's next statement. The loaded fixture also keeps
+        // r=0 independent from FixR=90 to pin the integer C++ gate
+        // (C4Object.cpp:552-554; C4Object.cpp:2791).
+        let mut target_definition = test_definition("HUT", "Hut", "");
+        target_definition.set_constructable(true);
+        target_definition.set_fire_properties(1, false, false);
+        let mut engine = definition_engine(
+            37,
+            test_definition(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc QuenchAndRead(pVictim) { Extinguish(pVictim); return GetOCF(pVictim); }\n",
+            ),
+        );
+        engine.register_test_definition(target_definition);
+        let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
+        let hut = engine.spawn_test_object(
+            SpawnConfig::new("HUT")
+                .with_loaded(true)
+                .with_construction(FULL_CON - 1)
+                .with_rotation(0)
+                .with_fixed_rotation(itofix(90)),
+        );
+        let actor_idx = engine.test_object_index(actor);
+        let hut_idx = engine.test_object_index(hut);
+        unit_assert!(engine.incinerate_object(hut_idx, 1, false, None).test_value());
+
+        let result = engine.call_test_object_function(
+            actor_idx,
+            "QuenchAndRead",
+            vec![Value::Object(hut.as_u64())],
+        );
+        let Value::Int(mask) = result else {
+            panic!("GetOCF should return an integer mask, got {result:?}");
+        };
+        unit_assert_ne!(
+            (mask as u32) & ocf::CONSTRUCT => 0,
+            "Extinguish restores OCF_Construct immediately",
+        );
+    }
+
+    #[test]
+    fn extinguish_clears_construct_ocf_after_same_call_rotation() {
+        // SetR changes only the target's rotation; the following Extinguish
+        // calls SetOnFire(false), which refreshes cached OCF before GetOCF
+        // resumes (C4Script.cpp:738-746; C4Object.cpp:530-640).
+        // After the integer r becomes 90, SetOCF's construct gate must stay
+        // clear even though this callback began with an incomplete building
+        // (C4Object.cpp:552-554).
+        let mut target_definition = test_definition("HUT", "Hut", "");
+        target_definition.set_constructable(true);
+        target_definition.set_fire_properties(1, false, false);
+        let mut engine = definition_engine(
+            37,
+            test_definition(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc TurnAndQuench(pVictim) { Incinerate(pVictim); SetR(90, pVictim); Extinguish(pVictim); return GetOCF(pVictim); }\n",
+            ),
+        );
+        engine.register_test_definition(target_definition);
+        let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
+        let hut = engine.spawn_test_object(
+            SpawnConfig::new("HUT")
+                .with_construction(FULL_CON - 1)
+                .with_rotation(0),
+        );
+        let actor_idx = engine.test_object_index(actor);
+
+        let result = engine.call_test_object_function(
+            actor_idx,
+            "TurnAndQuench",
+            vec![Value::Object(hut.as_u64())],
+        );
+        let Value::Int(mask) = result else {
+            panic!("GetOCF should return an integer mask, got {result:?}");
+        };
+        unit_assert_eq!(
+            (mask as u32) & ocf::CONSTRUCT => 0,
+            "rotation 90 keeps OCF_Construct clear after Extinguish",
+        );
+    }
+
+    #[test]
+    fn on_fire_ignores_the_dead_fire_effect_left_by_extinguish() {
+        // FnOnFire first reads the live OnFire flag, then asks C4Effect::Get
+        // for an active C4Fx_AnyFire node (C4Script.cpp:1864-1871;
+        // C4Effect.cpp:215-240). Extinguish leaves the killed Fire node
+        // linked at priority zero until the next effect sweep, but that node
+        // must not keep OnFire true.
+        let mut engine = definition_engine(
+            37,
+            test_definition(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc QuenchAndRead(pVictim) { Extinguish(pVictim); return OnFire(pVictim); }\n",
+            ),
+        );
+        register_simple_definitions(&mut engine, &["Hut"]);
+        let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
+        let hut = engine.spawn_test_object(SpawnConfig::new("Hut"));
+        let actor_idx = engine.test_object_index(actor);
+        let hut_idx = engine.test_object_index(hut);
+        unit_assert!(engine.incinerate_object(hut_idx, 1, false, None).test_value());
+
+        let result = engine.call_test_object_function(
+            actor_idx,
+            "QuenchAndRead",
+            vec![Value::Object(hut.as_u64())],
+        );
+        unit_assert_eq!(result => Value::Bool(false), "dead Fire effects are not burning");
+    }
+
+    #[test]
     fn remove_effect_fire_extinguishes_like_the_engine_fire_stop() {
         // RemoveEffect("Fire", obj) → C4Effect::Kill → the engine-internal
         // FnFxFireStop clears OnFire (C4Effect.cpp:787); with fDoNoCalls

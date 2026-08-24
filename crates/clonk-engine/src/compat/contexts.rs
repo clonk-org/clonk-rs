@@ -3570,6 +3570,16 @@ impl EffectHostContext {
                 scope.current_info_link = world.crew_info_link(scope.id());
                 scope.current_info_core = world.crew_infos.get(&scope.id()).cloned();
                 scope.definition_id = definition_id;
+                scope.current_contact_incinerate = scope
+                    .definition_id
+                    .as_deref()
+                    .and_then(|id| world.definition_metadata(id))
+                    .map_or(0, |metadata| metadata.fire.contact_incinerate);
+                scope.current_constructable = scope
+                    .definition_id
+                    .as_deref()
+                    .and_then(|id| world.definition_metadata(id))
+                    .is_some_and(|metadata| metadata.constructable);
                 scope.configure_fair_crew(&world);
                 // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358).
                 scope.cached_ocf = Some(ocf);
@@ -6087,6 +6097,9 @@ impl EffectHostContext {
         scope.current_info_link = self.world.crew_info_link(object.id);
         scope.current_info_core = self.world.crew_infos.get(&object.id).cloned();
         scope.definition_id = Some(object.definition_id().to_string());
+        scope.current_contact_incinerate =
+            metadata.map_or(0, |metadata| metadata.fire.contact_incinerate);
+        scope.current_constructable = metadata.is_some_and(|metadata| metadata.constructable);
         scope.configure_fair_crew(&self.world);
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
@@ -8341,6 +8354,12 @@ pub(crate) struct ObjectScopeContext {
     current_controller: i32,
     pub(crate) current_category: i32,
     ocf_base: u32,
+    /// DefCore ContactIncinerate drives OCF_Inflammable after a same-call
+    /// SetOnFire(false), just as C4Object::SetOCF does.
+    current_contact_incinerate: i32,
+    /// DefCore Constructable drives OCF_Construct after a same-call
+    /// SetOnFire(false), just as C4Object::SetOCF does.
+    current_constructable: bool,
     /// The object's CACHED OCF at call entry — FnGetOCF returns pObj->OCF
     /// verbatim (C4Script.cpp:1354-1358). None for bare fixture scopes,
     /// which fall back to the preview-grade recompute.
@@ -8487,6 +8506,8 @@ impl ObjectScopeContext {
             current_controller: controller,
             current_category: category,
             ocf_base,
+            current_contact_incinerate: 0,
+            current_constructable: false,
             cached_ocf: None,
             persist_final_ocf: false,
             crew_member,
@@ -8541,6 +8562,8 @@ impl ObjectScopeContext {
             .blocks_other_actions_for_entry(&self.current_action_name, self.current_action_index);
         self.definition_physical = metadata.physical;
         self.ocf_base = metadata.ocf_base;
+        self.current_contact_incinerate = metadata.fire.contact_incinerate;
+        self.current_constructable = metadata.constructable;
         self.crew_member = metadata.crew_member;
         self.walk_rotation.rotateable = metadata.rotateable;
 
@@ -9321,10 +9344,13 @@ impl ObjectScopeContext {
         {
             mask &= !(ocf::COLLECTION | ocf::FIGHT_READY);
         }
-        mask
+        self.staged_ocf(mask)
     }
 
-    /// The OCF mask mid-call world reads see: `base` (the snapshot mask)
+    /// The OCF mask mid-call world reads see: `base` (the snapshot mask).
+    /// This mirrors C4Object::SetOCF's immediate cache rebuild
+    /// (C4Object.cpp:530-640), including fire transitions before the next
+    /// host query.
     /// with the bits re-derived whose driving state THIS call staged.
     /// C++ SetOCF runs synchronously on Enter/Exit (C4Object.cpp:
     /// 1531,1570), DoCon and the alive transitions (AssignDeath/
@@ -9363,6 +9389,34 @@ impl ObjectScopeContext {
             }
             if self.crew_member && alive {
                 mask |= ocf::CREW_MEMBER;
+            }
+        }
+        if self.pending_update.fire.is_some() || self.pending_update.fire_flag.is_some() {
+            // C4Object::SetOnFire calls SetOCF immediately (C4Object.h:359),
+            // rebuilding both fire-dependent bits before the next script
+            // statement or foreign-object lookup.
+            let on_fire = self.pending_update.staged_on_fire().unwrap_or(false);
+            // SetOCF rebuilds OCF_Construct from the same live definition,
+            // construction and integer rotation state, so discard any stale
+            // cached bit before the !OnFire reconstruction below.
+            mask &= !(ocf::ON_FIRE | ocf::INFLAMMABLE | ocf::CONSTRUCT);
+            if on_fire {
+                mask |= ocf::ON_FIRE;
+            } else {
+                // SetOCF rebuilds OCF_Construct from the live definition,
+                // construction and integer rotation once OnFire clears
+                // (C4Object.cpp:552-554).
+                if self.current_constructable
+                    && self.construction() < FULL_CON
+                    && self.rotation() == 0
+                {
+                    mask |= ocf::CONSTRUCT;
+                }
+                if self.current_contact_incinerate > 0
+                    && (self.category() & crate::CATEGORY_LIVING == 0 || self.alive())
+                {
+                    mask |= ocf::INFLAMMABLE;
+                }
             }
         }
         if self
