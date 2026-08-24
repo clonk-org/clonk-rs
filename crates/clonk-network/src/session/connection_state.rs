@@ -977,6 +977,15 @@ fn local_resource_lookup_path(local: &crate::LocalResourceMatch) -> Option<PathB
     }
 }
 
+fn resource_is_registered(
+    catalog: &crate::ResourceCatalog,
+    backend: Option<&crate::ResourceTransferBackend>,
+    resource_id: i32,
+) -> bool {
+    catalog.contains_resource(resource_id)
+        || backend.is_some_and(|backend| backend.catalog().contains_resource(resource_id))
+}
+
 pub(crate) fn load_authoritative_player_resources(
     resolver: &crate::client_bootstrap::ClientBootstrapResolver,
     catalog: &mut crate::ResourceCatalog,
@@ -1001,7 +1010,7 @@ pub(crate) fn load_authoritative_player_resources(
         };
         // AddByCore returns an existing ID before comparing cores or probing
         // local files (src/C4Network2Res.cpp:1473-1477).
-        if catalog.contains_resource(core.id) {
+        if resource_is_registered(catalog, backend.as_deref(), core.id) {
             continue;
         }
         let registered = resolver
@@ -1231,7 +1240,7 @@ impl ClientResourceState {
     }
 
     fn contains_bootstrap_resource(&self, resource_id: i32) -> bool {
-        self.catalog.contains_resource(resource_id)
+        resource_is_registered(&self.catalog, self.backend.as_ref(), resource_id)
     }
 
     pub(crate) fn add_bootstrap_resource(
