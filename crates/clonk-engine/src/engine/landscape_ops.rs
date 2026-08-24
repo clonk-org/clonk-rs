@@ -2685,7 +2685,11 @@ impl Engine {
                         world.preview_object_destroyed(nested.object_id);
                     }
                     for order in &nested.contents_orders {
-                        world.preview_contents_order(order.container, &order.contents);
+                        world.preview_contents_order(
+                            order.container,
+                            &order.contents,
+                            &order.link_generations,
+                        );
                     }
                 }
                 pending_other_objects.extend(event_other_objects);

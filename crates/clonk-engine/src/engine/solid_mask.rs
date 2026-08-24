@@ -38,6 +38,10 @@ impl Engine {
     /// contained, no rotation, C4Object.cpp:5652-5656).
     pub(crate) fn solid_mask_spec(&self, index: usize) -> Option<SolidMaskSpec> {
         let object = self.objects.get(index)?;
+        self.solid_mask_spec_for_object(object)
+    }
+
+    fn solid_mask_spec_for_object(&self, object: &Object) -> Option<SolidMaskSpec> {
         if object.destroyed
             || matches!(object.state.status, ObjectStatus::Deleted)
             || object.state.container.is_some()
@@ -841,6 +845,62 @@ impl Engine {
         outermost
     }
 
+    /// Initial DoCon's UpdateFace(true) puts a completed newborn's mask
+    /// before Completion/Initialize, while Rust still owns that object as a
+    /// local SpawnConfig materialization. Add the put to the chronological
+    /// host stream now so those callbacks query the live raster; replay waits
+    /// until the object has joined `self.objects` (C4Object.cpp:1428-1511,
+    /// 5655-5690).
+    pub(crate) fn stage_pending_spawn_solid_mask(&mut self, object: &mut Object) {
+        let Some(spec) = self.solid_mask_spec_for_object(object) else {
+            return;
+        };
+        self.solid_mask_staging.next_solid_mask_instance_sequence = self
+            .solid_mask_staging
+            .deferred_solid_mask_operations
+            .iter()
+            .filter_map(|operation| match operation {
+                HostSolidMaskOperation::Put {
+                    instance_sequence, ..
+                } => instance_sequence.checked_add(1),
+                HostSolidMaskOperation::Remove { .. }
+                | HostSolidMaskOperation::Landscape { .. } => None,
+            })
+            .fold(
+                self.solid_mask_staging.next_solid_mask_instance_sequence,
+                u64::max,
+            );
+        let instance_sequence = object.solid_mask_instance_sequence.unwrap_or_else(|| {
+            let sequence = self.solid_mask_staging.next_solid_mask_instance_sequence;
+            self.solid_mask_staging.next_solid_mask_instance_sequence = self
+                .solid_mask_staging
+                .next_solid_mask_instance_sequence
+                .checked_add(1)
+                .expect("C4SolidMask instance sequence overflow");
+            sequence
+        });
+        object.solid_mask_instance_sequence = Some(instance_sequence);
+        self.solid_mask_staging.next_solid_mask_instance_sequence = self
+            .solid_mask_staging
+            .next_solid_mask_instance_sequence
+            .max(
+                instance_sequence
+                    .checked_add(1)
+                    .expect("C4SolidMask instance sequence overflow"),
+            );
+        self.note_solid_mask_host_state_changed();
+        let operations = vec![HostSolidMaskOperation::Put {
+            object_id: object.id,
+            spec,
+            position: object.state.position,
+            instance_sequence,
+        }];
+        let mut world = self.host_world_context();
+        world.preview_solid_mask_operations(&operations);
+        let preview = world.host_raster_preview();
+        self.stage_host_solid_mask_operations(operations, Some(preview));
+    }
+
     /// A materialized spawn normally gets its first mask at the final
     /// UpdateSolidMask below. When a creation callback opened a deferred
     /// chronological fold using only foreign-object operations, that normal
@@ -1068,6 +1128,31 @@ impl Engine {
         self.objects[index].state.ocf = ocf;
     }
 
+    /// SetOCF for a NewObject value that Rust is still materializing outside
+    /// `self.objects`. `linked` distinguishes Init (before Objects.Add) from
+    /// the initial DoCon (after Objects.Add); neither phase has put the
+    /// newborn's solid mask yet (C4Game.cpp:1115-1131; C4Object.cpp:198-217,
+    /// 1428-1450).
+    pub(crate) fn refresh_pending_object_ocf(&self, object: &mut Object, linked: bool) {
+        object.in_mat = if let Some(container_id) = object.state.container {
+            self.find_object_index(container_id)
+                .and_then(|container_index| {
+                    let container = &self.objects[container_index];
+                    let closed = self
+                        .definitions
+                        .get(&container.definition_id)
+                        .is_some_and(|definition| definition.closed_container() != 0);
+                    (!closed).then_some(container.in_mat).flatten()
+                })
+        } else {
+            self.landscape.as_ref().and_then(|landscape| {
+                landscape.material_at(object.state.position.x, object.state.position.y)
+            })
+        };
+        let contents_count = self.retained_contents_count(&object.state.contents);
+        object.state.ocf = self.compute_object_ocf_for(object, contents_count, Some(linked));
+    }
+
     pub(crate) fn retained_contents_count(&self, contents: &[ObjectId]) -> usize {
         contents
             .iter()
@@ -1080,8 +1165,17 @@ impl Engine {
 
     fn compute_object_ocf(&self, index: usize) -> u32 {
         let object = &self.objects[index];
-        let definition = self.definitions.get(&object.definition_id);
         let contents_count = self.retained_contents_count(&object.state.contents);
+        self.compute_object_ocf_for(object, contents_count, None)
+    }
+
+    fn compute_object_ocf_for(
+        &self,
+        object: &Object,
+        contents_count: usize,
+        pending_linked: Option<bool>,
+    ) -> u32 {
+        let definition = self.definitions.get(&object.definition_id);
         let mut ocf = definition
             .map(|definition| {
                 definition.compute_ocf_with_contents_count(&object.state, contents_count)
@@ -1104,8 +1198,16 @@ impl Engine {
         // exclusive object blocking the center — the
         // Game.Objects.AtObject(x, y, OCF_Exclusive) probe (SetOCF,
         // C4Object.cpp:570-575).
+        let pending_self_blocks_center = pending_linked == Some(true)
+            && object.state.status.is_active()
+            && object.state.container.is_none()
+            && object.state.ocf & crate::ocf::EXCLUSIVE != 0
+            && self
+                .object_shape_rect(object)
+                .contains_point(object.state.position.x, object.state.position.y);
         if definition.is_some_and(|definition| definition.is_chopable())
             && object.state.category & CATEGORY_STATIC_BACK != 0
+            && !pending_self_blocks_center
             && self
                 .at_object(object.state.position, crate::ocf::EXCLUSIVE, None)
                 .is_none()
@@ -1117,9 +1219,14 @@ impl Engine {
         // mask overlay here (grid worlds bake, and the overlay is empty).
         // Without a landscape everything is air, like C++ sky borders.
         let landscape = self.landscape.as_ref();
-        let solid_masks = landscape
+        let mut solid_masks = landscape
             .map(|_| self.ocf_solid_mask_overlay())
             .unwrap_or_default();
+        if pending_linked.is_some() {
+            // Init has not joined Game.Objects; initial DoCon has joined the
+            // list but runs SetOCF before UpdateFace can put its new mask.
+            solid_masks.retain(|mask| mask.object_id != object.id);
+        }
         let masked = |x: i32, y: i32| solid_masks.iter().any(|mask| mask.contains(x, y));
         let solid = |x: i32, y: i32| landscape.is_some_and(|l| l.is_solid_at(x, y)) || masked(x, y);
         let semi_solid =
@@ -1347,6 +1454,84 @@ impl Engine {
         loaded: bool,
     ) -> Result<(), EngineError> {
         self.apply_container_change_with_motion(object_id, previous, new, loaded, true)
+    }
+
+    /// Fold AssignRemoval's final Contained unlink without running Exit.
+    /// Native removes the old Contents link and refreshes only the surviving
+    /// parent; the deleted child keeps its cached OCF, mobility, liquid state,
+    /// position, and motion (C4Object.cpp:284-306).
+    pub(crate) fn apply_container_unlink_for_removal(
+        &mut self,
+        object_id: ObjectId,
+        previous: Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        if let Some(previous) = previous {
+            if let Some(previous_index) = self.find_object_index(previous) {
+                self.track_contents_link_removal(previous, object_id);
+                self.objects[previous_index]
+                    .state
+                    .contents
+                    .retain(|&child| child != object_id);
+                self.refresh_object_ocf(previous_index);
+            }
+        }
+        let object_index = self
+            .find_object_index(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+        self.objects[object_index].state.container = None;
+        self.objects[object_index].compiler_cache.contained = 0;
+        Ok(())
+    }
+
+    /// Reconcile the authoritative Contents links for an Enter/Exit that the
+    /// script host already executed synchronously. Its copied-out object
+    /// fields contain the final native controller, motion, mobility, liquid,
+    /// face, solid-mask, compiler-cache, and OCF state, so replaying ordinary
+    /// [`Self::apply_container_change`] semantics here would move those side
+    /// effects after later statements in the same callback.
+    pub(crate) fn apply_host_container_link_change(
+        &mut self,
+        object_id: ObjectId,
+        previous: Option<ObjectId>,
+        new: Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        if previous == new {
+            return Ok(());
+        }
+
+        if let Some(previous) = previous {
+            if let Some(previous_index) = self.find_object_index(previous) {
+                self.track_contents_link_removal(previous, object_id);
+                self.objects[previous_index]
+                    .state
+                    .contents
+                    .retain(|&child| child != object_id);
+            }
+        }
+
+        let object_index = self
+            .find_object_index(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+        if let Some(container_id) = new {
+            let container_index = self
+                .find_object_index(container_id)
+                .ok_or(EngineError::UnknownObject(container_id))?;
+            if !self.objects[container_index]
+                .state
+                .contents
+                .contains(&object_id)
+            {
+                let position = self.contents_insert_position(container_index, object_index);
+                self.objects[container_index]
+                    .state
+                    .contents
+                    .insert(position, object_id);
+                let generation = &mut self.objects[object_index].state.contents_link_generation;
+                *generation = generation.checked_add(1).unwrap_or(1);
+            }
+        }
+        self.objects[object_index].state.container = new;
+        Ok(())
     }
 
     /// Runtime `Enter` normally copies the new container's motion. Collect

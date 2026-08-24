@@ -1138,6 +1138,164 @@ fn effect_batch_threads_callback_final_contents_order() {
 }
 
 #[test]
+fn effect_batch_threads_active_contents_link_generation() {
+    // C++ runs consecutive effect timers against the same live object. Each
+    // Enter allocates a fresh link and Exit deletes it before the callback
+    // removes its newly created container. The next timer still sees that
+    // incarnation (C4Object.cpp:1542-1547,1598-1605,287-306;
+    // C4ObjectList.cpp:129-132,240-259).
+    let mut engine = Engine::with_seed(19);
+    engine.register_test_script_definition("BOX_", "Box", "#strict\n");
+    register_fixture!(
+        engine,
+        "FXLI",
+        "Link incarnation actor",
+        r#"
+            #strict 3
+            func Arm()
+            {
+                AddEffect("First", this(), 10, 1, this());
+                AddEffect("Second", this(), 20, 1, this());
+                return(1);
+            }
+
+            func FxFirstTimer()
+            {
+                var box = CreateObject(BOX_);
+                Enter(box);
+                Exit();
+                box->RemoveObject();
+                return(0);
+            }
+
+            func FxSecondTimer()
+            {
+                var box = CreateObject(BOX_);
+                Enter(box);
+                Exit();
+                box->RemoveObject();
+                return(0);
+            }
+        "#,
+        set_c4_callback_convention(true)
+    );
+
+    let actor = spawn_fixture!(engine, "FXLI", with_category: CATEGORY_OBJECT);
+    let actor_index = engine.test_object_index(actor);
+    let generation_before = engine.objects[actor_index].state.contents_link_generation;
+    engine.call_test_object_function(actor_index, "Arm", Vec::new());
+    let actor_index = engine.test_object_index(actor);
+    let effects = ["First", "Second"].map(|name| {
+        crate::TestValueExt::test_value(
+            engine.objects[actor_index]
+                .state
+                .effects
+                .iter()
+                .find(|effect| effect.name == name)
+                .cloned(),
+        )
+    });
+    let definition_id = engine.objects[actor_index].definition_id.clone();
+
+    crate::TestValueExt::test_value(engine.dispatch_object_effect_events(
+        actor_index,
+        &definition_id,
+        effects.into_iter().map(EffectEvent::timer).collect(),
+    ));
+
+    let actor_index = engine.test_object_index(actor);
+    assert_eq!(engine.objects[actor_index].state.container, None);
+    assert_eq!(
+        engine.objects[actor_index].state.contents_link_generation,
+        generation_before + 2,
+        "the second timer starts from the first timer's removed link incarnation"
+    );
+    assert_eq!(
+        engine.objects.len(),
+        1,
+        "both pending containers were cancelled"
+    );
+}
+
+#[test]
+fn effect_batch_threads_foreign_contents_link_generation() {
+    // The effect carrier is neither the foreign container nor its item. Each
+    // Scroll removes the first live object and Add(stNone) allocates a fresh
+    // tail link, even for a one-item list whose visible order never changes
+    // (C4Script.cpp:1793-1804; C4ObjectList.cpp:296-308,129-132,240-259).
+    let mut engine = Engine::with_seed(23);
+    engine.register_test_script_definition("BOX_", "Box", "#strict\n");
+    engine.register_test_script_definition("ITEM", "Item", "#strict\n");
+    register_fixture!(
+        engine,
+        "FXLF",
+        "Foreign link incarnation actor",
+        r#"
+            #strict 3
+            local box;
+
+            func Arm(object target)
+            {
+                box = target;
+                AddEffect("First", this(), 10, 1, this());
+                AddEffect("Second", this(), 20, 1, this());
+                return(1);
+            }
+
+            func FxFirstTimer()
+            {
+                ScrollContents(box);
+                return(0);
+            }
+
+            func FxSecondTimer()
+            {
+                ScrollContents(box);
+                return(0);
+            }
+        "#,
+        set_c4_callback_convention(true)
+    );
+
+    let box_id = spawn_fixture!(engine, "BOX_", with_category: CATEGORY_OBJECT);
+    let item =
+        spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT, with_container: box_id);
+    let actor = spawn_fixture!(engine, "FXLF", with_category: CATEGORY_OBJECT);
+    let item_index = engine.test_object_index(item);
+    let generation_before = engine.objects[item_index].state.contents_link_generation;
+    let actor_index = engine.test_object_index(actor);
+    engine.call_test_object_function(actor_index, "Arm", vec![object_reference_value(box_id)]);
+    let actor_index = engine.test_object_index(actor);
+    let effects = ["First", "Second"].map(|name| {
+        crate::TestValueExt::test_value(
+            engine.objects[actor_index]
+                .state
+                .effects
+                .iter()
+                .find(|effect| effect.name == name)
+                .cloned(),
+        )
+    });
+    let definition_id = engine.objects[actor_index].definition_id.clone();
+
+    crate::TestValueExt::test_value(engine.dispatch_object_effect_events(
+        actor_index,
+        &definition_id,
+        effects.into_iter().map(EffectEvent::timer).collect(),
+    ));
+
+    let item_index = engine.test_object_index(item);
+    assert_eq!(engine.objects[item_index].state.container, Some(box_id));
+    assert_eq!(
+        engine.objects[item_index].state.contents_link_generation,
+        generation_before + 2,
+        "the second timer sees the first Scroll's replacement link"
+    );
+    let box_index = engine.test_object_index(box_id);
+    assert_eq!(engine.objects[box_index].state.contents, [item]);
+}
+
+#[test]
 fn effect_batch_threads_dig_contents_shape_and_layer() {
     let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
         r#"

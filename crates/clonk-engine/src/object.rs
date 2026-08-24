@@ -735,6 +735,9 @@ impl ObjectState {
             self.temporary_physical = physicals.temporary;
             self.physical_changes = physicals.changes.clone();
         }
+        if let Some(ocf) = delta.ocf_override {
+            self.ocf = ocf;
+        }
 
         if !raw_change_def_idle {
             self.action.reconcile_with_library(library);
@@ -861,6 +864,12 @@ pub(crate) struct ObjectDelta {
     pub(crate) command_direction: Option<CommandDirection>,
     pub(crate) action: Option<ActionUpdate>,
     status: Option<ObjectStatus>,
+    /// The native host already executed this Enter/Exit synchronously. The
+    /// engine fold must reconcile only the deferred Contents link rather
+    /// than replaying motion, shape, controller, and cached-OCF effects.
+    pub(crate) host_container_change: bool,
+    /// Final cached C4Object::OCF after the host's ordered native calls.
+    ocf_override: Option<u32>,
     pub(crate) owner: Option<i32>,
     /// C4Object::Base overwrite used by FLAG/FlyBase SetOwner propagation.
     base: Option<i32>,
@@ -902,7 +911,15 @@ pub(crate) struct ObjectDelta {
 }
 
 impl ObjectDelta {
+    pub(crate) fn ocf_override(&self) -> Option<u32> {
+        self.ocf_override
+    }
+
     pub(crate) fn merge_update(&mut self, update: ObjectUpdate) {
+        self.host_container_change |= update.host_container_change;
+        if let Some(ocf) = update.ocf_override {
+            self.ocf_override = Some(ocf);
+        }
         let changes_definition = update.change_def.is_some();
         if let Some(change_def) = update.change_def.as_ref() {
             self.change_def = Some(change_def.clone());
@@ -1183,6 +1200,8 @@ impl From<ObjectUpdate> for ObjectDelta {
             command_direction: update.command_direction,
             action: update.action,
             status: update.status,
+            host_container_change: update.host_container_change,
+            ocf_override: update.ocf_override,
             owner: update.owner,
             base: update.base,
             controller: update.controller,
@@ -1466,6 +1485,11 @@ pub struct ObjectUpdate {
     pub alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<Option<ObjectId>>,
+    /// Runtime provenance for Enter/Exit performed synchronously by the
+    /// script host. Save/control data carries only the resulting fields.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub host_container_change: bool,
     /// Direct current-shape vertex overwrite. This deliberately leaves the
     /// object's own-vertex mode unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1816,6 +1840,7 @@ impl ObjectUpdate {
             && self.alive.is_none()
             && self.entrance_status.is_none()
             && self.container.is_none()
+            && !self.host_container_change
             && self.live_vertices.is_none()
             && self.shape_vertices.is_none()
             && self.contact_density.is_none()
@@ -2161,6 +2186,7 @@ pub(crate) struct ContainerUpdateRecord {
     pub(crate) object_id: ObjectId,
     pub(crate) previous: Option<ObjectId>,
     pub(crate) new: Option<ObjectId>,
+    pub(crate) host_executed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3276,6 +3302,7 @@ impl Object {
                     object_id: self.id,
                     previous,
                     new,
+                    host_executed: delta.host_container_change,
                 });
             }
             let mut effect_events = self.apply_effect_commands(&command.effects);

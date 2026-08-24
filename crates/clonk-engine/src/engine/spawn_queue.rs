@@ -636,7 +636,7 @@ impl Engine {
         let mut change_def_reinsert = false;
         if let Some(container_id) = container {
             object.state.container = Some(container_id);
-            container_changes.push((None, Some(container_id)));
+            container_changes.push((None, Some(container_id), false));
         }
 
         let mut effect_events = Vec::new();
@@ -675,13 +675,11 @@ impl Engine {
         // dropping it as an unknown live object.
         let mut pending_nested_outcomes = Vec::new();
         let mut deferred_transfer_zones: Vec<TransferZoneCommand> = Vec::new();
-        // C++ Init runs SetOCF before any script callback
-        // (C4Object.cpp:215): Construction/Initialize read a live mask.
-        object.state.ocf = self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| definition.compute_ocf(&object.state))
-            .unwrap_or(OCF_NORMAL);
+        // C++ Init runs SetOCF before Objects.Add and before Construction
+        // (C4Game.cpp:1115-1126; C4Object.cpp:198-217). Compute against the
+        // existing world without making the newborn or its not-yet-put mask
+        // visible to object queries.
+        self.refresh_pending_object_ocf(&mut object, false);
         // Initialize/Construction may legally remove the object
         // (RemoveObject in a placer script, e.g. the grass distributor):
         // the object spawns and immediately ends Deleted like C++.
@@ -689,6 +687,11 @@ impl Engine {
         // The ordinary post-insertion StartCall is only for an object whose
         // creation phases did not already execute SetAction synchronously.
         let mut creation_action_callbacks_dispatched = false;
+        // C4Object::DoCon refreshes OCF before PSF_Initialize. Native calls
+        // made by Initialize may deliberately leave that cache stale relative
+        // to later raw writes, so retain its final host-side value across the
+        // deferred materialization refresh (C4Object.cpp:1428-1511).
+        let mut initialize_ocf_override = None;
 
         // Call Construction() before Initialize()
         // Construction() initializes local variables that may be used in Initialize() or action callbacks
@@ -798,6 +801,7 @@ impl Engine {
             }
             let change_def = delta.change_def.clone();
             let callback_change_def_reinsert = delta.change_def_reinsert;
+            let host_container_change = delta.host_container_change;
             let callback_action_library = if let Some(new_def) = change_def.as_deref() {
                 let definition = self
                     .definitions
@@ -852,7 +856,7 @@ impl Engine {
                 }
             }
             if let Some(change) = outcome.container_change {
-                container_changes.push(change);
+                container_changes.push((change.0, change.1, host_container_change));
             }
             let mut applied = object.apply_effect_commands(&effects);
             effect_events.append(&mut applied);
@@ -885,9 +889,28 @@ impl Engine {
             }
         }
 
+        if !loaded && !initialized && !destroy_requested {
+            // NewObject's initial DoCon calls SetOCF after Objects.Add and
+            // Construction, but before UpdateFace puts the completed mask
+            // and before Completion/Initialize (C4Object.cpp:1428-1511).
+            self.refresh_pending_object_ocf(&mut object, true);
+            let has_initialize = self
+                .definitions
+                .get(&object.definition_id)
+                .is_some_and(|definition| definition.has_initialize);
+            if has_initialize || !effect_events.is_empty() {
+                // Only callbacks that still run before materialization need
+                // a private raster preview. With no such observer, the
+                // ordinary post-insertion put below is the same C++ state
+                // transition without an extra COW landscape copy.
+                self.stage_pending_spawn_solid_mask(&mut object);
+            }
+        }
+
         let initialize_definition_id = object.definition_id.clone();
         if !loaded
             && !initialized
+            && !destroy_requested
             && self
                 .definitions
                 .get(&initialize_definition_id)
@@ -966,6 +989,7 @@ impl Engine {
                     self.audio_registry.clone(),
                 )?
             };
+            let initialize_host_ocf_override = delta.ocf_override();
             self.stage_host_solid_mask_operations(
                 initialize_solid_mask_operations,
                 initialize_host_raster_preview,
@@ -1011,6 +1035,7 @@ impl Engine {
             }
             let change_def = delta.change_def.clone();
             let callback_change_def_reinsert = delta.change_def_reinsert;
+            let host_container_change = delta.host_container_change;
             let callback_action_library = if let Some(new_def) = change_def.as_deref() {
                 let definition = self
                     .definitions
@@ -1051,6 +1076,10 @@ impl Engine {
                     object.state.ocf = current_definition.compute_ocf(&object.state);
                 }
             }
+            if let Some(ocf) = initialize_host_ocf_override {
+                object.state.ocf = ocf;
+            }
+            initialize_ocf_override = Some(object.state.ocf);
             // See the Construction fold above: callback-world SetAction has
             // already completed its synchronous Start/Abort sequence.
             if let Some(change) = outcome.action_change {
@@ -1063,7 +1092,7 @@ impl Engine {
                 }
             }
             if let Some(change) = outcome.container_change {
-                container_changes.push(change);
+                container_changes.push((change.0, change.1, host_container_change));
             }
             let mut applied = object.apply_effect_commands(&effects);
             effect_events.append(&mut applied);
@@ -1096,7 +1125,7 @@ impl Engine {
             }
         }
 
-        if !effect_events.is_empty() {
+        if !destroy_requested && !effect_events.is_empty() {
             let mut world =
                 self.host_world_context_for_pending_object(&object, initial_exec_position);
             for command in &deferred_transfer_zones {
@@ -1129,6 +1158,7 @@ impl Engine {
                 _effect_solid_mask_changed,
                 effect_action_callbacks_dispatched,
                 effect_change_def_reinsert,
+                effect_host_container_change,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -1203,7 +1233,14 @@ impl Engine {
             }
             self.apply_particle_commands(emitted_particles);
             if previous_container != object.state.container {
-                container_changes.push((previous_container, object.state.container));
+                container_changes.push((
+                    previous_container,
+                    object.state.container,
+                    effect_host_container_change,
+                ));
+            }
+            if initialize_ocf_override.is_some() {
+                initialize_ocf_override = Some(object.state.ocf);
             }
         }
 
@@ -1260,14 +1297,16 @@ impl Engine {
         // UpdateFace(true). Runtime deactivation is deliberately different:
         // it leaves an already-put mask intact.
         let loaded_inactive = loaded && self.objects[index].state.status == ObjectStatus::Inactive;
-        if !loaded_inactive {
-            if !destroy_requested {
-                self.stage_materialized_spawn_solid_mask(index);
-            }
+        if !loaded_inactive && !destroy_requested {
+            self.stage_materialized_spawn_solid_mask(index);
             self.update_solid_mask(index);
         }
-        for (previous, new) in container_changes {
-            self.apply_container_change(id, previous, new, loaded)?;
+        for (previous, new, host_executed) in container_changes {
+            if host_executed {
+                self.apply_host_container_link_change(id, previous, new)?;
+            } else {
+                self.apply_container_change(id, previous, new, loaded)?;
+            }
         }
         if change_def_reinsert {
             self.reinsert_change_def_contents_link(id)?;
@@ -1295,6 +1334,9 @@ impl Engine {
             self.initialize_action_sound(index, false);
         }
         self.refresh_object_ocf(index);
+        if let Some(ocf) = initialize_ocf_override {
+            self.objects[index].state.ocf = ocf;
+        }
         // Loaded objects restore their action WITHOUT callbacks. Native
         // host creation marked `initialized` already ran every SetAction
         // Start/Abort callback synchronously before this materialization;

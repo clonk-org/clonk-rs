@@ -3249,7 +3249,7 @@ impl Engine {
             .collect::<HashSet<_>>();
 
         for &(child, parent) in contained_links {
-            if child != parent && active.contains(&child) && active.contains(&parent) {
+            if active.contains(&child) && active.contains(&parent) {
                 if let Some(child_index) = self.find_object_index(child) {
                     self.objects[child_index].state.container = Some(parent);
                 }
@@ -3257,56 +3257,88 @@ impl Engine {
         }
 
         // C4ObjectList::DenumerateRead appends the saved links in their
-        // compiled order. Its duplicate repair keeps the final occurrence.
+        // compiled order. Keep duplicates until the owning object's turn in
+        // the master repair walk below: an earlier object's missing-Contained
+        // insertion may sort relative to those raw links first.
         for (parent, children) in orders {
+            let loaded = children
+                .iter()
+                .copied()
+                .filter(|child| active.contains(child))
+                .collect::<Vec<_>>();
+            if let Some(parent_index) = self.find_object_index(*parent) {
+                self.objects[parent_index].state.contents = loaded;
+            }
+        }
+
+        // C4GameObjects::Load performs both consistency repairs inside one
+        // forward master-list walk: first add this object's valid Contained
+        // link with stContents if missing, then retarget every child in this
+        // object's Contents list. The interleaving is observable in malformed
+        // saves when a later parent's list retargets a child whose earlier
+        // Contained link was just repaired (C4GameObjects.cpp:597-631).
+        // `exec_list` stores the reverse of that native list view.
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        for object_id in master_order {
+            if !active.contains(&object_id) {
+                continue;
+            }
+            let Some(object_index) = self.find_object_index(object_id) else {
+                continue;
+            };
+            if let Some(parent) = self.objects[object_index].state.container {
+                if !active.contains(&parent) {
+                    self.objects[object_index].state.container = None;
+                } else if let Some(parent_index) = self.find_object_index(parent) {
+                    if !self.objects[parent_index]
+                        .state
+                        .contents
+                        .contains(&object_id)
+                    {
+                        let position = self.contents_insert_position(parent_index, object_index);
+                        self.objects[parent_index]
+                            .state
+                            .contents
+                            .insert(position, object_id);
+                    }
+                }
+            }
+
+            // The same native loop now removes every earlier duplicate link,
+            // leaving the final occurrence, before it reconciles each child's
+            // Contained pointer (C4GameObjects.cpp:612-631).
             let mut seen = HashSet::new();
-            let mut normalized = children
+            let mut contents = self.objects[object_index]
+                .state
+                .contents
                 .iter()
                 .rev()
                 .copied()
-                .filter(|child| *child != *parent && active.contains(child))
                 .filter(|child| seen.insert(*child))
                 .collect::<Vec<_>>();
-            normalized.reverse();
-            if let Some(parent_index) = self.find_object_index(*parent) {
-                self.objects[parent_index].state.contents = normalized;
-            }
-        }
-
-        // The saved Contents list is authoritative over a conflicting
-        // Contained pointer. Writer-produced saves are consistent, but this
-        // mirrors C4GameObjects::Load's repair pass for hand-edited files.
-        for (parent, _) in orders {
-            let Some(parent_index) = self.find_object_index(*parent) else {
-                continue;
-            };
-            let children = self.objects[parent_index].state.contents.clone();
-            for child in children {
+            contents.reverse();
+            self.objects[object_index].state.contents = contents.clone();
+            for child in contents {
                 if let Some(child_index) = self.find_object_index(child) {
-                    self.objects[child_index].state.container = Some(*parent);
+                    self.objects[child_index].state.container = Some(object_id);
                 }
             }
         }
-
-        // Conversely, a valid Contained pointer omitted from Contents is
-        // appended after the compiled list (C4GameObjects.cpp:605-611).
-        let contained = self
-            .objects
-            .iter()
-            .filter(|object| active.contains(&object.id))
-            .filter_map(|object| object.state.container.map(|parent| (object.id, parent)))
-            .collect::<Vec<_>>();
-        for (child, parent) in contained {
-            if !active.contains(&parent) {
-                if let Some(child_index) = self.find_object_index(child) {
-                    self.objects[child_index].state.container = None;
-                }
-                continue;
-            }
-            if let Some(parent_index) = self.find_object_index(parent) {
-                if !self.objects[parent_index].state.contents.contains(&child) {
-                    self.objects[parent_index].state.contents.push(child);
-                }
+        // Every retained Contained/Contents pair represents one freshly
+        // denumerated C4ObjectLink. Runtime generations are not serialized;
+        // establish the first incarnation without double-incrementing links
+        // that the sequential scenario loader already materialized.
+        for index in 0..self.objects.len() {
+            let linked = self.objects[index].state.container.is_some_and(|parent| {
+                self.find_object_index(parent).is_some_and(|parent_index| {
+                    self.objects[parent_index]
+                        .state
+                        .contents
+                        .contains(&self.objects[index].id)
+                })
+            });
+            if linked && self.objects[index].state.contents_link_generation == 0 {
+                self.objects[index].state.contents_link_generation = 1;
             }
         }
         for object in &mut self.objects {

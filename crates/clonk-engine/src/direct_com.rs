@@ -11515,6 +11515,771 @@ protected func CalcValue(object pInBase)
     }
 
     #[test]
+    fn callback_exit_cycles_preserve_every_contents_link_incarnation() {
+        // Every successful Enter allocates a fresh Contents link before its
+        // synchronous Collection2 callback; each Exit then deletes that link
+        // (C4Object.cpp:1542-1547,1598-1627;
+        // C4ObjectList.cpp:129-132,240-259). Copy-out must retain both
+        // allocations even though the final relationship is free -> free.
+        let mut engine = clonk_engine("#strict 2\n");
+        let container = structure_definition(
+            "CONT",
+            "Container",
+            r#"#strict 2
+local cycling;
+protected func Collection2(object item)
+{
+  if (cycling) return 1;
+  cycling = 1;
+  item->Exit();
+  item->Enter(this());
+  item->Exit();
+  return 1;
+}
+"#,
+        );
+        engine.register_test_definition(container);
+        let item = test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\npublic func Cycle(object target) { return Enter(target); }\n",
+        );
+        engine.register_test_definition(item);
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+        let item_index = engine.test_object_index(item);
+        let generation_before = engine.objects[item_index].state.contents_link_generation;
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    item_index,
+                    "Cycle",
+                    vec![crate::compat::object_reference_value(container)],
+                )
+                .test_value(),
+            Value::Bool(true)
+        );
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.container, None);
+        assert!(test_snapshot(&engine, container).contents.is_empty());
+        assert_eq!(
+            item.state.contents_link_generation,
+            generation_before + 2,
+            "both transient C4ObjectLink allocations remain observable"
+        );
+    }
+
+    #[test]
+    fn transient_enter_retains_link_incarnation_after_pending_container_removal() {
+        // Enter allocates the link before Exit deletes it; removing the now
+        // empty container afterward cannot erase that completed incarnation
+        // (C4Object.cpp:1542-1547,1598-1605,287-306;
+        // C4ObjectList.cpp:129-132,240-259).
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(structure_definition("CONT", "Container", "#strict 2\n"));
+        engine.register_test_definition(test_definition(
+            "ITEM",
+            "Item",
+            r#"#strict 2
+public func Cycle()
+{
+  var target = CreateObject(CONT);
+  Enter(target);
+  Exit();
+  target->RemoveObject();
+  return 1;
+}
+"#,
+        ));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+        let item_index = engine.test_object_index(item);
+        let generation_before = engine.objects[item_index].state.contents_link_generation;
+
+        assert_eq!(
+            engine
+                .call_object_function(item_index, "Cycle", Vec::new())
+                .test_value(),
+            Value::Int(1)
+        );
+
+        assert_eq!(test_object(&engine, item).state.container, None);
+        assert_eq!(
+            test_object(&engine, item).state.contents_link_generation,
+            generation_before + 1,
+            "the removed container does not own the child's link history"
+        );
+        assert_eq!(
+            engine.objects.len(),
+            1,
+            "the pending container was cancelled"
+        );
+    }
+
+    #[test]
+    fn assign_removal_preserves_contained_ocf_for_self_containment() {
+        // AssignRemoval refreshes a containing object's OCF before clearing
+        // the removed object's Contained pointer (C4Object.cpp:297-306). If a
+        // denumerated save made the object its own container, those are the
+        // same object and the final deleted cache therefore stays contained.
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(test_definition(
+            "SELF",
+            "Self container",
+            "#strict 2\npublic func RemoveSelf() { return RemoveObject(); }\n",
+        ));
+        let object = engine.spawn_test_object(SpawnConfig::new("SELF"));
+        let index = engine.test_object_index(object);
+        engine.objects[index].state.container = Some(object);
+        engine.objects[index].state.contents = vec![object];
+        engine.objects[index].state.contents_link_generation = 1;
+        engine.refresh_object_ocf(index);
+        let contained_ocf = engine.objects[index].state.ocf;
+        assert_eq!(contained_ocf & crate::ocf::NOT_CONTAINED, 0);
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "RemoveSelf", Vec::new())
+                .test_value(),
+            Value::Bool(true)
+        );
+
+        let object = test_object(&engine, object);
+        assert_eq!(object.state.status, crate::ObjectStatus::Deleted);
+        assert_eq!(object.state.container, None);
+        assert!(object.state.contents.is_empty());
+        assert_eq!(
+            object.state.ocf, contained_ocf,
+            "the post-unlink raw Contained clear does not run SetOCF"
+        );
+    }
+
+    #[test]
+    fn assign_removal_parent_ocf_precedes_later_velocity_write() {
+        // Removing a contained object runs the parent's UpdateMass and SetOCF
+        // synchronously before the caller resumes (C4Object.cpp:297-305).
+        // A later SetXDir writes raw motion without another SetOCF
+        // (C4Script.cpp:697-732), so the cached hit-speed bits stay clear.
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(structure_definition(
+            "CONT",
+            "Container",
+            "#strict 2\npublic func RemoveThenAccelerate(object child) { RemoveObject(child); SetXDir(2, 0, 1); return 1; }\n",
+        ));
+        engine.register_test_definition(test_definition("ITEM", "Item", "#strict 2\n"));
+        let parent = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        let child = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(parent));
+        let parent_index = engine.test_object_index(parent);
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    parent_index,
+                    "RemoveThenAccelerate",
+                    vec![crate::compat::object_reference_value(child)],
+                )
+                .test_value(),
+            Value::Int(1)
+        );
+
+        let parent = test_object(&engine, parent);
+        assert_eq!(parent.fixed_velocity.x, itofix(2));
+        assert_eq!(
+            parent.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            0,
+            "the deferred child unlink must not move the parent's SetOCF after SetXDir"
+        );
+    }
+
+    #[test]
+    fn collect_exit_ocf_precedes_later_velocity_write() {
+        // Collect's Collection callback may Exit the item. Exit refreshes its
+        // OCF before the callback's following SetXDir, and Collect skips its
+        // tail CopyMotion once the item is no longer contained
+        // (C4Object.cpp:1532-1563,5709-5714; C4Script.cpp:697-732).
+        let mut engine = clonk_engine("#strict 2\n");
+        let mut collector = structure_definition(
+            "COLL",
+            "Collector",
+            r#"#strict 2
+protected func Collection(object item)
+{
+  Exit(item);
+  SetXDir(20, item, 1);
+}
+public func CollectItem(object item) { return Collect(item); }
+"#,
+        );
+        collector.set_collection_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine.register_test_definition(collector);
+        engine.register_test_definition(structure_definition("OUTS", "Outside", "#strict 2\n"));
+        let mut item_definition = test_definition("ITEM", "Item", "#strict 2\n");
+        item_definition.set_category(crate::CATEGORY_OBJECT);
+        item_definition.set_collectible(true);
+        engine.register_test_definition(item_definition);
+
+        let collector = engine.spawn_test_object(SpawnConfig::new("COLL"));
+        let outside = engine.spawn_test_object(SpawnConfig::new("OUTS"));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(outside));
+        let collector_index = engine.test_object_index(collector);
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    collector_index,
+                    "CollectItem",
+                    vec![crate::compat::object_reference_value(item)],
+                )
+                .test_value(),
+            Value::Bool(true)
+        );
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.container, None);
+        assert_eq!(item.fixed_velocity.x, itofix(20));
+        assert_eq!(
+            item.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            0,
+            "the deferred final Exit must not move SetOCF after SetXDir"
+        );
+        assert!(test_snapshot(&engine, collector).contents.is_empty());
+        assert!(test_snapshot(&engine, outside).contents.is_empty());
+    }
+
+    #[test]
+    fn enter_ocf_and_motion_precede_later_velocity_write() {
+        // Enter copies the container motion and calls SetOCF before the script
+        // resumes. A following SetXDir must therefore win in raw motion while
+        // leaving the contained-era cache untouched (C4Object.cpp:1598-1624;
+        // C4Script.cpp:697-732).
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(structure_definition("CONT", "Container", "#strict 2\n"));
+        engine.register_test_definition(test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\npublic func EnterThenAccelerate(object target) { Enter(target); SetXDir(2, 0, 1); return 1; }\n",
+        ));
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+        let item_index = engine.test_object_index(item);
+
+        engine
+            .call_object_function(
+                item_index,
+                "EnterThenAccelerate",
+                vec![crate::compat::object_reference_value(container)],
+            )
+            .test_value();
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.container, Some(container));
+        assert_eq!(item.fixed_velocity.x, itofix(2));
+        assert_eq!(
+            item.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            0
+        );
+    }
+
+    #[test]
+    fn initialize_enter_ocf_precedes_later_velocity_write() {
+        // NewObject's DoCon refreshes OCF before it calls Initialize. Enter
+        // then refreshes the contained mask before the following raw SetXDir,
+        // and no creation-tail SetOCF runs afterwards (C4Game.cpp:1115-1131;
+        // C4Object.cpp:1428-1511,1598-1624; C4Script.cpp:697-732).
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(structure_definition("CONT", "Container", "#strict 2\n"));
+        engine.register_test_definition(test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\nfunc Initialize() { Enter(FindObject(CONT)); SetXDir(2, 0, 1); return 1; }\n",
+        ));
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.container, Some(container));
+        assert_eq!(item.fixed_velocity.x, itofix(2));
+        assert_eq!(
+            item.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            0,
+            "the spawn fold must not move DoCon's SetOCF after Initialize"
+        );
+    }
+
+    #[test]
+    fn initialize_raw_velocity_keeps_docon_ocf() {
+        // DoCon's SetOCF precedes Initialize, while SetXDir is only a raw
+        // xdir write. NewObject performs no later SetOCF, so the creation
+        // result keeps the pre-write hit-speed mask (C4Game.cpp:1115-1131;
+        // C4Object.cpp:1428-1511; C4Script.cpp:697-732).
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\nfunc Initialize() { SetXDir(2, 0, 1); return 1; }\n",
+        ));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.fixed_velocity.x, itofix(2));
+        assert_eq!(
+            item.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            0,
+            "Initialize's raw dir write must not trigger a creation-tail SetOCF"
+        );
+    }
+
+    #[test]
+    fn initialize_set_action_replaces_docon_ocf() {
+        // SetAction refreshes OCF after selecting its action and before its
+        // callbacks. NewObject performs no later SetOCF, so Initialize must
+        // retain the disabled action's cache (C4Game.cpp:1115-1131;
+        // C4Object.cpp:1428-1511,4111-4197).
+        let mut engine = clonk_engine("#strict 2\n");
+        let mut definition = test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\nfunc Initialize() { SetAction(\"Disabled\"); return 1; }\n",
+        );
+        definition.set_category(crate::CATEGORY_LIVING);
+        definition.configure_actions(
+            Some("Idle".to_owned()),
+            HashMap::from([(
+                "Disabled".to_owned(),
+                ActionSpec {
+                    disabled: true,
+                    ..ActionSpec::default()
+                },
+            )]),
+        );
+        engine.register_test_definition(definition);
+
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_alive(true));
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.action.name, "Disabled");
+        assert_eq!(
+            item.state.ocf & crate::ocf::FIGHT_READY,
+            0,
+            "Initialize's SetAction cache must supersede DoCon's cache"
+        );
+    }
+
+    #[test]
+    fn native_create_initialize_raw_velocity_keeps_docon_ocf() {
+        // FnCreateObject runs NewObject's Construction/DoCon/Initialize
+        // lifecycle synchronously. Its deferred Rust materialization must
+        // retain the same pre-SetXDir cache (C4Game.cpp:1115-1131;
+        // C4Object.cpp:1428-1511; C4Script.cpp:697-732,1886-1902).
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\nfunc Initialize() { SetXDir(2, 0, 1); return 1; }\n",
+        ));
+        engine.register_test_definition(test_definition(
+            "MAKE",
+            "Maker",
+            "#strict 2\nfunc Make() { return CreateObject(ITEM, 0, 0, -1); }\n",
+        ));
+        let maker = engine.spawn_test_object(SpawnConfig::new("MAKE"));
+        let maker_index = engine.test_object_index(maker);
+        let created = engine
+            .call_object_function(maker_index, "Make", Vec::new())
+            .test_value();
+        let Value::Object(created) = created else {
+            panic!("CreateObject must return the new object")
+        };
+        let item = test_object(&engine, ObjectId::new(created));
+
+        assert_eq!(item.fixed_velocity.x, itofix(2));
+        assert_eq!(
+            item.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            0,
+            "native creation must not add a materialization-time SetOCF"
+        );
+    }
+
+    #[test]
+    fn initialize_effect_enter_ocf_precedes_later_velocity_write() {
+        // AddEffect starts an object effect synchronously before Initialize
+        // returns. Its Enter SetOCF therefore precedes the following raw dir
+        // write and must survive creation materialization (C4Effect.cpp:97-136;
+        // C4Object.cpp:1428-1511,1598-1624; C4Script.cpp:697-732).
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(structure_definition("CONT", "Container", "#strict 2\n"));
+        engine.register_test_definition(test_definition(
+            "ITEM",
+            "Item",
+            r#"#strict 2
+func Initialize() { AddEffect("Move", this(), 100, 0, this()); return 1; }
+func FxMoveStart(object target, int number, int temporary)
+{
+    Enter(FindObject(CONT));
+    SetXDir(2, 0, 1);
+    return 1;
+}
+"#,
+        ));
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.container, Some(container));
+        assert_eq!(item.fixed_velocity.x, itofix(2));
+        assert_eq!(
+            item.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            0,
+            "the effect's Enter cache must precede its raw dir write"
+        );
+    }
+
+    #[test]
+    fn construction_enter_ocf_is_refreshed_by_docon() {
+        // Construction runs before NewObject's initial DoCon. Its SetOCF
+        // therefore observes the later raw SetXDir when DoCon refreshes the
+        // mask, unlike the same sequence in Initialize (C4Game.cpp:1115-1131;
+        // C4Object.cpp:1428-1511,1598-1624; C4Script.cpp:697-732).
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(structure_definition("CONT", "Container", "#strict 2\n"));
+        engine.register_test_definition(test_definition(
+            "ITEM",
+            "Item",
+            r#"#strict 2
+local construction_ocf, initialize_ocf;
+func Construction()
+{
+    construction_ocf = GetOCF();
+    Enter(FindObject(CONT));
+    SetXDir(2, 0, 1);
+    return 1;
+}
+func Initialize() { initialize_ocf = GetOCF(); return 1; }
+"#,
+        ));
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        let item = engine.spawn_test_object(
+            SpawnConfig::new("ITEM").with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO)),
+        );
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.container, Some(container));
+        assert_eq!(item.fixed_velocity.x, itofix(2));
+        let construction_ocf = match item.state.local_vars.get("construction_ocf") {
+            Some(Value::Int(ocf)) => *ocf as u32,
+            other => panic!("Construction must record an integer OCF, got {other:?}"),
+        };
+        let initialize_ocf = match item.state.local_vars.get("initialize_ocf") {
+            Some(Value::Int(ocf)) => *ocf as u32,
+            other => panic!("Initialize must record an integer OCF, got {other:?}"),
+        };
+        assert_eq!(
+            construction_ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            crate::ocf::HIT_SPEED1 | crate::ocf::HIT_SPEED2,
+            "Construction observes Init's OCF refresh"
+        );
+        assert_eq!(
+            initialize_ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            crate::ocf::HIT_SPEED1 | crate::ocf::HIT_SPEED2,
+            "Initialize observes DoCon's OCF refresh"
+        );
+        assert_eq!(
+            item.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            crate::ocf::HIT_SPEED1 | crate::ocf::HIT_SPEED2,
+            "DoCon must supersede Construction's earlier cached mask"
+        );
+    }
+
+    #[test]
+    fn construction_initial_ocf_excludes_unlinked_own_solid_mask() {
+        // C4Game::NewObject runs C4Object::Init (including its SetOCF) before
+        // adding the object to Game.Objects. Construction therefore sees the
+        // air at its position, not its own not-yet-linked solid mask
+        // (C4Game.cpp:1115-1126; C4Object.cpp:198-216).
+        let mut engine = clonk_engine("#strict 2\n");
+        let mut definition = test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\nlocal construction_ocf; func Construction() { construction_ocf = GetOCF(); return 1; }\n",
+        );
+        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine.register_test_definition(definition);
+        engine.set_landscape(Landscape::flat(64, 32));
+
+        let item =
+            engine.spawn_test_object(SpawnConfig::new("ITEM").with_position(Vector2::new(16, 16)));
+
+        let item = test_object(&engine, item);
+        let construction_ocf = match item.state.local_vars.get("construction_ocf") {
+            Some(Value::Int(ocf)) => *ocf as u32,
+            other => panic!("Construction must record an integer OCF, got {other:?}"),
+        };
+        assert_eq!(
+            construction_ocf & crate::ocf::IN_SOLID,
+            0,
+            "Init must compute OCF before the newborn's mask joins object queries"
+        );
+    }
+
+    #[test]
+    fn initialize_sees_docon_solid_mask_put() {
+        // Initial DoCon runs SetOCF first, then UpdateFace(true) puts the
+        // completed solid mask before Completion and Initialize. Landscape
+        // queries in Initialize therefore see that new vehicle pixel
+        // (C4Object.cpp:1428-1511,5655-5690).
+        let mut engine = clonk_engine("#strict 2\n");
+        let mut definition = test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\nlocal mask_solid; func Initialize() { mask_solid = GBackSolid(0, 0); return 1; }\n",
+        );
+        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine.register_test_definition(definition);
+        let grid = crate::landscape::PixelGrid::new(
+            64,
+            64,
+            vec![0; 64 * 64],
+            vec![0, 100, 100],
+            vec![None, Some("Earth".to_owned()), Some("Vehicle".to_owned())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(64, vec![32; 64]).test_value();
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let item =
+            engine.spawn_test_object(SpawnConfig::new("ITEM").with_position(Vector2::new(16, 16)));
+
+        assert_eq!(
+            test_object(&engine, item)
+                .state
+                .local_vars
+                .get("mask_solid"),
+            Some(&Value::Bool(true)),
+            "Initialize must query the mask put by DoCon's UpdateFace"
+        );
+    }
+
+    #[test]
+    fn construction_removal_skips_docon_initialize_and_mask_put() {
+        // NewObject returns immediately when Construction clears Status, so
+        // it runs neither initial DoCon nor Initialize and never puts the
+        // full-con solid mask (C4Game.cpp:1121-1131; C4Object.cpp:240-313).
+        let mut engine = clonk_engine("#strict 2\n");
+        let mut definition = test_definition(
+            "ITEM",
+            "Item",
+            r#"#strict 2
+local initialized;
+func Construction() { RemoveObject(); return 1; }
+func Initialize() { initialized = 1; return 1; }
+"#,
+        );
+        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine.register_test_definition(definition);
+        let grid = crate::landscape::PixelGrid::new(
+            64,
+            64,
+            vec![0; 64 * 64],
+            vec![0, 100, 100],
+            vec![None, Some("Earth".to_owned()), Some("Vehicle".to_owned())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(64, vec![32; 64]).test_value();
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let item =
+            engine.spawn_test_object(SpawnConfig::new("ITEM").with_position(Vector2::new(16, 16)));
+
+        let item = test_object(&engine, item);
+        assert!(item.destroyed);
+        assert_ne!(
+            item.state.local_vars.get("initialized"),
+            Some(&Value::Int(1)),
+            "Initialize must not run after Construction removal"
+        );
+        assert!(item.solid_mask_bake.is_none());
+        assert!(item.solid_mask_instance_sequence.is_none());
+        assert!(
+            !engine
+                .landscape()
+                .test_value()
+                .is_solid_at(item.state.position.x, item.state.position.y),
+            "removed newborn must leave no vehicle pixel"
+        );
+    }
+
+    #[test]
+    fn inactive_newborn_does_not_block_its_docon_chop_probe() {
+        // StatusDeactivate removes the newborn from Game.Objects but keeps a
+        // nonzero status, so NewObject continues through DoCon. SetOCF's
+        // AtObject probe cannot see the now-inactive object itself
+        // (C4Game.cpp:1121-1131; C4GameObjects.cpp:54-70;
+        // C4Object.cpp:549-575,1428-1511).
+        let mut engine = clonk_engine("#strict 2\n");
+        let mut definition = test_definition(
+            "ITEM",
+            "Item",
+            r#"#strict 2
+local initialize_ocf;
+func Construction() { SetObjectStatus(2); return 1; }
+func Initialize() { initialize_ocf = GetOCF(); return 1; }
+"#,
+        );
+        definition.set_category(crate::CATEGORY_STATIC_BACK);
+        definition.set_exclusive(true);
+        definition.set_chopable(true);
+        engine.register_test_definition(definition);
+
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.status, crate::ObjectStatus::Inactive);
+        let initialize_ocf = match item.state.local_vars.get("initialize_ocf") {
+            Some(Value::Int(ocf)) => *ocf as u32,
+            other => panic!("Initialize must record an integer OCF, got {other:?}"),
+        };
+        assert_ne!(
+            initialize_ocf & crate::ocf::CHOP,
+            0,
+            "inactive newborn must not appear in DoCon's main-list AtObject probe"
+        );
+    }
+
+    #[test]
+    fn exit_ocf_precedes_later_velocity_write() {
+        // Exit writes its requested motion and calls SetOCF before returning;
+        // a later SetXDir changes motion without refreshing that cache
+        // (C4Object.cpp:1532-1563; C4Script.cpp:697-732).
+        let mut engine = clonk_engine("#strict 2\n");
+        engine.register_test_definition(structure_definition("CONT", "Container", "#strict 2\n"));
+        engine.register_test_definition(test_definition(
+            "ITEM",
+            "Item",
+            "#strict 2\npublic func ExitThenAccelerate() { Exit(); SetXDir(2, 0, 1); return 1; }\n",
+        ));
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(container));
+        let item_index = engine.test_object_index(item);
+
+        engine
+            .call_object_function(item_index, "ExitThenAccelerate", Vec::new())
+            .test_value();
+
+        let item = test_object(&engine, item);
+        assert_eq!(item.state.container, None);
+        assert_eq!(item.fixed_velocity.x, itofix(2));
+        assert_eq!(
+            item.state.ocf
+                & (crate::ocf::HIT_SPEED1
+                    | crate::ocf::HIT_SPEED2
+                    | crate::ocf::HIT_SPEED3
+                    | crate::ocf::HIT_SPEED4),
+            0
+        );
+    }
+
+    #[test]
+    fn scroll_replaces_link_while_shift_preserves_link_identity() {
+        // FnScrollContents removes the first live object and Add(stNone)
+        // allocates a fresh tail link (C4Script.cpp:1793-1804;
+        // C4ObjectList.cpp:296-308,129-132,240-259). ShiftContents instead
+        // rotates the existing link chain (C4ObjectList.cpp:815-833).
+        let mut engine = clonk_engine("#strict 2\n");
+        let container = structure_definition(
+            "CONT",
+            "Container",
+            r#"#strict 2
+public func Scroll() { return ScrollContents(); }
+public func Shift() { return ShiftContents(); }
+"#,
+        );
+        engine.register_test_definition(container);
+        for id in ["ITMA", "ITMB", "ITMC"] {
+            let mut definition = test_definition(id, id, "#strict 2\n");
+            definition.set_category(crate::CATEGORY_OBJECT);
+            engine.register_test_definition(definition);
+        }
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        let a = engine.spawn_test_object(SpawnConfig::new("ITMA").with_container(container));
+        let b = engine.spawn_test_object(SpawnConfig::new("ITMB").with_container(container));
+        let c = engine.spawn_test_object(SpawnConfig::new("ITMC").with_container(container));
+        let container_index = engine.test_object_index(container);
+        assert_eq!(test_snapshot(&engine, container).contents, [c, b, a]);
+
+        let c_generation = test_object(&engine, c).state.contents_link_generation;
+        assert_eq!(
+            engine
+                .call_object_function(container_index, "Scroll", Vec::new())
+                .test_value(),
+            Value::Object(b.as_u64())
+        );
+        assert_eq!(test_snapshot(&engine, container).contents, [b, a, c]);
+        assert_eq!(
+            test_object(&engine, c).state.contents_link_generation,
+            c_generation + 1,
+            "ScrollContents creates a new tail link"
+        );
+
+        let generations =
+            [a, b, c].map(|item| test_object(&engine, item).state.contents_link_generation);
+        assert_eq!(
+            engine
+                .call_object_function(container_index, "Shift", Vec::new())
+                .test_value(),
+            Value::Bool(true)
+        );
+        assert_eq!(test_snapshot(&engine, container).contents, [a, c, b]);
+        assert_eq!(
+            [a, b, c].map(|item| { test_object(&engine, item).state.contents_link_generation }),
+            generations,
+            "ShiftContents retains every existing link"
+        );
+    }
+
+    #[test]
     fn activate_refill_applies_each_registered_iterator_removal_immediately() {
         // Initial A,B,C. A::CalcValue removes A (registered iterators move
         // to B), inserts N before C, then removes B (iterators move to N).

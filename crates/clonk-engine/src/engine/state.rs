@@ -1362,22 +1362,20 @@ impl Engine {
         }
         self.reset_sectors_from_landscape();
 
-        for (object_id, container) in container_assignments {
-            self.apply_container_change(object_id, None, Some(container), true)?;
-            // Restores denumerate Contained without running Enter — the
-            // snapshot controller stays authoritative (no C4Object.cpp:1582
-            // transfer on load).
-            if let (Some(index), Some(snapshot)) = (
-                self.find_object_index(object_id),
-                state
-                    .objects
-                    .iter()
-                    .find(|persisted| persisted.snapshot.id == object_id)
-                    .map(|persisted| &persisted.snapshot),
-            ) {
-                self.objects[index].state.controller = snapshot.controller;
-            }
-        }
+        // C4Object::CompileFunc persists Contents as a separate ordered
+        // C4ObjectList (C4Object.cpp:2812). DenumerateRead restores those
+        // links by tail-appending the saved sequence after every numbered
+        // Contained pointer exists. Use that raw two-phase denumeration here:
+        // runtime Enter would reject representable cyclic graphs and transfer
+        // controller state (C4Object.cpp:1606-1609), neither of which load
+        // does (C4GameObjects.cpp:597-610;
+        // C4ObjectList.cpp:457-465,476-497).
+        let contents_orders = state
+            .objects
+            .iter()
+            .map(|persisted| (persisted.snapshot.id, persisted.snapshot.contents.clone()))
+            .collect::<Vec<_>>();
+        self.restore_legacy_object_links(&container_assignments, &contents_orders);
 
         self.restore_script_globals(&state.script_globals);
 
@@ -1663,6 +1661,7 @@ impl Engine {
             effect_solid_mask_changed,
             _effect_action_callbacks_dispatched,
             effect_change_def_reinsert,
+            effect_host_container_change,
             effect_next_object_id,
             triggered_game_over,
             effect_script_go,
@@ -1747,7 +1746,20 @@ impl Engine {
             self.apply_particle_commands(emitted_particles);
             let new_container = self.objects[idx].state.container;
             if previous_container != new_container {
-                self.apply_container_change(object_id, previous_container, new_container, false)?;
+                if effect_host_container_change {
+                    self.apply_host_container_link_change(
+                        object_id,
+                        previous_container,
+                        new_container,
+                    )?;
+                } else {
+                    self.apply_container_change(
+                        object_id,
+                        previous_container,
+                        new_container,
+                        false,
+                    )?;
+                }
             }
             if effect_change_def_reinsert.unwrap_or(false) {
                 self.reinsert_change_def_contents_link(object_id)?;
@@ -1790,6 +1802,7 @@ impl Engine {
             bool,
             bool,
             Option<bool>,
+            bool,
             u64,
             bool,
             Option<bool>,
@@ -1819,6 +1832,7 @@ impl Engine {
                 false,
                 false,
                 None,
+                false,
                 next_object_id,
                 false,
                 None,
@@ -1856,6 +1870,7 @@ impl Engine {
         let mut solid_mask_changed = false;
         let mut action_callbacks_dispatched = false;
         let mut change_def_reinsert = None;
+        let mut host_container_change = false;
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
         let mut script_counter_requested: Option<i32> = None;
@@ -2508,7 +2523,11 @@ impl Engine {
                         world.preview_object_destroyed(nested.object_id);
                     }
                     for order in &nested.contents_orders {
-                        world.preview_contents_order(order.container, &order.contents);
+                        world.preview_contents_order(
+                            order.container,
+                            &order.contents,
+                            &order.link_generations,
+                        );
                         if order.container == object_id {
                             active_contents_order = Some(order.contents.clone());
                         }
@@ -2537,6 +2556,7 @@ impl Engine {
             }
 
             if let Some(update) = object_update {
+                host_container_change |= update.host_container_change;
                 // Later callbacks in this same deferred batch must see the
                 // carrier's complete live update. C++ mutates the object in
                 // place; in particular, consecutive DigFree callbacks share
@@ -2752,6 +2772,7 @@ impl Engine {
             solid_mask_changed,
             action_callbacks_dispatched,
             change_def_reinsert,
+            host_container_change,
             next_object_id,
             game_over_requested,
             script_go_requested,

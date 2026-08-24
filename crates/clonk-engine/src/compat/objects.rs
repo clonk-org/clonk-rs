@@ -789,7 +789,14 @@ pub(crate) fn refresh_live_object_ocf(context: &mut EffectHostContext, target: O
 }
 
 fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: ObjectId) {
-    let _ = refresh_live_object_ocf(context, container);
+    if refresh_live_object_ocf(context, container) {
+        // The authoritative container-link fold happens after the callback
+        // returns. Carry this synchronous SetOCF across that seam so a later
+        // raw motion write cannot be reordered before it.
+        if let Some(scope) = context.object_scope_mut(container) {
+            scope.persist_final_ocf = true;
+        }
+    }
 }
 
 /// Direct `C4Object::Exit(x, y)` with absolute coordinates. Unlike the
@@ -1035,6 +1042,7 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
         scope.removed_contents_links.insert(previous);
         scope.current_container = None;
         scope.pending_update.container = Some(None);
+        scope.pending_update.host_container_change = true;
         scope.reset_contained_compiler_cache();
         scope.pending_update.construction_preserves_fixed_position = false;
         scope.exit_bounds_in_progress = true;
@@ -1068,7 +1076,7 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
         scope.set_fixed_velocity(velocity);
         scope.set_rotation_velocity(rotation_velocity);
         scope.set_mobile(true);
-        scope.current_in_liquid = false;
+        scope.set_in_liquid(false);
         // Bounds callbacks may have opened a menu; Exit closes it afterward.
         scope.pending_update.menu = Some(None);
         // UpdateFace(true) rebuilds an ordinary C4Shape from Def after the
@@ -1106,7 +1114,14 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
             // SetOCF derives the final outside-container flags.
             context.preview_live_object_sector(target);
             context.update_live_solid_mask(target, false);
-            let _ = refresh_live_object_ocf(context, target);
+            if refresh_live_object_ocf(context, target) {
+                // Engine copy-out reconciles the Contents link after the
+                // callback. Preserve Exit's synchronous SetOCF across that
+                // seam; later raw velocity writes do not refresh it.
+                if let Some(scope) = context.object_scope_mut(target) {
+                    scope.persist_final_ocf = true;
+                }
+            }
         }
     });
 
@@ -1344,6 +1359,7 @@ fn enter_object_live_internal(
         // transfer's Exit already did so, but the repeated close is harmless.
         scope.pending_update.menu = Some(None);
         scope.set_container(Some(container));
+        scope.pending_update.host_container_change = true;
         if !(scope.alive() && scope.category() & crate::CATEGORY_LIVING != 0) {
             scope.set_controller(controller);
         }
@@ -1384,7 +1400,14 @@ fn enter_object_live_internal(
             // immediately before SetOCF, has the same observable ordering.
             context.update_live_solid_mask(target, false);
         }
-        let _ = refresh_live_object_ocf(context, target);
+        if refresh_live_object_ocf(context, target) {
+            // Enter's SetOCF precedes UpdateFace, container SetOCF, and all
+            // later callback statements. Carry that exact cache through the
+            // deferred authoritative Contents-link fold.
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.persist_final_ocf = true;
+            }
+        }
         if let Some(scope) = context.object_scope_mut(target) {
             if definition_metadata.line == 0 {
                 scope.pending_update.shape_override = Some(None);
@@ -1558,8 +1581,14 @@ pub(crate) fn assign_removal_live(
         let removed_from = context
             .object_scope(target)
             .and_then(ObjectScopeContext::container);
+        // C++ refreshes pCont before clearing this->Contained. Usually those
+        // are distinct objects; a denumerated self-containment makes them the
+        // same and renders that order observable (C4Object.cpp:297-306).
+        if removed_from == Some(target) {
+            refresh_container_collection_ocf(context, target);
+        }
         context.set_object_container_tracked(target, None);
-        if let Some(container) = removed_from {
+        if let Some(container) = removed_from.filter(|container| *container != target) {
             // AssignRemoval removes the child's link, then UpdateMass and
             // SetOCF on the surviving parent (C4Object.cpp:297-305).
             refresh_container_collection_ocf(context, container);
@@ -2168,6 +2197,15 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     if !enter_object_live_for_collect(item, collector)? {
         return Ok(Value::Bool(false));
     }
+    // The final authoritative container fold is deferred until this host call
+    // returns. Preserve the cache established by Enter and any later Exit or
+    // re-entry even when Collection moves the item away; subsequent raw dir
+    // writes do not themselves call SetOCF (C4Object.cpp:5701-5714).
+    with_host_context_mut((), |context| {
+        if let Some(scope) = context.object_scope_mut(item) {
+            scope.persist_final_ocf = true;
+        }
+    });
 
     // C4Object::Collect cancels an ATTACH procedure before Collection. Use
     // ObjectSetAction so Start/Abort calls remain synchronous like C++

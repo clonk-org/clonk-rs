@@ -44,6 +44,8 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
 | `network_rule_goal_placement` | complete `C4SGame::ConvertGoals` and `C4Game::InitRules`/`InitGoals` bodies (`src/C4Scenario.cpp:506-556`; `src/C4Game.cpp:4056-4076`) | HarpoonRace's authored RVLR plus default energy realism becomes authoritative RVLR+ENRG parameters; rules use `max(count, 1)`, goals use the exact count, and local scenario lists cannot replace synchronized JoinData lists |
 | `player_join_capacity` | complete `C4PlayerList::GetCount` plus the mechanically extracted capacity block from `C4PlayerList::Join` (`src/C4PlayerList.cpp:172-178,288-294`) | all linked players count, zero is a closed limit, one remaining slot admits exactly one named player, and rejection leaves the ordered roster unchanged |
+| `contents_list_order` | complete `C4ObjectList::Add`, `Remove`, `GetLink`, `RemoveLink`, `InsertLink`, and `ShiftContents` bodies (`src/C4ObjectList.cpp:110-268,310-318,614-636,815-831`) | exact category/id insertion, StaticBack/line/unsorted exceptions, tail-add, link-preserving rotation, fresh-link reinsertion, and iterator repair |
+| `container_lifecycle` | complete `C4Object::Enter`, `Exit`, and `Collect` bodies (`src/C4Object.cpp:1532-1637,5693-5717`) | callback and reentrant mutation order, both containment directions, controller transfer, final status, and raw fixed motion |
 | `contact_action_bottom_flight` | complete bottom `DFA_FLIGHT` arm of `C4Object::ContactAction` + action helpers | the `(OCF_HitSpeed4 \|\| fDisabled)` FlatUp gate, including low-speed disabled actions |
 | `contact_action_top_side_flight` | complete top/left/right `DFA_FLIGHT` arms + action helpers + unresolved-flight tail | the `(OCF_HitSpeed3 \|\| fDisabled)` Tumble gates, exact transient wall kicks, enabled Hangle/Scale controls, and final slide-free state |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
@@ -205,6 +207,15 @@ interactions still require running the C++ engine through the
   roster. The C++ scaffold executes and validates the diagnostic call, but the
   Rust differential deliberately makes no logging claim: application-level
   presentation is covered by the join-control tests.
+- `contents_list_order` compiles the complete production linked-list bodies
+  that allocate, remove, insert, and rotate `C4ObjectLink`s. Constructor
+  serials make link identity observable without relying on allocator address
+  reuse; Rust independently normalizes each object's incarnation counter to
+  the same allocation sequence.
+- `container_lifecycle` compiles the complete production `Enter`, `Exit`, and
+  `Collect` bodies against a callback recorder. Rust drives the matching public
+  script functions and compares callback order plus final containment,
+  controller, status, mobility, liquid state, and raw fixed motion.
 - `contact_action_bottom_flight` mechanically extracts the complete first
   `DFA_FLIGHT` switch arm from `C4Object::ContactAction` and the production
   `ObjectActionWalk`, `ObjectActionKneel`, and `ObjectActionFlat` helpers. Its
