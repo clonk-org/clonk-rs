@@ -2176,6 +2176,7 @@ where
         world,
         next_object_id,
         game_over_triggered,
+        false,
         func,
     )
 }
@@ -2202,6 +2203,34 @@ where
         world,
         next_object_id,
         game_over_triggered,
+        false,
+        func,
+    )
+}
+
+pub(crate) fn with_effect_context_with_state_and_definition_and_spawn_previews<F, T, E>(
+    object: Option<HostObjectContext<'_>>,
+    definition_context: Option<DefinitionId>,
+    script_object_context: Option<ObjectId>,
+    global_effects: &[EffectState],
+    world: HostWorldContext,
+    next_object_id: u64,
+    game_over_triggered: bool,
+    func: F,
+) -> (Result<T, E>, EffectContextOutcome)
+where
+    F: FnOnce() -> Result<T, E>,
+    E: From<RuntimeError>,
+{
+    with_effect_context_with_definition_state(
+        object,
+        definition_context,
+        script_object_context,
+        global_effects,
+        world,
+        next_object_id,
+        game_over_triggered,
+        true,
         func,
     )
 }
@@ -2226,6 +2255,7 @@ where
         world,
         next_object_id,
         game_over_triggered,
+        false,
         func,
     )
 }
@@ -2263,6 +2293,7 @@ fn with_effect_context_with_definition_state<F, T, E>(
     world: HostWorldContext,
     next_object_id: u64,
     game_over_triggered: bool,
+    publish_spawn_previews: bool,
     func: F,
 ) -> (Result<T, E>, EffectContextOutcome)
 where
@@ -2286,6 +2317,7 @@ where
             next_object_id,
             audio_state,
             game_over_triggered,
+            publish_spawn_previews,
         ));
         let guard = EffectHostContextTlsGuard { cell, active: true };
         let result =
@@ -2364,6 +2396,10 @@ pub struct EffectContextOutcome {
     pub messages: Vec<MessageCommand>,
     pub player_commands: Vec<PlayerCommand>,
     pub object_order_commands: Vec<ObjectOrderCommand>,
+    /// Exact callback-final master, inactive, and sector link state when this
+    /// call synchronously changed `Game.Objects`. This preserves transition
+    /// chronology across deferred spawn/object-update copy-out.
+    pub(crate) object_lists: Option<EffectObjectListPreview>,
     pub next_mission_commands: Vec<NextMissionCommand>,
     pub menu_requests: Vec<crate::MenuRequest>,
     pub audio: AudioOutcome,
@@ -2422,6 +2458,7 @@ impl EffectContextOutcome {
             messages,
             player_commands,
             object_order_commands,
+            object_lists: None,
             next_mission_commands: Vec::new(),
             menu_requests: Vec::new(),
             audio,
@@ -2454,6 +2491,7 @@ impl EffectContextOutcome {
             messages: Vec::new(),
             player_commands: Vec::new(),
             object_order_commands: Vec::new(),
+            object_lists: None,
             next_mission_commands: Vec::new(),
             menu_requests: Vec::new(),
             audio: AudioOutcome {
@@ -3383,11 +3421,15 @@ pub(crate) struct EffectHostContext {
     /// authoritative engine applies the sort when the host batch returns;
     /// this preview exposes its synchronous C++ visibility meanwhile.
     master_order_preview: Option<Vec<ObjectId>>,
+    /// Same-call `Game.Objects.InactiveObjects` order. Repeated deactivate /
+    /// activate transitions cannot be recovered from callback-final status.
+    inactive_order_preview: Option<Vec<ObjectId>>,
     pub(crate) next_mission_commands: Vec<NextMissionCommand>,
     team_home_base_rule: bool,
     pub(crate) pending_spawns: Vec<SpawnConfig>,
     pub(crate) pending_objects: HashMap<ObjectId, HostWorldObject>,
     pending_order: Vec<ObjectId>,
+    publish_spawn_previews: bool,
     pending_particles: Vec<ParticleCommand>,
     transfer_zone_commands: Vec<TransferZoneCommand>,
     pending_messages: Vec<MessageCommand>,
@@ -3452,6 +3494,7 @@ impl EffectHostContext {
         next_object_id: u64,
         audio: AudioRegistry,
         game_over_triggered: bool,
+        publish_spawn_previews: bool,
     ) -> Self {
         let team_home_base_rule = world.team_home_base_rule();
         let scenario_script_counter = world.scenario_script_counter();
@@ -3666,11 +3709,13 @@ impl EffectHostContext {
             player_commands: Vec::new(),
             object_order_commands: Vec::new(),
             master_order_preview: None,
+            inactive_order_preview: None,
             next_mission_commands: Vec::new(),
             team_home_base_rule,
             pending_spawns: Vec::new(),
             pending_objects: HashMap::new(),
             pending_order: Vec::new(),
+            publish_spawn_previews,
             pending_particles: Vec::new(),
             transfer_zone_commands: Vec::new(),
             pending_messages: Vec::new(),
@@ -3740,6 +3785,7 @@ impl EffectHostContext {
 
     pub(crate) fn register_spawn(&mut self, spawn: SpawnConfig, mut preview: HostWorldObject) {
         let id = preview.id;
+        let status = preview.status();
         // C4Object::Init copies Def->SolidMask and checks it against the
         // already-selected base bitmap before Construction/Initialize can
         // observe the object (C4Object.cpp:172-174,206-211).
@@ -3761,7 +3807,16 @@ impl EffectHostContext {
         }
         self.pending_objects.insert(id, preview);
         self.pending_spawns.push(spawn);
-        if self.master_order_preview.is_some() {
+        if self.publish_spawn_previews {
+            // C4Game::CreateObject inserts this exact raw object synchronously,
+            // before Construction/Initialize may mutate its category or status
+            // (C4Game.cpp:1121-1138; C4ObjectList.cpp:134-175). Record that one
+            // chronological insertion instead of sorting callback-final objects.
+            self.preview_object_status_change(id, status);
+        } else if self.master_order_preview.is_some() {
+            // Generic callback phases do not yet transport their exact list
+            // state across deferred materialization (clonk-org/clonk-rs#1007).
+            // Retain their established callback-local sorted projection.
             self.preview_sort_master_by_category();
         }
     }
@@ -5679,6 +5734,19 @@ impl EffectHostContext {
         self.pending_spawns.retain(|spawn| spawn.id != Some(target));
         let removed = self.pending_spawns.len() != before;
         if removed {
+            // The pending object was already linked into the callback's live
+            // Game.Objects/sector projection. DoCon(0) and same-call removal
+            // unlink it before NewObject returns; clear those exact links
+            // while its scope and preview are still resolvable.
+            let has_list_preview = self.publish_spawn_previews
+                || self.master_order_preview.is_some()
+                || self.inactive_order_preview.is_some();
+            if has_list_preview {
+                if let Some(scope) = self.object_scope_mut(target) {
+                    scope.mark_destroy_status();
+                }
+                self.preview_object_status_change(target, ObjectStatus::Deleted);
+            }
             self.pending_order.retain(|id| *id != target);
             self.pending_objects.remove(&target);
         }
@@ -7015,25 +7083,14 @@ impl EffectHostContext {
         self.master_order_preview = Some(ids);
     }
 
-    /// Preview C4Object::StatusDeactivate/StatusActivate's synchronous list
-    /// transition for callbacks nested before the host outcome folds into
-    /// Engine. Activation uses the same stMain insertion rules as the
-    /// authoritative exec-list fold: same category/definition cluster first,
-    /// then the category bracket; lines and Unsorted objects append.
-    pub(crate) fn preview_object_status_change(&mut self, target: ObjectId, status: ObjectStatus) {
-        let mut ids = self
-            .master_order_preview
-            .clone()
-            .unwrap_or_else(|| self.world.master_object_ids().to_vec());
-        ids.retain(|id| *id != target);
-        if status != ObjectStatus::Normal {
-            self.commit_object_status_preview(target, ids);
-            return;
-        }
-
+    fn insert_object_status_preview(
+        &self,
+        ids: &mut Vec<ObjectId>,
+        target: ObjectId,
+        list_status: ObjectStatus,
+    ) {
         let Some((category, definition_id)) = self.contents_sort_key(target) else {
             ids.push(target);
-            self.commit_object_status_preview(target, ids);
             return;
         };
         let is_line = self
@@ -7041,7 +7098,6 @@ impl EffectHostContext {
             .is_some_and(|metadata| metadata.line != 0);
         if is_line || self.contents_object_unsorted(target) {
             ids.push(target);
-            self.commit_object_status_preview(target, ids);
             return;
         }
 
@@ -7052,7 +7108,7 @@ impl EffectHostContext {
             for (position, other) in ids.iter().copied().enumerate() {
                 let live_sorted = self
                     .get_world_object(other)
-                    .is_some_and(|object| object.status().is_active())
+                    .is_some_and(|object| object.status() == list_status)
                     && !self.contents_object_unsorted(other);
                 if !live_sorted {
                     continue;
@@ -7074,7 +7130,7 @@ impl EffectHostContext {
             for (position, other) in ids.iter().copied().enumerate() {
                 let live_sorted = self
                     .get_world_object(other)
-                    .is_some_and(|object| object.status().is_active())
+                    .is_some_and(|object| object.status() == list_status)
                     && !self.contents_object_unsorted(other);
                 if !live_sorted {
                     continue;
@@ -7089,7 +7145,33 @@ impl EffectHostContext {
             }
         }
         ids.insert(predecessor.map_or(0, |position| position + 1), target);
-        self.commit_object_status_preview(target, ids);
+    }
+
+    /// Preview C4Object::StatusDeactivate/StatusActivate's synchronous list
+    /// transition for callbacks nested before the host outcome folds into
+    /// Engine. Activation uses the same stMain insertion rules as the
+    /// authoritative exec-list fold: same category/definition cluster first,
+    /// then the category bracket; lines and Unsorted objects append.
+    pub(crate) fn preview_object_status_change(&mut self, target: ObjectId, status: ObjectStatus) {
+        let mut master = self
+            .master_order_preview
+            .clone()
+            .unwrap_or_else(|| self.world.master_object_ids().to_vec());
+        master.retain(|id| *id != target);
+        if status == ObjectStatus::Normal {
+            self.insert_object_status_preview(&mut master, target, ObjectStatus::Normal);
+        }
+        self.commit_object_status_preview(target, master);
+
+        let mut inactive = self
+            .inactive_order_preview
+            .clone()
+            .unwrap_or_else(|| self.world.inactive_object_ids().to_vec());
+        inactive.retain(|id| *id != target);
+        if status == ObjectStatus::Inactive {
+            self.insert_object_status_preview(&mut inactive, target, ObjectStatus::Inactive);
+        }
+        self.inactive_order_preview = Some(inactive);
     }
 
     pub(crate) fn preview_sort_master_by_category(&mut self) {
@@ -7725,6 +7807,107 @@ impl EffectHostContext {
                 }
             })
             .collect::<Vec<_>>();
+        // C4Game::CreateObject links the raw object before Construction but
+        // returns only after initial DoCon and Initialize. Retain both views:
+        // the base object pins its original stMain insertion identity, while
+        // the final projection is what the next synchronous effect callback
+        // observes (C4Game.cpp:1102-1138; C4ObjectList.cpp:134-175).
+        let mut effect_spawn_previews = if self.publish_spawn_previews {
+            self.pending_order
+                .iter()
+                .filter_map(|id| {
+                    let base = self.pending_objects.get(id)?.clone();
+                    let mut final_object = self.get_world_object(*id)?;
+                    let scope = self.object_scope(*id)?;
+                    if let Some(state) = final_object.state.as_mut() {
+                        let state = Rc::make_mut(state);
+                        let mut delta = crate::ObjectDelta::default();
+                        delta.merge_update(scope.pending_update.clone());
+                        let _ = state.apply_delta(&delta, &scope.action_library);
+
+                        // Creation commits initial DoCon and Action into the
+                        // pending SpawnConfig, clearing those delta fields.
+                        // Rebuild the callback-final live state from the scope
+                        // so the next Fx callback sees the object exactly as
+                        // CreateObject returned it (C4Game.cpp:1121-1138).
+                        state.position = scope.effective_position();
+                        state.script_fixed_position = Some(scope.fixed_position());
+                        state.velocity = Vector2::new(
+                            scope.fixed_velocity().int_x(),
+                            scope.fixed_velocity().int_y(),
+                        );
+                        state.script_fixed_velocity = Some(scope.fixed_velocity());
+                        state.rotation = scope.rotation();
+                        state.script_fixed_rotation = Some(scope.fixed_rotation());
+                        state.script_rotation_velocity = Some(scope.rotation_velocity());
+                        state.energy = scope.energy();
+                        state.breath = scope.breath();
+                        state.need_energy = scope.need_energy();
+                        state.magic_energy = scope.magic_energy();
+                        state.damage = scope.damage();
+                        state.construction = scope.construction();
+                        state.action.name = scope.effective_action_name().to_string();
+                        state.action.act_map_index = scope.effective_action_index();
+                        state.action.phase = scope.action_phase();
+                        state.action.time = scope.effective_action_ticks();
+                        state.action.data = scope.effective_action_data();
+                        state.action.target = scope.effective_action_target(0);
+                        state.action.target2 = scope.effective_action_target(1);
+                        state.direction = scope.direction();
+                        state.command_direction = scope.command_direction();
+                        state.effects = scope.effects.snapshot();
+                        state.vertices = scope.vertices().to_vec();
+                        state.shape_vertices = scope.shape_vertex_buffer();
+                        state.contact_density = scope.contact_density();
+                        state.container = scope.container();
+                        state.status = scope.status();
+                        state.owner = scope.owner();
+                        state.controller = scope.controller();
+                        state.category = scope.category();
+                        state.crew_member = scope.crew_member;
+                        state.plr_view_range = scope.plr_view_range();
+                        state.selected = scope.selected();
+                        state.alive = scope.alive();
+                        state.base_graphics = scope.base_graphics.clone();
+                        state.graphics_overlays = scope.graphics_overlays.clone();
+                        state.draw_transform = scope.draw_transform();
+                        state.in_liquid = scope.in_liquid();
+                        state.mobile = scope.mobile();
+                        state.t_attach = scope.t_attach();
+                        state.no_collect_delay = scope.no_collect_delay();
+                        state.own_mass = scope.own_mass();
+                        state.info_physical = scope.info_physical;
+                        state.temporary_physical = scope.temporary_physical;
+                        state.physical_changes = scope.physical_changes.clone();
+                        state.ocf = scope.ocf();
+
+                        if let Some(nested) = self.nested_objects.get(id) {
+                            state.local_vars = nested.local_vars.clone().into();
+                        }
+                        if let Some(cells) = self.session_local_cells.get(id) {
+                            state.local_vars = cells.snapshot().into();
+                        }
+                    }
+                    final_object.status = scope.status();
+                    final_object.alive = scope.alive();
+                    final_object.energy = scope.energy();
+                    final_object.need_energy = scope.need_energy();
+                    final_object.damage = scope.damage();
+                    final_object.construction = scope.construction();
+                    let last_energy_loss_cause = scope
+                        .pending_update
+                        .energy_loss_cause
+                        .unwrap_or(final_object.last_energy_loss_cause);
+                    final_object = final_object
+                        .with_in_liquid(scope.in_liquid())
+                        .with_contact_density(scope.contact_density())
+                        .with_last_energy_loss_cause(last_energy_loss_cause);
+                    Some(EffectSpawnPreview { base, final_object })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         // Cross-object LocalN cells fold like any other foreign mutation:
         // merged into the target's outcome locals (cells hold the LATEST
         // value, after any nested calls), with cell-only targets getting a
@@ -7884,7 +8067,21 @@ impl EffectHostContext {
             self.pending_spawns
                 .retain(|spawn| spawn.id.is_none_or(|id| !destroyed.contains(&id)));
         }
-
+        let mut master_order = if self.publish_spawn_previews {
+            self.master_order_preview.take()
+        } else {
+            None
+        };
+        if !destroyed.is_empty() {
+            if let Some(order) = &mut master_order {
+                order.retain(|id| !destroyed.contains(id));
+            }
+        }
+        if self.publish_spawn_previews {
+            effect_spawn_previews.retain(|preview| !destroyed.contains(&preview.final_object.id));
+            self.world
+                .publish_effect_spawn_previews(effect_spawn_previews);
+        }
         let host_raster_preview = (!self.solid_mask_operations.is_empty()).then(|| {
             let (inherit_landscape, landscape) = self.world.host_raster_landscape_preview();
             HostRasterPreview {
@@ -7927,6 +8124,24 @@ impl EffectHostContext {
         outcome.other_objects = other_objects;
         outcome.solid_mask_operations = self.solid_mask_operations;
         outcome.host_raster_preview = host_raster_preview;
+        outcome.object_lists = master_order.map(|master_order| {
+            let mut inactive_order = self
+                .inactive_order_preview
+                .take()
+                .unwrap_or_else(|| self.world.inactive_object_ids().to_vec());
+            inactive_order.retain(|id| !destroyed.contains(id));
+            let mut sectors = self.world.effect_sector_map_preview();
+            if let Some(sectors) = &mut sectors {
+                for id in &destroyed {
+                    sectors.remove(*id);
+                }
+            }
+            EffectObjectListPreview {
+                inactive_order,
+                sectors,
+                master_order,
+            }
+        });
         outcome
     }
 }
@@ -8008,8 +8223,9 @@ impl EffectScopeContext {
 
         let requested_priority = effect.priority;
         let mut insert_pos = 0;
-        while insert_pos < self.effects.len()
-            && self.effects[insert_pos].priority.abs() < requested_priority.abs()
+        while requested_priority > 0
+            && insert_pos < self.effects.len()
+            && self.effects[insert_pos].priority.unsigned_abs() < requested_priority as u32
         {
             insert_pos += 1;
         }

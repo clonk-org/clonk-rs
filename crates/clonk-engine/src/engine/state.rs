@@ -1656,6 +1656,7 @@ impl Engine {
             effect_transfer_zones,
             effect_spawns,
             effect_other_objects,
+            effect_object_lists,
             effect_solid_mask_operations,
             effect_host_raster_preview,
             effect_solid_mask_changed,
@@ -1710,6 +1711,9 @@ impl Engine {
             }
             if !effect_other_objects.is_empty() {
                 self.apply_nested_object_outcomes(effect_other_objects)?;
+            }
+            if let Some(preview) = effect_object_lists {
+                self.install_effect_object_lists(preview);
             }
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
@@ -1797,6 +1801,7 @@ impl Engine {
             Vec<TransferZoneCommand>,
             Vec<SpawnConfig>,
             Vec<compat::NestedObjectOutcome>,
+            Option<compat::EffectObjectListPreview>,
             Vec<HostSolidMaskOperation>,
             Option<compat::HostRasterPreview>,
             bool,
@@ -1827,6 +1832,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
                 Vec::new(),
                 None,
                 false,
@@ -1866,6 +1872,7 @@ impl Engine {
         // model's deferred fold; C++ mutates live state mid-call): the
         // CALLER applies them via apply_nested_object_outcomes.
         let mut pending_other_objects = Vec::new();
+        let mut pending_object_lists = None;
         let mut pending_solid_mask_operations = Vec::new();
         let mut solid_mask_changed = false;
         let mut action_callbacks_dispatched = false;
@@ -2086,14 +2093,37 @@ impl Engine {
                 // keeps the node linked so GetEffect(number, include-dead)
                 // and the unique-number allocator still see it
                 // (C4Effect.cpp:407-424,55-81).
-                if let Some(effect) = object
+                let effect = object
                     .state
                     .effects
                     .iter_mut()
-                    .find(|effect| effect.number == event.effect.number)
-                {
-                    effect.priority = 0;
-                    state_snapshot.effects = object.state.effects.clone();
+                    .find(|effect| effect.number == event.effect.number);
+                match effect {
+                    Some(effect) if effect.priority != 0 => {
+                        // A higher Stop may have renamed this lower node while
+                        // ClearAll's recursive frame was suspended. C++
+                        // dispatches through its then-live callback pointers.
+                        event.effect = effect.clone();
+                        effect.priority = 0;
+                        state_snapshot.effects = object.state.effects.clone();
+                    }
+                    Some(_) => {
+                        // A higher Stop killed this still-linked node before
+                        // its recursive frame resumed (IsDead => return).
+                        continue;
+                    }
+                    None if death_stop => {
+                        // AssignDeath keeps every native node linked. If the
+                        // node disappeared, the carrier was mutated past the
+                        // frame C++ would still be able to call.
+                        continue;
+                    }
+                    None => {
+                        // Legacy deferred Clear/Destroyed commands may have
+                        // drained the Rust vector before dispatch. The owned
+                        // snapshot fallback below recreates C++'s linked dead
+                        // victim for that callback.
+                    }
                 }
             }
 
@@ -2104,16 +2134,25 @@ impl Engine {
             // an effect killed inside its temp Stop.
             match event.kind {
                 EffectEventKind::TempRemoved => {
-                    let Some(effect) =
-                        object.state.effects.iter_mut().find(|effect| {
-                            effect.number == event.effect.number && effect.priority > 0
-                        })
+                    let Some(effect) = object
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|effect| effect.number == event.effect.number)
                     else {
                         continue;
                     };
+                    // This recursive TempRemoveUpperEffects frame was entered
+                    // while the node was active. A higher Stop callback may
+                    // kill it before the frame resumes, but C++ still applies
+                    // FlipActive (zero remains zero) and dispatches FxStop
+                    // (C4Effect.cpp:480-490).
                     effect.priority = -effect.priority;
                     event.effect = effect.clone();
                     state_snapshot.effects = object.state.effects.clone();
+                    if event.effect.priority == 1 {
+                        continue;
+                    }
                 }
                 EffectEventKind::TempReadded => {
                     let Some(effect) =
@@ -2405,6 +2444,7 @@ impl Engine {
                     log_runtime_call_frames(&definition, source.call_frames());
                     rng = rng_backup;
                     current_audio = audio_backup;
+                    let _ = world.take_effect_spawn_previews();
                     continue;
                 }
                 Err(other) => return Err(other),
@@ -2465,6 +2505,7 @@ impl Engine {
                 spawns,
                 next_object_id,
                 other_objects: mut event_other_objects,
+                object_lists: event_object_lists,
                 ..
             } = outcome;
 
@@ -2493,6 +2534,8 @@ impl Engine {
                 world.preview_object_local_vars(object_id, &object.state.local_vars);
             }
 
+            let spawn_previews = world.take_effect_spawn_previews();
+            world.seed_pending_objects(spawn_previews);
             if !spawns.is_empty() {
                 pending_spawns.extend(spawns);
             }
@@ -2701,6 +2744,15 @@ impl Engine {
                 state_snapshot = object.script_state_snapshot();
             }
 
+            // Carrier updates fold after foreign-object updates in this
+            // deferred runner. Restore the callback's exact list/sector
+            // snapshot only after both channels have replayed, otherwise a
+            // collapsed final status can overwrite the chronological order.
+            if let Some(preview) = event_object_lists {
+                world.install_effect_object_lists(preview.clone());
+                pending_object_lists = Some(preview);
+            }
+
             if !global_effect_commands.is_empty() {
                 apply_effect_commands_to_stack(&mut global_view, &global_effect_commands);
                 global_commands.append(&mut global_effect_commands);
@@ -2767,6 +2819,7 @@ impl Engine {
             pending_transfer_zones,
             pending_spawns,
             pending_other_objects,
+            pending_object_lists,
             pending_solid_mask_operations,
             host_raster_preview,
             solid_mask_changed,
@@ -2968,6 +3021,124 @@ impl Engine {
         Ok(())
     }
 
+    /// `LoadScenarioSection`'s active-list teardown before global effect
+    /// cleanup (C4Game.cpp:4190-4201). Objects already in the inactive list
+    /// survive; objects created during a departing object's destruction are
+    /// cleared without recursively running another destruction lifecycle.
+    fn remove_active_objects_for_scenario_section(
+        &mut self,
+        _preserved: &HashSet<ObjectId>,
+    ) -> Result<(), EngineError> {
+        // `Objects.First` is the reverse of Rust's execution order. Native
+        // follows the live Next link after each AssignRemoval: callbacks may
+        // unlink a future object by deactivating it or insert a new object on
+        // either side of the cursor (C4Game.cpp:4190-4193).
+        let mut current = self.exec_list.iter().rev().copied().find(|id| {
+            self.find_object_index(*id).is_some_and(|index| {
+                self.objects[index].state.status.is_active() && !self.objects[index].destroyed
+            })
+        });
+        while let Some(object) = current {
+            let _ = self.assign_object_removal(object)?;
+            current = self
+                .exec_list
+                .iter()
+                .position(|candidate| *candidate == object)
+                .and_then(|position| {
+                    self.exec_list[..position].iter().rev().copied().find(|id| {
+                        self.find_object_index(*id).is_some_and(|index| {
+                            self.objects[index].state.status.is_active()
+                                && !self.objects[index].destroyed
+                        })
+                    })
+                });
+        }
+
+        // Native warns about objects created in destruction, clears every
+        // pointer to each of them without calling AssignRemoval again, then
+        // deletes the whole active list (C4Game.cpp:4194-4201).
+        let created_during_destruction = self
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| {
+                self.find_object_index(*id).is_some_and(|index| {
+                    self.objects[index].state.status.is_active() && !self.objects[index].destroyed
+                })
+            })
+            .collect::<Vec<_>>();
+        for object in created_during_destruction {
+            self.clear_object_references_for_removal(object)?;
+            if let Some(index) = self.find_object_index(object) {
+                self.remove_solid_mask(index);
+            }
+        }
+
+        let removed = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Inactive)
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        self.objects.retain(|object| !removed.contains(&object.id));
+        self.exec_list.retain(|object| !removed.contains(object));
+        self.inactive_exec_list
+            .retain(|object| !removed.contains(object));
+        if let Some(sectors) = self.sectors.as_mut() {
+            for object in &removed {
+                sectors.remove(*object);
+            }
+        }
+        if !removed.is_empty() {
+            self.note_objects_changed();
+        }
+        Ok(())
+    }
+
+    /// `InitGameSecondPart`'s `Objects.Clear(false)`: delete the active main
+    /// list without Destruction or effect callbacks while retaining the
+    /// inactive list (C4Game.cpp:2699-2704; C4GameObjects.cpp:313-331).
+    fn clear_active_objects_for_scenario_section_init(&mut self) -> Result<(), EngineError> {
+        let active = self
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| {
+                self.find_object_index(*id).is_some_and(|index| {
+                    self.objects[index].state.status.is_active() && !self.objects[index].destroyed
+                })
+            })
+            .collect::<Vec<_>>();
+        for object in active {
+            self.clear_object_references_for_removal(object)?;
+            if let Some(index) = self.find_object_index(object) {
+                self.remove_solid_mask(index);
+            }
+        }
+
+        let removed = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Inactive)
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        self.objects.retain(|object| !removed.contains(&object.id));
+        self.exec_list.retain(|object| !removed.contains(object));
+        self.inactive_exec_list
+            .retain(|object| !removed.contains(object));
+        if let Some(sectors) = self.sectors.as_mut() {
+            for object in &removed {
+                sectors.remove(*object);
+            }
+        }
+        if !removed.is_empty() {
+            self.note_objects_changed();
+        }
+        Ok(())
+    }
+
     pub(crate) fn load_scenario_section(
         &mut self,
         name: &str,
@@ -3152,6 +3323,22 @@ impl Engine {
             self.scenario_sections.insert(departing_key, current);
         }
 
+        // Native removes the active object list through AssignRemoval and
+        // ClearPointers, then deletes that list before global ClearAll. This
+        // also clears effect command targets, so global Stop callbacks cannot
+        // dispatch through or enumerate a departing object
+        // (C4Game.cpp:4190-4208).
+        self.remove_active_objects_for_scenario_section(&preserved)?;
+
+        // ClearAll runs every original Stop callback tail-first and leaves its
+        // nodes linked dead. Capture the complete post-callback engine state:
+        // C++ keeps objects, player writes, messages, allocation state and
+        // every other synchronous side effect produced here into InitGame;
+        // InitGameSecondPart later directly deletes any active object spawn
+        // (C4Game.cpp:4202-4208; C4Effect.cpp:407-425).
+        self.clear_global_effects_for_scenario_section()?;
+        state = self.capture_state();
+
         let target = self
             .scenario_sections
             .get(&key)
@@ -3160,19 +3347,6 @@ impl Engine {
         let target_landscape_systems = target.landscape_systems.clone();
         let mut post_init_map_callbacks = map_creator_s2::PostInitMapCallbacks::default();
         let keep_map_creator = target.keep_map_creator;
-        let retained = state
-            .objects
-            .iter()
-            .filter(|object| preserved.contains(&object.snapshot.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        let retained_order = state
-            .object_order
-            .iter()
-            .copied()
-            .filter(|id| preserved.contains(id))
-            .collect::<Vec<_>>();
-
         // C4Landscape::Init repairs an unset persistent MapSeed before its
         // first FixRandom. The draw is deliberately made on the pre-reset
         // game ledger; FixRandom immediately discards its resulting state.
@@ -3435,31 +3609,11 @@ impl Engine {
         state.scenario_values = Some(target.scenario_values.clone());
         state.base_reject_entrance_enabled = Some(target.base_reject_entrance_enabled);
         state.environment = target.environment;
-        state.global_effects.clear();
         state.particles.clear();
         state.transfer_zones.clear();
         state.mass_movers.clear();
 
-        let removed_sound_targets = state
-            .objects
-            .iter()
-            .filter(|object| object.snapshot.status.is_active())
-            .filter(|object| !preserved.contains(&object.snapshot.id))
-            .map(|object| (object.snapshot.id, object.snapshot.position))
-            .collect::<Vec<_>>();
-        state.objects.clear();
-        state.objects.extend(retained);
-        state.object_order = retained_order;
-
         self.base_extinguish_enabled = target.base_extinguish_enabled;
-        // Native removes active departing objects through AssignRemoval and
-        // ClearPointers before InitGame installs the target section
-        // (C4Game.cpp:4190-4201). Detach now so target-section callbacks see
-        // the same freed sound channels while globals and inactive bindings
-        // remain in the process-local C4SoundSystem.
-        for (object, position) in removed_sound_targets {
-            self.detach_audio_for_object(object, position);
-        }
         self.restore_state_with_local_sound_reset(&state, false)?;
         match target_landscape_systems.pxs {
             Some(mut pxs) => {
@@ -3486,6 +3640,7 @@ impl Engine {
             physics.set_script_gravity(gravity);
             self.set_physics(physics);
         }
+        self.clear_active_objects_for_scenario_section_init()?;
         let target_objects = self.scenario_section_object_spawns(&target)?;
         self.spawn_scenario_section_objects(target_objects)?;
         if !target.no_initialize && landscape_loaded && keep_map_creator {

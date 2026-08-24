@@ -6652,6 +6652,7 @@ impl ScenarioScript {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            object_lists: _,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -6932,6 +6933,7 @@ impl ScenarioScript {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            object_lists: _,
             next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
@@ -11578,6 +11580,7 @@ struct GlobalEffectRunOutcome {
     transfer_zones: Vec<TransferZoneCommand>,
     spawns: Vec<SpawnConfig>,
     other_objects: Vec<compat::NestedObjectOutcome>,
+    object_lists: Option<compat::EffectObjectListPreview>,
     next_object_id: u64,
     game_over: bool,
     script_go: Option<bool>,
@@ -11901,112 +11904,113 @@ fn dispatch_global_effect_callback(
     let env_guard = enter_environment_context(environment, frame);
     let guard = enter_random_context(rng);
     let audio_guard = enter_audio_context(audio);
-    let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
-        context_object.and_then(|object_id| {
-            ambient_state.as_deref().map(|state| {
-                compat::HostObjectContext::with_category(
-                    object_id,
-                    state.container,
-                    state.status,
-                    state.energy,
-                    state.damage,
-                    state.construction,
-                    state.owner,
-                    state.position,
-                    state.velocity,
-                    state.rotation,
-                    &state.effects,
-                    state.action.name.clone(),
-                    state.action.time,
-                    state.action.data,
-                    state.action.phase,
-                    ambient_action_library.clone(),
-                    state.direction,
-                    state.command_direction,
-                    0,
-                    state.action.target,
-                    state.action.target2,
-                    &state.vertices,
-                    state.category,
-                    ambient_ocf_base,
-                    ambient_crew_member,
-                    state.draw_transform,
-                    state.base_graphics.clone(),
-                )
-                .with_action_index(state.action.act_map_index)
-                .with_shape_vertices(&state.shape_vertices)
-                .with_definition_id(ambient_definition_id.as_deref().unwrap_or_default())
-                .with_alive(state.alive)
-                .with_controller(state.controller)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
-                .with_physicals(
-                    state.info_physical,
-                    state.temporary_physical,
-                    state.physical_changes.clone(),
-                    ambient_definition_physical,
-                )
-                .with_graphics_overlays(state.graphics_overlays.clone())
-                .with_walk_rotation(compat::WalkRotationSeed {
-                    rotateable: ambient_rotateable,
-                    t_attach: state.t_attach,
-                    attach: state.shape_attach,
-                    def_attach_vtx_x: ambient_def_attach_vtx_x,
-                })
-                .with_script_fixed_position(state.script_fixed_position)
-                .with_script_fixed_velocity(state.script_fixed_velocity)
-                .with_script_rotation_velocity(state.script_rotation_velocity)
-                .with_script_fixed_rotation(state.script_fixed_rotation)
-                .with_magic_energy(state.magic_energy)
-                .with_breath(state.breath)
-                .with_need_energy(state.need_energy)
-                .with_ocf(state.ocf)
-            })
-        }),
-        callback.definition_context.clone(),
-        context_object,
-        global_effects,
-        world,
-        next_object_id,
-        game_over_triggered,
-        || {
-            if let Some(session_id) = context_object {
-                compat::register_session_local_cells(session_id, context_cells.clone());
-            }
-            if callback.engine_global_entry {
-                return callback
-                    .script
-                    .call_resolved_with_cells_and_this_for_effect_callback(
-                        &callback.resolution,
-                        true,
-                        &args,
-                        &context_cells,
-                        context_this,
+    let (result, mut commands) =
+        compat::with_effect_context_with_state_and_definition_and_spawn_previews(
+            context_object.and_then(|object_id| {
+                ambient_state.as_deref().map(|state| {
+                    compat::HostObjectContext::with_category(
+                        object_id,
+                        state.container,
+                        state.status,
+                        state.energy,
+                        state.damage,
+                        state.construction,
+                        state.owner,
+                        state.position,
+                        state.velocity,
+                        state.rotation,
+                        &state.effects,
+                        state.action.name.clone(),
+                        state.action.time,
+                        state.action.data,
+                        state.action.phase,
+                        ambient_action_library.clone(),
+                        state.direction,
+                        state.command_direction,
+                        0,
+                        state.action.target,
+                        state.action.target2,
+                        &state.vertices,
+                        state.category,
+                        ambient_ocf_base,
+                        ambient_crew_member,
+                        state.draw_transform,
+                        state.base_graphics.clone(),
                     )
-                    .map(|value| Some((value, context_cells.snapshot())));
-            }
-            if context_object.is_some() {
-                return callback
+                    .with_action_index(state.action.act_map_index)
+                    .with_shape_vertices(&state.shape_vertices)
+                    .with_definition_id(ambient_definition_id.as_deref().unwrap_or_default())
+                    .with_alive(state.alive)
+                    .with_controller(state.controller)
+                    .with_in_liquid(state.in_liquid)
+                    .with_own_mass(state.own_mass)
+                    .with_physicals(
+                        state.info_physical,
+                        state.temporary_physical,
+                        state.physical_changes.clone(),
+                        ambient_definition_physical,
+                    )
+                    .with_graphics_overlays(state.graphics_overlays.clone())
+                    .with_walk_rotation(compat::WalkRotationSeed {
+                        rotateable: ambient_rotateable,
+                        t_attach: state.t_attach,
+                        attach: state.shape_attach,
+                        def_attach_vtx_x: ambient_def_attach_vtx_x,
+                    })
+                    .with_script_fixed_position(state.script_fixed_position)
+                    .with_script_fixed_velocity(state.script_fixed_velocity)
+                    .with_script_rotation_velocity(state.script_rotation_velocity)
+                    .with_script_fixed_rotation(state.script_fixed_rotation)
+                    .with_magic_energy(state.magic_energy)
+                    .with_breath(state.breath)
+                    .with_need_energy(state.need_energy)
+                    .with_ocf(state.ocf)
+                })
+            }),
+            callback.definition_context.clone(),
+            context_object,
+            global_effects,
+            world,
+            next_object_id,
+            game_over_triggered,
+            || {
+                if let Some(session_id) = context_object {
+                    compat::register_session_local_cells(session_id, context_cells.clone());
+                }
+                if callback.engine_global_entry {
+                    return callback
+                        .script
+                        .call_resolved_with_cells_and_this_for_effect_callback(
+                            &callback.resolution,
+                            true,
+                            &args,
+                            &context_cells,
+                            context_this,
+                        )
+                        .map(|value| Some((value, context_cells.snapshot())));
+                }
+                if context_object.is_some() {
+                    return callback
+                        .script
+                        .call_effect_callback_with_cells_and_this(
+                            &callback_name,
+                            &args,
+                            &context_cells,
+                            context_this,
+                        )
+                        .map(|value| Some((value, context_cells.snapshot())));
+                }
+                callback
                     .script
-                    .call_effect_callback_with_cells_and_this(
+                    .call_effect_callback_with_locals_and_this(
                         &callback_name,
                         &args,
-                        &context_cells,
+                        &context_locals,
                         context_this,
                     )
-                    .map(|value| Some((value, context_cells.snapshot())));
-            }
-            callback
-                .script
-                .call_effect_callback_with_locals_and_this(
-                    &callback_name,
-                    &args,
-                    &context_locals,
-                    context_this,
-                )
-                .map(Some)
-        },
-    );
+                    .map(Some)
+            },
+        );
     let rng = guard.finish();
     let physics_delta = physics_guard.finish();
     let environment_delta = env_guard.finish();
@@ -12064,18 +12068,17 @@ fn resolve_effect_dispatch_definition<'a>(
         .unwrap_or(fallback)
 }
 
-fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
+fn effect_stop_reason_value(reason: EffectStopReason) -> Option<Value> {
     match reason {
-        // C4Effect::Kill omits the third parameter. An explicit nil is the
-        // same ten-slot C4AulParSet value and, unlike integer zero, stays nil
-        // for untyped callbacks after parameter conversion; a strict-3 `int`
-        // parameter converts the missing slot to C4FxCall_Normal (0).
-        EffectStopReason::Removed | EffectStopReason::Replaced => Value::Nil,
+        // C4Effect::Kill supplies exactly target and number. C4Aul pads its
+        // parameter set internally, but callback/debug traces must not
+        // materialize a third nil argument (C4Effect.cpp:386-392).
+        EffectStopReason::Removed | EffectStopReason::Replaced => None,
         // C4Effect::ClearAll uses C4FxCall_RemoveClear.
-        EffectStopReason::Cleared | EffectStopReason::Destroyed => Value::Int(3),
+        EffectStopReason::Cleared | EffectStopReason::Destroyed => Some(Value::Int(3)),
         // C4FxCall_RemoveDeath and C4FxCall_Temp (C4Effects.h:46-50).
-        EffectStopReason::Death => Value::Int(4),
-        EffectStopReason::Temp => Value::Int(1),
+        EffectStopReason::Death => Some(Value::Int(4)),
+        EffectStopReason::Temp => Some(Value::Int(1)),
     }
 }
 
@@ -12141,24 +12144,21 @@ fn advance_effect_frame_cursor(
     }
 }
 
-/// Active effects AFTER `anchor` in the C++ effect list — the list orders
-/// ascending by |iPriority| with new-before-equal insertion
-/// (C4Effect.cpp:80-94), so an upper effect has a higher priority magnitude
-/// or is an equal-magnitude peer inserted earlier (lower number).
-/// Priority-1 effects never take temp callbacks (C4Effect.cpp:489,505).
+/// Active effects AFTER `anchor` in the live C++ effect list. The actual
+/// suffix matters because negative constructors and Stop-denial restoration
+/// can make the list temporarily non-monotonic. A live priority-1 node ends
+/// the recursive temp walk before its successor (C4Effect.cpp:477-492).
 fn upper_effects_of(effects: &[EffectState], anchor: &EffectState) -> Vec<EffectState> {
-    effects
+    let Some(anchor_index) = effects
         .iter()
-        .filter(|existing| {
-            existing.number != anchor.number && existing.priority > 0 && existing.priority != 1
-        })
-        .filter(|existing| {
-            let (upper, base) = (
-                existing.priority.unsigned_abs(),
-                anchor.priority.unsigned_abs(),
-            );
-            upper > base || (upper == base && existing.number < anchor.number)
-        })
+        .position(|effect| effect.number == anchor.number)
+    else {
+        return Vec::new();
+    };
+    effects[anchor_index + 1..]
+        .iter()
+        .take_while(|effect| effect.priority != 1)
+        .filter(|effect| effect.priority > 0)
         .cloned()
         .collect()
 }
@@ -12236,17 +12236,19 @@ fn insert_effect_into_stack(stack: &mut Vec<EffectState>, mut effect: EffectStat
 
     // Preserve C++'s newest-first order for carried equal-priority nodes;
     // fresh effects have max+1 and therefore still insert before all equals.
-    let priority = effect.priority.unsigned_abs();
     let mut insert_pos = 0;
-    while insert_pos < stack.len() {
-        let existing = &stack[insert_pos];
-        let existing_priority = existing.priority.unsigned_abs();
-        if existing_priority > priority
-            || (existing_priority == priority && existing.number < effect.number)
-        {
-            break;
+    if effect.priority > 0 {
+        let priority = effect.priority as u32;
+        while insert_pos < stack.len() {
+            let existing = &stack[insert_pos];
+            let existing_priority = existing.priority.unsigned_abs();
+            if existing_priority > priority
+                || (existing_priority == priority && existing.number < effect.number)
+            {
+                break;
+            }
+            insert_pos += 1;
         }
-        insert_pos += 1;
     }
 
     stack.insert(insert_pos, effect);
@@ -13706,6 +13708,13 @@ mod movement_contact_snap;
 #[cfg(test)]
 #[path = "lib_tests/effect_deny_number_reservation.rs"]
 mod effect_deny_number_reservation;
+
+#[cfg(test)]
+#[path = "lib_tests/native_effect_clearall_live_walk.rs"]
+mod native_effect_clearall_live_walk;
+#[cfg(test)]
+#[path = "lib_tests/native_effect_damage_live_walk.rs"]
+mod native_effect_damage_live_walk;
 
 #[cfg(test)]
 #[path = "lib_tests/goal_rule_activate_families.rs"]

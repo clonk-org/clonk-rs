@@ -682,6 +682,7 @@ impl Engine {
                         effect_transfer_zones,
                         effect_spawns,
                         effect_other_objects,
+                        effect_object_lists,
                         effect_solid_mask_operations,
                         effect_host_raster_preview,
                         effect_solid_mask_changed,
@@ -737,6 +738,9 @@ impl Engine {
                         }
                         if !effect_other_objects.is_empty() {
                             self.apply_nested_object_outcomes(effect_other_objects)?;
+                        }
+                        if let Some(preview) = effect_object_lists {
+                            self.install_effect_object_lists(preview);
                         }
                         if !landscape_ops.is_empty() {
                             self.apply_landscape_operations(landscape_ops);
@@ -1510,6 +1514,7 @@ impl Engine {
                             effect_transfer_zones,
                             effect_spawns,
                             effect_other_objects,
+                            effect_object_lists,
                             effect_solid_mask_operations,
                             effect_host_raster_preview,
                             effect_solid_mask_changed,
@@ -1565,6 +1570,9 @@ impl Engine {
                         }
                         if !effect_other_objects.is_empty() {
                             self.apply_nested_object_outcomes(effect_other_objects)?;
+                        }
+                        if let Some(preview) = effect_object_lists {
+                            self.install_effect_object_lists(preview);
                         }
                         if !player_commands.is_empty() {
                             self.apply_player_commands(player_commands)?;
@@ -3023,6 +3031,7 @@ impl Engine {
             messages,
             player_commands,
             object_order_commands,
+            object_lists: _,
             next_mission_commands,
             menu_requests,
             audio: outcome_audio,
@@ -3375,6 +3384,7 @@ impl Engine {
                 effect_transfer_zones,
                 effect_spawns,
                 effect_other_objects,
+                effect_object_lists,
                 nested_effect_solid_mask_operations,
                 nested_effect_host_raster_preview,
                 nested_effect_solid_mask_changed,
@@ -3421,6 +3431,9 @@ impl Engine {
             }
             if !effect_other_objects.is_empty() {
                 self.apply_nested_object_outcomes(effect_other_objects)?;
+            }
+            if let Some(preview) = effect_object_lists {
+                self.install_effect_object_lists(preview);
             }
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
@@ -3779,6 +3792,7 @@ impl Engine {
                     effect_transfer_zones,
                     effect_spawns,
                     effect_other_objects,
+                    effect_object_lists,
                     nested_effect_solid_mask_operations,
                     nested_effect_host_raster_preview,
                     nested_effect_solid_mask_changed,
@@ -3827,6 +3841,9 @@ impl Engine {
                     retained.extend(
                         self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?,
                     );
+                }
+                if let Some(preview) = effect_object_lists {
+                    self.install_effect_object_lists(preview);
                 }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);

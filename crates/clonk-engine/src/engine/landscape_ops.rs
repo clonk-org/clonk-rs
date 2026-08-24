@@ -2316,92 +2316,122 @@ impl Engine {
             };
 
             self.record_effect_dispatch(|stats| stats.global_timer_events += 1);
-            let world = self.host_world_context();
-            let rng_state = self.rng.clone();
-            let mut global_effects = std::mem::take(&mut self.global_effects);
-            let outcome = Self::run_effect_events_for_global(
-                self.game_over_triggered,
-                rng_state,
-                vec![event],
-                &mut global_effects,
-                &mut self.environment,
-                self.physics,
-                self.frame,
-                world,
-                self.audio_registry.clone(),
-            );
-            self.global_effects = global_effects;
-            let GlobalEffectRunOutcome {
-                particles,
-                physics_delta,
-                audio_events,
-                messages,
-                player_commands,
-                object_order_commands,
-                next_mission_commands,
-                landscape_ops,
-                solid_mask_operations,
-                host_raster_preview,
-                transfer_zones,
-                spawns,
-                other_objects,
-                next_object_id,
-                game_over,
-                script_go,
-                script_counter,
-                audio_state,
-                rng,
-            } = outcome?;
-            let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
-            let mut outermost =
-                self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
-            let fold_result = (|| -> Result<(), EngineError> {
-                self.rng = rng;
-                self.audio_registry = audio_state;
-                self.sync_next_object_id(next_object_id);
-                if !spawns.is_empty() {
-                    self.process_spawn_queue(spawns)?;
-                }
-                if !transfer_zones.is_empty() {
-                    self.apply_transfer_zone_commands(transfer_zones)?;
-                }
-                if !other_objects.is_empty() {
-                    self.apply_nested_object_outcomes(other_objects)?;
-                }
-                if !landscape_ops.is_empty() {
-                    self.apply_landscape_operations(landscape_ops);
-                }
-                if !player_commands.is_empty() {
-                    self.apply_player_commands(player_commands)?;
-                }
-                self.pending_object_order_commands
-                    .extend(object_order_commands);
-                self.apply_next_mission_commands(next_mission_commands);
-                if !audio_events.is_empty() {
-                    self.emit_audio_commands(audio_events);
-                }
-                for command in messages {
-                    self.messages.apply_command(command);
-                }
-                if let Some(go) = script_go {
-                    self.scenario_script_go = go;
-                }
-                if let Some(counter) = script_counter {
-                    self.scenario_script_counter = counter;
-                }
-                if game_over {
-                    self.request_game_over()?;
-                }
-                if !physics_delta.is_empty() {
-                    self.apply_physics_delta(physics_delta);
-                }
-                self.apply_particle_commands(particles);
-                Ok(())
-            })();
-            outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
-            self.finish_host_solid_mask_operations(outermost, fold_result)?;
+            self.dispatch_global_effect_events(vec![event])?;
         }
         Ok(())
+    }
+
+    /// Runs one already-selected batch from the global effect list and folds
+    /// every callback side channel back into the live engine.
+    pub(crate) fn dispatch_global_effect_events(
+        &mut self,
+        events: Vec<EffectEvent>,
+    ) -> Result<(), EngineError> {
+        let world = self.host_world_context();
+        let rng_state = self.rng.clone();
+        let mut global_effects = std::mem::take(&mut self.global_effects);
+        let outcome = Self::run_effect_events_for_global(
+            self.game_over_triggered,
+            rng_state,
+            events,
+            &mut global_effects,
+            &mut self.environment,
+            self.physics,
+            self.frame,
+            world,
+            self.audio_registry.clone(),
+        );
+        self.global_effects = global_effects;
+        let GlobalEffectRunOutcome {
+            particles,
+            physics_delta,
+            audio_events,
+            messages,
+            player_commands,
+            object_order_commands,
+            next_mission_commands,
+            landscape_ops,
+            solid_mask_operations,
+            host_raster_preview,
+            transfer_zones,
+            spawns,
+            other_objects,
+            object_lists,
+            next_object_id,
+            game_over,
+            script_go,
+            script_counter,
+            audio_state,
+            rng,
+        } = outcome?;
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
+        let mut outermost =
+            self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
+        let fold_result = (|| -> Result<(), EngineError> {
+            self.rng = rng;
+            self.audio_registry = audio_state;
+            self.sync_next_object_id(next_object_id);
+            if !spawns.is_empty() {
+                self.process_spawn_queue(spawns)?;
+            }
+            if !transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(transfer_zones)?;
+            }
+            if !other_objects.is_empty() {
+                self.apply_nested_object_outcomes(other_objects)?;
+            }
+            if let Some(preview) = object_lists {
+                self.install_effect_object_lists(preview);
+            }
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
+            }
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
+            self.pending_object_order_commands
+                .extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
+            if !audio_events.is_empty() {
+                self.emit_audio_commands(audio_events);
+            }
+            for command in messages {
+                self.messages.apply_command(command);
+            }
+            if let Some(go) = script_go {
+                self.scenario_script_go = go;
+            }
+            if let Some(counter) = script_counter {
+                self.scenario_script_counter = counter;
+            }
+            if game_over {
+                self.request_game_over()?;
+            }
+            if !physics_delta.is_empty() {
+                self.apply_physics_delta(physics_delta);
+            }
+            self.apply_particle_commands(particles);
+            Ok(())
+        })();
+        outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, fold_result)
+    }
+
+    /// `C4Effect::ClearAll(nullptr, C4FxCall_RemoveClear)` for the global
+    /// effect list (C4Game.cpp:4202-4208; C4Effect.cpp:407-425). The traversal
+    /// is captured tail-first, but each node is resolved live when its turn is
+    /// reached. Effects created by a Stop callback are therefore outside this
+    /// clear, while the original nodes stay linked dead for the next Execute.
+    pub(crate) fn clear_global_effects_for_scenario_section(&mut self) -> Result<(), EngineError> {
+        let events = self
+            .global_effects
+            .iter()
+            .filter(|effect| effect.priority != 0)
+            .rev()
+            .cloned()
+            .map(|effect| EffectEvent::stopped(effect, EffectStopReason::Cleared))
+            .collect::<Vec<_>>();
+        self.dispatch_global_effect_events(events)
     }
 
     /// Executes deferred Fx* events of the GLOBAL effect list — the
@@ -2439,6 +2469,7 @@ impl Engine {
         let mut pending_landscape_ops = Vec::new();
         let mut pending_transfer_zones = Vec::new();
         let mut pending_other_objects = Vec::new();
+        let mut pending_object_lists = None;
         let mut pending_solid_mask_operations = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
@@ -2488,12 +2519,20 @@ impl Engine {
                 EffectEventKind::TempRemoved => {
                     let Some(effect) = global_effects
                         .iter_mut()
-                        .find(|effect| effect.number == event.effect.number && effect.priority > 0)
+                        .find(|effect| effect.number == event.effect.number)
                     else {
                         continue;
                     };
+                    // This recursive TempRemoveUpperEffects frame was entered
+                    // while the node was active. A higher Stop callback may
+                    // kill it before the frame resumes, but C++ still applies
+                    // FlipActive (zero remains zero) and dispatches FxStop
+                    // (C4Effect.cpp:480-490).
                     effect.priority = -effect.priority;
                     event.effect = effect.clone();
+                    if event.effect.priority == 1 {
+                        continue;
+                    }
                 }
                 EffectEventKind::TempReadded => {
                     let Some(effect) = global_effects
@@ -2506,6 +2545,24 @@ impl Engine {
                     event.effect = effect.clone();
                 }
                 _ => {}
+            }
+            let clear_all_stop = matches!(
+                event.kind,
+                EffectEventKind::Stopped(EffectStopReason::Cleared)
+            );
+            if clear_all_stop {
+                // ClearAll reaches this node only after recursively processing
+                // its original successor. Re-read it now: an upper Stop may
+                // have removed, renamed, or otherwise replaced the node while
+                // the recursion unwound (C4Effect.cpp:407-425).
+                let Some(effect) = global_effects
+                    .iter_mut()
+                    .find(|effect| effect.number == event.effect.number && effect.priority != 0)
+                else {
+                    continue;
+                };
+                event.effect = effect.clone();
+                effect.priority = 0;
             }
             // C++ runs Fx* callbacks with fPassErrors=false (fail-safe
             // exec); RNG/audio restore from the pre-call backups on the
@@ -2543,7 +2600,7 @@ impl Engine {
                     &event.effect,
                     "Stop",
                     "FxStop",
-                    vec![effect_stop_reason_value(reason)],
+                    effect_stop_reason_value(reason).map_or_else(Vec::new, |value| vec![value]),
                     rng,
                     global_effects,
                     current_physics,
@@ -2557,10 +2614,12 @@ impl Engine {
                     // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
                     // refuses its removal and recovers
                     // (C4Effect.cpp:389-396).
-                    stop_denied = matches!(reason, EffectStopReason::Removed)
-                        && stop_result
-                            .as_ref()
-                            .is_some_and(|value| compat::value_as_i32(value) == -1);
+                    stop_denied = matches!(
+                        reason,
+                        EffectStopReason::Removed | EffectStopReason::Cleared
+                    ) && stop_result
+                        .as_ref()
+                        .is_some_and(|value| compat::value_as_i32(value) == -1);
                     (outcome, audio_state, new_rng)
                 }),
                 EffectEventKind::TempRemoved => dispatch_global_effect_callback(
@@ -2623,6 +2682,7 @@ impl Engine {
                     log_runtime_call_frames(&definition, source.call_frames());
                     rng = rng_backup;
                     current_audio = audio_backup;
+                    let _ = world.take_effect_spawn_previews();
                     continue;
                 }
                 Err(other) => return Err(other),
@@ -2658,6 +2718,7 @@ impl Engine {
                 spawns,
                 next_object_id,
                 other_objects: event_other_objects,
+                object_lists: event_object_lists,
                 ..
             } = event_outcome;
 
@@ -2673,6 +2734,8 @@ impl Engine {
             }
             pending_transfer_zones.extend(event_transfer_zones);
 
+            let spawn_previews = world.take_effect_spawn_previews();
+            world.seed_pending_objects(spawn_previews);
             if !spawns.is_empty() {
                 pending_spawns.extend(spawns);
             }
@@ -2693,6 +2756,10 @@ impl Engine {
                     }
                 }
                 pending_other_objects.extend(event_other_objects);
+            }
+            if let Some(preview) = event_object_lists {
+                world.install_effect_object_lists(preview.clone());
+                pending_object_lists = Some(preview);
             }
             world = world.with_next_object_id(next_object_id);
             if !host_landscape_ops.is_empty() {
@@ -2771,6 +2838,7 @@ impl Engine {
             transfer_zones: pending_transfer_zones,
             spawns: pending_spawns,
             other_objects: pending_other_objects,
+            object_lists: pending_object_lists,
             next_object_id,
             game_over: game_over_requested,
             script_go: script_go_requested,

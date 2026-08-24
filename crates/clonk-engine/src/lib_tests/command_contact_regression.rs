@@ -2668,6 +2668,123 @@ fn effect_batch_geometry_preview_preserves_callback_entry_sector_order() {
 }
 
 #[test]
+fn effect_batch_status_relink_persists_callback_final_sector_order() {
+    // StatusDeactivate/StatusActivate remove and re-add physical sector links
+    // immediately. When SortByCategory previously changed only stMain, that
+    // re-add makes the sector order converge on the new master order even
+    // though the object's callback-final status is unchanged
+    // (oracle-src-pinned src/C4Object.cpp:5987-6007;
+    // src/C4Sector.cpp:88-147; src/C4GameObjects.cpp:732-736).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    engine.register_test_script_definition("ORDR", "Ordered candidate", "#strict\n");
+    register_fixture!(
+        engine,
+        "FXSR",
+        "Effect status relink observer",
+        r#"#strict 3
+    local status_target, expected_first, expected_second;
+
+    public func Arm(object status_object, object first, object second)
+    {
+        status_target = status_object;
+        expected_first = first;
+        expected_second = second;
+        AddEffect("Relink", this(), 10, 1, this());
+        AddEffect("Observe", this(), 20, 1, this());
+    }
+
+    private func Ordered()
+    {
+        return FindObjects(
+            [C4FO_InRect, 0, 0, 50, 100],
+            [C4FO_ID, ORDR]);
+    }
+
+    func FxRelinkTimer()
+    {
+        SetObjectStatus(C4OS_INACTIVE, status_target);
+        SetObjectStatus(C4OS_NORMAL, status_target);
+        return 0;
+    }
+
+    func FxObserveTimer()
+    {
+        var found = Ordered();
+        if (GetLength(found) == 2 &&
+            found[0] == expected_first && found[1] == expected_second)
+            SetR(17);
+        else
+            SetR(23);
+        return 0;
+    }
+
+    public func ReadLater() { return Ordered(); }
+    "#,
+        set_c4_callback_convention(true)
+    );
+    let older = spawn_fixture!(engine, "ORDR", with_position: Vector2::new(10, 10));
+    let newer = spawn_fixture!(engine, "ORDR", with_position: Vector2::new(20, 10));
+    let observer = spawn_fixture!(engine, "FXSR", with_position: Vector2::new(210, 20));
+
+    let older_index = engine.test_object_index(older);
+    let newer_index = engine.test_object_index(newer);
+    engine.objects[older_index].state.category = CATEGORY_OBJECT;
+    engine.objects[newer_index].state.category = CATEGORY_STRUCTURE;
+    engine
+        .pending_object_order_commands
+        .push(ObjectOrderCommand::SortByCategory);
+    engine.execute_object_order_commands();
+
+    let observer_index = engine.test_object_index(observer);
+    crate::TestValueExt::test_value(engine.call_object_function(
+        observer_index,
+        "Arm",
+        vec![
+            object_reference_value(newer),
+            object_reference_value(older),
+            object_reference_value(newer),
+        ],
+    ));
+    let observer_index = engine.test_object_index(observer);
+    let relink = crate::TestValueExt::test_value(
+        engine.objects[observer_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Relink")
+            .cloned(),
+    );
+    let observe = crate::TestValueExt::test_value(
+        engine.objects[observer_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Observe")
+            .cloned(),
+    );
+    let definition_id = engine.objects[observer_index].definition_id.clone();
+
+    crate::TestValueExt::test_value(engine.dispatch_object_effect_events(
+        observer_index,
+        &definition_id,
+        vec![EffectEvent::timer(relink), EffectEvent::timer(observe)],
+    ));
+
+    assert_eq!(engine.objects[observer_index].state.rotation, 17);
+    assert_eq!(
+        engine
+            .call_object_function(observer_index, "ReadLater", Vec::new())
+            .expect("post-batch bounded query succeeds"),
+        Value::Array(vec![
+            object_reference_value(older),
+            object_reference_value(newer),
+        ]),
+        "authoritative sectors must retain the callback-final relink order"
+    );
+}
+
+#[test]
 fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
     // FREEZE. `C4LSectors` keeps its own physical per-sector list order and
     // refreshes only a rank oracle on SortByCategory (oracle-src-pinned

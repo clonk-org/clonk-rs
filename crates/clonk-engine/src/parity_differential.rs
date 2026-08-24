@@ -58,7 +58,7 @@ use crate::{
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -114,6 +114,750 @@ fn register_real_c4_effect_definition(engine: &mut Engine, id: &str, name: &str,
     engine
         .register_definition(definition)
         .unwrap_or_else(|error| panic!("{id} effect fixture registers: {error}"));
+}
+
+const EFFECT_LIFECYCLE_PROBE: &str = r#"
+static lifecycle_state, lifecycle_count, lifecycle_randoms, lifecycle_receivers;
+
+global func LifecycleReset()
+{
+  lifecycle_state = lifecycle_count = 0;
+  lifecycle_randoms = CreateArray(16);
+  lifecycle_receivers = CreateArray(16);
+  return 1;
+}
+
+global func LifecycleRecord(int code, object receiver)
+{
+  lifecycle_receivers[lifecycle_count] = !!receiver;
+  lifecycle_randoms[lifecycle_count] = Random(17);
+  lifecycle_count += 1;
+  lifecycle_state = lifecycle_state * 10 + code;
+  return 0;
+}
+
+global func LifecycleState() { return lifecycle_state; }
+global func LifecycleRandoms()
+{
+  SetLength(lifecycle_randoms, lifecycle_count);
+  return lifecycle_randoms;
+}
+global func LifecycleReceivers()
+{
+  SetLength(lifecycle_receivers, lifecycle_count);
+  return lifecycle_receivers;
+}
+"#;
+
+#[derive(Clone)]
+struct EffectLifecycleCall {
+    callback: String,
+    args: Vec<ScriptValue>,
+}
+
+type EffectLifecycleTrace = Arc<Mutex<Vec<EffectLifecycleCall>>>;
+
+fn register_effect_lifecycle_definition(
+    engine: &mut Engine,
+    id: &str,
+    name: &str,
+    body: &str,
+    trace: &EffectLifecycleTrace,
+) {
+    let source = format!("#strict 3\n{EFFECT_LIFECYCLE_PROBE}\n{body}");
+    let mut definition = Definition::from_script(id, name, &source)
+        .unwrap_or_else(|error| panic!("{id} effect lifecycle fixture compiles: {error}"));
+    definition.set_c4_callback_convention(true);
+    let observed = Arc::clone(trace);
+    definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+        move |callback, args| {
+            if callback.starts_with("Fx")
+                && ["Start", "Timer", "Stop", "Effect", "Add", "Damage"]
+                    .iter()
+                    .any(|suffix| callback.ends_with(suffix))
+            {
+                observed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(EffectLifecycleCall {
+                        callback: callback.to_owned(),
+                        args: args.to_vec(),
+                    });
+            }
+        },
+    ));
+    engine
+        .register_definition(definition)
+        .unwrap_or_else(|error| panic!("{id} effect lifecycle fixture registers: {error}"));
+}
+
+fn effect_lifecycle_i32(value: ScriptValue, field: &str) -> i32 {
+    match value {
+        ScriptValue::Int(value) => value,
+        ScriptValue::Bool(value) => i32::from(value),
+        ScriptValue::RawBool(value) => i32::from(value != 0),
+        ScriptValue::Nil => 0,
+        value => panic!("effect lifecycle `{field}` has unexpected value {value:?}"),
+    }
+}
+
+fn effect_lifecycle_i32_array(value: ScriptValue, field: &str) -> Vec<i32> {
+    match value {
+        ScriptValue::Array(values) => values
+            .into_iter()
+            .map(|value| effect_lifecycle_i32(value, field))
+            .collect(),
+        value => panic!("effect lifecycle `{field}` has unexpected value {value:?}"),
+    }
+}
+
+fn effect_lifecycle_arg(value: &ScriptValue) -> Value {
+    match value {
+        ScriptValue::Int(value) => Value::from(*value),
+        ScriptValue::Bool(value) => Value::from(i32::from(*value)),
+        ScriptValue::RawBool(value) => Value::from(i32::from(*value != 0)),
+        ScriptValue::String(value) => Value::from(value.to_string()),
+        ScriptValue::C4Id(value) => Value::from(value.clone()),
+        ScriptValue::Object(_) | ScriptValue::Proplist(_) => Value::from("object"),
+        ScriptValue::Nil => Value::Null,
+        ScriptValue::Array(value) => {
+            panic!("effect lifecycle callback has array argument {value:?}")
+        }
+    }
+}
+
+fn effect_lifecycle_effects(effects: &[crate::effect::EffectState]) -> Value {
+    Value::Array(
+        effects
+            .iter()
+            .map(|effect| {
+                serde_json::json!({
+                    "name": effect.name,
+                    "number": effect.number,
+                    "priority": effect.priority,
+                    "time": effect.timer,
+                    "interval": effect.interval,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn effect_lifecycle_state(engine: &mut Engine, function: &str) -> ScriptValue {
+    engine
+        .call_engine_global_function(function, &[])
+        .unwrap_or_else(|error| panic!("effect lifecycle `{function}` reads: {error}"))
+}
+
+fn finish_effect_lifecycle_case(
+    case: &str,
+    seed: u32,
+    result: i32,
+    effects: &[crate::effect::EffectState],
+    engine: &mut Engine,
+    trace: &EffectLifecycleTrace,
+) -> Value {
+    let state = effect_lifecycle_i32(
+        effect_lifecycle_state(engine, "LifecycleState"),
+        "callback state",
+    );
+    let randoms = effect_lifecycle_i32_array(
+        effect_lifecycle_state(engine, "LifecycleRandoms"),
+        "callback randoms",
+    );
+    let receivers = effect_lifecycle_i32_array(
+        effect_lifecycle_state(engine, "LifecycleReceivers"),
+        "callback receivers",
+    );
+    let calls = trace
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    assert_eq!(
+        calls.len(),
+        randoms.len(),
+        "effect lifecycle `{case}` records one Random draw per callback"
+    );
+    assert_eq!(
+        calls.len(),
+        receivers.len(),
+        "effect lifecycle `{case}` records every callback receiver"
+    );
+    let trace = calls
+        .into_iter()
+        .zip(randoms)
+        .zip(receivers)
+        .map(|((call, random), receiver)| {
+            serde_json::json!({
+                "callback": call.callback,
+                "receiver": if receiver == 0 { "nil" } else { "command" },
+                "args": call.args.iter().map(effect_lifecycle_arg).collect::<Vec<_>>(),
+                "random": random,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "case": case,
+        "seed": seed,
+        "result": result,
+        "effects": effect_lifecycle_effects(effects),
+        "trace": trace,
+        "state": state,
+        "random_count": engine.rng.count,
+        "random_hold": engine.rng.hold,
+    })
+}
+
+fn effect_lifecycle_entry(
+    name: &str,
+    number: i32,
+    priority: i32,
+    interval: i32,
+    command_target: Option<i32>,
+    command_id: Option<&str>,
+) -> crate::effect::EffectState {
+    let mut effect = crate::effect::EffectState::new(name)
+        .with_priority(priority)
+        .with_interval(interval)
+        .with_command_target(command_target)
+        .with_command_id(command_id);
+    effect.number = number;
+    effect.start_dispatched = true;
+    effect
+}
+
+fn run_effect_lifecycle_case(case: &str, seed: u32) -> Value {
+    let trace = EffectLifecycleTrace::default();
+    match case {
+        "object_start_timer_kill" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOA",
+                "Object effect lifecycle",
+                r#"
+public func RunObject()
+{
+  LifecycleReset();
+  return AddEffect("Object", this(), 100, 1, nil, ELOA, 11, 12, 13, 14);
+}
+func FxObjectStart(object target, int number, int temp, int a, int b, int c, int d)
+{
+  LifecycleRecord(1, this());
+  return 0;
+}
+func FxObjectTimer(object target, int number, int time)
+{
+  LifecycleRecord(2, this());
+  return -1;
+}
+func FxObjectStop(object target, int number)
+{
+  LifecycleRecord(3, this());
+  return 0;
+}
+"#,
+                &trace,
+            );
+            let object = engine
+                .spawn_object(SpawnConfig::new("ELOA"))
+                .expect("object lifecycle carrier spawns");
+            let index = engine
+                .find_object_index(object)
+                .expect("object lifecycle carrier exists");
+            engine.rng = LcgRng::new(seed);
+            let result = effect_lifecycle_i32(
+                engine
+                    .call_object_function(index, "RunObject", Vec::new())
+                    .expect("object lifecycle effect starts"),
+                "object result",
+            );
+            engine
+                .tick_without_snapshot()
+                .expect("object lifecycle timer kills the effect");
+            let effects = engine.objects[index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "global_start_timer" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOB",
+                "Global effect lifecycle",
+                r#"
+public func RunGlobal()
+{
+  LifecycleReset();
+  return AddEffect("Global", nil, 100, 1, nil, nil, 21, 22, 23, 24);
+}
+global func FxGlobalStart(object target, int number, int temp, int a, int b, int c, int d)
+{
+  LifecycleRecord(1, this());
+  return 0;
+}
+global func FxGlobalTimer(object target, int number, int time)
+{
+  LifecycleRecord(2, this());
+  return 0;
+}
+"#,
+                &trace,
+            );
+            let caller = engine
+                .spawn_object(SpawnConfig::new("ELOB"))
+                .expect("global lifecycle caller spawns");
+            let index = engine
+                .find_object_index(caller)
+                .expect("global lifecycle caller exists");
+            engine.rng = LcgRng::new(seed);
+            let result = effect_lifecycle_i32(
+                engine
+                    .call_object_function(index, "RunGlobal", Vec::new())
+                    .expect("global lifecycle effect starts"),
+                "global result",
+            );
+            engine
+                .tick_without_snapshot()
+                .expect("global lifecycle timer runs");
+            let effects = engine.global_effects().to_vec();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "start_deny_reserves_number" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOC",
+                "Denied effect number lifecycle",
+                r#"
+public func RunDenied()
+{
+  LifecycleReset();
+  var denied = AddEffect("Denied", this(), 100, 0, nil, ELOC);
+  var survivor = AddEffect("Survivor", this(), 50, 0, nil, nil);
+  return denied * 10 + survivor;
+}
+func FxDeniedStart(object target, int number, int temp, a, b, c, d)
+{
+  LifecycleRecord(1, this());
+  return -1;
+}
+"#,
+                &trace,
+            );
+            let object = engine
+                .spawn_object(SpawnConfig::new("ELOC"))
+                .expect("denied lifecycle carrier spawns");
+            let index = engine
+                .find_object_index(object)
+                .expect("denied lifecycle carrier exists");
+            engine.rng = LcgRng::new(seed);
+            let result = effect_lifecycle_i32(
+                engine
+                    .call_object_function(index, "RunDenied", Vec::new())
+                    .expect("denied lifecycle effects construct"),
+                "denied result",
+            );
+            let effects = engine.objects[index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "add_annul_temp_bracket" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOD",
+                "Annulled effect lifecycle",
+                r#"
+public func RunAnnul()
+{
+  LifecycleReset();
+  return AddEffect("New", this(), 20, 35, nil, ELOD, 31, 32, 33, 34);
+}
+func FxAbsorberEffect(string name, object target, int number, unused, int a, int b, int c, int d)
+{
+  LifecycleRecord(4, this());
+  return -3;
+}
+func FxUpperEffect(string name, object target, int number, unused, int a, int b, int c, int d)
+{
+  LifecycleRecord(4, this());
+  return 0;
+}
+func FxUpperStop(object target, int number, int reason, bool temp)
+{
+  LifecycleRecord(3, this());
+  return 0;
+}
+func FxAbsorberAdd(object target, int number, string name, int interval, int a, int b, int c, int d, unused)
+{
+  LifecycleRecord(5, this());
+  return 0;
+}
+func FxUpperStart(object target, int number, int temp)
+{
+  LifecycleRecord(1, this());
+  return 0;
+}
+"#,
+                &trace,
+            );
+            let object = engine
+                .spawn_object(SpawnConfig::new("ELOD"))
+                .expect("annul lifecycle carrier spawns");
+            let index = engine
+                .find_object_index(object)
+                .expect("annul lifecycle carrier exists");
+            engine.objects[index].state.effects = vec![
+                effect_lifecycle_entry("Absorber", 1, 50, 0, None, Some("ELOD")),
+                effect_lifecycle_entry("Upper", 2, 200, 0, None, Some("ELOD")),
+            ];
+            engine.rng = LcgRng::new(seed);
+            let result = effect_lifecycle_i32(
+                engine
+                    .call_object_function(index, "RunAnnul", Vec::new())
+                    .expect("annul lifecycle negotiation runs"),
+                "annul result",
+            );
+            let effects = engine.objects[index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "clear_all_tail_first_stop_deny" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOE",
+                "Global ClearAll lifecycle",
+                r#"
+global func FxUpperStop(object target, int number, int reason)
+{
+  LifecycleRecord(3, this());
+  ChangeEffect("Lower", target, 0, "Renamed", 0);
+  AddEffect("Added", target, 150, 0);
+  return -1;
+}
+global func FxLowerStop(object target, int number, int reason)
+{
+  LifecycleRecord(9, this());
+  return 0;
+}
+global func FxRenamedStop(object target, int number, int reason)
+{
+  LifecycleRecord(7, this());
+  return 0;
+}
+"#,
+                &trace,
+            );
+            effect_lifecycle_state(&mut engine, "LifecycleReset");
+            engine.global_effects = vec![
+                effect_lifecycle_entry("Lower", 1, 100, 0, None, None),
+                effect_lifecycle_entry("Upper", 2, 200, 0, None, None),
+            ];
+            engine.rng = LcgRng::new(seed);
+            engine
+                .clear_global_effects_for_scenario_section()
+                .expect("global ClearAll lifecycle runs");
+            let effects = engine.global_effects().to_vec();
+            finish_effect_lifecycle_case(case, seed, 0, &effects, &mut engine, &trace)
+        }
+        "negative_priority_one_barrier" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOH",
+                "Negative effect priority lifecycle",
+                r#"
+public func RunNegative()
+{
+  LifecycleReset();
+  return AddEffect("Negative", this(), -200, 0, nil, ELOH);
+}
+func FxUpperStop(object target, int number, int reason, bool temp)
+{
+  LifecycleRecord(1, this());
+  return 0;
+}
+func FxNegativeStart(object target, int number, int temp, a, b, c, d)
+{
+  LifecycleRecord(2, this());
+  return 0;
+}
+func FxUpperStart(object target, int number, int temp)
+{
+  LifecycleRecord(3, this());
+  return 0;
+}
+"#,
+                &trace,
+            );
+            let object = engine
+                .spawn_object(SpawnConfig::new("ELOH"))
+                .expect("negative-priority lifecycle carrier spawns");
+            let index = engine
+                .find_object_index(object)
+                .expect("negative-priority lifecycle carrier exists");
+            engine.objects[index].state.effects = vec![
+                effect_lifecycle_entry("One", 1, 1, 0, None, Some("ELOH")),
+                effect_lifecycle_entry("Upper", 2, 100, 0, None, Some("ELOH")),
+            ];
+            engine.rng = LcgRng::new(seed);
+            let result = effect_lifecycle_i32(
+                engine
+                    .call_object_function(index, "RunNegative", Vec::new())
+                    .expect("negative-priority effect constructs"),
+                "negative-priority result",
+            );
+            let effects = engine.objects[index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "temp_remove_killed_suspended_frame" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOK",
+                "Suspended temp-removal lifecycle",
+                r#"
+public func RunTempRemoval()
+{
+  LifecycleReset();
+  return CheckEffect("Pending", this(), 50, 0);
+}
+func FxAnchorEffect(string name, object target, int number, unused, a, b, c, d)
+{
+  LifecycleRecord(4, this());
+  return -3;
+}
+func FxHighestStop(object target, int number, int reason, bool temp)
+{
+  LifecycleRecord(1, this());
+  RemoveEffect("Suspended", target, 0, true);
+  return 0;
+}
+func FxSuspendedStop(object target, int number, int reason, bool temp)
+{
+  LifecycleRecord(2, this());
+  return 0;
+}
+func FxHighestStart(object target, int number, int temp)
+{
+  LifecycleRecord(3, this());
+  return 0;
+}
+"#,
+                &trace,
+            );
+            let object = engine
+                .spawn_object(SpawnConfig::new("ELOK"))
+                .expect("suspended-temp lifecycle carrier spawns");
+            let index = engine
+                .find_object_index(object)
+                .expect("suspended-temp lifecycle carrier exists");
+            engine.objects[index].state.effects = vec![
+                effect_lifecycle_entry("Anchor", 1, 100, 0, None, Some("ELOK")),
+                effect_lifecycle_entry("Suspended", 2, 200, 0, None, Some("ELOK")),
+                effect_lifecycle_entry("Highest", 3, 300, 0, None, Some("ELOK")),
+            ];
+            engine.rng = LcgRng::new(seed);
+            let result = effect_lifecycle_i32(
+                engine
+                    .call_object_function(index, "RunTempRemoval", Vec::new())
+                    .expect("suspended temp-removal recursion runs"),
+                "suspended temp-removal result",
+            );
+            let effects = engine.objects[index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "damage_live_mutation" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOF",
+                "Damage effect lifecycle",
+                r#"
+func FxFirstDamage(object target, int number, int change, int cause, int caused_by)
+{
+  LifecycleRecord(6, this());
+  RemoveEffect("Victim", target, 0, true);
+  AddEffect("Replacement", target, 150, 0, nil, ELOF);
+  return change + 1;
+}
+func FxReplacementDamage(object target, int number, int change, int cause, int caused_by)
+{
+  LifecycleRecord(6, this());
+  return change + 2;
+}
+"#,
+                &trace,
+            );
+            let object = engine
+                .spawn_object(SpawnConfig::new("ELOF"))
+                .expect("damage lifecycle carrier spawns");
+            let index = engine
+                .find_object_index(object)
+                .expect("damage lifecycle carrier exists");
+            engine.objects[index].state.effects = vec![
+                effect_lifecycle_entry("First", 1, 100, 0, None, Some("ELOF")),
+                effect_lifecycle_entry("Victim", 2, 200, 0, None, Some("ELOF")),
+            ];
+            effect_lifecycle_state(&mut engine, "LifecycleReset");
+            engine.rng = LcgRng::new(seed);
+            engine
+                .change_object_damage(index, 10, 0, OWNER_NONE)
+                .expect("damage lifecycle chain runs");
+            let result = engine.objects[index].state.damage;
+            let effects = engine.objects[index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "command_target_lost_silent" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOG",
+                "Lost command target lifecycle",
+                r#"
+public func Drop(object target)
+{
+  RemoveObject(target);
+  return 0;
+}
+func FxCommandedTimer(object target, int number, int time)
+{
+  LifecycleRecord(2, this());
+  return 0;
+}
+"#,
+                &trace,
+            );
+            let carrier = engine
+                .spawn_object(SpawnConfig::new("ELOG"))
+                .expect("command-target lifecycle carrier spawns");
+            let command_target = engine
+                .spawn_object(SpawnConfig::new("ELOG"))
+                .expect("effect command target spawns");
+            let carrier_index = engine
+                .find_object_index(carrier)
+                .expect("command-target lifecycle carrier exists");
+            let command_target_number = i32::try_from(command_target.as_u64())
+                .expect("effect command target number fits C4Object pointer slot");
+            engine.objects[carrier_index].state.effects = vec![effect_lifecycle_entry(
+                "Commanded",
+                1,
+                100,
+                0,
+                Some(command_target_number),
+                Some("ELOG"),
+            )];
+            effect_lifecycle_state(&mut engine, "LifecycleReset");
+            engine.rng = LcgRng::new(seed);
+            let result = effect_lifecycle_i32(
+                engine
+                    .call_object_function(
+                        carrier_index,
+                        "Drop",
+                        vec![ScriptValue::Object(command_target.as_u64())],
+                    )
+                    .expect("command-target removal runs"),
+                "command-target result",
+            );
+            let carrier_index = engine
+                .find_object_index(carrier)
+                .expect("command-target lifecycle carrier remains");
+            let effects = engine.objects[carrier_index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "timer_error_is_nil_after_side_effects" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOI",
+                "Effect callback error lifecycle",
+                r#"
+func FxErrorTimer(object target, int number, int time)
+{
+  LifecycleRecord(8, this());
+  FatalError("effect lifecycle timer failure");
+  return 0;
+}
+"#,
+                &trace,
+            );
+            let object = engine
+                .spawn_object(SpawnConfig::new("ELOI"))
+                .expect("effect-error lifecycle carrier spawns");
+            let index = engine
+                .find_object_index(object)
+                .expect("effect-error lifecycle carrier exists");
+            engine.objects[index].state.effects = vec![effect_lifecycle_entry(
+                "Error",
+                1,
+                100,
+                1,
+                None,
+                Some("ELOI"),
+            )];
+            effect_lifecycle_state(&mut engine, "LifecycleReset");
+            engine.rng = LcgRng::new(seed);
+            engine
+                .tick_without_snapshot()
+                .expect("effect timer errors are fail-safe");
+            let result = engine.objects[index].state.effects[0].priority;
+            let effects = engine.objects[index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        "object_command_target_start" => {
+            let mut engine = Engine::new();
+            register_effect_lifecycle_definition(
+                &mut engine,
+                "ELOJ",
+                "Object-commanded effect lifecycle",
+                r#"
+local command_state;
+
+public func RunCommand(object command_target)
+{
+  LifecycleReset();
+  return AddEffect("Command", this(), 100, 0, command_target, nil, 41, 42, 43, 44);
+}
+public func CommandState() { return command_state; }
+func FxCommandStart(object target, int number, int temp, int a, int b, int c, int d)
+{
+  LifecycleRecord(1, this());
+  command_state = 77;
+  return 0;
+}
+"#,
+                &trace,
+            );
+            let carrier = engine
+                .spawn_object(SpawnConfig::new("ELOJ"))
+                .expect("object-command lifecycle carrier spawns");
+            let command_target = engine
+                .spawn_object(SpawnConfig::new("ELOJ"))
+                .expect("object-command lifecycle receiver spawns");
+            let carrier_index = engine
+                .find_object_index(carrier)
+                .expect("object-command lifecycle carrier exists");
+            let command_index = engine
+                .find_object_index(command_target)
+                .expect("object-command lifecycle receiver exists");
+            engine.rng = LcgRng::new(seed);
+            engine
+                .call_object_function(
+                    carrier_index,
+                    "RunCommand",
+                    vec![ScriptValue::Object(command_target.as_u64())],
+                )
+                .expect("object-commanded effect starts");
+            let result = effect_lifecycle_i32(
+                engine
+                    .call_object_function(command_index, "CommandState", Vec::new())
+                    .expect("command target mutation reads"),
+                "object-command result",
+            );
+            let effects = engine.objects[carrier_index].state.effects.clone();
+            finish_effect_lifecycle_case(case, seed, result, &effects, &mut engine, &trace)
+        }
+        other => panic!("unhandled effect_lifecycle case `{other}`"),
+    }
 }
 
 /// Assert two values are equal, panicking with a precise first-divergence report.
@@ -4105,6 +4849,27 @@ fn parity_differential_matches_cpp_golden() {
                 "PARITY DIVERGENCE in `effect_execute` entry {idx} frame {frame} live effects"
             );
         }
+    }
+
+    // 0l-b. Complete the remaining C4Effect callback lifecycle against the
+    //     mechanically lifted constructor, Kill, ClearAll, DoDamage and
+    //     ClearPointers bodies (C4Effect.cpp:31-152,271-316,365-469). Each
+    //     callback records its exact receiver and parameter vector, performs
+    //     one synchronized Random(17) draw and mutates shared state. The
+    //     linked list projection then catches number reservation, priority /
+    //     timer state, live callback mutation and command-target loss in the
+    //     same row as callback ordering and RNG state.
+    for (idx, case) in golden["effect_lifecycle"]
+        .as_array()
+        .expect("effect_lifecycle golden section is an array")
+        .iter()
+        .enumerate()
+    {
+        let name = case["case"]
+            .as_str()
+            .expect("effect_lifecycle case has a name");
+        let rust = run_effect_lifecycle_case(name, i(case, "seed") as u32);
+        expect_json_eq("effect_lifecycle", idx, "row", case.clone(), rust);
     }
 
     // 0m. C4Object::AssignRemoval (C4Object.cpp:240-320), the object teardown.

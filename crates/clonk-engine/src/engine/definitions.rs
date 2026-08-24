@@ -1601,9 +1601,13 @@ impl Engine {
     ) -> Result<ObjectId, EngineError> {
         let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
         let result = (|| {
-            let (id, additional, nested_outcomes) =
+            let (id, additional, nested_outcomes, object_lists) =
                 self.spawn_single_inner(config, initial_info_physical)?;
-            self.process_spawn_queue_with_outcomes(additional, nested_outcomes)?;
+            self.process_spawn_queue_with_outcomes_inner(
+                additional,
+                nested_outcomes,
+                object_lists.into_iter().collect(),
+            )?;
             self.refresh_elimination_state();
             self.check_game_over()?;
             Ok(id)

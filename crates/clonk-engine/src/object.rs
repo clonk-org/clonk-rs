@@ -485,7 +485,11 @@ impl ObjectState {
         }
     }
 
-    fn apply_delta(&mut self, delta: &ObjectDelta, library: &ActionLibrary) -> ApplyDeltaOutcome {
+    pub(crate) fn apply_delta(
+        &mut self,
+        delta: &ObjectDelta,
+        library: &ActionLibrary,
+    ) -> ApplyDeltaOutcome {
         let previous_container = self.container;
         let mut container_change = None;
         let mut action_change = None;
@@ -3078,17 +3082,19 @@ impl Object {
         // Equal-priority nodes are newest-first. A fresh max+1 number still
         // inserts at the front, while a carried number (for example a denied
         // Kill victim) returns to its original position among its peers.
-        let priority = effect.priority.unsigned_abs();
         let mut insert_pos = 0;
-        while insert_pos < self.state.effects.len() {
-            let existing = &self.state.effects[insert_pos];
-            let existing_priority = existing.priority.unsigned_abs();
-            if existing_priority > priority
-                || (existing_priority == priority && existing.number < effect.number)
-            {
-                break;
+        if effect.priority > 0 {
+            let priority = effect.priority as u32;
+            while insert_pos < self.state.effects.len() {
+                let existing = &self.state.effects[insert_pos];
+                let existing_priority = existing.priority.unsigned_abs();
+                if existing_priority > priority
+                    || (existing_priority == priority && existing.number < effect.number)
+                {
+                    break;
+                }
+                insert_pos += 1;
             }
-            insert_pos += 1;
         }
         let inserted = effect.clone();
         self.state.effects.insert(insert_pos, effect);

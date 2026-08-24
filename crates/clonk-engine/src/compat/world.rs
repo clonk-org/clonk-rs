@@ -91,6 +91,21 @@ pub(crate) struct HostWorldObject {
     pub last_energy_loss_cause: i32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct EffectSpawnPreview {
+    pub base: HostWorldObject,
+    pub final_object: HostWorldObject,
+}
+
+/// Exact callback-final object-list state that cannot be reconstructed from
+/// deferred spawn and object-update channels without losing link chronology.
+#[derive(Debug, Clone)]
+pub(crate) struct EffectObjectListPreview {
+    pub(crate) master_order: Vec<ObjectId>,
+    pub(crate) inactive_order: Vec<ObjectId>,
+    pub(crate) sectors: Option<SectorMap>,
+}
+
 /// The DefCore fields the blast/fire chain consults: the host-path
 /// incinerate (C4Object::Blast, C4Object.cpp:1420-1423 + the fxFireStart
 /// core, C4Effect.cpp:560-641) and the GetDefCoreVal reflection entries
@@ -2152,11 +2167,18 @@ pub struct HostWorldContext {
     /// an id-specific lookup materializes only that object, while enumeration
     /// fills the complete map on demand.
     pub(crate) object_store: RefCell<Rc<HostWorldObjectStore>>,
+    /// Non-Send previews produced by the currently executing Fx callback.
+    /// Only native effect event runners request this channel; ordinary host
+    /// calls leave it empty and continue returning the Send copy-out outcome.
+    effect_spawn_previews: Rc<RefCell<Vec<EffectSpawnPreview>>>,
     lazy_world: Option<LazyHostWorldProvider>,
     /// `Game.Objects` from First -> Next. The engine's `exec_list` is this
     /// order reversed; only APIs such as C4Game::FindBase explicitly walk
     /// the forward master list (C4Game.cpp:3732-3744).
     pub(crate) master_order: OnceCell<Rc<Vec<ObjectId>>>,
+    /// `Game.Objects.InactiveObjects` from First -> Next. Unlike the master
+    /// list this is small and copied eagerly into callback worlds.
+    inactive_order: Rc<Vec<ObjectId>>,
     /// Uninitialized until a host API actually reads or mutates terrain.
     landscape: OnceCell<Option<Arc<Landscape>>>,
     /// Fully defaulted, post-load `Game.C4S` reflection data. This remains
@@ -2248,6 +2270,10 @@ pub struct HostWorldContext {
     /// that name crew ids without providing corresponding world objects.
     pub(crate) crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
+    /// First storage index after the paused Engine object table. Deferred
+    /// callback spawns consume these monotonically until copy-out materializes
+    /// them at the same tail positions.
+    next_storage_index: usize,
     team_home_base_rule: bool,
     pub(crate) needed_material_strings: Rc<crate::NeededMaterialStrings>,
     /// Process-local ConstructionCheck feedback templates
@@ -2444,8 +2470,10 @@ impl Default for HostWorldContext {
                 complete: true,
                 ..HostWorldObjectStore::default()
             })),
+            effect_spawn_previews: Rc::new(RefCell::new(Vec::new())),
             lazy_world: None,
             master_order: OnceCell::from(Rc::new(Vec::new())),
+            inactive_order: Rc::new(Vec::new()),
             landscape: OnceCell::new(),
             scenario_values: Rc::new(ScenarioValueStore::default()),
             scenario_sections: Rc::new(HashSet::new()),
@@ -2481,6 +2509,7 @@ impl Default for HostWorldContext {
             active_message_board_input: None,
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
+            next_storage_index: 0,
             league_game: false,
             game_tick_delay_ms: Rc::new(Cell::new(crate::DEFAULT_GAME_TICK_DELAY_MS)),
             game_tick_delay_revision: Rc::new(Cell::new(0)),
@@ -2582,6 +2611,71 @@ impl HostWorldContext {
     }
 
     pub(crate) fn seed_object(&mut self, index: usize, object: HostWorldObject) {
+        self.seed_new_object(index, object);
+    }
+
+    pub(crate) fn publish_effect_spawn_previews(&self, objects: Vec<EffectSpawnPreview>) {
+        *self.effect_spawn_previews.borrow_mut() = objects;
+    }
+
+    pub(crate) fn take_effect_spawn_previews(&self) -> Vec<EffectSpawnPreview> {
+        std::mem::take(&mut *self.effect_spawn_previews.borrow_mut())
+    }
+
+    /// Publish objects created by one deferred effect callback into the live
+    /// host projection used by the next callback. They keep their exact
+    /// callback-built preview; `SpawnConfig` remains the authoritative
+    /// copy-out representation.
+    pub(crate) fn seed_pending_objects(&mut self, objects: Vec<EffectSpawnPreview>) {
+        for preview in objects {
+            self.materialize_sector_map_for_incremental_update();
+            let record = host_sector_record(&preview.final_object, self.definitions.as_ref());
+            let id = preview.base.id;
+            let status = preview.base.status();
+            let index = self.next_storage_index;
+            self.next_storage_index = self
+                .next_storage_index
+                .checked_add(1)
+                .expect("host world storage index overflow");
+            self.seed_object_inner(index, preview.base);
+            let master_order = self.preview_master_status_change(id, status);
+            self.seed_object_inner(index, preview.final_object);
+            let mut cache = self.sectors.borrow_mut();
+            if let Some(sectors) = cache.as_mut() {
+                let sectors = Rc::make_mut(sectors);
+                sectors.set_master_order(master_order);
+                if let Some(record) = record {
+                    sectors.add(record);
+                }
+            }
+        }
+    }
+
+    /// Replace the threaded callback world's master-list view with the exact
+    /// order produced by the preceding synchronous effect callback. Spawn
+    /// projections are materialized separately; this step restores the raw
+    /// link order after callback-final mutations have been replayed.
+    pub(crate) fn install_effect_object_lists(&mut self, preview: EffectObjectListPreview) {
+        let EffectObjectListPreview {
+            master_order,
+            inactive_order,
+            sectors,
+        } = preview;
+        self.master_order = OnceCell::from(Rc::new(master_order.clone()));
+        self.inactive_order = Rc::new(inactive_order);
+        if let Some(mut sectors) = sectors {
+            sectors.set_master_order(master_order);
+            self.sectors = RefCell::new(Some(Rc::new(sectors)));
+            self.borrowed_sector_map_valid.set(false);
+        } else {
+            let mut cache = self.sectors.borrow_mut();
+            if let Some(sectors) = cache.as_mut() {
+                Rc::make_mut(sectors).set_master_order(master_order);
+            }
+        }
+    }
+
+    fn seed_new_object(&mut self, index: usize, object: HostWorldObject) {
         // Public seeding adds an object absent from the source. NewObject
         // links only that target into C4LSectors before its lifecycle
         // callbacks (C4Game.cpp:1121-1142; C4GameObjects.cpp:54-70), so
@@ -2610,6 +2704,12 @@ impl HostWorldContext {
         if !store.order.contains(&id) {
             store.record_materialized(id);
         }
+        self.next_storage_index = self.next_storage_index.max(index.saturating_add(1));
+    }
+
+    pub(crate) fn with_next_storage_index(mut self, next_storage_index: usize) -> Self {
+        self.next_storage_index = next_storage_index;
+        self
     }
 
     pub(crate) fn with_definition_tables(
@@ -2823,8 +2923,10 @@ impl HostWorldContext {
                 order_dirty: false,
                 complete: true,
             })),
+            effect_spawn_previews: Rc::new(RefCell::new(Vec::new())),
             lazy_world: None,
             master_order: OnceCell::from(Rc::clone(&order)),
+            inactive_order: Rc::new(Vec::new()),
             landscape: OnceCell::from(landscape.map(Arc::new)),
             scenario_values,
             scenario_sections: Rc::new(HashSet::new()),
@@ -2865,6 +2967,7 @@ impl HostWorldContext {
             teams: Rc::new(Vec::new()),
             crew_selection: Rc::new(crew_selection),
             next_object_id,
+            next_storage_index: order.len(),
             team_home_base_rule,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
             construction_check_strings: Rc::new(crate::ConstructionCheckStrings::default()),
@@ -3968,6 +4071,9 @@ impl HostWorldContext {
         if let Some(construction) = update.construction {
             object.construction = construction.max(0);
         }
+        if let Some(damage) = update.damage {
+            object.damage = damage.max(0);
+        }
         if let Some(container) = update.container {
             object.container = container;
         }
@@ -3993,6 +4099,9 @@ impl HostWorldContext {
             }
             if let Some(construction) = update.construction {
                 state.construction = construction.max(0);
+            }
+            if let Some(damage) = update.damage {
+                state.damage = damage.max(0);
             }
             if let Some(container) = update.container {
                 state.container = container;
@@ -4245,11 +4354,27 @@ impl HostWorldContext {
             .as_slice()
     }
 
+    pub(crate) fn inactive_object_ids(&self) -> &[ObjectId] {
+        self.inactive_order.as_slice()
+    }
+
+    pub(crate) fn effect_sector_map_preview(&self) -> Option<SectorMap> {
+        self.with_read_sector_map(Clone::clone)
+    }
+
     pub(crate) fn with_master_order<I>(mut self, order: I) -> Self
     where
         I: IntoIterator<Item = ObjectId>,
     {
         self.master_order = OnceCell::from(Rc::new(order.into_iter().collect()));
+        self
+    }
+
+    pub(crate) fn with_inactive_order<I>(mut self, order: I) -> Self
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        self.inactive_order = Rc::new(order.into_iter().collect());
         self
     }
 
