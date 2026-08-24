@@ -11029,6 +11029,35 @@ fn runtime_network_role_requires_consistent_manager_identity_and_mode() {
 }
 
 #[test]
+fn running_host_parameters_publish_the_initialized_startup_player_count() {
+    // InitGame replaces StartupPlayerCount from the synchronized PlayerInfos
+    // at frame zero, and the landscape consumes that retained parameter for
+    // MapPlayerExtend (src/C4Game.cpp:2456;
+    // src/C4Landscape.cpp:519-538).
+    let mut app = new_state_only_running_sandbox_app();
+    let startup_player_count = app.engine.freeze_startup_player_count(2);
+    main_assert_eq!(startup_player_count => 2);
+    configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
+    let (mut snapshot, reference) = default_exact_host_reference();
+    app.control_clients
+        .replace_snapshot(snapshot.parameters.clients.clients.clone());
+    snapshot.parameters.startup_player_count = 0;
+    app.host_join_snapshot = Some(snapshot);
+    app.advertised_game_reference = Some(reference);
+
+    app.publish_running_host_reference();
+
+    main_assert_eq!(
+        app.advertised_game_reference
+            .as_ref()
+            .test_value()
+            .parameters()
+            .startup_player_count =>
+        startup_player_count
+    );
+}
+
+#[test]
 fn game_execution_retires_runtime_dynamic_after_its_control_tick() {
     // C4Network2::Execute removes a dynamic once ControlTick exceeds
     // iDynamicTick (src/C4Network2.cpp:679-696), and C4Game::Execute calls
