@@ -2393,6 +2393,7 @@ impl GameApp {
         self.network_client_activity.clear();
         self.pending_network_join = None;
         self.pending_network_join_data = None;
+        self.pending_round_restart_join_data = false;
         self.initial_lobby_status_ack_pending = false;
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;

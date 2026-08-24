@@ -657,6 +657,9 @@ pub(crate) enum ClientRouteEvent {
 
 pub(crate) enum ClientRouteRead {
     Packet {
+        /// The live route that delivered this packet. PostMortem replay has
+        /// no current ingress route and therefore reports `None`.
+        route_id: Option<u32>,
         peer_id: ClientId,
         packet: crate::transport::InboundPacket,
         peer_addr: Option<SocketAddr>,
@@ -691,6 +694,12 @@ pub(crate) struct ClientRouteManager {
         crate::transport::InboundPacket,
         Option<SocketAddr>,
     )>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RoundRestartRetiredHostRoutes {
+    pub(crate) tcp: bool,
+    pub(crate) udp: bool,
 }
 
 impl ClientRouteManager {
@@ -990,7 +999,9 @@ impl ClientRouteManager {
         } else {
             crate::voice::VoiceRouteAuthentication::default()
         };
-        let voice_announcement = voice_auth.announcement();
+        let capability_announcement = voice_auth
+            .announcement()
+            .unwrap_or_else(crate::PortCapabilities::supported_without_voice);
         let replaced = self.routes.insert(
             local_connection_id,
             ClientRouteEntry {
@@ -1049,17 +1060,21 @@ impl ClientRouteManager {
                 .outbound
                 .retire();
         } else if peer_is_port {
-            if let Some(announcement) = voice_announcement {
-                let route = self
-                    .routes
-                    .get(&local_connection_id)
-                    .expect("new client route exists");
-                if let Some(cookie) = route.voice_auth.receive_cookie() {
-                    route.outbound.set_voice_receive_cookie(cookie);
-                }
-                let _ = route.outbound.send(ClientRouteCommand::Message(
-                    ControlMessage::PortCapabilities(announcement),
-                ));
+            let route = self
+                .routes
+                .get(&local_connection_id)
+                .expect("new client route exists");
+            if let Some(cookie) = route.voice_auth.receive_cookie() {
+                route.outbound.set_voice_receive_cookie(cookie);
+            }
+            let announced = route
+                .outbound
+                .send(ClientRouteCommand::Message(
+                    ControlMessage::PortCapabilities(capability_announcement),
+                ))
+                .is_ok();
+            if announced && peer_id == HOST_CLIENT_ID {
+                self.control_wait_attribution_announced_to_host = true;
             }
         }
         !peer_was_connected && new_route_wins
@@ -1133,9 +1148,11 @@ impl ClientRouteManager {
                 route.peer_id == HOST_CLIENT_ID && route.peer_is_port && !route.outbound.is_closed()
             });
             if host_is_port {
-                let capabilities = crate::PortCapabilities::from_bits(
-                    crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION,
-                );
+                // A capability packet is a complete declaration, not an
+                // incremental bit. Re-announcing only this late-discovered
+                // use would erase ROUND_RESTART_V2 at the host after the first
+                // running-game control packet.
+                let capabilities = crate::PortCapabilities::supported_without_voice();
                 self.try_send_to(
                     HOST_CLIENT_ID,
                     ControlMessage::PortCapabilities(capabilities),
@@ -1144,6 +1161,32 @@ impl ClientRouteManager {
             self.control_wait_attribution_announced_to_host = true;
         }
         self.try_send_to(HOST_CLIENT_ID, message)
+    }
+
+    pub(crate) fn try_send_on_route(
+        &self,
+        route_id: u32,
+        message: ControlMessage,
+    ) -> Result<(), TransportError> {
+        let outbound = self
+            .routes
+            .get(&route_id)
+            .filter(|route| route.peer_id == HOST_CLIENT_ID)
+            .map(|route| route.outbound.clone())
+            .ok_or_else(|| {
+                TransportError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "retained host route is no longer accepted",
+                ))
+            })?;
+        outbound
+            .send(ClientRouteCommand::Message(message))
+            .map_err(|_| {
+                TransportError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "retained host route closed while sending",
+                ))
+            })
     }
 
     #[cfg(test)]
@@ -1254,6 +1297,43 @@ impl ClientRouteManager {
                     )))
                 }
             };
+        }
+    }
+
+    pub(crate) async fn flush_route(&self, route_id: u32) -> Result<(), TransportError> {
+        let outbound = self
+            .routes
+            .get(&route_id)
+            .filter(|route| route.peer_id == HOST_CLIENT_ID)
+            .map(|route| route.outbound.clone())
+            .ok_or_else(|| {
+                TransportError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "retained host route is no longer accepted",
+                ))
+            })?;
+        let (completion, completed) = oneshot::channel();
+        outbound
+            .send(ClientRouteCommand::Flush(completion))
+            .map_err(|_| {
+                TransportError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "retained host route closed before flushing",
+                ))
+            })?;
+        match tokio::time::timeout(CLIENT_ROUTE_RETRY_INTERVAL, completed).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "retained host route closed before flushing queued messages",
+            ))),
+            Err(_) => {
+                outbound.retire();
+                Err(TransportError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "retained host route timed out while flushing",
+                )))
+            }
         }
     }
 
@@ -1529,6 +1609,53 @@ impl ClientRouteManager {
             .retain(|(replay_peer_id, _, _)| *replay_peer_id != peer_id);
     }
 
+    /// Starts a new round on one already-accepted host route.
+    ///
+    /// Packets from independent TCP, UDP, and mesh tasks share one logical
+    /// client queue, so FIFO ordering on the marker route cannot fence bytes
+    /// already in flight on another route. Retire every other route and drop
+    /// all PostMortem replay state before the fresh JoinData is admitted.
+    pub(crate) fn retain_round_restart_route(
+        &mut self,
+        route_id: u32,
+    ) -> Option<RoundRestartRetiredHostRoutes> {
+        if self
+            .routes
+            .get(&route_id)
+            .is_none_or(|route| route.peer_id != HOST_CLIENT_ID || route.outbound.is_closed())
+        {
+            return None;
+        }
+
+        let mut retired_host_routes = RoundRestartRetiredHostRoutes::default();
+        let retired_route_ids = self
+            .routes
+            .keys()
+            .copied()
+            .filter(|candidate| *candidate != route_id)
+            .collect::<Vec<_>>();
+        for retired_route_id in retired_route_ids {
+            if let Some(route) = self.routes.remove(&retired_route_id) {
+                if route.peer_id == HOST_CLIENT_ID {
+                    match route.protocol {
+                        crate::NetworkProtocol::Tcp => retired_host_routes.tcp = true,
+                        crate::NetworkProtocol::Udp => retired_host_routes.udp = true,
+                        _ => {}
+                    }
+                }
+                drop(route.outbound.retire_and_take_post_failure());
+            }
+        }
+        self.closed_routes = crate::post_mortem::ClosedConnectionRouter::default();
+        self.closed_route_peers.clear();
+        self.pending_post_mortems.clear();
+        self.replay_packets.clear();
+        self.peer_ping_ms
+            .retain(|peer_id, _| *peer_id == HOST_CLIENT_ID);
+        self.control_send_time_dirty = true;
+        Some(retired_host_routes)
+    }
+
     pub(crate) fn retire_peer_gracefully(&mut self, peer_id: ClientId) {
         for route in self.routes.values() {
             if route.peer_id == peer_id {
@@ -1681,6 +1808,7 @@ impl ClientRouteManager {
         loop {
             if let Some(packet) = self.replay_packets.pop_front() {
                 return Ok(ClientRouteRead::Packet {
+                    route_id: None,
                     peer_id: packet.0,
                     packet: packet.1,
                     peer_addr: packet.2,
@@ -1753,6 +1881,7 @@ impl ClientRouteManager {
                         }
                     }
                     return Ok(ClientRouteRead::Packet {
+                        route_id: Some(route_id),
                         peer_id,
                         packet,
                         peer_addr,

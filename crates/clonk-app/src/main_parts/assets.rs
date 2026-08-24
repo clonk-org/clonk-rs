@@ -5879,6 +5879,105 @@ impl AdmissionResourceStore {
         }
     }
 
+    /// Replaces one finished round's catalog with the freshly synchronized
+    /// JoinData catalog. Player files are session identities and may be reused
+    /// when their complete cores still match; every round-owned resource is
+    /// rearmed even when its numeric ID was reused.
+    pub(crate) fn reconcile_join_data_resources(
+        &mut self,
+        join_data: &clonk_network::JoinDataEnvelope,
+    ) {
+        self.reconcile_round_resources(
+            &join_data.parameters.scenario,
+            &join_data.parameters.game_resources,
+            &join_data.dynamic,
+            &join_data.parameters.player_infos,
+        );
+    }
+
+    pub(crate) fn reconcile_host_join_snapshot(
+        &mut self,
+        snapshot: &clonk_network::HostJoinSnapshot,
+    ) {
+        self.reconcile_round_resources(
+            &snapshot.parameters.scenario,
+            &snapshot.parameters.game_resources,
+            &snapshot.dynamic,
+            &snapshot.parameters.player_infos,
+        );
+    }
+
+    fn reconcile_round_resources(
+        &mut self,
+        scenario: &clonk_engine::NetworkResourceCore,
+        game_resources: &[clonk_engine::NetworkResourceCore],
+        dynamic: &clonk_engine::NetworkResourceCore,
+        player_infos: &clonk_network::PlayerInfoListSnapshot,
+    ) {
+        let mut next_cores = BTreeMap::new();
+        for core in std::iter::once(scenario)
+            .chain(game_resources)
+            .chain(std::iter::once(dynamic))
+        {
+            next_cores.insert(core.id, core.clone());
+        }
+        let mut reusable_player_ids = HashSet::new();
+        for player in player_infos
+            .clients
+            .iter()
+            .flat_map(|client| &client.players)
+            .filter(|player| {
+                player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0
+                    && player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0
+                    && player.flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE == 0
+            })
+        {
+            let Some(core) = player.resource.as_ref() else {
+                continue;
+            };
+            next_cores.insert(core.id, core.clone());
+            if core.resource_type == clonk_network::HostResourceType::Player as u8 {
+                reusable_player_ids.insert(core.id);
+            }
+        }
+
+        let previous_cores = std::mem::take(&mut self.resource_cores);
+        let mut previous_resources = std::mem::take(&mut self.resources);
+        let mut next_resources = BTreeMap::new();
+        let mut next_present_percent = BTreeMap::new();
+        for (&resource_id, core) in &next_cores {
+            let retained_player = reusable_player_ids.contains(&resource_id)
+                && previous_cores.get(&resource_id) == Some(core);
+            let retained_complete = retained_player
+                .then(|| previous_resources.remove(&resource_id))
+                .flatten()
+                .and_then(|state| match state {
+                    AdmissionResourceState::Complete { path, local, .. } => {
+                        Some(AdmissionResourceState::Complete {
+                            path,
+                            removed: false,
+                            local,
+                        })
+                    }
+                    AdmissionResourceState::Loading { .. }
+                    | AdmissionResourceState::Unavailable(_) => None,
+                });
+            if let Some(state) = retained_complete {
+                next_resources.insert(resource_id, state);
+                next_present_percent.insert(resource_id, 100);
+            } else {
+                next_resources.insert(
+                    resource_id,
+                    AdmissionResourceState::Loading { removed: false },
+                );
+                next_present_percent.insert(resource_id, 0);
+            }
+        }
+        self.resource_cores = next_cores;
+        self.resources = next_resources;
+        self.present_percent = next_present_percent;
+    }
+
     pub(crate) fn register_player_info_resources(
         &mut self,
         players: &[clonk_engine::ControlPlayerInfoEntry],

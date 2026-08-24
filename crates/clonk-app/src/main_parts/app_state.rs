@@ -716,6 +716,10 @@ pub(crate) struct GameApp {
     /// request observed before that boundary.
     pub(crate) pending_runtime_dynamic_request: Option<PendingRuntimeDynamicRequest>,
     pub(crate) pending_network_join_data: Option<clonk_network::JoinDataEnvelope>,
+    /// Armed after a retained-session restart marker and consumed by the next
+    /// JoinData. Initial admission also emits JoinData, so the marker must be
+    /// tracked explicitly before acknowledging the lower restart fence.
+    pub(crate) pending_round_restart_join_data: bool,
     pub(crate) initial_lobby_status_ack_pending: bool,
     pub(crate) client_start_barrier: ClientStartBarrier,
     pub(crate) pending_client_start_status: Option<clonk_network::NetworkStatus>,

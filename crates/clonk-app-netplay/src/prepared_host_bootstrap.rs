@@ -456,6 +456,48 @@ impl PreparedHostBootstrap {
         &self.host_config
     }
 
+    /// Replaces the lobby-owned portions of the prepared JoinData before this
+    /// bootstrap is claimed by a retained host session.
+    ///
+    /// A round restart reuses the socket session, so its connected-client and
+    /// PlayerInfo registries outlive the scenario resources prepared here.
+    /// Keep the fresh scenario/dynamic/restore state, but install those live
+    /// registries into both the wire snapshot and the team-assignment state
+    /// that the next lobby continues to mutate. The caller may replace remote
+    /// PlayerInfo packets only: the host packet remains tied to this
+    /// bootstrap's local resource, alternate-color and identity sidecars.
+    pub fn replace_initial_lobby_state(
+        &mut self,
+        clients: JoinClientRegistrySnapshot,
+        player_infos: PlayerInfoListSnapshot,
+        teams: InitialNetworkTeamMetadata,
+    ) -> Result<(), PrepareHostBootstrapError> {
+        let expected_host_player_info = ClientPlayerInfosSnapshot {
+            client_id: self.initial_host_player_info_control.client_id,
+            flags: self.initial_host_player_info_control.flags & !CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            players: self.initial_host_player_info_control.players.clone(),
+        };
+        let snapshot = self
+            .host_config
+            .initial_join_snapshot
+            .as_mut()
+            .ok_or(PrepareHostBootstrapError::MissingJoinSnapshot)?;
+        let mut host_player_infos = player_infos
+            .clients
+            .iter()
+            .filter(|client| client.client_id == expected_host_player_info.client_id);
+        if host_player_infos.next() != Some(&expected_host_player_info)
+            || host_player_infos.next().is_some()
+        {
+            return Err(PrepareHostBootstrapError::RetainedHostPlayerInfoMismatch);
+        }
+        snapshot.parameters.clients = clients;
+        snapshot.parameters.player_infos = player_infos;
+        snapshot.parameters.teams = join_team_list_snapshot(teams.clone());
+        self.runtime_team_metadata = teams;
+        Ok(())
+    }
+
     /// Runtime state compiled from the already-opened `Game.txt`, or the
     /// InitSystem defaults retained when that component was absent. GO must
     /// consume this frozen value rather than reopening a mutable source group.
@@ -1029,6 +1071,8 @@ pub enum PrepareHostBootstrapError {
     InvalidGameRuntime(#[from] InitialNetworkGameApplyError),
     #[error("the prepared host has no initial JoinData snapshot")]
     MissingJoinSnapshot,
+    #[error("retained lobby state must preserve the prepared host PlayerInfo packet")]
+    RetainedHostPlayerInfoMismatch,
     #[error(
         "no valid generated landscape was found in {attempts} seeds starting at {initial_seed}"
     )]

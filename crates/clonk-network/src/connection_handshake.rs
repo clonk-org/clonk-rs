@@ -652,7 +652,10 @@ where
             // Likewise for the session-preserving notice: this connection has
             // no round yet, so there is nothing to return to a lobby. The join
             // in progress carries on into whichever round the host is building.
-            ControlMessage::HostRestartLobby => continue,
+            ControlMessage::HostRestartLobby { .. } => continue,
+            // An acknowledgement is meaningful only after the retained
+            // client's fresh JoinData has been installed.
+            ControlMessage::RoundRestartAck { .. } => continue,
             ControlMessage::ControlWaitAttribution(_) => continue,
             ControlMessage::JoinData(join_data) => {
                 let remote_connection_id = connection.remote_connection_id().ok_or(
@@ -846,7 +849,8 @@ fn packet_type(message: &ControlMessage) -> u8 {
     match message {
         ControlMessage::PortCapabilities(_) => crate::PID_PORT_CAPABILITIES,
         ControlMessage::HostRestarting { .. } => crate::PID_PORT_HOST_RESTARTING,
-        ControlMessage::HostRestartLobby => crate::PID_PORT_HOST_RESTART_LOBBY,
+        ControlMessage::HostRestartLobby { .. } => crate::PID_PORT_HOST_RESTART_LOBBY,
+        ControlMessage::RoundRestartAck { .. } => crate::PID_PORT_ROUND_RESTART_ACK,
         ControlMessage::ControlWaitAttribution(_) => crate::PID_PORT_CONTROL_WAIT_ATTRIBUTION,
         ControlMessage::Ping(_) => 0x00,
         ControlMessage::Pong(_) => 0x01,
@@ -1241,7 +1245,8 @@ fn packet_name(message: &ControlMessage) -> &'static str {
     match message {
         ControlMessage::PortCapabilities(_) => "PID_PortCapabilities",
         ControlMessage::HostRestarting { .. } => "PID_PortHostRestarting",
-        ControlMessage::HostRestartLobby => "PID_PortHostRestartLobby",
+        ControlMessage::HostRestartLobby { .. } => "PID_PortHostRestartLobby",
+        ControlMessage::RoundRestartAck { .. } => "PID_PortRoundRestartAck",
         ControlMessage::ControlWaitAttribution(_) => "PID_PortControlWaitAttribution",
         ControlMessage::Ping(_) => "PID_Ping",
         ControlMessage::Pong(_) => "PID_Pong",

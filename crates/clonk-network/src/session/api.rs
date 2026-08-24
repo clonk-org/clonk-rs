@@ -674,6 +674,10 @@ pub(crate) fn synthetic_join_snapshot(
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    /// The retained host session has committed a replacement round and all
+    /// earlier round-scoped events have been emitted. Consumers use this as a
+    /// queue fence before applying the fresh lobby bootstrap.
+    RoundRestarted,
     /// Complete current address list for the host client after an
     /// AddAddrFromPuncher update. Reference invalidation waits for AssID.
     LocalAddressesChanged {
@@ -833,8 +837,9 @@ pub enum HostCommand {
         rejoin_seconds: u16,
         completion: oneshot::Sender<()>,
     },
-    BroadcastHostRestartLobby {
-        completion: oneshot::Sender<()>,
+    RestartRoundInLobby {
+        config: Box<HostConfig>,
+        completion: oneshot::Sender<Result<(), String>>,
     },
     SubmitPacket {
         delivery: ControlDelivery,
@@ -1032,18 +1037,24 @@ impl HostHandle {
         broadcast.await.map_err(|_| HostError::HostLoopGone)
     }
 
-    /// Tells every connected client that the round has restarted while this
-    /// session stays up, so each returns to the lobby on its existing
-    /// connection. Resolves once the notice is queued on every route, which is
-    /// what orders it ahead of the lobby state the host publishes next. See
-    /// [`crate::host_restart`].
-    pub async fn broadcast_host_restart_lobby(&self) -> Result<(), HostError> {
-        let (completion, broadcast) = oneshot::channel();
+    /// Replaces the synchronized round bootstrap while retaining every live
+    /// client and one FIFO route per client. Auxiliary routes are allowed to
+    /// reconnect without repeating admission. The restart marker and each
+    /// client's fresh JoinData are queued by one host-loop operation, so no
+    /// other command can interleave between them.
+    pub async fn restart_round_in_lobby(&self, config: HostConfig) -> Result<(), HostError> {
+        let (completion, restarted) = oneshot::channel();
         self.command_tx
-            .send(HostCommand::BroadcastHostRestartLobby { completion })
+            .send(HostCommand::RestartRoundInLobby {
+                config: Box::new(config),
+                completion,
+            })
             .await
             .map_err(|_| HostError::HostLoopGone)?;
-        broadcast.await.map_err(|_| HostError::HostLoopGone)
+        restarted
+            .await
+            .map_err(|_| HostError::HostLoopGone)?
+            .map_err(HostError::Resource)
     }
 
     pub async fn change_status(&self, status: NetworkStatus) -> Result<(), HostError> {
@@ -1490,6 +1501,8 @@ pub enum ClientError {
     Handshake(String),
     #[error("client resource publication failed: {0}")]
     Resource(String),
+    #[error("could not acknowledge the retained round restart: {0}")]
+    RoundRestart(String),
     #[error("failed to notify host before leaving: {0}")]
     GracefulPart(String),
     #[error("client loop terminated unexpectedly")]
@@ -1581,6 +1594,11 @@ pub enum ClientEvent {
     /// disconnect follows and the client re-enters the lobby on the connection
     /// it already has. See [`crate::host_restart`].
     HostRestartLobby,
+    /// Fresh synchronized bootstrap for the retained session's next round.
+    /// This is accepted exactly once after [`Self::HostRestartLobby`].
+    JoinData {
+        join_data: Box<JoinDataEnvelope>,
+    },
     UnhandledPacket {
         packet_type: u8,
     },
@@ -1592,6 +1610,9 @@ pub enum ClientEvent {
 /// Commands available to a connected client.
 #[derive(Debug)]
 pub enum ClientCommand {
+    AcknowledgeRoundRestart {
+        completion: oneshot::Sender<Result<(), String>>,
+    },
     SubmitStatusAck(NetworkStatus),
     SubmitReadyCheck(ReadyCheckPacket),
     RequestActivation(i32),
@@ -1733,6 +1754,20 @@ impl ClientHandle {
 
     pub fn take_join_data(&mut self) -> Option<JoinDataEnvelope> {
         self.join_data.take()
+    }
+
+    /// Releases the host's retained-session ingress fence after the runtime
+    /// has consumed the fresh JoinData and reset its round-scoped queues.
+    pub async fn acknowledge_round_restart(&self) -> Result<(), ClientError> {
+        let (completion, acknowledged) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::AcknowledgeRoundRestart { completion })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        acknowledged
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+            .map_err(ClientError::RoundRestart)
     }
 
     pub async fn submit_resource(&self, packet: ResourcePacket) -> Result<(), ClientError> {

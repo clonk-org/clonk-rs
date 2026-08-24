@@ -647,6 +647,42 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
 }
 
 #[test]
+fn retained_lobby_replacement_rejects_a_different_host_player_packet() {
+    let fixture = minimal_install(None);
+    let mut prepared = prepare(&fixture, &[]).expect("prepare the host scenario");
+    let snapshot = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .clone();
+    let clients = snapshot.parameters.clients.clone();
+    let mut player_infos = snapshot.parameters.player_infos.clone();
+    player_infos
+        .clients
+        .iter_mut()
+        .find(|client| client.client_id == 0)
+        .expect("prepared host PlayerInfo packet")
+        .players
+        .push(clonk_engine::ControlPlayerInfoEntry {
+            id: 77,
+            ..Default::default()
+        });
+    let teams = prepared.runtime_team_metadata().clone();
+
+    let error = prepared
+        .replace_initial_lobby_state(clients, player_infos, teams)
+        .expect_err("retained state cannot contradict the prepared host identity sidecars");
+
+    assert!(
+        error
+            .to_string()
+            .contains("prepared host PlayerInfo packet"),
+        "unexpected validation error: {error}"
+    );
+}
+
+#[test]
 fn prepared_clones_share_one_claim_of_the_loaded_scenario() {
     // C4Game owns one C4S member: OpenScenario loads it before InitNetworkHost,
     // and the same loaded value survives the lobby and is consumed by InitGame

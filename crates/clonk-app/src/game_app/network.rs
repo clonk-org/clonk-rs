@@ -3124,6 +3124,7 @@ impl GameApp {
             &join_data.parameters.league_address,
         );
         self.pending_network_join_data = None;
+        self.pending_round_restart_join_data = false;
         self.mode = AppMode::Loading;
         Ok(())
     }
@@ -3680,6 +3681,7 @@ impl GameApp {
         };
         let projected = clonk_script::c4_string_from_bytes(value);
         self.persist_game_option_text("Network", "Comment", &projected);
+        self.scenario_game_options.set_comment(projected);
         let password_needed = self
             .advertised_game_reference
             .as_ref()
@@ -3703,6 +3705,8 @@ impl GameApp {
             tracing::error!(%error, "failed to update chat-command host password");
             return;
         }
+        self.scenario_game_options
+            .set_password(clonk_script::c4_string_from_bytes(value));
         let comment = self
             .advertised_game_reference
             .as_ref()
@@ -3902,6 +3906,15 @@ impl GameApp {
                     }
                 }
                 if self.classic_host_lobby_active() {
+                    if let NetworkEvent::ScheduledSync { tick, controls } = &event {
+                        // A lobby is a frozen control boundary, not a place
+                        // where synchronized membership controls disappear.
+                        // The retained worker executes activation immediately
+                        // at this tick; mirror that execution in the app so
+                        // its roster is ready for the next Go barrier too.
+                        self.apply_synchronized_controls(*tick, controls.clone())?;
+                        continue;
+                    }
                     if let NetworkEvent::LeagueUpdate(response) = &event {
                         self.apply_league_update_response(response.clone());
                         continue;
@@ -3960,8 +3973,12 @@ impl GameApp {
                         NetworkEvent::JoinDataNeeded { .. } => None,
                         NetworkEvent::PlayerInfoUpdateRequest { .. } => None,
                         NetworkEvent::PreexecutedPlayerInfoEcho { .. } => None,
-                        NetworkEvent::ReadyTick { .. } => Some("ready control tick"),
-                        NetworkEvent::ScheduledSync { .. } => Some("scheduled control"),
+                        // A retained-session restart can enter this lobby with
+                        // the finished round's last ready frame still queued.
+                        // It belongs to no lobby child and is discarded just
+                        // like the ordinary non-running path.
+                        NetworkEvent::ReadyTick { .. } => None,
+                        NetworkEvent::ScheduledSync { .. } => None,
                         NetworkEvent::DirectControl(
                             NetworkControl::PlayerInfo(_)
                             | NetworkControl::ClientJoin(_)
@@ -3975,6 +3992,7 @@ impl GameApp {
                         NetworkEvent::PeerConnectionFailed { .. } => None,
                         NetworkEvent::HostRestarting { .. } => None,
                         NetworkEvent::HostRestartLobby => None,
+                        NetworkEvent::RoundRestarted => None,
                         NetworkEvent::NetpuncherStateChanged { .. } => unreachable!(
                             "netpuncher state is applied before the classic-lobby boundary"
                         ),
@@ -4076,12 +4094,49 @@ impl GameApp {
                         self.update_network_start_wait_ack(client_id, status);
                     }
                     NetworkEvent::JoinData(join_data) => {
+                        let round_restart_join_data =
+                            std::mem::take(&mut self.pending_round_restart_join_data);
+                        if round_restart_join_data {
+                            self.admission_resources
+                                .reconcile_join_data_resources(&join_data);
+                            // Reconciliation is an infallible in-memory
+                            // install. Once this synchronous handler sends the
+                            // ACK, any newly released events remain queued
+                            // until all authoritative registries below have
+                            // been replaced and this handler returns.
+                            if let Some(network) = self.network.as_ref() {
+                                if let Err(error) = network.acknowledge_round_restart() {
+                                    tracing::warn!(
+                                        %error,
+                                        "failed to acknowledge the retained round restart"
+                                    );
+                                }
+                            }
+                        }
                         // Game.Parameters is the authoritative client/player
                         // snapshot. Scenario and dynamic resource application
                         // remains deferred until the game leaves the lobby
                         // (src/C4Network2.cpp:1574-1620,619-671).
-                        self.admission_resources
-                            .register_join_data_resources(&join_data);
+                        let retained_local_player_request = join_data
+                            .parameters
+                            .player_infos
+                            .clients
+                            .iter()
+                            .find(|client| {
+                                client.client_id == join_data.client_id
+                                    && !client.players.is_empty()
+                            })
+                            .map(|client| {
+                                clonk_network::PlayerInfoUpdateRequest::new(
+                                    join_data.client_id,
+                                    clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                                    client.players.clone(),
+                                )
+                            });
+                        if !round_restart_join_data {
+                            self.admission_resources
+                                .register_join_data_resources(&join_data);
+                        }
                         let lobby_resource_rows = joined_classic_lobby_resource_rows(
                             &join_data,
                             &self.admission_resources.present_percent,
@@ -4166,12 +4221,25 @@ impl GameApp {
                         let local_is_observer =
                             self.control_clients.is_observer(join_data.client_id);
                         let initial_player_info_ready = if is_client && !local_is_observer {
-                            match self.submit_initial_client_player_info(
-                                join_data.client_id,
-                                joined_league_server_name,
-                            ) {
-                                LeaguePlayerAuthStatus::Completed(submitted) => submitted,
-                                LeaguePlayerAuthStatus::Pending => false,
+                            match retained_local_player_request {
+                                Some(request) => self.network.as_ref().is_some_and(|network| {
+                                    network
+                                        .submit_join_player_info_update(request)
+                                        .inspect_err(|error| {
+                                            tracing::error!(
+                                                %error,
+                                                "failed to re-affirm retained PlayerInfo"
+                                            );
+                                        })
+                                        .is_ok()
+                                }),
+                                None => match self.submit_initial_client_player_info(
+                                    join_data.client_id,
+                                    joined_league_server_name,
+                                ) {
+                                    LeaguePlayerAuthStatus::Completed(submitted) => submitted,
+                                    LeaguePlayerAuthStatus::Pending => false,
+                                },
                             }
                         } else {
                             is_client && local_is_observer
@@ -4525,6 +4593,7 @@ impl GameApp {
                                     self.network_client_activity
                                         .reset_client(join.core.client_id);
                                     self.publish_updated_host_join_snapshot();
+                                    self.sync_network_lobby_participants();
                                     self.sync_classic_lobby_roster();
                                 }
                             }
@@ -4551,6 +4620,7 @@ impl GameApp {
                                 if update.by_client == 0 {
                                     self.publish_updated_host_join_snapshot();
                                 }
+                                self.sync_network_lobby_participants();
                                 self.sync_classic_lobby_roster();
                             }
                             NetworkControl::ClientRemove(remove) => {
@@ -4601,6 +4671,7 @@ impl GameApp {
                                         .is_some();
                                     self.control_player_infos.on_client_part(remove.client_id);
                                     self.finish_control_client_part(had_player_info);
+                                    self.sync_network_lobby_participants();
                                     self.sync_classic_lobby_roster();
                                 }
                             }
@@ -4818,8 +4889,12 @@ impl GameApp {
                     // no disconnect follows it to serve as the proof.
                     NetworkEvent::HostRestartLobby => {
                         self.follow_host_restart_into_lobby()?;
-                        break;
+                        if self.network.is_none() {
+                            break;
+                        }
+                        self.pending_round_restart_join_data = true;
                     }
+                    NetworkEvent::RoundRestarted => continue,
                     NetworkEvent::NetpuncherStateChanged {
                         game_ids,
                         local_addresses,
@@ -5475,6 +5550,18 @@ impl GameApp {
                 return;
             }
         };
+        if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+            // A retained network session also retains the sockets that make
+            // its reference reachable. Starting a replacement first would
+            // close live reference requests and then needlessly rebind the
+            // same fixed PortRefServer.
+            self.advertised_game_reference = Some(reference.clone());
+            self.host_reference_paused = false;
+            if let Err(error) = advertiser.update_exact(&reference) {
+                tracing::warn!(%error, "exact network game reference update unavailable");
+            }
+            return;
+        }
         let config = load_network_advertiser_settings(self.app_paths.as_ref());
         self.start_network_game_advertiser_with_reference(config, reference);
     }
@@ -6248,6 +6335,10 @@ impl GameApp {
         // The host is not going away, so the reconnect this client may have
         // armed from an earlier notice is now the wrong answer.
         self.pending_host_rejoin = None;
+        let restarted_scenario = self
+            .active_scenario
+            .as_ref()
+            .map(|scenario| (scenario.identifier.clone(), scenario.title.clone()));
         let clients = self.control_clients.snapshot();
         self.return_to_menu_retaining_network_session();
         let Some(manager) = self.network.as_ref() else {
@@ -6274,12 +6365,23 @@ impl GameApp {
         if !clients.is_empty() {
             lobby.replace_participants_from_clients(&clients);
         }
+        if let Some((identifier, title)) = restarted_scenario {
+            lobby.select_scenario(&identifier, &title);
+            self.scenario_label = lobby.scenario_label();
+        }
         self.network_lobby = Some(lobby);
         self.classic_host_lobby = None;
         self.network_control_running = false;
         self.mode = AppMode::Menu;
         self.open_network_lobby();
         Ok(())
+    }
+
+    fn sync_network_lobby_participants(&mut self) {
+        let clients = self.control_clients.snapshot();
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.replace_participants_from_clients(&clients);
+        }
     }
 
     /// Whether this round's restart can keep its network session up.
@@ -6296,16 +6398,6 @@ impl GameApp {
             && !self.network_is_league
     }
 
-    /// Tells connected clients the round restarted and this session did not.
-    fn announce_network_round_restart_into_lobby(&mut self) {
-        let Some(network) = self.network.as_ref() else {
-            return;
-        };
-        if let Err(error) = network.broadcast_host_restart_lobby() {
-            tracing::warn!(%error, "failed to announce the lobby restart to clients");
-        }
-    }
-
     /// Restarts the round on the live session, and answers whether it did.
     ///
     /// Nothing is committed until the next round's scenario has been prepared.
@@ -6316,11 +6408,13 @@ impl GameApp {
         if !self.network_round_restart_preserves_session() {
             return Ok(false);
         }
-        let (Some(scenario), Some(mode)) =
-            (self.active_scenario.clone(), self.network_mode.clone())
-        else {
+        let Some(scenario) = self.active_scenario.clone() else {
             return Ok(false);
         };
+        let Some(NetworkMode::Host(old_settings)) = self.network_mode.as_ref() else {
+            return Ok(false);
+        };
+        let bind_addr = old_settings.bind_addr;
         let definition_load = self
             .active_definition_load
             .clone()
@@ -6336,13 +6430,220 @@ impl GameApp {
             }
         };
 
-        // Committed from here: the clients are told before the round goes, so
-        // they never see the end of it as a host that died.
+        // Materialize the next round before the old one is disturbed. The
+        // retained socket worker cannot reuse its original prepared bootstrap:
+        // both its HostConfig and its scenario-load capability are one-shot.
+        let preparation = match build_network_host_preparation(
+            self,
+            &staged.frontend,
+            &staged.definition_load,
+            &staged.effective_definition_modules,
+            &staged.definition_resources,
+            Some((&staged.definition_executable_path, &staged.definition_path)),
+            Some((&staged.lobby.local_name, &staged.lobby.nick)),
+        ) {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "cannot prepare the next round on the live session; re-hosting instead"
+                );
+                return Ok(false);
+            }
+        };
+        let mut prepared = match preparation.prepare() {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "cannot materialize the next round on the live session; re-hosting instead"
+                );
+                return Ok(false);
+            }
+        };
+
+        // Keep each connected client and its player-file identity, but reset
+        // the fields that described the finished simulation. The host packet
+        // comes from the fresh bootstrap; remote packets retain their stable
+        // IDs/resources and will be re-affirmed by their fresh JoinData.
+        let Some(mut player_infos) = prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.parameters.player_infos.clone())
+        else {
+            tracing::warn!("the restarted host bootstrap has no initial JoinData");
+            return Ok(false);
+        };
+        let mut restarted_clients = self.control_clients.snapshot();
+        let live_client_ids = restarted_clients
+            .iter()
+            .map(|client| client.client_id)
+            .collect::<HashSet<_>>();
+        let (retained_last_player_id, retained_player_infos) =
+            self.control_player_infos.retained_rows_snapshot();
+        player_infos.last_player_id = player_infos.last_player_id.max(retained_last_player_id);
+        const FINISHED_ROUND_PLAYER_FLAGS: u16 = clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_REMOVED
+            | clonk_engine::PLAYER_INFO_FLAG_JOIN_ISSUED
+            | clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED
+            | clonk_engine::PLAYER_INFO_FLAG_WON
+            | clonk_engine::PLAYER_INFO_FLAG_VOTED_OUT
+            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+            | clonk_engine::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK;
+        let restore_player_teams =
+            self.engine.restart_restore_info_mask() & RESTART_RESTORE_PLAYER_TEAMS != 0;
+        for (client_id, flags, mut players) in retained_player_infos {
+            if client_id == 0 || !live_client_ids.contains(&client_id) {
+                continue;
+            }
+            for player in &mut players {
+                // The fresh host row starts from the new lobby's team state.
+                // Remote rows follow it unless SetRestoreInfos explicitly kept
+                // the prior round's team selections.
+                if !restore_player_teams {
+                    player.team = 0;
+                }
+                player.flags &= !FINISHED_ROUND_PLAYER_FLAGS;
+                player.game_number = -1;
+                player.game_join_frame = -1;
+                player.game_part_frame = -1;
+            }
+            player_infos
+                .clients
+                .retain(|client| client.client_id != client_id);
+            player_infos
+                .clients
+                .push(clonk_network::ClientPlayerInfosSnapshot {
+                    client_id,
+                    flags,
+                    players,
+                });
+        }
+
+        for client in &mut restarted_clients {
+            client.lobby_ready = false;
+            if client.client_id != 0 {
+                client.activated = false;
+            }
+        }
+        let mut join_clients =
+            clonk_network::JoinClientRegistrySnapshot::new(restarted_clients.clone());
+        join_clients.local_client_id = Some(0);
+
+        let mut restarted_player_registry = ControlPlayerInfoRegistry::default();
+        restarted_player_registry.replace_snapshot(
+            player_infos.last_player_id,
+            player_infos.clients.iter().cloned().map(|client| {
+                clonk_engine::PlayerInfoControlData {
+                    client_id: client.client_id,
+                    flags: client.flags,
+                    players: client.players,
+                    by_client: 0,
+                }
+            }),
+        );
+        let mut team_assignment =
+            NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
+                prepared.runtime_team_metadata().clone(),
+                self.generated_team_name_template.clone(),
+            );
+        for client in &player_infos.clients {
+            for team in client
+                .players
+                .iter()
+                .map(|player| player.team)
+                .filter(|team| *team != 0)
+            {
+                team_assignment.generate_team_for_id(team);
+            }
+        }
+        restarted_player_registry.recheck_team_players(team_assignment.teams_mut());
+        let (last_player_id, retained_rows) = restarted_player_registry.retained_rows_snapshot();
+        let player_infos = clonk_network::PlayerInfoListSnapshot {
+            last_player_id,
+            clients: retained_rows
+                .into_iter()
+                .map(
+                    |(client_id, flags, players)| clonk_network::ClientPlayerInfosSnapshot {
+                        client_id,
+                        flags,
+                        players,
+                    },
+                )
+                .collect(),
+        };
+        if let Err(error) = prepared.replace_initial_lobby_state(
+            join_clients,
+            player_infos.clone(),
+            team_assignment.teams().clone(),
+        ) {
+            tracing::warn!(
+                %error,
+                "cannot install retained lobby state into the next round; re-hosting instead"
+            );
+            return Ok(false);
+        }
+        let fresh_snapshot = initial_host_join_snapshot(Some(&NetworkMode::Host(HostSettings {
+            bind_addr,
+            player_name: staged.lobby.local_name.clone(),
+            prepared: Some(prepared.clone()),
+        })));
+        let fresh_max_players = prepared.host_config().max_players;
+        let fresh_resource_files = prepared.host_config().resource_files.clone();
+        let fresh_alternate_colors = prepared.local_player_alternate_colors_by_resource().clone();
+        let fresh_local_player_ids = prepared
+            .initial_host_player_info_control()
+            .players
+            .iter()
+            .filter_map(|player| {
+                player.resource.as_ref().and_then(|resource| {
+                    fresh_alternate_colors
+                        .contains_key(&resource.id)
+                        .then_some(player.id)
+                })
+            })
+            .filter(|id| *id > 0)
+            .collect();
+        let mut fresh_config = match prepared.claim_host_config() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "cannot claim the next round for the live session; re-hosting instead"
+                );
+                return Ok(false);
+            }
+        };
+        // Ordinary startup keeps admission closed until the initial host row
+        // is installed. This restart has already materialized the complete
+        // retained roster in JoinData, so open the rebuilt lobby as part of
+        // the same host-loop transaction instead of racing a later command.
+        fresh_config.allow_join = true;
+        let mode = NetworkMode::Host(HostSettings {
+            bind_addr,
+            player_name: staged.lobby.local_name.clone(),
+            prepared: Some(prepared),
+        });
+
+        let Some(network) = self.network.as_ref() else {
+            return Ok(false);
+        };
+        if let Err(error) = network.restart_host_round_in_lobby(fresh_config) {
+            tracing::warn!(
+                %error,
+                "cannot restart the round on the live session; re-hosting instead"
+            );
+            return Ok(false);
+        }
+
+        // Committed from here: one host-loop operation queues the restart
+        // marker and fresh JoinData before the old round goes away.
         let mut values = self.scenario_game_options.values().clone();
         values.countdown = false;
         values.lobby_is_league = false;
         self.retain_restart_restore_mask_for_restart();
-        self.announce_network_round_restart_into_lobby();
+        let mut admission_resources = std::mem::take(&mut self.admission_resources);
         self.return_to_menu_retaining_network_session();
         self.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
@@ -6370,10 +6671,31 @@ impl GameApp {
         self.network_lobby_min_players = Some(staged.lobby.min_players);
         self.staged_network_host_scenario = Some(staged);
 
-        // Round-scoped session state the retained manager still holds. The
-        // teardown left it alone precisely because it does not know the session
-        // is being reused; the next round republishes all of it.
-        self.host_join_snapshot = None;
+        if let Some(snapshot) = fresh_snapshot.as_ref() {
+            admission_resources.reconcile_host_join_snapshot(snapshot);
+        }
+        for resource in fresh_resource_files {
+            admission_resources.register_lobby_resource(&resource.core);
+            admission_resources.mark_complete_with_locality(
+                resource.core.id,
+                resource.path,
+                // These files were all prepared by this host. Temporary means
+                // the network backend owns their cleanup, not that their bytes
+                // came from a peer.
+                true,
+            );
+        }
+        self.admission_resources = admission_resources;
+        self.control_clients.replace_snapshot(restarted_clients);
+        self.control_player_infos = restarted_player_registry;
+        self.network_team_assignment = Some(team_assignment);
+        self.host_local_alternate_colors_by_resource = fresh_alternate_colors;
+        self.host_local_player_info_ids = fresh_local_player_ids;
+        self.network_max_players = fresh_max_players;
+        self.engine
+            .set_max_players(i32::try_from(fresh_max_players).unwrap_or(i32::MAX));
+        self.host_join_snapshot = fresh_snapshot;
+        self.network_mode = Some(mode.clone());
         self.runtime_network_control_mode = None;
         self.runtime_network_committed_control_mode = None;
         self.runtime_network_committed_status = None;
@@ -6381,7 +6703,24 @@ impl GameApp {
         // Back to the clock a lobby starts from, not the finished round's:
         // the next Go re-times from the prepared bootstrap the same way a
         // freshly hosted session does.
-        self.network_control_clock = initial_network_control_clock(self.network_mode.as_ref());
+        self.network_control_clock = initial_network_control_clock(Some(&mode));
+
+        if let (Some(prepared), Some(network)) = (
+            match &mode {
+                NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                }) => Some(prepared.clone()),
+                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+            },
+            self.network.take(),
+        ) {
+            self.start_prepared_network_game_advertiser(&prepared, &network);
+            if let Err(error) = network.invalidate_league_reference() {
+                tracing::error!(%error, "failed to invalidate restarted lobby reference");
+            }
+            self.network = Some(network);
+        }
 
         let built = self
             .network
@@ -6404,10 +6743,6 @@ impl GameApp {
                     let mut audio = audio.borrow_mut();
                     audio.stop_music();
                 }
-                // The session is still in the state the finished round left it.
-                // A lobby that keeps announcing Go would have the next round's
-                // barrier already satisfied before anybody reached it.
-                self.reset_retained_session_to_lobby();
                 Ok(true)
             }
             Err(error) => {
@@ -6421,21 +6756,6 @@ impl GameApp {
                 ))?;
                 Ok(true)
             }
-        }
-    }
-
-    /// Puts a retained session's status back where a lobby expects it.
-    fn reset_retained_session_to_lobby(&mut self) {
-        let Some(network) = self.network.as_ref() else {
-            return;
-        };
-        let status = clonk_network::NetworkStatus {
-            state: clonk_network::NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: -1,
-        };
-        if let Err(error) = network.change_status(status) {
-            tracing::warn!(%error, "failed to return the retained session to lobby status");
         }
     }
 
@@ -6482,6 +6802,7 @@ impl GameApp {
     pub(crate) fn clear_live_network_session(&mut self) {
         let removed_voice = self.voice_chat.clear();
         self.remove_voice_playback(removed_voice);
+        self.pending_round_restart_join_data = false;
         if self.network.is_none() {
             return;
         }
@@ -6718,6 +7039,7 @@ impl GameApp {
         self.host_local_alternate_colors_by_resource.clear();
         self.host_local_player_info_ids.clear();
         self.pending_network_join_data = None;
+        self.pending_round_restart_join_data = false;
         self.initial_lobby_status_ack_pending = false;
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;

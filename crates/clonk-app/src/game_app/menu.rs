@@ -4969,15 +4969,20 @@ impl GameApp {
             self.control_clients.clear_nonhost_lobby_ready();
         }
         self.network_client_activity.clear();
-        self.control_player_infos = ControlPlayerInfoRegistry::default();
-        self.local_player_profile_paths.clear();
+        if session == NetworkSessionTeardown::Clear {
+            self.control_player_infos = ControlPlayerInfoRegistry::default();
+            self.local_player_profile_paths.clear();
+        }
         self.network_team_assignment = None;
         self.clear_blocking_resource_wait();
-        self.admission_resources.clear();
-        self.host_local_alternate_colors_by_resource.clear();
-        self.host_local_player_info_ids.clear();
+        if session == NetworkSessionTeardown::Clear {
+            self.admission_resources.clear();
+            self.host_local_alternate_colors_by_resource.clear();
+            self.host_local_player_info_ids.clear();
+        }
         self.pending_runtime_dynamic_request = None;
         self.pending_network_join_data = None;
+        self.pending_round_restart_join_data = false;
         self.initial_lobby_status_ack_pending = false;
         self.network_is_league = false;
         self.network_league_name.clear();
@@ -5059,7 +5064,40 @@ impl GameApp {
         self.main_menu_state.resize(width_f, height_f);
 
         self.mode = AppMode::Menu;
+        if session == NetworkSessionTeardown::Retain
+            && self.startup_view == StartupView::NetworkLobby
+        {
+            // `show_main_menu` treats departure from NetworkLobby as the
+            // session teardown hub. A round restart is only borrowing its
+            // presentation reset; the manager and its routes are the state
+            // this caller explicitly retains.
+            self.startup_view = StartupView::MainMenu;
+        }
+        // `show_main_menu` also clears host discovery/reference state. Keep
+        // the live advertiser out of that generic teardown so existing TCP
+        // reference requests survive the same round boundary as game routes.
+        let retained_advertiser = if session == NetworkSessionTeardown::Retain {
+            self.network_game_advertiser.take()
+        } else {
+            None
+        };
+        let retained_reference = if session == NetworkSessionTeardown::Retain {
+            self.advertised_game_reference.take()
+        } else {
+            None
+        };
+        let retained_reference_paused = self.host_reference_paused;
         self.show_main_menu();
+        if session == NetworkSessionTeardown::Retain {
+            self.network_game_advertiser = retained_advertiser;
+            self.advertised_game_reference = retained_reference;
+            self.host_reference_paused = retained_reference_paused;
+            // `show_main_menu` normally enforces first-run profile creation.
+            // This presentation reset is immediately replaced by the retained
+            // network lobby, where an observer may intentionally have no
+            // local player profile.
+            self.startup_player_properties_dialog = None;
+        }
         if restore_dialog {
             self.restore_startup_dialog(last_startup_dialog);
             self.begin_startup_dialog_fade_in();

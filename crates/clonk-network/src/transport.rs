@@ -355,7 +355,14 @@ pub enum ControlMessage {
     /// The host restarting the round *without* closing the session, so this
     /// connection carries straight on into the new lobby. See
     /// [`crate::host_restart`].
-    HostRestartLobby,
+    HostRestartLobby {
+        restart_nonce: u64,
+    },
+    /// A retained client has installed fresh JoinData and releases the host's
+    /// old-round ingress quarantine.
+    RoundRestartAck {
+        restart_nonce: u64,
+    },
     /// Which participant class held up one host-routed aggregate tick.
     ControlWaitAttribution(crate::ControlWaitAttribution),
 }
@@ -711,8 +718,11 @@ impl<S> ControlTransport<S> {
             ControlMessage::HostRestarting { rejoin_seconds } => {
                 frame.extend(crate::encode_host_restart_notice(rejoin_seconds));
             }
-            ControlMessage::HostRestartLobby => {
-                frame.extend(crate::encode_host_restart_lobby_notice());
+            ControlMessage::HostRestartLobby { restart_nonce } => {
+                frame.extend(crate::encode_host_restart_lobby_notice(restart_nonce));
+            }
+            ControlMessage::RoundRestartAck { restart_nonce } => {
+                frame.extend(crate::encode_round_restart_ack(restart_nonce));
             }
             ControlMessage::ControlWaitAttribution(attribution) => {
                 frame.extend(crate::control_wait::encode_control_wait_attribution(
@@ -902,9 +912,14 @@ fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> 
                 crate::PID_PORT_HOST_RESTARTING,
             )),
         crate::PID_PORT_HOST_RESTART_LOBBY => crate::decode_host_restart_lobby_notice(body)
-            .then_some(ControlMessage::HostRestartLobby)
+            .map(|restart_nonce| ControlMessage::HostRestartLobby { restart_nonce })
             .ok_or(TransportError::UnsupportedPacket(
                 crate::PID_PORT_HOST_RESTART_LOBBY,
+            )),
+        crate::PID_PORT_ROUND_RESTART_ACK => crate::decode_round_restart_ack(body)
+            .map(|restart_nonce| ControlMessage::RoundRestartAck { restart_nonce })
+            .ok_or(TransportError::UnsupportedPacket(
+                crate::PID_PORT_ROUND_RESTART_ACK,
             )),
         crate::PID_PORT_CONTROL_WAIT_ATTRIBUTION => {
             crate::control_wait::decode_control_wait_attribution(body)
@@ -1457,7 +1472,9 @@ mod tests {
     #[test]
     fn a_lobby_restart_notice_round_trips_through_the_frame_codec() {
         let frame = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
-            ControlMessage::HostRestartLobby,
+            ControlMessage::HostRestartLobby {
+                restart_nonce: 0x0102_0304_0506_0708,
+            },
         )
         .expect("notice encodes");
 
@@ -1465,7 +1482,12 @@ mod tests {
 
         let decoded = parse_control_message(&frame[FRAME_HEADER_LEN..]).expect("notice decodes");
 
-        assert_eq!(decoded, ControlMessage::HostRestartLobby);
+        assert_eq!(
+            decoded,
+            ControlMessage::HostRestartLobby {
+                restart_nonce: 0x0102_0304_0506_0708,
+            }
+        );
     }
 
     /// Wait attribution is presentation-side timing metadata, not a lockstep
