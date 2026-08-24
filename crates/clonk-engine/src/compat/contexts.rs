@@ -9146,7 +9146,15 @@ impl ObjectScopeContext {
         if !self.persist_final_ocf {
             return;
         }
-        let final_ocf = self.ocf();
+        // AssignRemoval leaves the cache from its last explicit SetOCF
+        // untouched even after raw field cleanup (C4Object.cpp:276-313).
+        // Do not turn those later assignments into a synthetic refresh when
+        // persisting the deleted object across the host boundary.
+        let final_ocf = if self.destroy {
+            self.cached_ocf.unwrap_or_else(|| self.ocf())
+        } else {
+            self.ocf()
+        };
         self.update_recorded_no_collect_delay_ocf(final_ocf);
         self.pending_update.ocf_override = Some(final_ocf);
     }
