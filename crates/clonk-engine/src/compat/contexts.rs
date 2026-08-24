@@ -2181,6 +2181,36 @@ where
     )
 }
 
+/// The creation-phase twin of `with_effect_context_with_state`. C4Game::NewObject
+/// links every synchronously created object into `Game.Objects` before the next
+/// statement runs (C4Game.cpp:1100-1142), so `Construction`/`Initialize` need the
+/// same exact list snapshot the effect dispatcher already publishes.
+pub(crate) fn with_effect_context_with_state_and_spawn_previews<F, T, E>(
+    object: Option<HostObjectContext<'_>>,
+    global_effects: &[EffectState],
+    world: HostWorldContext,
+    next_object_id: u64,
+    game_over_triggered: bool,
+    func: F,
+) -> (Result<T, E>, EffectContextOutcome)
+where
+    F: FnOnce() -> Result<T, E>,
+    E: From<RuntimeError>,
+{
+    let script_object_context = object.as_ref().map(|object| object.id);
+    with_effect_context_with_definition_state(
+        object,
+        None,
+        script_object_context,
+        global_effects,
+        world,
+        next_object_id,
+        game_over_triggered,
+        true,
+        func,
+    )
+}
+
 pub(crate) fn with_effect_context_with_state_and_definition<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     definition_context: Option<DefinitionId>,
@@ -3814,9 +3844,10 @@ impl EffectHostContext {
             // chronological insertion instead of sorting callback-final objects.
             self.preview_object_status_change(id, status);
         } else if self.master_order_preview.is_some() {
-            // Generic callback phases do not yet transport their exact list
-            // state across deferred materialization (clonk-org/clonk-rs#1007).
-            // Retain their established callback-local sorted projection.
+            // A context outside the creation and effect phases discards its
+            // preview at fold time, so nothing transports the exact order
+            // across deferred materialization. Retain the established
+            // callback-local sorted projection for the rest of this call.
             self.preview_sort_master_by_category();
         }
     }

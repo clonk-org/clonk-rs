@@ -1319,6 +1319,9 @@ impl Engine {
                     player_commands,
                     object_order_commands,
                     next_mission_commands,
+                    // Step is not a creation phase: its generic context
+                    // publishes no list snapshot.
+                    object_lists: _,
                     trigger_game_over,
                     script_go,
                     script_counter,
