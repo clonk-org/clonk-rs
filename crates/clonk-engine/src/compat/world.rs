@@ -2622,6 +2622,14 @@ impl HostWorldContext {
         std::mem::take(&mut *self.effect_spawn_previews.borrow_mut())
     }
 
+    /// The channel a callback publishes its spawn projections into. Object
+    /// creation runs its phases against separately built worlds, so the
+    /// caller retains this handle to carry one phase's objects into the
+    /// next instead of cloning the whole context.
+    pub(crate) fn effect_spawn_preview_sink(&self) -> Rc<RefCell<Vec<EffectSpawnPreview>>> {
+        Rc::clone(&self.effect_spawn_previews)
+    }
+
     /// Publish objects created by one deferred effect callback into the live
     /// host projection used by the next callback. They keep their exact
     /// callback-built preview; `SpawnConfig` remains the authoritative

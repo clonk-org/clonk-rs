@@ -2181,6 +2181,36 @@ where
     )
 }
 
+/// `with_effect_context_with_state` for a creation-phase callback. C++ runs
+/// Construction/Initialize with the object already linked into Game.Objects
+/// (C4Game.cpp:1115-1131), so every object they create links chronologically
+/// and the exact list has to reach deferred materialization.
+pub(crate) fn with_effect_context_with_state_and_spawn_previews<F, T, E>(
+    object: Option<HostObjectContext<'_>>,
+    global_effects: &[EffectState],
+    world: HostWorldContext,
+    next_object_id: u64,
+    game_over_triggered: bool,
+    func: F,
+) -> (Result<T, E>, EffectContextOutcome)
+where
+    F: FnOnce() -> Result<T, E>,
+    E: From<RuntimeError>,
+{
+    let script_object_context = object.as_ref().map(|object| object.id);
+    with_effect_context_with_definition_state(
+        object,
+        None,
+        script_object_context,
+        global_effects,
+        world,
+        next_object_id,
+        game_over_triggered,
+        true,
+        func,
+    )
+}
+
 pub(crate) fn with_effect_context_with_state_and_definition<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     definition_context: Option<DefinitionId>,
@@ -3814,9 +3844,9 @@ impl EffectHostContext {
             // chronological insertion instead of sorting callback-final objects.
             self.preview_object_status_change(id, status);
         } else if self.master_order_preview.is_some() {
-            // Generic callback phases do not yet transport their exact list
-            // state across deferred materialization (clonk-org/clonk-rs#1007).
-            // Retain their established callback-local sorted projection.
+            // A callback phase that does not transport its exact list across
+            // deferred materialization keeps its established callback-local
+            // sorted projection instead.
             self.preview_sort_master_by_category();
         }
     }

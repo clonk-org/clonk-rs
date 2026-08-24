@@ -2579,7 +2579,7 @@ impl Definition {
         // pre-error local writes (C4AulExec aborts the call but rolls
         // nothing back, C4AulExec.cpp:1318-1342).
         let cells = clonk_script::LocalCells::from_local_vars(&state.local_vars);
-        let (result, host_effects) = compat::with_effect_context_with_state(
+        let (result, host_effects) = compat::with_effect_context_with_state_and_spawn_previews(
             Some(self.host_object_context(state, object_id, &world)),
             global_effects,
             world,
@@ -2768,7 +2768,7 @@ impl Definition {
         // Cells live OUTSIDE the session so a mid-call error keeps the
         // pre-error local writes (C4AulExec.cpp:1318-1342, no rollback).
         let cells = clonk_script::LocalCells::from_local_vars(&state.local_vars);
-        let (result, host_effects) = compat::with_effect_context_with_state(
+        let (result, host_effects) = compat::with_effect_context_with_state_and_spawn_previews(
             Some(self.host_object_context(state, object_id, &world)),
             global_effects,
             world,

@@ -873,6 +873,143 @@ func Reorder(pRelative, pSort, fAfter) {
     unit_assert_eq!(restored.debug_exec_order() => vec![c, a, b]);
 }
 
+/// C4Game::NewObject links every object into Game.Objects the moment it is
+/// created, with the category it was created with (C4Game.cpp:1085-1142;
+/// C4ObjectList.cpp:134-175). A later C4Object::SetCategory only assigns
+/// Category, sets Unsorted and arms the global resort — it never moves the
+/// existing link (C4Object.h:303-311). So a creation-phase callback chain
+/// that creates two children and then re-categorizes the first one leaves
+/// both links exactly where creation put them.
+#[test]
+fn creation_phase_effect_start_keeps_native_child_order_across_a_category_write() {
+    // Construction -> AddEffect -> FxStart -> CreateObject, CreateObject,
+    // SetCategory: the whole chain runs inside NewObject, before the
+    // creating object's own callbacks return.
+    let script = r#"
+#strict
+protected func Construction() {
+    AddEffect("Chrono", this(), 100, 0, this());
+    return 1;
+}
+
+protected func FxChronoStart(object pTarget, int iNumber, int fTemp) {
+    var pFirst = CreateObject(CHDA, 10, 10, -1);
+    var pSecond = CreateObject(CHDB, 20, 20, -1);
+    // C4D_StaticBack: pFirst's callback-final category would sort it
+    // behind pSecond, but its link was already established above.
+    SetCategory(1, pFirst);
+    return 1;
+}
+"#;
+    let mut first = simple_definition("CHDA");
+    first.set_category(CATEGORY_LIVING);
+    let mut second = simple_definition("CHDB");
+    second.set_category(CATEGORY_STATIC_BACK);
+    let mut engine = order_engine_fixture([c4_definition("PRNT", "Parent", script), first, second]);
+
+    let parent = spawn_fixture!(engine, "PRNT", with_category: CATEGORY_OBJECT);
+    let child = |engine: &Engine, definition: &str| -> ObjectId {
+        engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id.as_str() == definition)
+            .expect("the creation-phase child materialized")
+            .id
+    };
+    let first = child(&engine, "CHDA");
+    let second = child(&engine, "CHDB");
+
+    let master_order = |engine: &Engine| {
+        engine
+            .debug_exec_order()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+    };
+    unit_assert_eq!(
+        master_order(&engine) =>
+        vec![parent, first, second],
+        "each child keeps the main-list link its creation established"
+    );
+    unit_assert!(
+        engine
+            .pending_object_order_commands
+            .contains(&ObjectOrderCommand::ResortObject(first)),
+        "SetCategory arms C4Object::Resort rather than relinking the child itself"
+    );
+
+    // ExecuteResorts is the only thing that ever moves the link, and it
+    // re-adds with the same stMain rules: scanning [parent, second] for the
+    // first sorted link at or below C4D_StaticBack stops at `second`, so the
+    // re-categorized child lands back in front of it (C4ObjectList.cpp:164-173).
+    engine.execute_object_order_commands();
+    unit_assert_eq!(
+        master_order(&engine) =>
+        vec![parent, first, second],
+        "the deferred sweep cannot rescue an order that creation got wrong"
+    );
+}
+
+/// C4Game::NewObject runs Construction, the initial DoCon and Initialize
+/// against one live Game.Objects (C4Game.cpp:1102-1138), so Initialize
+/// enumerates and mutates anything Construction created and links its own
+/// creations relative to those existing links.
+#[test]
+fn initialize_enumerates_and_orders_against_construction_created_children() {
+    let script = r#"
+#strict
+local iSawChild;
+
+protected func Construction() {
+    CreateObject(CHDA, 10, 10, -1);
+    return 1;
+}
+
+protected func Initialize() {
+    iSawChild = ObjectCount(CHDA);
+    CreateObject(CHDB, 20, 20, -1);
+    return 1;
+}
+
+public func ReadSawChild() { return iSawChild; }
+"#;
+    let mut first = simple_definition("CHDA");
+    first.set_category(CATEGORY_LIVING);
+    let mut second = simple_definition("CHDB");
+    second.set_category(CATEGORY_STATIC_BACK);
+    let mut engine = order_engine_fixture([c4_definition("PRNT", "Parent", script), first, second]);
+
+    let parent = spawn_fixture!(engine, "PRNT", with_category: CATEGORY_OBJECT);
+    let child = |engine: &Engine, definition: &str| -> ObjectId {
+        engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id.as_str() == definition)
+            .expect("the creation-phase child materialized")
+            .id
+    };
+    let first = child(&engine, "CHDA");
+    let second = child(&engine, "CHDB");
+
+    let parent_index = engine.test_object_index(parent);
+    unit_assert_eq!(
+        engine
+            .call_object_function(parent_index, "ReadSawChild", Vec::new())
+            .expect("the parent reports what Initialize saw") =>
+        Value::Int(1),
+        "Initialize enumerates the object Construction created"
+    );
+    unit_assert_eq!(
+        engine
+            .debug_exec_order()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>() =>
+        vec![parent, first, second],
+        "Initialize's creation links behind the Construction child's existing link"
+    );
+}
+
 #[test]
 fn resort_object_readds_into_its_category_and_definition_cluster() {
     let script = r#"

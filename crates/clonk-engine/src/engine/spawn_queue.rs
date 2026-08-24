@@ -683,6 +683,12 @@ impl Engine {
         let mut pending_nested_outcomes = Vec::new();
         let mut pending_effect_object_lists: VecDeque<compat::EffectObjectListPreview> =
             VecDeque::new();
+        // Objects an earlier creation phase created are already linked in
+        // C++ when the next one runs (C4Game.cpp:1102-1138). Each phase gets
+        // its own freshly built world, so carry those projections forward
+        // instead of letting Initialize and the deferred effect batch
+        // enumerate a Game.Objects that is missing them.
+        let mut creation_spawn_previews: Vec<compat::EffectSpawnPreview> = Vec::new();
         let mut deferred_transfer_zones: Vec<TransferZoneCommand> = Vec::new();
         // C++ Init runs SetOCF before Objects.Add and before Construction
         // (C4Game.cpp:1115-1126; C4Object.cpp:198-217). Compute against the
@@ -715,6 +721,8 @@ impl Engine {
                 .unwrap_or(false)
         {
             let rng_state = self.rng.clone();
+            // The publication channel outlives the phase-local world.
+            let construction_spawn_previews;
             let (
                 CommandBatch {
                     delta,
@@ -749,6 +757,7 @@ impl Engine {
             ) = {
                 let world =
                     self.host_world_context_for_pending_object(&object, initial_exec_position);
+                construction_spawn_previews = world.effect_spawn_preview_sink();
                 let definition = self
                     .definitions
                     .get(&definition_id)
@@ -770,6 +779,7 @@ impl Engine {
                 construction_solid_mask_operations,
                 construction_host_raster_preview,
             );
+            creation_spawn_previews.append(&mut construction_spawn_previews.borrow_mut());
             // Fail-safe game call: a script error logs and the object
             // spawns WITH the callback's pre-error effects — C4AulExec
             // aborts the call but rolls nothing back
@@ -942,6 +952,7 @@ impl Engine {
                 self.next_random_i32()
             };
             let rng_state = self.rng.clone();
+            let initialize_spawn_previews;
             let (
                 CommandBatch {
                     delta,
@@ -980,6 +991,8 @@ impl Engine {
                 // C++ kept live between the two callbacks.
                 let mut world =
                     self.host_world_context_for_pending_object(&object, initial_exec_position);
+                world.seed_pending_objects(creation_spawn_previews.clone());
+                initialize_spawn_previews = world.effect_spawn_preview_sink();
                 for command in &deferred_transfer_zones {
                     world.preview_transfer_zone_command(command);
                 }
@@ -1006,6 +1019,7 @@ impl Engine {
                 initialize_solid_mask_operations,
                 initialize_host_raster_preview,
             );
+            creation_spawn_previews.append(&mut initialize_spawn_previews.borrow_mut());
             // Fail-safe game call: a script error logs and the object
             // spawns WITH the callback's pre-error effects — C4AulExec
             // aborts the call but rolls nothing back
@@ -1125,7 +1139,10 @@ impl Engine {
             if !commands.is_empty() {
                 object.enqueue_commands(commands);
             }
-            additional_spawns = spawns;
+            // Append: C++ keeps every object Construction created linked
+            // while Initialize runs (C4Game.cpp:1102-1138), so Initialize's
+            // own creations queue behind them rather than replacing them.
+            additional_spawns.extend(spawns);
             pending_nested_outcomes
                 .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
             if !audio.is_empty() {
@@ -1141,6 +1158,7 @@ impl Engine {
         if !destroy_requested && !effect_events.is_empty() {
             let mut world =
                 self.host_world_context_for_pending_object(&object, initial_exec_position);
+            world.seed_pending_objects(std::mem::take(&mut creation_spawn_previews));
             for command in &deferred_transfer_zones {
                 world.preview_transfer_zone_command(command);
             }
