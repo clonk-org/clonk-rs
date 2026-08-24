@@ -620,12 +620,20 @@ impl Engine {
                 }
 
                 for update in container_updates {
-                    self.apply_container_change(
-                        update.object_id,
-                        update.previous,
-                        update.new,
-                        false,
-                    )?;
+                    if update.host_executed {
+                        self.apply_host_container_link_change(
+                            update.object_id,
+                            update.previous,
+                            update.new,
+                        )?;
+                    } else {
+                        self.apply_container_change(
+                            update.object_id,
+                            update.previous,
+                            update.new,
+                            false,
+                        )?;
+                    }
                 }
                 if queue_change_def_reinsert {
                     self.reinsert_change_def_contents_link(object_id)?;
@@ -679,6 +687,7 @@ impl Engine {
                         effect_solid_mask_changed,
                         _effect_action_callbacks_dispatched,
                         effect_change_def_reinsert,
+                        effect_host_container_change,
                         effect_next_object_id,
                         triggered_game_over,
                         effect_script_go,
@@ -764,12 +773,20 @@ impl Engine {
                         self.apply_particle_commands(emitted_particles);
                         let new_container = self.objects[idx].state.container;
                         if previous_container != new_container {
-                            self.apply_container_change(
-                                object_id,
-                                previous_container,
-                                new_container,
-                                false,
-                            )?;
+                            if effect_host_container_change {
+                                self.apply_host_container_link_change(
+                                    object_id,
+                                    previous_container,
+                                    new_container,
+                                )?;
+                            } else {
+                                self.apply_container_change(
+                                    object_id,
+                                    previous_container,
+                                    new_container,
+                                    false,
+                                )?;
+                            }
                         }
                         if effect_change_def_reinsert.unwrap_or(false) {
                             self.reinsert_change_def_contents_link(object_id)?;
@@ -1313,6 +1330,7 @@ impl Engine {
                 let command_fold_result = (|| -> Result<(), EngineError> {
                     let change_def = delta.change_def.clone();
                     let change_def_reinsert = delta.change_def_reinsert;
+                    let host_container_change = delta.host_container_change;
 
                     let action_library = change_def
                         .as_deref()
@@ -1444,12 +1462,20 @@ impl Engine {
                         new_crew,
                     );
                     if let Some((previous_container, new_container)) = container_change {
-                        self.apply_container_change(
-                            object_id,
-                            previous_container,
-                            new_container,
-                            false,
-                        )?;
+                        if host_container_change {
+                            self.apply_host_container_link_change(
+                                object_id,
+                                previous_container,
+                                new_container,
+                            )?;
+                        } else {
+                            self.apply_container_change(
+                                object_id,
+                                previous_container,
+                                new_container,
+                                false,
+                            )?;
+                        }
                     }
                     if change_def_reinsert {
                         self.reinsert_change_def_contents_link(object_id)?;
@@ -1489,6 +1515,7 @@ impl Engine {
                             effect_solid_mask_changed,
                             _effect_action_callbacks_dispatched,
                             effect_change_def_reinsert,
+                            effect_host_container_change,
                             effect_next_object_id,
                             triggered_game_over,
                             effect_script_go,
@@ -1574,12 +1601,20 @@ impl Engine {
                         }
                         self.apply_particle_commands(emitted_particles);
                         if previous_container != new_container {
-                            self.apply_container_change(
-                                object_id,
-                                previous_container,
-                                new_container,
-                                false,
-                            )?;
+                            if effect_host_container_change {
+                                self.apply_host_container_link_change(
+                                    object_id,
+                                    previous_container,
+                                    new_container,
+                                )?;
+                            } else {
+                                self.apply_container_change(
+                                    object_id,
+                                    previous_container,
+                                    new_container,
+                                    false,
+                                )?;
+                            }
                         }
                         if effect_change_def_reinsert.unwrap_or(false) {
                             self.reinsert_change_def_contents_link(object_id)?;
@@ -2139,6 +2174,7 @@ impl Engine {
             command_direction,
             action,
             status,
+            ocf_override,
             owner,
             base,
             controller,
@@ -2155,6 +2191,7 @@ impl Engine {
             change_def_reinsert,
             alive,
             container,
+            host_container_change,
             live_vertices,
             shape_vertices,
             contact_density,
@@ -2539,7 +2576,15 @@ impl Engine {
             new_crew,
         );
         if let Some((previous_container, new_container)) = container_change {
-            self.apply_container_change(object_id, previous_container, new_container, false)?;
+            if host_container_change {
+                self.apply_host_container_link_change(
+                    object_id,
+                    previous_container,
+                    new_container,
+                )?;
+            } else {
+                self.apply_container_change(object_id, previous_container, new_container, false)?;
+            }
         }
         if change_def_reinsert {
             self.reinsert_change_def_contents_link(object_id)?;
@@ -2580,6 +2625,9 @@ impl Engine {
         // Host-driven changes are SetOCF events (SetAlive C4Object.h:361,
         // DoCon C4Object.cpp:1417, status C4Object.cpp:4139).
         self.refresh_object_ocf(index);
+        if let Some(ocf) = ocf_override {
+            self.objects[index].state.ocf = ocf;
+        }
         self.trigger_action_callbacks(index, Some(previous_action_name))?;
         self.update_sector_for_index(index);
         if self.objects[index].destroyed
@@ -3202,6 +3250,7 @@ impl Engine {
             }
 
             if let Some(update) = object_update {
+                let host_container_change = update.host_container_change;
                 let callbacks_dispatched = update
                     .action
                     .as_ref()
@@ -3220,7 +3269,7 @@ impl Engine {
                     }
                 }
                 if let Some(change) = outcome.container_change {
-                    container_changes.push(change);
+                    container_changes.push((change.0, change.1, host_container_change));
                 }
             }
 
@@ -3331,6 +3380,7 @@ impl Engine {
                 nested_effect_solid_mask_changed,
                 _nested_effect_action_callbacks_dispatched,
                 nested_effect_change_def_reinsert,
+                effect_host_container_change,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -3407,13 +3457,23 @@ impl Engine {
             self.apply_particle_commands(emitted_particles);
             let new_container = self.objects[index].state.container;
             if previous_container != new_container {
-                container_changes.push((previous_container, new_container));
+                container_changes.push((
+                    previous_container,
+                    new_container,
+                    effect_host_container_change,
+                ));
             }
         }
         self.update_sector_for_index(index);
 
-        for (previous, new) in container_changes {
-            self.apply_container_change(object_id, previous, new, false)?;
+        for (previous, new, host_executed) in container_changes {
+            if destroy_object && new.is_none() {
+                self.apply_container_unlink_for_removal(object_id, previous)?;
+            } else if host_executed {
+                self.apply_host_container_link_change(object_id, previous, new)?;
+            } else {
+                self.apply_container_change(object_id, previous, new, false)?;
+            }
         }
         if change_def_reinsert {
             self.reinsert_change_def_contents_link(object_id)?;
@@ -3599,6 +3659,7 @@ impl Engine {
             {
                 let object = &mut self.objects[index];
                 if let Some(mut update) = outcome.update {
+                    let host_container_change = update.host_container_change;
                     // A nested Enter/Exit followed by DoCon must copy the
                     // container motion first and only then bottom-adjust the
                     // new construction shape. The copy-in/out scope carries
@@ -3633,7 +3694,7 @@ impl Engine {
                         }
                     }
                     if let Some(change) = apply_outcome.container_change {
-                        container_changes.push(change);
+                        container_changes.push((change.0, change.1, host_container_change));
                     }
                 }
                 if !outcome.command_operations.is_empty() {
@@ -3723,6 +3784,7 @@ impl Engine {
                     nested_effect_solid_mask_changed,
                     _nested_effect_action_callbacks_dispatched,
                     nested_effect_change_def_reinsert,
+                    effect_host_container_change,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -3801,13 +3863,23 @@ impl Engine {
                 self.apply_particle_commands(emitted_particles);
                 let new_container = self.objects[index].state.container;
                 if previous_container != new_container {
-                    container_changes.push((previous_container, new_container));
+                    container_changes.push((
+                        previous_container,
+                        new_container,
+                        effect_host_container_change,
+                    ));
                 }
             }
             self.update_sector_for_index(index);
 
-            for (previous, new) in container_changes {
-                self.apply_container_change(object_id, previous, new, false)?;
+            for (previous, new, host_executed) in container_changes {
+                if outcome.destroy && new.is_none() {
+                    self.apply_container_unlink_for_removal(object_id, previous)?;
+                } else if host_executed {
+                    self.apply_host_container_link_change(object_id, previous, new)?;
+                } else {
+                    self.apply_container_change(object_id, previous, new, false)?;
+                }
             }
             if change_def_reinsert {
                 self.reinsert_change_def_contents_link(object_id)?;
@@ -3895,13 +3967,25 @@ impl Engine {
         orders: Vec<compat::HostContentsOrder>,
     ) -> Vec<compat::HostContentsOrder> {
         let mut pending = Vec::new();
-        for order in orders {
+        for mut order in orders {
+            let mut missing_child = false;
+            // Link incarnations belong to the child, not the container. Apply
+            // them before resolving the list owner so a completed transient
+            // Enter survives removal of a pending container.
+            let link_generations = std::mem::take(&mut order.link_generations);
+            for (child, generation) in link_generations {
+                let Some(child_index) = self.find_object_index(child) else {
+                    missing_child = true;
+                    order.link_generations.push((child, generation));
+                    continue;
+                };
+                self.objects[child_index].state.contents_link_generation = generation;
+            }
             let Some(container_index) = self.find_object_index(order.container) else {
                 pending.push(order);
                 continue;
             };
             let mut contents = Vec::with_capacity(order.contents.len());
-            let mut missing_child = false;
             for &child in &order.contents {
                 let Some(child_index) = self.find_object_index(child) else {
                     missing_child = true;
@@ -3983,5 +4067,58 @@ mod tests {
         // C4Game::ExecObjects preserves one master-list order during this
         // walk (C4Game.cpp:1582); the frame snapshot already records it.
         assert_eq!(EXEC_LIST_MASTER_ORDER_SCANS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn contents_order_retry_does_not_restore_an_already_applied_link_generation() {
+        // C++ allocates each Contents link synchronously, so a later callback
+        // observes and may supersede that incarnation before a pending Rust
+        // spawn has materialized (C4ObjectList.cpp:129-132).
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        let container = engine
+            .spawn_object(SpawnConfig::new("Plain"))
+            .expect("container spawns");
+        let present = engine
+            .spawn_object(SpawnConfig::new("Plain"))
+            .expect("present child spawns");
+        let missing = ObjectId::new(1_000);
+
+        let pending = engine.apply_host_contents_orders(vec![compat::HostContentsOrder {
+            container,
+            contents: Vec::new(),
+            link_generations: vec![(present, 7), (missing, 11)],
+        }]);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].link_generations, [(missing, 11)]);
+        let present_index = engine
+            .find_object_index(present)
+            .expect("present child remains live");
+        assert_eq!(
+            engine.objects[present_index].state.contents_link_generation,
+            7
+        );
+
+        // A later callback allocates another link before the missing child is
+        // materialized and causes the retained carrier to be retried.
+        engine.objects[present_index].state.contents_link_generation = 9;
+        engine
+            .spawn_object(SpawnConfig::new("Plain").with_id(missing))
+            .expect("missing child materializes");
+
+        assert!(engine.apply_host_contents_orders(pending).is_empty());
+        let missing_index = engine
+            .find_object_index(missing)
+            .expect("missing child is now live");
+        assert_eq!(
+            engine.objects[present_index].state.contents_link_generation, 9,
+            "retry must not roll the newer incarnation back to seven"
+        );
+        assert_eq!(
+            engine.objects[missing_index].state.contents_link_generation,
+            11
+        );
     }
 }

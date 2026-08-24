@@ -3718,6 +3718,144 @@ fn auto_collect_moves_carryable_into_inventory() -> Result<(), EngineError> {
 }
 
 #[test]
+fn cross_check_collection_rereads_item_position_after_query_catch_blow() -> Result<(), EngineError>
+{
+    // A truthy QueryCatchBlow falls through to collection, which rereads the
+    // live object positions before testing the collection rectangle
+    // (C4GameObjects.cpp:167-190). Moving the item out during the callback
+    // must therefore prevent collection.
+    let mut collector = c4_definition(
+        "COLL",
+        "Collector",
+        "#strict 2\nfunc QueryCatchBlow(item) { SetPosition(90, 50, item); return 1; }\n",
+    );
+    collector.set_category(CATEGORY_LIVING);
+    collector.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+    collector.set_collection_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+    let mut item = test_definition("ITEM", "Item", "#strict 2\n");
+    item.set_category(CATEGORY_OBJECT);
+    item.set_collectible(true);
+    let mut engine = engine_fixture([collector, item]);
+
+    let collector = spawn_fixture!(engine, "COLL", with_loaded: true, with_alive: true, with_construction: FULL_CON, with_position: Vector2::new(50, 50));
+    let item = spawn_fixture!(engine, "ITEM", with_loaded: true, with_construction: FULL_CON, with_position: Vector2::new(50, 50), with_velocity: Vector2::new(5, 0));
+
+    engine.cross_check(3)?;
+
+    let item = engine.test_object_snapshot(item);
+    unit_assert_eq!(item.container => None);
+    unit_assert_eq!(item.position => Vector2::new(90, 50));
+    unit_assert!(engine.test_object_snapshot(collector).contents.is_empty());
+    Ok(())
+}
+
+#[test]
+fn cross_check_collection_uses_live_rectangle_after_query_changedef(
+) -> Result<(), EngineError> {
+    // QueryCatchBlow runs before CrossCheck's collection arm. A truthy result
+    // skips the Hit body, then C++ rereads obj1->Def->Collection
+    // (C4GameObjects.cpp:167-190, especially :186-188).
+    // ChangeDef swaps Def and refreshes OCF before returning to the callback
+    // (C4Object.cpp:1223-1245).
+    let mut narrow = c4_definition(
+        "NARR",
+        "Narrow collector",
+        r#"#strict 2
+protected func QueryCatchBlow(object item)
+{
+    ChangeDef(WIDE);
+    return(1);
+}
+"#,
+    );
+    narrow.set_category(CATEGORY_LIVING);
+    narrow.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+    narrow.set_collection_rect(Some(DefinitionRect::new(-2, -2, 4, 4)));
+
+    let mut wide = c4_definition("WIDE", "Wide collector", "#strict 2\n");
+    wide.set_category(CATEGORY_LIVING);
+    wide.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+    wide.set_collection_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+
+    let mut item = c4_definition("ITEM", "Item", "#strict 2\n");
+    item.set_category(CATEGORY_OBJECT);
+    item.set_collectible(true);
+
+    let mut engine = engine_fixture([narrow, wide, item]);
+    let collector = engine.spawn_object(
+        SpawnConfig::new("NARR")
+            .with_alive(true)
+            .with_position(Vector2::new(100, 100))
+            .with_loaded(true),
+    )?;
+    let item = engine.spawn_object(
+        SpawnConfig::new("ITEM")
+            .with_position(Vector2::new(105, 100))
+            .with_fixed_velocity(FixedVec2::new(itofix(3), C4Fixed::ZERO))
+            .with_mobile(true)
+            .with_loaded(true),
+    )?;
+
+    let collector_index = engine.test_object_index(collector);
+    unit_assert_ne!(
+        engine.object_ocf_at_index(collector_index) & ocf::COLLECTION =>
+        0,
+        "the narrow definition admits the collector to CrossCheck"
+    );
+    let item_index = engine.test_object_index(item);
+    unit_assert_eq!(
+        engine.object_ocf_at_index(item_index) & (ocf::CARRYABLE | ocf::HIT_SPEED2) =>
+        ocf::CARRYABLE | ocf::HIT_SPEED2,
+        "the item enters both the collection and QueryCatchBlow paths"
+    );
+
+    engine.cross_check(3)?;
+
+    let collector_index = engine.test_object_index(collector);
+    unit_assert_eq!(engine.objects[collector_index].definition_id => "WIDE");
+    unit_assert_eq!(
+        engine.test_object_snapshot(item).container =>
+        Some(collector),
+        "C++ tests the live WIDE collection rectangle after QueryCatchBlow"
+    );
+    Ok(())
+}
+
+#[test]
+fn cross_check_collection_rectangle_is_half_open_like_cpp() -> Result<(), EngineError> {
+    // CrossCheck uses Inside(offset, 0, size - 1), so left/top and the last
+    // pixel are included while right/bottom are excluded
+    // (C4GameObjects.cpp:185-190; C4Math.h:22).
+    fn collected_at(offset: Vector2) -> Result<bool, EngineError> {
+        let mut collector = test_definition("COLL", "Collector", "#strict 2\n");
+        collector.set_category(CATEGORY_LIVING);
+        collector.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-2, -1, 4, 3)));
+        let mut item = test_definition("ITEM", "Item", "#strict 2\n");
+        item.set_category(CATEGORY_OBJECT);
+        item.set_collectible(true);
+        let mut engine = engine_fixture([collector, item]);
+        let collector = spawn_fixture!(engine, "COLL", with_loaded: true, with_alive: true, with_construction: FULL_CON, with_position: Vector2::new(50, 50));
+        let item = spawn_fixture!(engine, "ITEM", with_loaded: true, with_construction: FULL_CON, with_position: Vector2::new(50 + offset.x, 50 + offset.y));
+
+        engine.cross_check(3)?;
+        Ok(engine.test_object_snapshot(item).container == Some(collector))
+    }
+
+    for (offset, expected) in [
+        (Vector2::new(-2, -1), true),
+        (Vector2::new(1, 1), true),
+        (Vector2::new(2, 0), false),
+        (Vector2::new(0, 2), false),
+        (Vector2::new(-3, 0), false),
+        (Vector2::new(0, -2), false),
+    ] {
+        unit_assert_eq!(collected_at(offset)? => expected, "offset {offset:?}");
+    }
+    Ok(())
+}
+
+#[test]
 fn command_enter_runs_collection_then_entrance_and_transfers_contents_like_cpp(
 ) -> Result<(), EngineError> {
     // C4Command::Enter calls cObj->Enter(Target) (C4Command.cpp:600-605).

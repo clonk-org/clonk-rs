@@ -2641,7 +2641,14 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             // SetAction calls SetOCF before Start/Abort callbacks. Use the full
             // live refresh so leaving an ObjectDisabled action can re-add
             // OCF_FightReady rather than only clearing stale bits.
-            let _ = refresh_live_object_ocf(context, object_id);
+            if refresh_live_object_ocf(context, object_id) {
+                // SetAction's SetOCF is synchronous and may precede later
+                // raw writes in this same callback. Carry that exact cache
+                // through the deferred engine fold just like Enter/Exit.
+                if let Some(object) = context.object_scope_mut(object_id) {
+                    object.persist_final_ocf = true;
+                }
+            }
 
             Ok(Value::Bool(true))
         })?;

@@ -2324,6 +2324,11 @@ pub struct NestedObjectOutcome {
 pub struct HostContentsOrder {
     pub(crate) container: ObjectId,
     pub(crate) contents: Vec<ObjectId>,
+    /// Absolute link-incarnation counters for every child whose Contents
+    /// link changed while producing this order. A callback may remove and
+    /// re-add a link while leaving the child's final `Contained` pointer
+    /// unchanged, so the ordinary object delta cannot carry this state.
+    pub(crate) link_generations: Vec<(ObjectId, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -3264,6 +3269,15 @@ impl ContentsLinkOperation {
             | Self::Insert { container, .. }
             | Self::MoveToBack { container, .. }
             | Self::RotateToFront { container, .. } => container,
+        }
+    }
+
+    fn child(self) -> ObjectId {
+        match self {
+            Self::Remove { child, .. }
+            | Self::Insert { child, .. }
+            | Self::MoveToBack { child, .. }
+            | Self::RotateToFront { child, .. } => child,
         }
     }
 
@@ -5834,8 +5848,18 @@ impl EffectHostContext {
             .get_world_object(container)
             .is_some_and(|object| object.contents().contains(&child));
         if linked {
-            // FnScrollContents removes the raw first live link and appends
-            // that same link with stNone (C4Script.cpp:1879-1891).
+            // FnScrollContents removes the first live object and
+            // C4ObjectList::Add allocates a fresh stNone link at the tail
+            // (C4Script.cpp:1793-1804; C4ObjectList.cpp:296-308,129-132,
+            // 240-259).
+            self.track_contents_link_removal(container, child);
+            self.ensure_object_scope(child);
+            if let Some(scope) = self.object_scope_mut(child) {
+                scope.current_contents_link_generation = scope
+                    .current_contents_link_generation
+                    .checked_add(1)
+                    .unwrap_or(1);
+            }
             self.contents_link_operations
                 .push(ContentsLinkOperation::MoveToBack { container, child });
         }
@@ -7656,12 +7680,36 @@ impl EffectHostContext {
         }
         let contents_orders = touched_containers
             .into_iter()
-            .filter_map(|container| {
-                self.get_world_object(container)
-                    .map(|object| HostContentsOrder {
-                        container,
-                        contents: object.contents().to_vec(),
-                    })
+            .map(|container| {
+                // The container may have been a pending CreateObject that
+                // was removed after a completed Enter/Exit. Its final list is
+                // then empty and unmaterializable, but the child's allocated
+                // link incarnation remains observable.
+                let contents = self
+                    .get_world_object(container)
+                    .map(|object| object.contents().to_vec())
+                    .unwrap_or_default();
+                let mut touched_children = Vec::new();
+                for operation in self
+                    .contents_link_operations
+                    .iter()
+                    .copied()
+                    .filter(|operation| operation.container() == container)
+                {
+                    let child = operation.child();
+                    if !touched_children.contains(&child) {
+                        touched_children.push(child);
+                    }
+                }
+                let link_generations = touched_children
+                    .into_iter()
+                    .map(|child| (child, self.contents_link_generation(child)))
+                    .collect();
+                HostContentsOrder {
+                    container,
+                    contents,
+                    link_generations,
+                }
             })
             .collect::<Vec<_>>();
         // Cross-object LocalN cells fold like any other foreign mutation:
@@ -9226,6 +9274,7 @@ impl ObjectScopeContext {
     /// to the same live script scope. Command states only emit this core
     /// field set; cross-object writes travel as CommandEvents.
     pub(crate) fn stage_command_update(&mut self, mut update: ObjectUpdate) {
+        let host_container_change = std::mem::take(&mut update.host_container_change);
         if let Some(compiler_cache) = update.compiler_cache.take() {
             self.current_compiler_cache = compiler_cache.clone();
             self.pending_update.compiler_cache = Some(compiler_cache);
@@ -9255,6 +9304,7 @@ impl ObjectScopeContext {
         }
         if let Some(container) = update.container.take() {
             self.set_container(container);
+            self.pending_update.host_container_change |= host_container_change;
         }
         if let Some(owner) = update.owner.take() {
             self.set_owner(owner);
@@ -9452,6 +9502,11 @@ impl ObjectScopeContext {
 
     pub(crate) fn mark_destroy_status(&mut self) {
         self.destroy = true;
+        // AssignRemoval deliberately leaves the object's last SetOCF cache
+        // untouched (C4Object.cpp:276-313). This must cross the host seam
+        // even when an Enter followed by recursive removal collapses the
+        // final Contained value back to its call-entry value.
+        self.persist_final_ocf = true;
     }
 
     pub(crate) fn clear_info_for_removal(&mut self) {

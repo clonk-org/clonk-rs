@@ -97,6 +97,7 @@
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -4424,17 +4425,122 @@ void C4Object::DoRotation(bool fNoAttach, bool fRedirectYR)
 
 
 // ---------------------------------------------------------------------------
+// Container contents list ordering (src/C4ObjectList.cpp:110-268,310-318,
+// 614-636,815-831). The production Add/Remove/ShiftContents bodies and their
+// pointer helpers are lifted whole. A monotonic constructor serial stands in
+// for link identity: addresses cannot be compared because an allocator may
+// reuse the just-freed link on remove+add.
+namespace contents_list_order
+{
+const int32_t C4D_StaticBack = 1 << 0;
+const int32_t C4D_Structure = 1 << 1;
+const int32_t C4D_Vehicle = 1 << 2;
+const int32_t C4D_Living = 1 << 3;
+const int32_t C4D_Object = 1 << 4;
+const int32_t C4D_SortLimit =
+    C4D_StaticBack | C4D_Structure | C4D_Vehicle | C4D_Living | C4D_Object;
+
+struct C4Object;
+
+static int32_t next_link_serial;
+
+struct C4ObjectLink
+{
+    C4ObjectLink() : Serial(++next_link_serial) {}
+
+    C4Object *Obj{};
+    C4ObjectLink *Prev{};
+    C4ObjectLink *Next{};
+    int32_t Serial{};
+};
+
+struct C4Def
+{
+    int32_t Line{};
+};
+
+struct C4Object
+{
+    const char *Tag{};
+    C4Def *Def{};
+    int32_t Status{1};
+    bool Unsorted{};
+    int32_t Category{};
+    int32_t id{};
+    int32_t Mass{1};
+};
+
+struct C4ObjectList
+{
+    enum SortType
+    {
+        stNone = 0,
+        stMain,
+        stContents,
+        stReverse,
+    };
+
+    struct iterator
+    {
+        C4ObjectLink *pLink{};
+        iterator *Next{};
+        C4ObjectLink *C4ObjectLink::*direction{&C4ObjectLink::Next};
+    };
+
+    ~C4ObjectList()
+    {
+        while (First)
+        {
+            C4ObjectLink *next = First->Next;
+            delete First;
+            First = next;
+        }
+    }
+
+    bool Add(C4Object *nObj, SortType eSort, C4ObjectList *pLstSorted = nullptr);
+    bool Remove(C4Object *pObj);
+    C4ObjectLink *GetLink(C4Object *pObj);
+    bool ShiftContents(C4Object *pNewFirst);
+    void RemoveLink(C4ObjectLink *pLnk);
+    void InsertLink(C4ObjectLink *pLnk, C4ObjectLink *pAfter);
+    bool CheckSort(C4ObjectList *) { return true; }
+    void CheckCategorySort() {}
+
+    C4ObjectLink *First{};
+    C4ObjectLink *Last{};
+    int32_t Mass{};
+    iterator *FirstIter{};
+};
+
+#include "object_list_get_link.inc"
+#include "object_list_insert_link.inc"
+#include "object_list_remove_link.inc"
+#include "object_list_add.inc"
+
+#ifndef BREAKPOINT_HERE
+#define CONTENTS_LIST_ORDER_BREAKPOINT_HERE
+#define BREAKPOINT_HERE assert(false)
+#endif
+#include "object_list_remove.inc"
+#ifdef CONTENTS_LIST_ORDER_BREAKPOINT_HERE
+#undef BREAKPOINT_HERE
+#undef CONTENTS_LIST_ORDER_BREAKPOINT_HERE
+#endif
+
+#include "object_list_shift_contents.inc"
+} // namespace contents_list_order
+
+
+// ---------------------------------------------------------------------------
 // The container lifecycle: C4Object::Enter, Exit and Collect (src/C4Object.cpp).
 // What is pinned here is the SHAPE of three ordered state machines — which
 // script call runs before which mutation, which rollback undoes a failed
 // insert, and which `Status` re-check abandons the rest after a callback
 // removed one of the two objects.
 //
-// `C4ObjectList::Add`'s insert ORDER is deliberately not modelled: it sorts by
-// category through a linked list with its own invariants, and lifting it would
-// be a section of its own. `Contents` here is an append-only list whose `Add`
-// can be told to fail, which is what exercises Enter's rollback. Contents
-// ordering keeps its existing Rust-side coverage.
+// `C4ObjectList::Add`'s insert order is modelled independently by the section
+// above. `Contents` here remains an append-only list whose `Add` can be told to
+// fail, which is what exercises Enter's rollback without coupling two fixtures.
 //
 // Script calls are recorded rather than executed, and each can be configured to
 // return a value and to perform one side effect — clearing either object's
@@ -4445,11 +4551,17 @@ namespace container_lifecycle
 struct C4Object;
 
 const int32_t ActIdle = -1;
+const int32_t DFA_ATTACH = 14;                 // C4Def.h:444
 const int32_t C4D_Living = 1 << 3;             // C4Def.h:47
 const int32_t C4ID_Flag = 1;                   // stands in for C4Id("FLAG")
 const int32_t C4RULE_FlagRemoveable = 1 << 0;  // C4Rules bit under test
 // OCF_HitSpeed1..3 and BASEFUNC_AutoSellContents come from the real
 // C4Constants.h / C4Scenario.h the oracle already includes.
+const uint32_t LifecycleOCFMask =
+    OCF_Normal | OCF_HitSpeed1 | OCF_HitSpeed2 | OCF_HitSpeed3 | OCF_HitSpeed4
+    | OCF_NotContained | OCF_InLiquid | OCF_InFree | OCF_Available;
+
+#include "object_hit_speeds.inc"
 
 // The PSF_ names the lifted bodies call, copied verbatim from C4Script.h
 // (:48-50, 56-60, 82, 96). The leading `~` marks the callback optional and is
@@ -4491,10 +4603,21 @@ enum class Effect
     // entered — the case Enter's post-callback re-check exists for.
     ClearEnteringContainer,
     ClearEnteringStatus,
+    // A callback made on the entering object that runs the final containment
+    // and status mutations of its real RemoveObject() script call. The full
+    // AssignRemoval call order is pinned by the separate removal section.
+    RemoveSelf,
     // A callback that Exits the object it was told about, running the lifted
     // Exit body — which is what a script doing the same would do, callbacks and
     // all.
     ExitEntering,
+    // Entrance calls `pContainer->RemoveObject()` with its default
+    // fExitContents=false. AssignRemoval marks the target deleted, unlinks its
+    // direct content, and recursively deletes that content before returning
+    // (C4Object.cpp:276-305). The separate AssignRemoval oracle below pins the
+    // full teardown; this focused effect retains the final state that Enter's
+    // post-callback guard observes.
+    RemoveContainingObject,
 };
 
 // The container an Effect::ReEnter callback drops the object into, standing in
@@ -4539,6 +4662,7 @@ struct DefStub
     struct ActMapEntry
     {
         const char *Name{""};
+        int32_t Procedure{};
     } ActMap[4];
 };
 
@@ -4662,11 +4786,30 @@ struct C4Object
     // Everything below is bookkeeping the lifted bodies invoke but this section
     // does not pin; each records that it ran so a reordering is still visible.
     void CloseMenu(bool) { record("CloseMenu"); }
-    void SetOCF() { record("SetOCF"); }
+    void SetOCF()
+    {
+        record("SetOCF");
+        // Focused SetOCF subset for these all-sky fixtures. GetSpeed and the
+        // four thresholds are mechanically extracted; these decisions are the
+        // production branches at C4Object.cpp:549-550,590-594,629-650.
+        const C4Fixed cspeed = GetSpeed();
+        OCF = OCF_Normal;
+        if (cspeed >= HitSpeed1) OCF |= OCF_HitSpeed1;
+        if (cspeed >= HitSpeed2) OCF |= OCF_HitSpeed2;
+        if (cspeed >= HitSpeed3) OCF |= OCF_HitSpeed3;
+        if (cspeed >= HitSpeed4) OCF |= OCF_HitSpeed4;
+        if (!Contained)
+        {
+            OCF |= OCF_NotContained;
+            if (InLiquid) OCF |= OCF_InLiquid;
+            OCF |= OCF_InFree | OCF_Available;
+        }
+    }
     void UpdateFace(bool) { record("UpdateFace"); }
     void UpdateMass() { record("UpdateMass"); }
     void UpdateSolidMask(bool) { record("UpdateSolidMask"); }
-    void CopyMotion(C4Object *) { record("CopyMotion"); }
+    void UpdatePos() { record("UpdatePos"); }
+    void CopyMotion(C4Object *from);
     void BoundsCheck(int32_t &, int32_t &) { record("BoundsCheck"); }
     void AutoSellContents() { record("AutoSellContents"); }
 
@@ -4700,7 +4843,17 @@ struct C4Object
         void SetNameList(int32_t *list) { List = list; }
     } LocalNamed;
 
-    void SetAction(int32_t) { record("SetActionIdle"); }
+    C4Fixed GetSpeed();
+    int32_t GetProcedure()
+    {
+        return Action.Act > ActIdle ? Def->ActMap[Action.Act].Procedure : 0;
+    }
+    bool SetAction(int32_t action)
+    {
+        record("SetActionIdle");
+        Action.Act = action;
+        return true;
+    }
     void SetDir(int32_t) { record("SetDir"); }
     void UpdateGraphics(bool) { record("UpdateGraphics"); }
 
@@ -4721,7 +4874,9 @@ struct C4Object
     bool Collect(C4Object *pObj);
 };
 
-static void ObjectComCancelAttach(C4Object *) { C4Object::record("CancelAttach"); }
+#include "object_get_speed.inc"
+#include "object_copy_motion.inc"
+#include "object_com_cancel_attach.inc"
 
 inline int32_t C4Object::Call(const char *fn, ParSet)
 {
@@ -4747,8 +4902,35 @@ inline int32_t C4Object::Call(const char *fn, ParSet)
         case Effect::ClearEnteringStatus:
             if (g_entering_object) g_entering_object->Status = 0;
             break;
+        case Effect::RemoveSelf:
+            if (Contained)
+            {
+                C4Object *container = Contained;
+                Status = 0;
+                Action.Act = ActIdle;
+                container->Contents.Remove(this);
+                Contained = nullptr;
+                container->UpdateMass();
+                container->SetOCF();
+            }
+            break;
         case Effect::ExitEntering:
-            if (g_entering_object) g_entering_object->Exit();
+            // Script Exit coordinates are relative to the callback receiver;
+            // both Collection2's container and Entrance's entering object sit
+            // at this position here (C4Script.cpp:372-388).
+            if (g_entering_object) g_entering_object->Exit(x, y);
+            break;
+        case Effect::RemoveContainingObject:
+            if (Contained)
+            {
+                C4Object *container = Contained;
+                container->Status = 0;
+                container->Action.Act = ActIdle;
+                container->Contents.Remove(this);
+                Status = 0;
+                Action.Act = ActIdle;
+                Contained = nullptr;
+            }
             break;
         case Effect::None: break;
         }
@@ -11569,6 +11751,183 @@ int main()
     arr_end();
     printf(",\n");
 
+    arr_begin("contents_list_order");
+    {
+        namespace list_order = contents_list_order;
+        using Def = list_order::C4Def;
+        using Link = list_order::C4ObjectLink;
+        using List = list_order::C4ObjectList;
+        using Object = list_order::C4Object;
+
+        auto emit = [](const char *name, List &list, Object *tracked = nullptr,
+                       int32_t tracked_serial_before = 0,
+                       const char *iterator_after_remove = nullptr)
+        {
+            sep();
+            printf("{\"case\":\"%s\",\"order\":[", name);
+            bool first = true;
+            for (Link *link = list.First; link; link = link->Next)
+            {
+                printf("%s\"%s\"", first ? "" : ",", link->Obj->Tag);
+                first = false;
+            }
+            printf("],\"serials\":[");
+            first = true;
+            for (Link *link = list.First; link; link = link->Next)
+            {
+                printf("%s%d", first ? "" : ",", link->Serial);
+                first = false;
+            }
+            printf("]");
+            if (tracked)
+            {
+                Link *link = list.GetLink(tracked);
+                printf(",\"tracked_serial_before\":%d,\"tracked_serial_after\":%d",
+                       tracked_serial_before, link ? link->Serial : 0);
+            }
+            if (iterator_after_remove)
+                printf(",\"iterator_after_remove\":\"%s\"", iterator_after_remove);
+            printf("}");
+        };
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object old_object{"old", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object new_object{"new", &def, 1, false, list_order::C4D_Object, 1, 1};
+            List list;
+            assert(list.Add(&old_object, List::stContents));
+            assert(list.Add(&new_object, List::stContents));
+            emit("same_id_newest_first", list);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object high{"high", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object low{"low", &def, 1, false, list_order::C4D_StaticBack, 2, 1};
+            Object middle{"middle", &def, 1, false, list_order::C4D_Living, 3, 1};
+            List list;
+            assert(list.Add(&high, List::stNone));
+            assert(list.Add(&low, List::stNone));
+            assert(list.Add(&middle, List::stContents));
+            emit("relative_category_descending", list);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object old_a{"old-a", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object old_c{"old-c", &def, 1, false, list_order::C4D_Object, 3, 1};
+            Object new_b{"new-b", &def, 1, false, list_order::C4D_Object, 2, 1};
+            List list;
+            assert(list.Add(&old_a, List::stNone));
+            assert(list.Add(&old_c, List::stNone));
+            assert(list.Add(&new_b, List::stContents));
+            emit("equal_category_new_cluster_first", list);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object old_b{"old-b", &def, 1, false, list_order::C4D_StaticBack, 2, 1};
+            Object old_a{"old-a", &def, 1, false, list_order::C4D_StaticBack, 1, 1};
+            Object new_a{"new-a", &def, 1, false, list_order::C4D_StaticBack, 1, 1};
+            List list;
+            assert(list.Add(&old_b, List::stNone));
+            assert(list.Add(&old_a, List::stNone));
+            assert(list.Add(&new_a, List::stContents));
+            emit("static_back_skips_id_cluster", list);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def ordinary_def{};
+            Def line_def{1};
+            Object low{"low", &ordinary_def, 1, false, list_order::C4D_StaticBack, 1, 1};
+            Object line{"line", &line_def, 1, false, list_order::C4D_Object, 2, 1};
+            List list;
+            assert(list.Add(&low, List::stNone));
+            assert(list.Add(&line, List::stContents));
+            emit("line_object_tail", list);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object low{"low", &def, 1, false, list_order::C4D_StaticBack, 1, 1};
+            Object unsorted{"unsorted", &def, 1, true, list_order::C4D_Object, 2, 1};
+            List list;
+            assert(list.Add(&low, List::stNone));
+            assert(list.Add(&unsorted, List::stContents));
+            emit("unsorted_object_tail", list);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object dead{"dead", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object unsorted{"unsorted", &def, 1, false, list_order::C4D_Object, 2, 1};
+            Object low{"low", &def, 1, false, list_order::C4D_StaticBack, 3, 1};
+            Object newcomer{"new", &def, 1, false, list_order::C4D_Living, 4, 1};
+            List list;
+            assert(list.Add(&dead, List::stNone));
+            assert(list.Add(&unsorted, List::stNone));
+            assert(list.Add(&low, List::stNone));
+            dead.Status = 0;
+            unsorted.Unsorted = true;
+            assert(list.Add(&newcomer, List::stContents));
+            emit("dead_and_unsorted_existing_ignored", list);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object old_object{"old", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object new_object{"new", &def, 1, false, list_order::C4D_Object, 1, 1};
+            List list;
+            assert(list.Add(&old_object, List::stNone));
+            assert(list.Add(&new_object, List::stNone));
+            emit("st_none_tail", list);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object a{"a", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object b{"b", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object c{"c", &def, 1, false, list_order::C4D_Object, 1, 1};
+            List list;
+            assert(list.Add(&a, List::stNone));
+            assert(list.Add(&b, List::stNone));
+            assert(list.Add(&c, List::stNone));
+            const int32_t before = list.GetLink(&b)->Serial;
+            assert(list.ShiftContents(&b));
+            emit("shift_contents_preserves_link", list, &b, before);
+        }
+
+        {
+            list_order::next_link_serial = 0;
+            Def def{};
+            Object a{"a", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object b{"b", &def, 1, false, list_order::C4D_Object, 1, 1};
+            Object c{"c", &def, 1, false, list_order::C4D_Object, 1, 1};
+            List list;
+            assert(list.Add(&a, List::stNone));
+            assert(list.Add(&b, List::stNone));
+            assert(list.Add(&c, List::stNone));
+            List::iterator iterator{list.GetLink(&b)};
+            list.FirstIter = &iterator;
+            const int32_t before = iterator.pLink->Serial;
+            assert(list.Remove(&b));
+            assert(list.Add(&b, List::stContents));
+            const char *iterator_tag = iterator.pLink ? iterator.pLink->Obj->Tag : "null";
+            emit("remove_add_allocates_fresh_link", list, &b, before, iterator_tag);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("container_lifecycle");
     {
         using namespace container_lifecycle;
@@ -11611,7 +11970,7 @@ int main()
             // RejectCollection is consulted only when the caller asked for the
             // flag — which C4Object::Collect does and a plain script Enter does
             // not — so it is exercised through the collect cases below.
-            {"enter_plain", "enter", false, false, false, false, false, false, false, false, -1,
+            {"enter_plain", "enter", false, false, false, false, false, true, false, false, -1,
              0, 0, 0, "", 0, 0, {}},
             // fCopyMotion inserts the solid-mask removal and the motion copy
             // BEFORE the OCF refresh (C4Object.cpp:1614-1620).
@@ -11619,29 +11978,37 @@ int main()
              -1, 0, 0, 0, "", 0, 0, {}},
             // A living object keeps its own controller; anything else inherits
             // the container's (C4Object.cpp:1608-1609).
-            {"enter_living_keeps_controller", "enter", false, false, false, false, false, false,
+            {"enter_living_keeps_controller", "enter", false, false, false, false, false, true,
              false, true, -1, 0, 0, 0, "", 0, 0, {}},
             // Already contained: Exit runs first, with its own two callbacks.
-            {"enter_from_container", "enter", false, false, true, false, false, false, false,
+            {"enter_from_container", "enter", false, false, true, false, false, true, false,
              false, -1, 0, 0, 0, "", 0, 0, {}},
-            // Collection2 removing the object abandons the Entrance call.
-            {"enter_collection2_kills", "enter", false, false, false, false, false, false, false,
-             false, -1, 0, 0, 0, "", 0, 1,
+            // Collection2 exiting the object abandons the Entrance call.
+            {"enter_collection2_exits_object", "enter", false, false, false, false, false, true,
+             false, false, -1, 0, 0, 0, "", 0, 1,
              {{"target", PSF_Collection2, 0, Effect::ExitEntering}}},
             // The re-check after Entrance tests the CONTAINER's status, not the
-            // entering object's — so an Entrance that removes the object itself
-            // does NOT stop the auto-sell tail (C4Object.cpp:1629-1633).
+            // entering object's — so directly clearing only the entering
+            // object's Status does NOT stop the auto-sell tail
+            // (C4Object.cpp:1629-1633).
             {"enter_entrance_clears_own_status", "enter", false, false, false, false, false,
-             false, false, false, 3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 1,
+             true, false, false, 3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 1,
              {{"object", PSF_Entrance, 0, Effect::ClearSelfStatus}}},
-            // Removing the CONTAINER is what the re-check catches.
-            {"enter_entrance_clears_container", "enter", false, false, false, false, false, false,
+            // Entrance can also Exit the entering object. That makes the
+            // !Contained arm stop the tail; it does not remove the container.
+            {"enter_entrance_exits_object", "enter", false, false, false, false, false, true,
              false, false, 3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 1,
              {{"object", PSF_Entrance, 0, Effect::ExitEntering}}},
+            // A real pContainer->RemoveObject() removes both the target and its
+            // contained object. This is the target-Status arm of the
+            // post-Entrance re-check (C4Object.cpp:1629-1633).
+            {"enter_entrance_removes_container", "enter", false, false, false, false, false,
+             true, false, false, 3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 1,
+             {{"object", PSF_Entrance, 0, Effect::RemoveContainingObject}}},
             // A valid base plus the realism bit runs the auto-sell tail.
-            {"enter_auto_sell", "enter", false, false, false, false, false, false, false, false,
+            {"enter_auto_sell", "enter", false, false, false, false, false, true, false, false,
              3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 0, {}},
-            {"enter_base_without_realism", "enter", false, false, false, false, false, false,
+            {"enter_base_without_realism", "enter", false, false, false, false, false, true,
              false, false, 3, 0, 0, 0, "", 0, 0, {}},
 
             // --- Exit ------------------------------------------------------
@@ -11663,15 +12030,20 @@ int main()
             // fixture models.
             {"collect_plain", "collect", false, false, false, false, false, false, false, false,
              -1, 0, 0, 0, "", 0, 0, {}},
+            // ObjectComCancelAttach runs between a successful Enter and the
+            // Collection callback (C4ObjectCom.cpp:769-774;
+            // C4Object.cpp:5703-5708).
+            {"collect_cancels_attach", "collect", false, false, false, false, false, false,
+             false, false, -1, 0, 0, 0, "Attach", 0, 0, {}},
             // The three hit calls are gated on their own OCF bits and run in
             // order (C4Object.cpp:5710-5712).
             {"collect_hit_speeds", "collect", false, false, false, false, false, false, false,
              false, -1, 0, 0, 0, "",
-             OCF_HitSpeed1 | OCF_HitSpeed2 | OCF_HitSpeed3, 0, {}},
+             OCF_HitSpeed1 | OCF_HitSpeed2 | OCF_HitSpeed3 | OCF_HitSpeed4, 0, {}},
             // A Hit callback that removes the object skips the rest.
             {"collect_hit_kills", "collect", false, false, false, false, false, false, false,
              false, -1, 0, 0, 0, "", OCF_HitSpeed1 | OCF_HitSpeed2, 1,
-             {{"object", PSF_Hit, 0, Effect::ClearSelfStatus}}},
+             {{"object", PSF_Hit, 0, Effect::RemoveSelf}}},
             // A refused Enter stops Collect before CancelAttach.
             {"collect_enter_refused", "collect", false, false, false, false, false, false, false,
              false, -1, 0, 0, 0, "", 0, 1,
@@ -11688,6 +12060,7 @@ int main()
             DefStub object_def;
             object_def.id = c.object_id;
             object_def.ActMap[0].Name = c.action_name;
+            object_def.ActMap[0].Procedure = SEqual(c.action_name, "Attach") ? DFA_ATTACH : 0;
             DefStub target_def;
             DefStub outside_def;
 
@@ -11696,9 +12069,29 @@ int main()
             object.Def = &object_def;
             object.Controller = 5;
             object.Base = c.base;
-            object.OCF = c.ocf;
             object.Alive = c.living ? 1 : 0;
             object.Category = c.living ? C4D_Living : 0;
+            object.x = 5;
+            object.y = 7;
+            object.fix_x = itofix(object.x);
+            object.fix_y = itofix(object.y);
+            object.xdir.val = 1111;
+            object.ydir.val = -2222;
+            if (c.ocf & OCF_HitSpeed4)
+            {
+                object.xdir = itofix(9);
+                object.ydir = Fix0;
+            }
+            else if (c.ocf & OCF_HitSpeed3)
+            {
+                object.xdir = itofix(7);
+                object.ydir = Fix0;
+            }
+            else if (c.ocf & OCF_HitSpeed2)
+            {
+                object.xdir = itofix(3);
+                object.ydir = Fix0;
+            }
             if (c.action_name[0]) object.Action.Act = 0;
 
             container_lifecycle::C4Object target;
@@ -11707,11 +12100,23 @@ int main()
             target.Controller = 9;
             target.Base = c.base;
             target.Contents.RefuseAdd = c.refuse_add;
+            target.x = 31;
+            target.y = 37;
+            target.fix_x = itofix(target.x);
+            target.fix_y = itofix(target.y);
+            target.xdir.val = 12345;
+            target.ydir.val = -23456;
 
             container_lifecycle::C4Object outside;
             outside.Tag = "outside";
             outside.Def = &outside_def;
             outside.Controller = 2;
+            outside.x = 71;
+            outside.y = 73;
+            outside.fix_x = itofix(outside.x);
+            outside.fix_y = itofix(outside.y);
+            outside.xdir.val = -34567;
+            outside.ydir.val = 45678;
 
             g_reenter_target = &outside;
             g_entering_object = &object;
@@ -11731,6 +12136,10 @@ int main()
                 target.Contained = &object;
                 object.Contents.Add(&target, container_lifecycle::C4ObjectList::stContents);
             }
+            object.SetOCF();
+            target.SetOCF();
+            outside.SetOCF();
+            g_call_count = 0;
 
             bool reject_collect = false;
             bool result = false;
@@ -11743,7 +12152,7 @@ int main()
             }
             else if (SEqual(c.op, "exit"))
             {
-                result = object.Exit(11, 22, 33, itofix(1), itofix(2), itofix(3) / 10, true);
+                result = object.Exit(111, 122, 33, itofix(1), itofix(2), itofix(3) / 10, true);
             }
             else
             {
@@ -11753,14 +12162,17 @@ int main()
             sep();
             printf("{\"case\":\"%s\",\"op\":\"%s\",\"result\":%d,\"reject_collect\":%d,"
                    "\"contained_is_target\":%d,\"contained_is_outside\":%d,"
-                   "\"target_contents\":%d,\"controller\":%d,\"mobile\":%d,"
-                   "\"in_liquid\":%d,\"x\":%d,\"y\":%d,\"r\":%d,\"xdir\":%d,"
+                   "\"target_contents\":%d,\"outside_contents\":%d,\"status\":%d,"
+                   "\"target_status\":%d,\"controller\":%d,\"mobile\":%d,"
+                   "\"in_liquid\":%d,\"ocf\":%u,\"action_idle\":%d,"
+                   "\"x\":%d,\"y\":%d,\"r\":%d,\"xdir\":%d,"
                    "\"ydir\":%d,\"rdir\":%d,\"calls\":[",
                    c.name, c.op, result ? 1 : 0, reject_collect ? 1 : 0,
                    object.Contained == &target ? 1 : 0, object.Contained == &outside ? 1 : 0,
-                   target.Contents.Count, object.Controller, object.Mobile, object.InLiquid,
-                   object.x, object.y, object.r, object.xdir.val, object.ydir.val,
-                   object.rdir.val);
+                   target.Contents.Count, outside.Contents.Count, object.Status, target.Status,
+                   object.Controller, object.Mobile, object.InLiquid,
+                   object.OCF & LifecycleOCFMask, object.Action.Act <= ActIdle ? 1 : 0, object.x,
+                   object.y, object.r, object.xdir.val, object.ydir.val, object.rdir.val);
             for (int32_t i = 0; i < g_call_count && i < MaxCalls; ++i)
                 printf("%s\"%s\"", i ? "," : "", g_calls[i]);
             printf("]}");

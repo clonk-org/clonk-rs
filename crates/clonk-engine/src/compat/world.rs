@@ -4085,16 +4085,28 @@ impl HostWorldContext {
     /// used by a later callback in the same effect batch. C++ mutates these
     /// links synchronously; the copied host world otherwise sees only the
     /// child's updated `Contained` pointer.
-    pub(crate) fn preview_contents_order(&mut self, container: ObjectId, contents: &[ObjectId]) {
+    pub(crate) fn preview_contents_order(
+        &mut self,
+        container: ObjectId,
+        contents: &[ObjectId],
+        link_generations: &[(ObjectId, u64)],
+    ) {
         let _ = self.get(container);
         let store = Rc::make_mut(self.object_store.get_mut());
-        let Some(object) = store.objects.get_mut(&container) else {
-            return;
-        };
-        let object = Rc::make_mut(object);
-        object.contents = contents.to_vec();
-        if let Some(state) = object.state.as_mut() {
-            Rc::make_mut(state).contents = contents.to_vec();
+        if let Some(object) = store.objects.get_mut(&container) {
+            let object = Rc::make_mut(object);
+            object.contents = contents.to_vec();
+            if let Some(state) = object.state.as_mut() {
+                Rc::make_mut(state).contents = contents.to_vec();
+            }
+        }
+        for &(child, generation) in link_generations {
+            let Some(child) = store.objects.get_mut(&child) else {
+                continue;
+            };
+            if let Some(state) = Rc::make_mut(child).state.as_mut() {
+                Rc::make_mut(state).contents_link_generation = generation;
+            }
         }
     }
 

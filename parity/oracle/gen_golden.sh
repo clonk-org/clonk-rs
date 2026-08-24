@@ -7,9 +7,11 @@
 # traversal (src/C4LandscapePath.h), FnEval/DirectExec context selection
 # (src/C4Script.cpp, src/C4AulExec.cpp), action-direction decisions
 # (src/C4ActionDirection.h), mechanically extracted DFA_PUSH/PULL/FIGHT
-# direction blocks, and active solid-mask bitmap sampling
-# (src/C4SolidMaskBitmap.h), complete C4Object::DigOutMaterialCast and landscape
-# BlastFree methods, and the bottom/top/side-flight C4Object::ContactAction
+# direction blocks and active solid-mask bitmap sampling
+# (src/C4SolidMaskBitmap.h), the mechanically extracted container
+# CopyMotion/GetSpeed/ObjectComCancelAttach helpers, complete
+# C4Object::DigOutMaterialCast and landscape BlastFree methods, and the
+# bottom/top/side-flight C4Object::ContactAction
 # arms, plus C4PlayerList::GetCount and Join's player-capacity gate. The Rust side
 # (crates/clonk-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
@@ -1097,11 +1099,39 @@ awk '
 ' "$src/C4Object.cpp" > "$gen/object_change_def.inc"
 
 awk '
+  /^const C4Fixed HitSpeed1 =/ { p = 1 }
+  p { print }
+  p && /^const C4Fixed HitSpeed4 =/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/object_hit_speeds.inc"
+
+awk '
+  /^C4Fixed C4Object::GetSpeed\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_get_speed.inc"
+
+awk '
   /^bool C4Object::Enter\(C4Object \*pTarget, bool fCalls, bool fCopyMotion, bool \*pfRejectCollect\)$/ { p = 1 }
   p { print }
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/object_enter.inc"
+
+awk '
+  /^void C4Object::CopyMotion\(C4Object \*from\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/object_copy_motion.inc"
+
+awk '
+  /^bool ObjectComCancelAttach\(C4Object \*cObj\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectCom.cpp" > "$gen/object_com_cancel_attach.inc"
 
 awk '
   /^bool C4Object::Exit\(int32_t iX, int32_t iY, int32_t iR, C4Fixed iXDir, C4Fixed iYDir, C4Fixed iRDir, bool fCalls\)$/ { p = 1 }
@@ -1116,6 +1146,53 @@ awk '
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/object_collect.inc"
+
+# 3r2. Lift the linked-list operations that define container contents order.
+#       `Add` owns both the category/id insertion rules and link allocation;
+#       `Remove` and `ShiftContents` distinguish fresh-link reinsertion from a
+#       rotation that preserves link identity. The other three bodies are the
+#       complete pointer helpers those operations call.
+awk '
+  /^bool C4ObjectList::Add\(C4Object \*nObj, SortType eSort, C4ObjectList \*pLstSorted\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/object_list_add.inc"
+
+awk '
+  /^bool C4ObjectList::Remove\(C4Object \*pObj\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/object_list_remove.inc"
+
+awk '
+  /^C4ObjectLink \*C4ObjectList::GetLink\(C4Object \*pObj\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/object_list_get_link.inc"
+
+awk '
+  /^void C4ObjectList::RemoveLink\(C4ObjectLink \*pLnk\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/object_list_remove_link.inc"
+
+awk '
+  /^void C4ObjectList::InsertLink\(C4ObjectLink \*pLnk, C4ObjectLink \*pAfter\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/object_list_insert_link.inc"
+
+awk '
+  /^bool C4ObjectList::ShiftContents\(C4Object \*pNewFirst\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/object_list_shift_contents.inc"
 
 # 3q. Lift C4Effect::Check, the negotiation every AddEffect runs before an
 #     effect exists. It walks the whole list asking each live effect of at least

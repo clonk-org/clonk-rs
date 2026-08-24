@@ -51,9 +51,10 @@ use crate::scenario::{
 use crate::{
     contact_action_wall_tumble_x, ActionSpec, ActionState, CommandDirection, Definition,
     DefinitionPicture, DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction,
-    EffectVarValue, Engine, EngineError, JoinPlayerConfig, ObjectBaseGraphics, ObjectStatus,
-    ObjectUpdate, PhysicalInfo, PhysicsSettings, PlayerConfig, Scenario, ShapeAttachRecord,
-    SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT, CATEGORY_VEHICLE, OWNER_NONE,
+    EffectVarValue, Engine, EngineError, JoinPlayerConfig, ObjectBaseGraphics, ObjectId,
+    ObjectStatus, ObjectUpdate, PhysicalInfo, PhysicsSettings, PlayerConfig, Scenario,
+    ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT, CATEGORY_STATIC_BACK,
+    CATEGORY_VEHICLE, OWNER_NONE,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2579,17 +2580,352 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
-    // 0j. The container lifecycle: C4Object::Enter, Exit and Collect
+    // 0j-a. Raw C4ObjectList contents ordering and link identity. The oracle
+    //       compiles Add/Remove/GetLink/InsertLink/RemoveLink/ShiftContents
+    //       directly from C4ObjectList.cpp:110-238 (Add), :240-268 (Remove),
+    //       :310-318 (GetLink), :614-618 (RemoveLink), :620-636 (InsertLink)
+    //       and :815-831 (ShiftContents). Rust
+    //       drives the corresponding loaded tail-add, runtime Enter, script
+    //       ShiftContents and removal/re-entry paths; the local serial ledger
+    //       only normalizes Rust's per-object generations to C++'s global link
+    //       allocation counter.
+    {
+        struct ContentsListProbe {
+            engine: Engine,
+            container: ObjectId,
+            tags: HashMap<ObjectId, String>,
+            serials: HashMap<(ObjectId, u64), u64>,
+            next_serial: u64,
+        }
+
+        impl ContentsListProbe {
+            fn new() -> Self {
+                let mut engine = Engine::with_seed(0);
+                let container = Definition::from_script(
+                    "CONT",
+                    "CONT",
+                    "#strict\npublic func ShiftToB() { return ShiftContents(); }\n",
+                )
+                .expect("contents-list container compiles");
+                engine
+                    .register_definition(container)
+                    .expect("contents-list container registers");
+                for id in [
+                    "SAME", "HIGH", "LOW", "MID", "ITMA", "ITMB", "ITMC", "SBA", "SBB", "LINE",
+                    "UNSO", "DEAD", "NEWC",
+                ] {
+                    let mut definition = Definition::from_script(id, id, "#strict\n")
+                        .expect("contents-list item compiles");
+                    if id == "LINE" {
+                        definition.set_line(1);
+                    }
+                    engine
+                        .register_definition(definition)
+                        .expect("contents-list item registers");
+                }
+                let container = engine
+                    .spawn_object(SpawnConfig::new("CONT"))
+                    .expect("contents-list container spawns");
+                Self {
+                    engine,
+                    container,
+                    tags: HashMap::new(),
+                    serials: HashMap::new(),
+                    next_serial: 0,
+                }
+            }
+
+            fn add(
+                &mut self,
+                tag: &str,
+                definition: &str,
+                category: i32,
+                loaded: bool,
+            ) -> ObjectId {
+                let mut config = SpawnConfig::new(definition).with_category(category);
+                if loaded {
+                    config = config.with_container(self.container).with_loaded(true);
+                }
+                let object = self
+                    .engine
+                    .spawn_object(config)
+                    .expect("contents-list item spawns");
+                self.tags.insert(object, tag.to_string());
+                if loaded {
+                    self.record_allocation(object);
+                }
+                object
+            }
+
+            fn record_allocation(&mut self, object: ObjectId) {
+                self.next_serial += 1;
+                let generation = self.generation(object);
+                assert_ne!(generation, 0, "a contained object has a live link");
+                assert!(
+                    self.serials
+                        .insert((object, generation), self.next_serial)
+                        .is_none(),
+                    "every C4ObjectLink incarnation is unique"
+                );
+            }
+
+            fn generation(&self, object: ObjectId) -> u64 {
+                let index = self
+                    .engine
+                    .find_object_index(object)
+                    .expect("contents-list item remains materialized");
+                self.engine.objects[index].state.contents_link_generation
+            }
+
+            fn enter(&mut self, object: ObjectId) {
+                let index = self
+                    .engine
+                    .find_object_index(object)
+                    .expect("contents-list item remains materialized");
+                let previous = self.engine.objects[index].state.container;
+                self.engine
+                    .apply_container_change(object, previous, Some(self.container), false)
+                    .expect("runtime contents insertion succeeds");
+                self.record_allocation(object);
+            }
+
+            fn exit(&mut self, object: ObjectId) {
+                self.engine
+                    .apply_container_change(object, Some(self.container), None, false)
+                    .expect("runtime contents removal succeeds");
+            }
+
+            fn set_unsorted(&mut self, object: ObjectId) {
+                let index = self
+                    .engine
+                    .find_object_index(object)
+                    .expect("contents-list item remains materialized");
+                self.engine.objects[index].unsorted = true;
+            }
+
+            fn set_deleted(&mut self, object: ObjectId) {
+                let index = self
+                    .engine
+                    .find_object_index(object)
+                    .expect("contents-list item remains materialized");
+                self.engine.objects[index].state.status = ObjectStatus::Deleted;
+            }
+
+            fn make_picture_distinct(&mut self, object: ObjectId) {
+                let index = self
+                    .engine
+                    .find_object_index(object)
+                    .expect("contents-list item remains materialized");
+                self.engine.objects[index].state.color_modulation = 0x0080_8080;
+            }
+
+            fn shift_to_b(&mut self) {
+                let index = self
+                    .engine
+                    .find_object_index(self.container)
+                    .expect("contents-list container remains materialized");
+                let result = self
+                    .engine
+                    .call_object_function(index, "ShiftToB", Vec::new())
+                    .expect("ShiftContents callback succeeds");
+                assert_eq!(result, ScriptValue::Bool(true));
+            }
+
+            fn links(&self) -> Vec<(ObjectId, u64)> {
+                let index = self
+                    .engine
+                    .find_object_index(self.container)
+                    .expect("contents-list container remains materialized");
+                self.engine.objects[index]
+                    .state
+                    .contents
+                    .iter()
+                    .copied()
+                    .map(|object| (object, self.generation(object)))
+                    .collect()
+            }
+
+            fn tag(&self, object: ObjectId) -> String {
+                self.tags
+                    .get(&object)
+                    .expect("every probe object has a tag")
+                    .clone()
+            }
+
+            fn snapshot(&self) -> (Vec<String>, Vec<u64>) {
+                self.links()
+                    .into_iter()
+                    .map(|(object, generation)| {
+                        let tag = self.tag(object);
+                        let serial = *self
+                            .serials
+                            .get(&(object, generation))
+                            .expect("every live link incarnation has a serial");
+                        (tag, serial)
+                    })
+                    .unzip()
+            }
+        }
+
+        let cases = golden["contents_list_order"].as_array().unwrap();
+        assert_eq!(
+            cases
+                .iter()
+                .filter_map(|case| case["case"].as_str())
+                .collect::<Vec<_>>(),
+            [
+                "same_id_newest_first",
+                "relative_category_descending",
+                "equal_category_new_cluster_first",
+                "static_back_skips_id_cluster",
+                "line_object_tail",
+                "unsorted_object_tail",
+                "dead_and_unsorted_existing_ignored",
+                "st_none_tail",
+                "shift_contents_preserves_link",
+                "remove_add_allocates_fresh_link",
+            ],
+            "the mechanically extracted contents-list matrix is complete"
+        );
+        for (idx, case) in cases.iter().enumerate() {
+            let name = case["case"].as_str().unwrap_or_default();
+            let mut probe = ContentsListProbe::new();
+            let mut tracked_before = None;
+            let mut tracked_after = None;
+            let mut iterator_after_remove = None;
+            match name {
+                "same_id_newest_first" => {
+                    probe.add("old", "SAME", CATEGORY_OBJECT, true);
+                    let new = probe.add("new", "SAME", CATEGORY_OBJECT, false);
+                    probe.enter(new);
+                }
+                "relative_category_descending" => {
+                    probe.add("high", "HIGH", CATEGORY_OBJECT, true);
+                    probe.add("low", "LOW", CATEGORY_STATIC_BACK, true);
+                    let middle = probe.add("middle", "MID", CATEGORY_LIVING, false);
+                    probe.enter(middle);
+                }
+                "equal_category_new_cluster_first" => {
+                    probe.add("old-a", "ITMA", CATEGORY_OBJECT, true);
+                    probe.add("old-c", "ITMC", CATEGORY_OBJECT, true);
+                    let new_b = probe.add("new-b", "ITMB", CATEGORY_OBJECT, false);
+                    probe.enter(new_b);
+                }
+                "static_back_skips_id_cluster" => {
+                    probe.add("old-b", "SBB", CATEGORY_STATIC_BACK, true);
+                    probe.add("old-a", "SBA", CATEGORY_STATIC_BACK, true);
+                    let new_a = probe.add("new-a", "SBA", CATEGORY_STATIC_BACK, false);
+                    probe.enter(new_a);
+                }
+                "line_object_tail" => {
+                    probe.add("low", "LOW", CATEGORY_STATIC_BACK, true);
+                    let line = probe.add("line", "LINE", CATEGORY_OBJECT, false);
+                    probe.enter(line);
+                }
+                "unsorted_object_tail" => {
+                    probe.add("low", "LOW", CATEGORY_STATIC_BACK, true);
+                    let unsorted = probe.add("unsorted", "UNSO", CATEGORY_OBJECT, false);
+                    probe.set_unsorted(unsorted);
+                    probe.enter(unsorted);
+                }
+                "dead_and_unsorted_existing_ignored" => {
+                    let dead = probe.add("dead", "DEAD", CATEGORY_OBJECT, true);
+                    let unsorted = probe.add("unsorted", "UNSO", CATEGORY_OBJECT, true);
+                    probe.add("low", "LOW", CATEGORY_STATIC_BACK, true);
+                    probe.set_deleted(dead);
+                    probe.set_unsorted(unsorted);
+                    let new = probe.add("new", "NEWC", CATEGORY_LIVING, false);
+                    probe.enter(new);
+                }
+                "st_none_tail" => {
+                    probe.add("old", "SAME", CATEGORY_OBJECT, true);
+                    probe.add("new", "SAME", CATEGORY_OBJECT, true);
+                }
+                "shift_contents_preserves_link" => {
+                    probe.add("a", "SAME", CATEGORY_OBJECT, true);
+                    let b = probe.add("b", "SAME", CATEGORY_OBJECT, true);
+                    probe.add("c", "SAME", CATEGORY_OBJECT, true);
+                    // Keep the oracle's one-definition list. A distinct
+                    // picture makes public C4Object::ShiftContents select b,
+                    // then both engines execute the raw list rotation.
+                    probe.make_picture_distinct(b);
+                    tracked_before = probe.serials.get(&(b, probe.generation(b))).copied();
+                    probe.shift_to_b();
+                    tracked_after = probe.serials.get(&(b, probe.generation(b))).copied();
+                }
+                "remove_add_allocates_fresh_link" => {
+                    probe.add("a", "SAME", CATEGORY_OBJECT, true);
+                    let b = probe.add("b", "SAME", CATEGORY_OBJECT, true);
+                    let c = probe.add("c", "SAME", CATEGORY_OBJECT, true);
+                    tracked_before = probe.serials.get(&(b, probe.generation(b))).copied();
+                    let mut iterator = crate::direct_com::RemovalSafeContentsIterator::new(
+                        probe.container,
+                        &[(b, probe.generation(b)), (c, probe.generation(c))],
+                    );
+                    probe.exit(b);
+                    probe.enter(b);
+                    iterator_after_remove = iterator
+                        .next(&probe.links())
+                        .map(|object| probe.tag(object));
+                    tracked_after = probe.serials.get(&(b, probe.generation(b))).copied();
+                }
+                other => panic!("unknown contents_list_order oracle case `{other}`"),
+            }
+
+            let (order, serials) = probe.snapshot();
+            expect_json_eq(
+                "contents_list_order",
+                idx,
+                "order",
+                case["order"].clone(),
+                serde_json::json!(order),
+            );
+            expect_json_eq(
+                "contents_list_order",
+                idx,
+                "serials",
+                case["serials"].clone(),
+                serde_json::json!(serials),
+            );
+            if case.get("tracked_serial_before").is_some() {
+                expect_eq_u64(
+                    "contents_list_order",
+                    idx,
+                    "tracked_serial_before",
+                    u(case, "tracked_serial_before"),
+                    tracked_before.expect("tracked case records its initial link"),
+                );
+                expect_eq_u64(
+                    "contents_list_order",
+                    idx,
+                    "tracked_serial_after",
+                    u(case, "tracked_serial_after"),
+                    tracked_after.expect("tracked case records its final link"),
+                );
+            }
+            if let Some(expected) = case.get("iterator_after_remove") {
+                expect_json_eq(
+                    "contents_list_order",
+                    idx,
+                    "iterator_after_remove",
+                    expected.clone(),
+                    serde_json::json!(iterator_after_remove),
+                );
+            }
+        }
+    }
+
+    // 0j-b. The container lifecycle: C4Object::Enter, Exit and Collect
     //     (C4Object.cpp:1532-1563, 1566-1637, 5693-5717), all three compiled
     //     from mechanically extracted bodies. What is pinned is the ORDER of
     //     their script calls and the re-checks between them:
     //
     //       * the recursion guard runs AFTER RejectEntrance, and
     //         RejectCollection only when the caller asked for the flag;
-    //       * a Collection2 that removes the object abandons Entrance;
+    //       * a Collection2 that exits the object abandons Entrance;
     //       * the re-check after Entrance tests the CONTAINER's status, not the
-    //         entering object's, so an Entrance that removes the object itself
-    //         still reaches the base auto-sell tail while one that removes the
+    //         entering object's, so directly clearing only the object's Status
+    //         still reaches the base auto-sell tail while removing the
     //         container does not;
     //       * Exit reports failure when a Departure callback put the object
     //         back into a container, having already done everything; and
@@ -2637,7 +2973,8 @@ fn parity_differential_matches_cpp_golden() {
             let reject_collection = i64::from(name == "collect_rejected_by_container");
             let entrance_body = match name {
                 "enter_entrance_clears_own_status" => "RemoveObject();",
-                "enter_entrance_clears_container" => "Exit();",
+                "enter_entrance_exits_object" => "Exit();",
+                "enter_entrance_removes_container" => "pContainer->RemoveObject();",
                 _ => "",
             };
             let departure_body = match name {
@@ -2649,7 +2986,7 @@ fn parity_differential_matches_cpp_golden() {
                 _ => "",
             };
             let collection2_body = match name {
-                "enter_collection2_kills" => "Exit(pObj);",
+                "enter_collection2_exits_object" => "Exit(pObj);",
                 _ => "",
             };
 
@@ -2665,7 +3002,7 @@ fn parity_differential_matches_cpp_golden() {
                  public func DoEnterNull() {{ return Enter(0); }}\n\
                  public func DoEnterSelf() {{ return Enter(this()); }}\n\
                  public func DoEnter(pTarget) {{ return Enter(pTarget); }}\n\
-                 public func DoExit() {{ return Exit(this(), 11, 22, 33, 1, 2, 3); }}\n"
+                 public func DoExit() {{ return Exit(this(), 106, 115, 33, 1, 2, 3); }}\n"
             );
             let container_script = format!(
                 "#strict\n\
@@ -2692,55 +3029,112 @@ fn parity_differential_matches_cpp_golden() {
             engine
                 .register_definition(container_definition)
                 .expect("container lifecycle fixture registers");
-            for (id, script) in [
-                ("CTOB", object_script.as_str()),
-                // The old container an already-contained object exits from.
-                // It needs the same recorder: the oracle logs every call, so a
-                // silent OUTS would drop Ejection from the sequence.
-                (
-                    "OUTS",
-                    "#strict\n\
-                     static callback_log;\n\
-                     protected func Ejection(pObj) { callback_log = callback_log * 11 + 6; }\n\
-                     protected func Collection2(pObj) { callback_log = callback_log * 11 + 3; }\n",
-                ),
-            ] {
-                engine
-                    .register_definition(
-                        Definition::from_script(id, id, script)
-                            .expect("container lifecycle fixture compiles"),
+            let mut object_definition =
+                Definition::from_script("CTOB", "CTOB", object_script.as_str())
+                    .expect("container lifecycle fixture compiles");
+            object_definition.configure_actions(
+                None,
+                HashMap::from([(
+                    "Attach".to_string(),
+                    ActionSpec::default().with_procedure("ATTACH"),
+                )]),
+            );
+            engine
+                .register_definition(object_definition)
+                .expect("container lifecycle fixture registers");
+            // The old container an already-contained object exits from. It
+            // also owns the surviving log reader for target-removal cases.
+            engine
+                .register_definition(
+                    Definition::from_script(
+                        "OUTS",
+                        "OUTS",
+                        "#strict\n\
+                         static callback_log;\n\
+                         protected func Ejection(pObj) { callback_log = callback_log * 11 + 6; }\n\
+                         protected func Collection2(pObj) { callback_log = callback_log * 11 + 3; }\n\
+                         public func ReadLog() { return callback_log; }\n\
+                         public func ResetLog() { callback_log = 0; return 1; }\n",
                     )
-                    .expect("container lifecycle fixture registers");
-            }
+                    .expect("container lifecycle fixture compiles"),
+                )
+                .expect("container lifecycle fixture registers");
 
+            let mut object_config = SpawnConfig::new("CTOB")
+                .with_controller(5)
+                .with_position(crate::Vector2::new(5, 7))
+                .with_fixed_position(FixedVec2::new(itofix(5), itofix(7)))
+                .with_fixed_velocity(FixedVec2::new(
+                    C4Fixed::from_raw(1111),
+                    C4Fixed::from_raw(-2222),
+                ))
+                .with_mobile(false);
+            if name == "enter_living_keeps_controller" {
+                object_config = object_config
+                    .with_alive(true)
+                    .with_category(crate::CATEGORY_LIVING);
+            }
+            if name == "collect_cancels_attach" {
+                object_config = object_config.with_action(ActionState::new("Attach"));
+            }
             let object = engine
-                .spawn_object(SpawnConfig::new("CTOB").with_controller(5))
+                .spawn_object(object_config)
                 .expect("lifecycle object spawns");
             let container = engine
-                .spawn_object(SpawnConfig::new("CTCN").with_controller(9))
+                .spawn_object(
+                    SpawnConfig::new("CTCN")
+                        .with_controller(9)
+                        .with_position(crate::Vector2::new(31, 37))
+                        .with_fixed_position(FixedVec2::new(itofix(31), itofix(37)))
+                        .with_fixed_velocity(FixedVec2::new(
+                            C4Fixed::from_raw(12345),
+                            C4Fixed::from_raw(-23456),
+                        )),
+                )
                 .expect("lifecycle container spawns");
             let outside = engine
-                .spawn_object(SpawnConfig::new("OUTS").with_controller(2))
+                .spawn_object(
+                    SpawnConfig::new("OUTS")
+                        .with_controller(2)
+                        .with_position(crate::Vector2::new(71, 73))
+                        .with_fixed_position(FixedVec2::new(itofix(71), itofix(73)))
+                        .with_fixed_velocity(FixedVec2::new(
+                            C4Fixed::from_raw(-34567),
+                            C4Fixed::from_raw(45678),
+                        )),
+                )
                 .expect("lifecycle outside container spawns");
 
             // `exit_not_contained` is the one case that must start free.
             if name == "enter_from_container" || (op == "exit" && name != "exit_not_contained") {
-                let index = engine.find_object_index(object).expect("object exists");
-                engine.objects[index].state.container = Some(outside);
+                let object_index = engine.find_object_index(object).expect("object exists");
+                let outside_index = engine
+                    .find_object_index(outside)
+                    .expect("outside container exists");
+                engine.objects[object_index].state.container = Some(outside);
+                engine.objects[object_index].state.contents_link_generation = 1;
+                engine.objects[outside_index].state.contents.push(object);
+                engine.refresh_object_ocf(object_index);
             }
             if name == "enter_recursive" {
-                let index = engine
+                let container_index = engine
                     .find_object_index(container)
                     .expect("container exists");
-                engine.objects[index].state.container = Some(object);
+                let object_index = engine.find_object_index(object).expect("object exists");
+                engine.objects[container_index].state.container = Some(object);
+                engine.objects[container_index]
+                    .state
+                    .contents_link_generation = 1;
+                engine.objects[object_index].state.contents.push(container);
+                engine.refresh_object_ocf(container_index);
             }
-            // The oracle sets the hit-speed OCF bits directly; the port derives
-            // them from raw speed (|xdir| + |ydir| >= 1.5 / 2 / 6, see
-            // `movement_hit_speed_flags`), and Collect defers its CopyMotion
-            // until after the Hit calls precisely so they are still live there.
+            // Both sides derive hit-speed OCF bits from raw speed
+            // (|xdir| + |ydir| >= 1.5 / 2 / 6), and Collect defers its
+            // CopyMotion until after the Hit calls precisely so they are still
+            // live there.
             if name.starts_with("collect_hit") {
                 let index = engine.find_object_index(object).expect("object exists");
-                let speed = if name == "collect_hit_speeds" { 7 } else { 3 };
+                let speed = if name == "collect_hit_speeds" { 9 } else { 3 };
                 engine.objects[index].fixed_velocity = FixedVec2::new(itofix(speed), C4Fixed::ZERO);
                 engine.objects[index].state.ocf |=
                     crate::movement_hit_speed_flags(engine.objects[index].fixed_velocity);
@@ -2750,8 +3144,11 @@ fn parity_differential_matches_cpp_golden() {
             let container_index = engine
                 .find_object_index(container)
                 .expect("container exists");
+            let outside_index = engine
+                .find_object_index(outside)
+                .expect("outside container exists");
             engine
-                .call_object_function(container_index, "ResetLog", Vec::new())
+                .call_object_function(outside_index, "ResetLog", Vec::new())
                 .expect("the log resets");
 
             let target_value = crate::compat::object_reference_value(container);
@@ -2794,7 +3191,7 @@ fn parity_differential_matches_cpp_golden() {
             // (see the `zero_literal` section), so an untouched log reads as
             // Nil rather than Int(0).
             let log = match engine
-                .call_object_function(container_index, "ReadLog", Vec::new())
+                .call_object_function(outside_index, "ReadLog", Vec::new())
                 .expect("the log reads back")
             {
                 ScriptValue::Int(value) => i64::from(value),
@@ -2808,6 +3205,82 @@ fn parity_differential_matches_cpp_golden() {
                 expected_log,
                 log,
             );
+
+            let object = &engine.objects[object_index];
+            let target = &engine.objects[container_index];
+            let outside_index = engine
+                .find_object_index(outside)
+                .expect("outside container exists");
+            let outside_state = &engine.objects[outside_index];
+            expect_eq(
+                "container_lifecycle",
+                idx,
+                "outside_contents",
+                i(case, "outside_contents"),
+                outside_state.state.contents.len() as i64,
+            );
+            // This oracle callback deliberately clears Status directly to
+            // isolate Enter's guard placement. The real Rust RemoveObject
+            // also unlinks containment, so only that row's link state differs.
+            if name != "enter_entrance_clears_own_status" {
+                for (field, rust) in [
+                    (
+                        "contained_is_target",
+                        i64::from(u8::from(object.state.container == Some(container))),
+                    ),
+                    (
+                        "contained_is_outside",
+                        i64::from(u8::from(object.state.container == Some(outside))),
+                    ),
+                    ("target_contents", target.state.contents.len() as i64),
+                ] {
+                    expect_eq("container_lifecycle", idx, field, i(case, field), rust);
+                }
+            }
+            for (field, rust) in [
+                ("status", i64::from(object.state.status.to_script_value())),
+                (
+                    "target_status",
+                    i64::from(target.state.status.to_script_value()),
+                ),
+                ("controller", i64::from(object.state.controller)),
+                ("mobile", i64::from(u8::from(object.state.mobile))),
+                ("in_liquid", i64::from(u8::from(object.state.in_liquid))),
+                (
+                    "ocf",
+                    i64::from(
+                        object.state.ocf
+                            & (crate::ocf::NORMAL
+                                | crate::ocf::HIT_SPEED1
+                                | crate::ocf::HIT_SPEED2
+                                | crate::ocf::HIT_SPEED3
+                                | crate::ocf::HIT_SPEED4
+                                | crate::ocf::NOT_CONTAINED
+                                | crate::ocf::IN_LIQUID
+                                | crate::ocf::IN_FREE
+                                | crate::ocf::AVAILABLE),
+                    ),
+                ),
+                (
+                    "action_idle",
+                    i64::from(u8::from(object.state.action.name == "Idle")),
+                ),
+                ("x", i64::from(object.state.position.x)),
+                ("y", i64::from(object.state.position.y)),
+                ("r", i64::from(object.state.rotation)),
+                ("xdir", i64::from(object.fixed_velocity.x.val())),
+                ("ydir", i64::from(object.fixed_velocity.y.val())),
+                ("rdir", i64::from(object.rotation_velocity.val())),
+            ] {
+                // This row intentionally contrasts a direct C++ Status clear
+                // with Rust's full RemoveObject teardown to isolate Enter's
+                // guard. Its containment-derived cached OCF is consequently
+                // outside the comparable state, like its raw links above.
+                if name == "enter_entrance_clears_own_status" && field == "ocf" {
+                    continue;
+                }
+                expect_eq("container_lifecycle", idx, field, i(case, field), rust);
+            }
         }
     }
 

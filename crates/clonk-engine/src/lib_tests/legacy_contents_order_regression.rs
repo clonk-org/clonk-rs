@@ -63,6 +63,178 @@ fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
 }
 
 #[test]
+fn state_restore_preserves_runtime_contents_order() {
+    // C4Object::Enter inserts with stContents (C4Object.cpp:1601), whose
+    // same-category/id pass places a new link before the existing cluster
+    // (C4ObjectList.cpp:147-175). Contents is then compiled in forward link
+    // order and denumerated by tail-appending those saved links
+    // (C4Object.cpp:2812; C4ObjectList.cpp:457-465,476-497).
+    let container_definition = test_definition("CONT", "Container", "");
+    let item_definition = test_definition("ITEM", "Item", "");
+    let mut engine = Engine::new();
+    engine.register_test_definition(container_definition.clone());
+    engine.register_test_definition(item_definition.clone());
+
+    let parent = spawn_fixture!(engine, "CONT", with_id: ObjectId::new(1));
+    let first = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(2), with_container: parent);
+    let second = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(3), with_container: parent);
+    for child in [first, second] {
+        engine
+            .apply_container_change(child, Some(parent), None, false)
+            .expect("runtime Exit removes the current link");
+        engine
+            .apply_container_change(child, None, Some(parent), false)
+            .expect("runtime Enter allocates a replacement link");
+    }
+    let parent_index = engine.test_object_index(parent);
+    assert_eq!(engine.objects[parent_index].state.contents, [second, first]);
+    for child in [first, second] {
+        assert_eq!(
+            engine.objects[engine.test_object_index(child)]
+                .state
+                .contents_link_generation,
+            2,
+            "the source state has a later link incarnation to discard on load"
+        );
+    }
+
+    let state = engine.capture_state();
+    let mut restored = Engine::new();
+    restored.register_test_definition(container_definition);
+    restored.register_test_definition(item_definition);
+    crate::TestValueExt::test_value(restored.restore_state(&state));
+
+    let parent_index = restored.test_object_index(parent);
+    assert_eq!(
+        restored.objects[parent_index].state.contents,
+        [second, first]
+    );
+    assert_eq!(
+        restored.objects[restored.test_object_index(first)]
+            .state
+            .container,
+        Some(parent)
+    );
+    assert_eq!(
+        restored.objects[restored.test_object_index(second)]
+            .state
+            .container,
+        Some(parent)
+    );
+    assert_eq!(
+        restored.objects[restored.test_object_index(first)]
+            .state
+            .contents_link_generation,
+        1,
+        "a freshly denumerated link starts its first runtime incarnation"
+    );
+    assert_eq!(
+        restored.objects[restored.test_object_index(second)]
+            .state
+            .contents_link_generation,
+        1,
+        "each restored child owns a distinct first link incarnation"
+    );
+}
+
+#[test]
+fn legacy_link_repair_sorts_omitted_contained_children() {
+    // C4GameObjects::Load repairs a valid Contained pointer missing from the
+    // parent's saved Contents with Add(stContents), not a tail append
+    // (C4GameObjects.cpp:597-610). Equal category/id children therefore use
+    // C4ObjectList::Add's newest-first cluster insertion
+    // (C4ObjectList.cpp:147-175).
+    let mut engine = Engine::new();
+    engine.register_test_definition(test_definition("CONT", "Container", ""));
+    engine.register_test_definition(test_definition("ITEM", "Item", ""));
+    let parent = spawn_fixture!(engine, "CONT", with_id: ObjectId::new(1));
+    let first = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(2));
+    let omitted_a = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(3));
+    let omitted_b = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(4));
+    // C4GameObjects::Load walks the forward main list; Engine::exec_list is
+    // its reverse representation. Two omitted equal-key children make that
+    // traversal observable because each Add(stContents) prepends its cluster.
+    engine.exec_list = vec![parent, first, omitted_a, omitted_b];
+
+    engine.restore_legacy_object_links(
+        &[(first, parent), (omitted_a, parent), (omitted_b, parent)],
+        &[(parent, vec![first])],
+    );
+
+    let parent_index = engine.test_object_index(parent);
+    assert_eq!(
+        engine.objects[parent_index].state.contents,
+        [omitted_a, omitted_b, first]
+    );
+}
+
+#[test]
+fn legacy_link_repair_interleaves_contained_and_contents_in_master_order() {
+    // C4GameObjects::Load repairs each object's missing Contained link before
+    // retargeting the children in that same object's Contents list, all in one
+    // forward master-list walk (C4GameObjects.cpp:597-631). A later parent's
+    // saved Contents may therefore retarget a child without removing the link
+    // that an earlier Contained repair just inserted.
+    let mut engine = Engine::new();
+    engine.register_test_definition(test_definition("CONT", "Container", ""));
+    engine.register_test_definition(test_definition("ITEM", "Item", ""));
+    let child = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(1));
+    let first_parent = spawn_fixture!(engine, "CONT", with_id: ObjectId::new(2));
+    let later_parent = spawn_fixture!(engine, "CONT", with_id: ObjectId::new(3));
+    // Native forward master order is child, first_parent, later_parent.
+    engine.exec_list = vec![later_parent, first_parent, child];
+
+    engine.restore_legacy_object_links(
+        &[(child, first_parent)],
+        &[(first_parent, Vec::new()), (later_parent, vec![child])],
+    );
+
+    let child_index = engine.test_object_index(child);
+    let first_parent_index = engine.test_object_index(first_parent);
+    let later_parent_index = engine.test_object_index(later_parent);
+    assert_eq!(
+        engine.objects[child_index].state.container,
+        Some(later_parent)
+    );
+    assert_eq!(engine.objects[first_parent_index].state.contents, [child]);
+    assert_eq!(engine.objects[later_parent_index].state.contents, [child]);
+}
+
+#[test]
+fn legacy_link_repair_deduplicates_when_each_parent_is_visited() {
+    // Missing Contained links are inserted before C++ reaches that parent and
+    // removes earlier duplicate Contents links (C4GameObjects.cpp:605-631).
+    // Pre-deduplicating [D,Y,D] would put X after Y; native Add(stContents)
+    // first inserts same-definition X before the first D, then duplicate
+    // repair keeps the final D and leaves [X,Y,D].
+    let mut engine = Engine::new();
+    engine.register_test_definition(test_definition("CONT", "Container", ""));
+    let mut item_definition = test_definition("ITEM", "Item", "");
+    item_definition.set_category(CATEGORY_OBJECT);
+    engine.register_test_definition(item_definition);
+    let mut other_definition = test_definition("OTHR", "Other", "");
+    other_definition.set_category(CATEGORY_OBJECT);
+    engine.register_test_definition(other_definition);
+    let inserted = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(1));
+    let parent = spawn_fixture!(engine, "CONT", with_id: ObjectId::new(2));
+    let duplicate = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(3));
+    let middle = spawn_fixture!(engine, "OTHR", with_id: ObjectId::new(4));
+    // Native forward master order is inserted, parent, duplicate, middle.
+    engine.exec_list = vec![middle, duplicate, parent, inserted];
+
+    engine.restore_legacy_object_links(
+        &[(inserted, parent)],
+        &[(parent, vec![duplicate, middle, duplicate])],
+    );
+
+    let parent_index = engine.test_object_index(parent);
+    assert_eq!(
+        engine.objects[parent_index].state.contents,
+        [inserted, middle, duplicate]
+    );
+}
+
+#[test]
 fn deferred_legacy_containment_preserves_mutual_cycles() {
     let mut engine = Engine::new();
     crate::TestValueExt::test_value(engine.register_script_definition("CYCL", "Cycle", ""));
@@ -77,6 +249,59 @@ fn deferred_legacy_containment_preserves_mutual_cycles() {
     assert_eq!(second_state.container, Some(first));
     assert_eq!(first_state.contents, [second]);
     assert_eq!(second_state.contents, [first]);
+}
+
+#[test]
+fn state_restore_preserves_mutual_containment_cycles() {
+    // Objects.txt compiles Contained as an enumerated pointer and resolves all
+    // pointers only after every object exists (C4Object.cpp:2914-2924;
+    // C4GameObjects.cpp:597-610). The raw two-phase relink therefore accepts
+    // a mutual cycle even though runtime Enter rejects one.
+    let definition = test_definition("CYCL", "Cycle", "");
+    let mut engine = Engine::new();
+    engine.register_test_definition(definition.clone());
+    let first = spawn_fixture!(engine, "CYCL", with_id: ObjectId::new(1));
+    let second = spawn_fixture!(engine, "CYCL", with_id: ObjectId::new(2));
+    engine.restore_legacy_object_links(&[(first, second), (second, first)], &[]);
+    let state = engine.capture_state();
+
+    let mut restored = Engine::new();
+    restored.register_test_definition(definition);
+    restored
+        .restore_state(&state)
+        .expect("compiled containment cycles denumerate without runtime Enter validation");
+
+    let first_state = &restored.objects[restored.test_object_index(first)].state;
+    let second_state = &restored.objects[restored.test_object_index(second)].state;
+    assert_eq!(first_state.container, Some(second));
+    assert_eq!(second_state.container, Some(first));
+    assert_eq!(first_state.contents, [second]);
+    assert_eq!(second_state.contents, [first]);
+}
+
+#[test]
+fn state_restore_preserves_self_containment() {
+    // C4Object::DenumeratePointers resolves the compiled Contained pointer and
+    // Contents list without runtime Enter's self/cycle guards
+    // (C4Object.cpp:2914-2924; C4GameObjects.cpp:597-610).
+    let definition = test_definition("CYCL", "Cycle", "");
+    let mut source = Engine::new();
+    source.register_test_definition(definition.clone());
+    let object = spawn_fixture!(source, "CYCL", with_id: ObjectId::new(1));
+    let mut state = source.capture_state();
+    let snapshot = &mut state.objects[0].snapshot;
+    snapshot.container = Some(object);
+    snapshot.contents = vec![object];
+
+    let mut restored = Engine::new();
+    restored.register_test_definition(definition);
+    restored
+        .restore_state(&state)
+        .expect("compiled self-containment denumerates without runtime Enter validation");
+
+    let restored_object = &restored.objects[restored.test_object_index(object)];
+    assert_eq!(restored_object.state.container, Some(restored_object.id));
+    assert_eq!(restored_object.state.contents, [restored_object.id]);
 }
 
 #[test]

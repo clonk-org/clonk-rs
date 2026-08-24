@@ -4196,14 +4196,7 @@ impl Engine {
             if self.object_ocf_at_index(idx) & focf == 0 {
                 continue;
             }
-            let (definition_id, obj1_layer) = {
-                let obj1 = &self.objects[idx];
-                (obj1.definition_id.clone(), obj1.state.layer)
-            };
-            let collection_rect = self
-                .definitions
-                .get(&definition_id)
-                .and_then(|definition| definition.collection_rect());
+            let obj1_layer = self.objects[idx].state.layer;
             // obj1->Area: candidates from the sector lists under the shape
             let collector_shape_rect = self.object_shape_rect(&self.objects[idx]);
             let candidate_ids = self
@@ -4297,6 +4290,7 @@ impl Engine {
                         let tmass = self.effective_object_mass(idx).max(50);
                         let candidate_velocity = self.objects[candidate_idx].fixed_velocity;
                         // fling unless airborne off-Tick3 (C4GameObjects.cpp:176)
+                        let definition_id = self.objects[idx].definition_id.clone();
                         let procedure = self
                             .definitions
                             .get(&definition_id)
@@ -4339,12 +4333,27 @@ impl Engine {
                     }
                 }
                 // Collection (C4GameObjects.cpp:185-194)
-                if ocf1 & crate::ocf::COLLECTION != 0 && ocf2 & crate::ocf::CARRYABLE != 0 {
+                // QueryCatchBlow may have changed either object's OCF,
+                // position, or the collector's definition. C++ reads every
+                // one of these live after that callback
+                // (C4GameObjects.cpp:167-190).
+                let live_ocf1 = self.object_ocf_at_index(idx);
+                let live_ocf2 = self.object_ocf_at_index(candidate_idx);
+                let live_obj1_position = self.objects[idx].state.position;
+                let live_candidate_position = self.objects[candidate_idx].state.position;
+                let live_dx = live_candidate_position.x - live_obj1_position.x;
+                let live_dy = live_candidate_position.y - live_obj1_position.y;
+                let collection_rect = self
+                    .definitions
+                    .get(&self.objects[idx].definition_id)
+                    .and_then(|definition| definition.collection_rect());
+                if live_ocf1 & crate::ocf::COLLECTION != 0 && live_ocf2 & crate::ocf::CARRYABLE != 0
+                {
                     let Some(collection_rect) = collection_rect.filter(|rect| rect.is_positive())
                     else {
                         continue;
                     };
-                    if !collection_rect.contains_offset(dx, dy) {
+                    if !collection_rect.contains_offset(live_dx, live_dy) {
                         continue;
                     }
                     // C4Object::Collect rejects FLAG/FlyBase before Enter
@@ -4365,9 +4374,9 @@ impl Engine {
                             "XCOLLECT collector={} ({:?}) at {:?} takes {} at {:?}",
                             obj1_id.as_u64(),
                             self.objects[idx].definition_id,
-                            obj1_position,
+                            live_obj1_position,
                             candidate_id.as_u64(),
-                            candidate_position
+                            live_candidate_position
                         ));
                     }
                     // C4Object::Collect runs the full Enter-and-tail path:
