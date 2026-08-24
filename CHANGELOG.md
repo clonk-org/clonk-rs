@@ -4,6 +4,19 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.4] - 2026-08-24
+
+### Bug fixes
+
+- Preserve live effect callback lifecycle ordering (#1008)
+- Match native C4Value map key equality (#1006)
+- Preserve container lifecycle order and link identity (#1005)
+- Retain players in lobby when host restarts (#1004)
+- Synchronize fire state with cached ocf (#1000)
+- Align pointer input with scaled presentation crop (#999)
+- Reuse completed player resources after shadow expiry (#1002)
+- Show savegame overwrite results in game (#1001)
+
 ## [0.9.4] - 2026-08-24
 
 ### Bug fixes
