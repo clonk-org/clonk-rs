@@ -283,6 +283,7 @@ jobs:
           - name: engine integration 3/3
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-3 --no-fail-fast --locked
           - name: engine and frontend unit and parity
+            apt: libasound2-dev libudev-dev
             command: |
               failed=0
               cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked || failed=1
