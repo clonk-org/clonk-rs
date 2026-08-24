@@ -64,6 +64,9 @@
 //   * `C4Effect::Check` is mechanically extracted in full; a configurable
 //     effect list records its negotiation order, the AnnulCalls temp bracket
 //     and the Start_Deny kill.
+//   * The C4Effect constructor, ClearPointers, Kill, ClearAll, DoDamage and
+//     temporary remove/readd helpers are mechanically extracted in full; a
+//     stateful callback matrix records their complete linked lifecycle.
 //   * `C4Object::Enter`, `Exit` and `Collect` are mechanically extracted in
 //     full; a two-object scaffold with configurable script callbacks records
 //     their exact call order, rollback and post-callback Status re-checks.
@@ -5169,6 +5172,382 @@ C4Value FnTimer::Exec(C4Object *, ParSet, bool, bool)
 
 #include "effect_check.inc"
 } // namespace effect_check
+
+
+// ---------------------------------------------------------------------------
+// Complete C4Effect lifecycle (src/C4Effect.cpp:31-150,201-212,271-510).
+//
+// The existing effect_check/effect_execute tables isolate two large methods.
+// This fixture joins the remaining production bodies around one stateful
+// callback registry so their linked-list semantics are observed end to end:
+// construction and number reservation, Start/Effect/Add and the temporary
+// priority bracket, Timer/Kill/Stop, recursive ClearAll, live Damage mutation,
+// and silent command-target loss.  Callback arguments, state mutation, and the
+// synchronized RNG ledger are all emitted; no lifecycle order is restated by
+// the fixture.
+namespace effect_lifecycle
+{
+using C4ID = unsigned long;
+
+struct C4Object;
+struct C4Effect;
+struct C4AulFunc;
+
+enum class ValueKind
+{
+    Nil,
+    Int,
+    Object,
+    String,
+    Bool,
+};
+
+struct C4Value
+{
+    ValueKind kind{ValueKind::Nil};
+    int32_t integer{};
+    C4Object *object{};
+    const char *string{};
+
+    int32_t getInt() const
+    {
+        return kind == ValueKind::Int || kind == ValueKind::Bool ? integer : 0;
+    }
+};
+
+static C4Value C4VInt(int32_t value)
+{
+    C4Value result;
+    result.kind = ValueKind::Int;
+    result.integer = value;
+    return result;
+}
+
+static C4Value C4VBool(bool value)
+{
+    C4Value result;
+    result.kind = ValueKind::Bool;
+    result.integer = value ? 1 : 0;
+    return result;
+}
+
+static C4Value C4VObj(C4Object *object)
+{
+    C4Value result;
+    result.kind = object ? ValueKind::Object : ValueKind::Nil;
+    result.object = object;
+    return result;
+}
+
+static C4Value C4VString(const char *string)
+{
+    C4Value result;
+    result.kind = ValueKind::String;
+    result.string = string;
+    return result;
+}
+
+struct ParSet
+{
+    std::vector<C4Value> values;
+
+    ParSet() = default;
+    ParSet(std::initializer_list<C4Value> initial) : values(initial) {}
+};
+
+struct C4AulFunc
+{
+    virtual ~C4AulFunc() = default;
+    virtual C4Value Exec(C4Object *, ParSet, bool, bool, bool = true) = 0;
+};
+
+struct C4AulScript
+{
+    struct Registered
+    {
+        std::string effect;
+        std::string suffix;
+        C4AulFunc *function{};
+    };
+
+    std::vector<Registered> functions;
+    C4AulFunc *custom{};
+
+    void Register(const char *effect, const char *suffix, C4AulFunc *function)
+    {
+        functions.push_back({effect, suffix, function});
+    }
+
+    C4AulFunc *Find(const char *effect, const char *suffix)
+    {
+        for (const Registered &entry : functions)
+            if (entry.effect == effect && entry.suffix == suffix) return entry.function;
+        return nullptr;
+    }
+
+    // The production DoCall composes Fx<Name><Custom> with std::format.  The
+    // oracle's global diagnostic-only format shim intentionally returns an
+    // empty string, so the focused script exposes the selected custom callback
+    // directly. AssignCallbackFunctions below uses the explicit registry.
+    C4AulFunc *GetFuncRecursive(const char *) { return custom; }
+};
+
+struct C4Def
+{
+    C4ID id{};
+    C4AulScript Script;
+};
+
+struct C4EnumeratedObjectPtr
+{
+    C4Object *pointer{};
+
+    C4EnumeratedObjectPtr &operator=(C4Object *value)
+    {
+        pointer = value;
+        return *this;
+    }
+    operator C4Object *() const { return pointer; }
+    C4Object *operator->() const { return pointer; }
+    bool operator==(C4Object *value) const { return pointer == value; }
+    void Enumerate() {}
+};
+
+struct C4ValueList
+{
+    explicit C4ValueList(int32_t) {}
+};
+
+struct DeletionTracker
+{
+    bool IsDeleted() const { return false; }
+};
+
+const int32_t C4Fx_OK = 0;
+const int32_t C4Fx_Effect_Deny = -1;
+const int32_t C4Fx_Effect_Annul = -2;
+const int32_t C4Fx_Effect_AnnulCalls = -3;
+const int32_t C4Fx_Execute_Kill = -1;
+const int32_t C4Fx_Stop_Deny = -1;
+const int32_t C4Fx_Start_Deny = -1;
+const int32_t C4FxCall_Temp = 1;
+const int32_t C4FxCall_TempAddForRemoval = 2;
+
+#define PSFS_FxAdd "Add"
+#define PSF_FxCustom "Fx{}{}"
+
+struct GameStub
+{
+    struct DefList
+    {
+        std::vector<C4Def *> values;
+
+        C4Def *ID2Def(C4ID id)
+        {
+            for (C4Def *definition : values)
+                if (definition->id == id) return definition;
+            return nullptr;
+        }
+    } Defs;
+
+    C4Effect *pGlobalEffects{};
+    C4AulScript ScriptEngine;
+};
+
+static GameStub Game;
+
+struct C4Object
+{
+    const char *tag{"object"};
+    int32_t Status{1};
+    int32_t state{};
+    C4Effect *pEffects{};
+    C4Def *Def{};
+    C4ID id{};
+};
+
+struct TraceEntry
+{
+    std::string callback;
+    C4Object *receiver{};
+    std::vector<C4Value> args;
+    int32_t random{};
+};
+
+static std::vector<TraceEntry> g_trace;
+static int32_t g_state{};
+static int32_t g_seed{};
+
+struct Callback : C4AulFunc
+{
+    std::string name;
+    int32_t state_code{};
+    std::function<C4Value(C4Object *, const ParSet &)> body;
+
+    Callback(std::string name, int32_t state_code,
+             std::function<C4Value(C4Object *, const ParSet &)> body = {})
+        : name(std::move(name)), state_code(state_code), body(std::move(body))
+    {
+    }
+
+    C4Value Exec(C4Object *receiver, ParSet parameters, bool, bool, bool) override
+    {
+        const int32_t random = Random(17);
+        g_state = g_state * 10 + state_code;
+        g_trace.push_back({name, receiver, parameters.values, random});
+        return body ? body(receiver, parameters) : C4Value{};
+    }
+};
+
+struct C4Effect
+{
+    char Name[C4MaxDefString + 1]{};
+    C4EnumeratedObjectPtr pCommandTarget;
+    C4ID idCommandTarget{};
+    int32_t iPriority{};
+    C4ValueList EffectVars{0};
+    int32_t iTime{};
+    int32_t iIntervall{};
+    int32_t iNumber{};
+    C4Effect *pNext{};
+    C4AulFunc *pFnTimer{};
+    C4AulFunc *pFnStart{};
+    C4AulFunc *pFnStop{};
+    C4AulFunc *pFnEffect{};
+    C4AulFunc *pFnDamage{};
+
+    C4Effect(C4Object *pForObj, const char *szName, int32_t iPrio,
+             int32_t iTimerIntervall, C4Object *pCmdTarget, C4ID idCmdTarget,
+             const C4Value &rVal1, const C4Value &rVal2, const C4Value &rVal3,
+             const C4Value &rVal4, bool fDoCalls, int32_t &riStoredAsNumber,
+             bool passErrors = false);
+    ~C4Effect() = default;
+
+    void AssignCallbackFunctions()
+    {
+        C4AulScript *script = GetCallbackScript();
+        pFnStart = script->Find(Name, "Start");
+        pFnStop = script->Find(Name, "Stop");
+        pFnTimer = script->Find(Name, "Timer");
+        pFnEffect = script->Find(Name, "Effect");
+        pFnDamage = script->Find(Name, "Damage");
+    }
+
+    C4AulScript *GetCallbackScript();
+    void ClearPointers(C4Object *pObj);
+    int32_t Check(C4Object *pForObj, const char *szCheckEffect, int32_t iPrio,
+                  int32_t iTimer, const C4Value &rVal1 = C4Value{},
+                  const C4Value &rVal2 = C4Value{},
+                  const C4Value &rVal3 = C4Value{},
+                  const C4Value &rVal4 = C4Value{}, bool passErrors = false);
+    void Execute(C4Object *pObj);
+    void Kill(C4Object *pObj);
+    void ClearAll(C4Object *pObj, int32_t iClearFlag);
+    void DoDamage(C4Object *pObj, int32_t &riDamage, int32_t iDamageType,
+                  int32_t iCausePlr);
+    C4Value DoCall(C4Object *pObj, const char *szFn,
+                   const C4Value &rVal1 = C4Value{},
+                   const C4Value &rVal2 = C4Value{},
+                   const C4Value &rVal3 = C4Value{},
+                   const C4Value &rVal4 = C4Value{},
+                   const C4Value &rVal5 = C4Value{},
+                   const C4Value &rVal6 = C4Value{},
+                   const C4Value &rVal7 = C4Value{}, bool passErrors = false,
+                   bool convertNilToIntBool = true);
+    void TempRemoveUpperEffects(C4Object *pObj, bool fTempRemoveThis,
+                                C4Effect **ppLastRemovedEffect);
+    void TempReaddUpperEffects(C4Object *pObj, C4Effect *pLastReaddEffect);
+
+    void SetDead() { iPriority = 0; }
+    bool IsDead() { return !iPriority; }
+    void FlipActive() { iPriority *= -1; }
+    bool IsActive() { return iPriority > 0; }
+    bool IsInactiveAndNotDead() { return iPriority < 0; }
+    DeletionTracker TrackDeletion() { return {}; }
+};
+
+static void SCopy(const char *source, char *target, int32_t max_length)
+{
+    std::strncpy(target, source ? source : "", static_cast<size_t>(max_length));
+    target[max_length] = '\0';
+}
+
+#include "effect_lifecycle_get_callback_script.inc"
+#include "effect_lifecycle_constructor.inc"
+#include "effect_check.inc"
+#include "effect_execute.inc"
+#include "effect_lifecycle_clear_pointers.inc"
+#include "effect_lifecycle_kill.inc"
+#include "effect_lifecycle_clear_all.inc"
+#include "effect_lifecycle_do_damage.inc"
+#include "effect_do_call.inc"
+#include "effect_lifecycle_temp_remove_upper_effects.inc"
+#include "effect_lifecycle_temp_readd_upper_effects.inc"
+
+static void Reset()
+{
+    Game.pGlobalEffects = nullptr;
+    Game.ScriptEngine.functions.clear();
+    Game.ScriptEngine.custom = nullptr;
+    Game.Defs.values.clear();
+    g_trace.clear();
+    g_state = 0;
+    g_seed = 0;
+}
+
+static void Seed(int32_t seed)
+{
+    g_seed = seed;
+    FixedRandom(seed);
+}
+
+static void PrintValue(const C4Value &value)
+{
+    switch (value.kind)
+    {
+    case ValueKind::Nil: printf("null"); break;
+    case ValueKind::Int:
+    case ValueKind::Bool: printf("%d", value.integer); break;
+    case ValueKind::Object: printf("\"%s\"", value.object->tag); break;
+    case ValueKind::String: printf("\"%s\"", value.string); break;
+    }
+}
+
+static void Emit(const char *name, int32_t result, C4Effect *effects)
+{
+    sep();
+    printf("{\"case\":\"%s\",\"seed\":%d,\"result\":%d,\"effects\":[", name,
+           g_seed, result);
+    bool first = true;
+    for (C4Effect *effect = effects; effect; effect = effect->pNext)
+    {
+        printf("%s{\"name\":\"%s\",\"number\":%d,\"priority\":%d,"
+               "\"time\":%d,\"interval\":%d}",
+               first ? "" : ",", effect->Name, effect->iNumber, effect->iPriority,
+               effect->iTime, effect->iIntervall);
+        first = false;
+    }
+    printf("],\"trace\":[");
+    for (size_t i = 0; i < g_trace.size(); ++i)
+    {
+        const TraceEntry &entry = g_trace[i];
+        printf("%s{\"callback\":\"%s\",\"receiver\":\"%s\",\"args\":[",
+               i ? "," : "", entry.callback.c_str(),
+               entry.receiver ? entry.receiver->tag : "nil");
+        for (size_t j = 0; j < entry.args.size(); ++j)
+        {
+            if (j) printf(",");
+            PrintValue(entry.args[j]);
+        }
+        printf("],\"random\":%d}", entry.random);
+    }
+    printf("],\"state\":%d,\"random_count\":%d,\"random_hold\":%u}", g_state,
+           RandomCount, static_cast<unsigned>(RandomHold));
+}
+
+#undef PSFS_FxAdd
+#undef PSF_FxCustom
+} // namespace effect_lifecycle
 
 
 // ---------------------------------------------------------------------------
@@ -12541,6 +12920,411 @@ int main()
             for (int32_t i = 0; i < effect_check::g_trace_count && i < effect_check::MaxTrace; ++i)
                 printf("%s\"%s\"", i ? "," : "", effect_check::g_trace[i]);
             printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("effect_lifecycle");
+    {
+        namespace lifecycle = effect_lifecycle;
+        const lifecycle::C4Value none;
+
+        // Object Start -> Timer -> Kill -> Stop, including the asymmetry that
+        // Kill's Stop call supplies no explicit reason argument.
+        {
+            lifecycle::Reset();
+            lifecycle::Callback start("FxObjectStart", 1,
+                                      [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                                      { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback timer("FxObjectTimer", 2,
+                                      [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                                      { return lifecycle::C4VInt(lifecycle::C4Fx_Execute_Kill); });
+            lifecycle::Callback stop("FxObjectStop", 3,
+                                     [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                                     { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Game.ScriptEngine.Register("Object", "Start", &start);
+            lifecycle::Game.ScriptEngine.Register("Object", "Timer", &timer);
+            lifecycle::Game.ScriptEngine.Register("Object", "Stop", &stop);
+            lifecycle::C4Object object;
+            int32_t stored = 0;
+            lifecycle::Seed(51901);
+            object.pEffects = new lifecycle::C4Effect(
+                &object, "Object", 100, 1, nullptr, 0, lifecycle::C4VInt(11),
+                lifecycle::C4VInt(12), lifecycle::C4VInt(13), lifecycle::C4VInt(14), true,
+                stored);
+            object.pEffects->Execute(&object);
+            lifecycle::Emit("object_start_timer_kill", stored, object.pEffects);
+        }
+
+        // The same Start/Timer carrier on the global list receives nil as its
+        // first callback argument and remains active after a zero timer result.
+        {
+            lifecycle::Reset();
+            lifecycle::Callback start("FxGlobalStart", 1,
+                                      [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                                      { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback timer("FxGlobalTimer", 2,
+                                      [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                                      { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Game.ScriptEngine.Register("Global", "Start", &start);
+            lifecycle::Game.ScriptEngine.Register("Global", "Timer", &timer);
+            int32_t stored = 0;
+            lifecycle::Seed(51902);
+            lifecycle::Game.pGlobalEffects = new lifecycle::C4Effect(
+                nullptr, "Global", 100, 1, nullptr, 0, lifecycle::C4VInt(21),
+                lifecycle::C4VInt(22), lifecycle::C4VInt(23), lifecycle::C4VInt(24), true,
+                stored);
+            lifecycle::Game.pGlobalEffects->Execute(nullptr);
+            lifecycle::Emit("global_start_timer", stored, lifecycle::Game.pGlobalEffects);
+        }
+
+        // Start denial leaves a dead linked node which still reserves its
+        // number; the following node therefore receives number two.
+        {
+            lifecycle::Reset();
+            lifecycle::Callback start("FxDeniedStart", 1,
+                                      [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                                      { return lifecycle::C4VInt(lifecycle::C4Fx_Start_Deny); });
+            lifecycle::Game.ScriptEngine.Register("Denied", "Start", &start);
+            lifecycle::C4Object object;
+            int32_t denied_number = 0;
+            lifecycle::Seed(51903);
+            object.pEffects = new lifecycle::C4Effect(
+                &object, "Denied", 100, 0, nullptr, 0, none, none, none, none, true,
+                denied_number);
+            int32_t survivor_number = 0;
+            new lifecycle::C4Effect(&object, "Survivor", 50, 0, nullptr, 0, none, none,
+                                    none, none, true, survivor_number);
+            lifecycle::Emit("start_deny_reserves_number",
+                            denied_number * 10 + survivor_number, object.pEffects);
+        }
+
+        // An AnnulCalls answer absorbs the newcomer and brackets FxAdd with a
+        // high-to-low temporary Stop and low-to-high Start of the upper stack.
+        {
+            lifecycle::Reset();
+            lifecycle::Callback absorber_effect(
+                "FxAbsorberEffect", 4,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_Effect_AnnulCalls); });
+            lifecycle::Callback upper_effect(
+                "FxUpperEffect", 4,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback upper_stop(
+                "FxUpperStop", 3,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback upper_start(
+                "FxUpperStart", 1,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback absorber_add(
+                "FxAbsorberAdd", 5,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Game.ScriptEngine.Register("Absorber", "Effect", &absorber_effect);
+            lifecycle::Game.ScriptEngine.Register("Upper", "Effect", &upper_effect);
+            lifecycle::Game.ScriptEngine.Register("Upper", "Stop", &upper_stop);
+            lifecycle::Game.ScriptEngine.Register("Upper", "Start", &upper_start);
+            lifecycle::Game.ScriptEngine.custom = &absorber_add;
+            lifecycle::C4Object object;
+            int32_t absorber_number = 0;
+            object.pEffects = new lifecycle::C4Effect(
+                &object, "Absorber", 50, 0, nullptr, 0, none, none, none, none, false,
+                absorber_number);
+            object.pEffects->iPriority = 50;
+            int32_t upper_number = 0;
+            lifecycle::C4Effect *upper = new lifecycle::C4Effect(
+                &object, "Upper", 200, 0, nullptr, 0, none, none, none, none, false,
+                upper_number);
+            upper->iPriority = 200;
+            lifecycle::g_trace.clear();
+            lifecycle::g_state = 0;
+            lifecycle::Seed(51904);
+            int32_t stored = 0;
+            new lifecycle::C4Effect(
+                &object, "New", 20, 35, nullptr, 0, lifecycle::C4VInt(31),
+                lifecycle::C4VInt(32), lifecycle::C4VInt(33), lifecycle::C4VInt(34), true,
+                stored);
+            lifecycle::Emit("add_annul_temp_bracket", stored, object.pEffects);
+        }
+
+        // Check's AnnulCalls path enters every active recursive temp frame
+        // before the high-to-low Stop callbacks unwind. Highest kills the
+        // already-entered Suspended node without callbacks; its suspended
+        // frame still resumes, flips dead priority zero, and calls
+        // FxSuspendedStop. Readd then skips that dead node and reactivates only
+        // Highest before Check returns Anchor's effect number.
+        {
+            lifecycle::Reset();
+            lifecycle::C4Effect *suspended = nullptr;
+            lifecycle::Callback anchor_effect(
+                "FxAnchorEffect", 4,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_Effect_AnnulCalls); });
+            lifecycle::Callback suspended_stop(
+                "FxSuspendedStop", 2,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback highest_stop(
+                "FxHighestStop", 1,
+                [&](lifecycle::C4Object *, const lifecycle::ParSet &)
+                {
+                    // FnRemoveEffect's fDoNoCalls path marks the selected
+                    // linked node dead without invoking C4Effect::Kill.
+                    suspended->SetDead();
+                    return lifecycle::C4VInt(lifecycle::C4Fx_OK);
+                });
+            lifecycle::Callback highest_start(
+                "FxHighestStart", 3,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Game.ScriptEngine.Register("Anchor", "Effect", &anchor_effect);
+            lifecycle::Game.ScriptEngine.Register("Suspended", "Stop",
+                                                  &suspended_stop);
+            lifecycle::Game.ScriptEngine.Register("Highest", "Stop", &highest_stop);
+            lifecycle::Game.ScriptEngine.Register("Highest", "Start", &highest_start);
+            lifecycle::C4Object object;
+            int32_t anchor_number = 0;
+            lifecycle::C4Effect *anchor = object.pEffects = new lifecycle::C4Effect(
+                &object, "Anchor", 100, 0, nullptr, 0, none, none, none, none, false,
+                anchor_number);
+            anchor->iPriority = 100;
+            int32_t suspended_number = 0;
+            suspended = new lifecycle::C4Effect(
+                &object, "Suspended", 200, 0, nullptr, 0, none, none, none, none,
+                false, suspended_number);
+            suspended->iPriority = 200;
+            int32_t highest_number = 0;
+            lifecycle::C4Effect *highest = new lifecycle::C4Effect(
+                &object, "Highest", 300, 0, nullptr, 0, none, none, none, none, false,
+                highest_number);
+            highest->iPriority = 300;
+            lifecycle::g_trace.clear();
+            lifecycle::g_state = 0;
+            lifecycle::Seed(51911);
+            const int32_t result = object.pEffects->Check(
+                &object, "Pending", 50, 0, none, none, none, none);
+            lifecycle::Emit("temp_remove_killed_suspended_frame", result,
+                            object.pEffects);
+        }
+
+        // Raw negative priority is compared directly at the constructor's
+        // insertion points. It lands before priority one; that priority-one
+        // frame then returns before recursing, shielding the later active
+        // effect from temporary Stop/Start callbacks.
+        {
+            lifecycle::Reset();
+            lifecycle::Callback upper_stop(
+                "FxUpperStop", 1,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback negative_start(
+                "FxNegativeStart", 2,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback upper_start(
+                "FxUpperStart", 3,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Game.ScriptEngine.Register("Upper", "Stop", &upper_stop);
+            lifecycle::Game.ScriptEngine.Register("Negative", "Start", &negative_start);
+            lifecycle::Game.ScriptEngine.Register("Upper", "Start", &upper_start);
+            lifecycle::C4Object object;
+            int32_t one_number = 0;
+            object.pEffects = new lifecycle::C4Effect(
+                &object, "One", 1, 0, nullptr, 0, none, none, none, none, false,
+                one_number);
+            object.pEffects->iPriority = 1;
+            int32_t upper_number = 0;
+            lifecycle::C4Effect *upper = new lifecycle::C4Effect(
+                &object, "Upper", 100, 0, nullptr, 0, none, none, none, none, false,
+                upper_number);
+            upper->iPriority = 100;
+            lifecycle::g_trace.clear();
+            lifecycle::g_state = 0;
+            lifecycle::Seed(51908);
+            int32_t stored = 0;
+            new lifecycle::C4Effect(&object, "Negative", -200, 0, nullptr, 0, none, none,
+                                    none, none, true, stored);
+            lifecycle::Emit("negative_priority_one_barrier", stored, object.pEffects);
+        }
+
+        // ClearAll recurses tail-first. A Stop_Deny revives only that node;
+        // before returning, that upper callback replaces the lower callback
+        // identity and appends an effect beyond the recursion frontier. The
+        // resumed lower frame uses its live callback while Added stays active.
+        {
+            lifecycle::Reset();
+            lifecycle::C4Effect *lower = nullptr;
+            lifecycle::C4Effect *added = nullptr;
+            lifecycle::Callback lower_old_stop(
+                "FxLowerOldStop", 3,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback lower_renamed_stop(
+                "FxRenamedStop", 7,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::Callback upper_stop(
+                "FxUpperStop", 3,
+                [&](lifecycle::C4Object *, const lifecycle::ParSet &)
+                {
+                    lifecycle::SCopy("Renamed", lower->Name, C4MaxDefString);
+                    lower->pFnStop = &lower_renamed_stop;
+                    int32_t added_number = 0;
+                    added = new lifecycle::C4Effect(
+                        nullptr, "Added", 150, 0, nullptr, 0, none, none, none, none,
+                        false, added_number);
+                    added->iPriority = 150;
+                    return lifecycle::C4VInt(lifecycle::C4Fx_Stop_Deny);
+                });
+            lifecycle::Game.ScriptEngine.Register("Lower", "Stop", &lower_old_stop);
+            lifecycle::Game.ScriptEngine.Register("Upper", "Stop", &upper_stop);
+            int32_t lower_number = 0;
+            lower = lifecycle::Game.pGlobalEffects = new lifecycle::C4Effect(
+                nullptr, "Lower", 100, 0, nullptr, 0, none, none, none, none, false,
+                lower_number);
+            lifecycle::Game.pGlobalEffects->iPriority = 100;
+            int32_t upper_number = 0;
+            lifecycle::C4Effect *upper = new lifecycle::C4Effect(
+                nullptr, "Upper", 200, 0, nullptr, 0, none, none, none, none, false,
+                upper_number);
+            upper->iPriority = 200;
+            lifecycle::g_trace.clear();
+            lifecycle::g_state = 0;
+            lifecycle::Seed(51905);
+            lifecycle::Game.pGlobalEffects->ClearAll(nullptr, 3);
+            lifecycle::Emit("clear_all_tail_first_stop_deny", 0,
+                            lifecycle::Game.pGlobalEffects);
+        }
+
+        // DoDamage follows the live pNext chain. First kills its successor and
+        // inserts Replacement after that dead node; the walk skips Victim and
+        // still invokes Replacement with First's adjusted damage.
+        {
+            lifecycle::Reset();
+            lifecycle::C4Object object;
+            lifecycle::C4Effect *victim = nullptr;
+            lifecycle::C4Effect *replacement = nullptr;
+            lifecycle::Callback replacement_damage(
+                "FxReplacementDamage", 6,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &parameters)
+                { return lifecycle::C4VInt(parameters.values[2].getInt() + 2); });
+            lifecycle::Callback first_damage(
+                "FxFirstDamage", 6,
+                [&](lifecycle::C4Object *, const lifecycle::ParSet &parameters)
+                {
+                    victim->SetDead();
+                    int32_t replacement_number = 0;
+                    replacement = new lifecycle::C4Effect(
+                        &object, "Replacement", 150, 0, nullptr, 0, none, none, none,
+                        none, false, replacement_number);
+                    replacement->iPriority = 150;
+                    return lifecycle::C4VInt(parameters.values[2].getInt() + 1);
+                });
+            lifecycle::Game.ScriptEngine.Register("First", "Damage", &first_damage);
+            lifecycle::Game.ScriptEngine.Register("Replacement", "Damage",
+                                                  &replacement_damage);
+            int32_t first_number = 0;
+            object.pEffects = new lifecycle::C4Effect(
+                &object, "First", 100, 0, nullptr, 0, none, none, none, none, false,
+                first_number);
+            object.pEffects->iPriority = 100;
+            int32_t victim_number = 0;
+            victim = new lifecycle::C4Effect(&object, "Victim", 200, 0, nullptr, 0, none,
+                                             none, none, none, false, victim_number);
+            victim->iPriority = 200;
+            lifecycle::g_trace.clear();
+            lifecycle::g_state = 0;
+            lifecycle::Seed(51906);
+            int32_t damage = 10;
+            object.pEffects->DoDamage(&object, damage, 0, -1);
+            lifecycle::Emit("damage_live_mutation", damage, object.pEffects);
+        }
+
+        // Losing the object selected as callback command target marks the
+        // effect dead without Stop or any other callback.
+        {
+            lifecycle::Reset();
+            lifecycle::Callback stop(
+                "FxCommandedStop", 3,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4VInt(lifecycle::C4Fx_OK); });
+            lifecycle::C4Def command_definition;
+            command_definition.id = 0x434d4420UL;
+            command_definition.Script.Register("Commanded", "Stop", &stop);
+            lifecycle::C4Object command;
+            command.tag = "command";
+            command.Def = &command_definition;
+            command.id = command_definition.id;
+            lifecycle::C4Object carrier;
+            int32_t stored = 0;
+            carrier.pEffects = new lifecycle::C4Effect(
+                &carrier, "Commanded", 100, 0, &command, 0, none, none, none, none, false,
+                stored);
+            carrier.pEffects->iPriority = 100;
+            lifecycle::g_trace.clear();
+            lifecycle::g_state = 0;
+            lifecycle::Seed(51907);
+            carrier.pEffects->ClearPointers(&command);
+            lifecycle::Emit("command_target_lost_silent", carrier.pEffects->iPriority,
+                            carrier.pEffects);
+        }
+
+        // A fail-safe script runtime error is surfaced to C4Effect as nil.
+        // Side effects and synchronized RNG performed before the error remain;
+        // getInt() then treats the nil timer result as zero and keeps it alive.
+        {
+            lifecycle::Reset();
+            lifecycle::Callback timer(
+                "FxErrorTimer", 8,
+                [](lifecycle::C4Object *, const lifecycle::ParSet &)
+                { return lifecycle::C4Value{}; });
+            lifecycle::Game.ScriptEngine.Register("Error", "Timer", &timer);
+            lifecycle::C4Object object;
+            int32_t stored = 0;
+            object.pEffects = new lifecycle::C4Effect(
+                &object, "Error", 100, 1, nullptr, 0, none, none, none, none, false,
+                stored);
+            object.pEffects->iPriority = 100;
+            lifecycle::g_trace.clear();
+            lifecycle::g_state = 0;
+            lifecycle::Seed(51909);
+            object.pEffects->Execute(&object);
+            lifecycle::Emit("timer_error_is_nil_after_side_effects",
+                            object.pEffects->iPriority, object.pEffects);
+        }
+
+        // An object command target selects the callback definition and is the
+        // actual script receiver, while the affected carrier remains arg zero.
+        {
+            lifecycle::Reset();
+            lifecycle::Callback start(
+                "FxCommandStart", 1,
+                [](lifecycle::C4Object *receiver, const lifecycle::ParSet &)
+                {
+                    receiver->state = 77;
+                    return lifecycle::C4VInt(lifecycle::C4Fx_OK);
+                });
+            lifecycle::C4Def command_definition;
+            command_definition.id = 0x434d4421UL;
+            command_definition.Script.Register("Command", "Start", &start);
+            lifecycle::C4Object command;
+            command.tag = "command";
+            command.Def = &command_definition;
+            command.id = command_definition.id;
+            lifecycle::C4Object carrier;
+            int32_t stored = 0;
+            lifecycle::Seed(51910);
+            carrier.pEffects = new lifecycle::C4Effect(
+                &carrier, "Command", 100, 0, &command, 0, lifecycle::C4VInt(41),
+                lifecycle::C4VInt(42), lifecycle::C4VInt(43), lifecycle::C4VInt(44), true,
+                stored);
+            lifecycle::Emit("object_command_target_start", command.state,
+                            carrier.pEffects);
         }
     }
     arr_end();

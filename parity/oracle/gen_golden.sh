@@ -12,7 +12,8 @@
 # CopyMotion/GetSpeed/ObjectComCancelAttach helpers, complete
 # C4Object::DigOutMaterialCast and landscape BlastFree methods, and the
 # bottom/top/side-flight C4Object::ContactAction
-# arms, plus C4PlayerList::GetCount and Join's player-capacity gate. The Rust side
+# arms, plus C4PlayerList::GetCount and Join's player-capacity gate, and the
+# complete callback-bearing C4Effect lifecycle. The Rust side
 # (crates/clonk-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
 # coverage change.
@@ -1232,6 +1233,35 @@ awk '
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4Effect.cpp" > "$gen/effect_check.inc"
+
+# The complete effect lifecycle differential compiles the production list
+# constructor and every mutation-bearing lifecycle method beside one compact
+# callback scaffold.  Keep each body as a mechanical source extract: the
+# fixture is specifically intended to catch pointer-walk, callback-order and
+# priority-state changes that a transcription could accidentally normalize.
+awk '
+  /^C4Effect::C4Effect\(C4Object \*pForObj, const char \*szName,/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Effect.cpp" > "$gen/effect_lifecycle_constructor.inc"
+
+while read -r lifecycle_method lifecycle_slug; do
+  awk -v method="$lifecycle_method" '
+    $0 ~ ("^(C4AulScript \\*|void )C4Effect::" method "\\(") { p = 1 }
+    p { print }
+    p && /^}$/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$src/C4Effect.cpp" > "$gen/effect_lifecycle_$lifecycle_slug.inc"
+done <<'EOF'
+GetCallbackScript get_callback_script
+ClearPointers clear_pointers
+Kill kill
+ClearAll clear_all
+DoDamage do_damage
+TempRemoveUpperEffects temp_remove_upper_effects
+TempReaddUpperEffects temp_readd_upper_effects
+EOF
 
 # 3n. Lift C4MouseControl::UpdateCursorTarget's OCF priority cascade. It is a
 #     run of UNCONDITIONAL overwrites, so the LAST matching rule wins, not the
