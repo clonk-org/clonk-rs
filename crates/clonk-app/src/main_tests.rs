@@ -4892,6 +4892,7 @@ include_main_test_fragment!("app-test-shard-3", "main_tests/scenario_routes_1.rs
 include_main_test_fragment!("app-test-shard-11", "main_tests/scenario_routes_2.rs");
 include_main_test_fragment!("app-test-shard-4", "main_tests/audio.rs");
 include_main_test_fragment!("app-test-shard-4", "main_tests/input.rs");
+include_main_test_fragment!("app-test-shard-4", "main_tests/mouse_target_parity.rs");
 include_main_test_fragment!("app-test-shard-6", "main_tests/game_over.rs");
 include_main_test_fragment!("app-test-shard-5", "main_tests/lobby.rs");
 include_main_test_fragment!("app-test-shard-1", "main_tests/netplay_1.rs");

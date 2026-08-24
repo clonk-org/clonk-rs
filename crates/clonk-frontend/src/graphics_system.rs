@@ -649,6 +649,28 @@ pub(crate) fn object_output_reach_evaluations() -> usize {
     OBJECT_OUTPUT_REACH_EVALUATIONS.with(std::cell::Cell::get)
 }
 
+/// Inputs shared by the live mouse picker and the C++ differential matrix.
+/// `world` is C4MouseControl's integer X/Y while `screen` is the projected
+/// point used to test the rendered live shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MouseTargetLookupQuery {
+    pub(crate) screen: GuiPoint,
+    pub(crate) world: Vector2,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) requested_ocf: u32,
+    pub(crate) excluded: Option<ObjectId>,
+    pub(crate) owner: Option<i32>,
+    pub(crate) find_next: Option<ObjectId>,
+    pub(crate) adjust_ocf: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MouseTargetLookupResult {
+    pub(crate) object: Option<ObjectId>,
+    pub(crate) ocf: u32,
+}
+
 pub struct GraphicsSystem {
     pub(crate) surface: Surface,
     tiled_underlay_cache: TiledUnderlayCache,
@@ -2571,8 +2593,44 @@ impl GraphicsSystem {
         ocf: u32,
         excluded: Option<ObjectId>,
     ) -> Option<ObjectId> {
-        let viewport = self.viewport_for_point(point)?;
-        if viewport.owner != owner {
+        let pointer = self.viewport_point_at(point)?;
+        self.mouse_target_lookup(
+            snapshot,
+            owner,
+            MouseTargetLookupQuery {
+                screen: point,
+                world: Vector2::new(pointer.world.x as i32, pointer.world.y as i32),
+                width: 0,
+                height: 0,
+                requested_ocf: ocf,
+                excluded,
+                owner: None,
+                find_next: None,
+                adjust_ocf: true,
+            },
+        )?
+        .object
+    }
+
+    /// `C4Game::FindVisObject`'s ordered filter and
+    /// `C4MouseControl::GetTargetObject`'s optional position-OCF adjustment
+    /// (`C4Game.cpp:1426-1498`; `C4MouseControl.cpp:1318-1325`).
+    pub(crate) fn mouse_target_lookup(
+        &self,
+        snapshot: &SimulationSnapshot,
+        player: i32,
+        query: MouseTargetLookupQuery,
+    ) -> Option<MouseTargetLookupResult> {
+        let full_range = query.world == Vector2::ZERO && query.width == 0 && query.height == 0;
+        let viewport = if full_range {
+            self.active_viewports
+                .iter()
+                .rev()
+                .find(|viewport| viewport.owner == player)?
+        } else {
+            self.viewport_for_point(query.screen)?
+        };
+        if viewport.owner != player {
             return None;
         }
 
@@ -2602,40 +2660,156 @@ impl GraphicsSystem {
         let player_cursor = snapshot
             .players
             .iter()
-            .find(|player| player.id == owner)
+            .find(|candidate| candidate.id == player)
             .map(|player| player.cursor);
-        let cursor_object = match player_cursor {
-            Some(Some(cursor)) => Some(snapshot.object(cursor)?),
-            Some(None) => return None,
+        let cursor_layer = match player_cursor {
+            Some(Some(cursor)) => Some(snapshot.object(cursor)?.layer),
+            Some(None) => {
+                return Some(MouseTargetLookupResult {
+                    object: None,
+                    ocf: query.requested_ocf,
+                })
+            }
             None => snapshot
                 .crew_selection
-                .get(&owner)
+                .get(&player)
                 .and_then(|selection| selection.cursor)
-                .and_then(|cursor| snapshot.object(cursor)),
+                .and_then(|cursor| snapshot.object(cursor))
+                .map(|cursor| cursor.layer),
         };
-        let cursor_layer = cursor_object.map(|cursor| cursor.layer);
 
-        back_to_front.into_iter().rev().find_map(|object| {
-            if excluded == Some(object.id)
-                || object.status != ObjectStatus::Normal
-                || object.container.is_some()
-                || object.ocf & ocf == 0
-                || object.category & CATEGORY_MOUSE_IGNORE_FLAG != 0
-                || cursor_layer.is_some_and(|layer| object.layer != layer)
-                || !Self::object_is_visible(
-                    &snapshot.objects,
-                    &snapshot.players,
-                    object,
-                    owner,
-                    false,
-                )
-            {
-                return None;
+        let front_to_back = back_to_front.into_iter().rev().collect::<Vec<_>>();
+        let mut find_next = query.find_next;
+        // Native accidentally scans the master list for all three visual-list
+        // passes. The first pass therefore decides ordinary searches; later
+        // passes only matter when pFindNext is reached at the tail.
+        for pass in 0..3 {
+            for object in &front_to_back {
+                if find_next.is_none()
+                    && object.status == ObjectStatus::Normal
+                    && (pass != 1
+                        || object.category & (CATEGORY_BACKGROUND_FLAG | CATEGORY_FOREGROUND_FLAG)
+                            == 0)
+                    && object.category & CATEGORY_MOUSE_IGNORE_FLAG == 0
+                    && object.ocf & query.requested_ocf != 0
+                    && query.excluded != Some(object.id)
+                    && object.container.is_none()
+                    && query.owner.is_none_or(|owner| object.owner == owner)
+                    && Self::object_is_visible(
+                        &snapshot.objects,
+                        &snapshot.players,
+                        object,
+                        player,
+                        false,
+                    )
+                    && cursor_layer.is_none_or(|layer| object.layer == layer)
+                    && self.mouse_target_area_contains(object, viewport, query)
+                {
+                    let ocf = if query.adjust_ocf {
+                        self.object_ocf_for_mouse_position(object, query.world)
+                    } else {
+                        query.requested_ocf
+                    };
+                    return Some(MouseTargetLookupResult {
+                        object: Some(object.id),
+                        ocf,
+                    });
+                }
+                if find_next == Some(object.id) {
+                    find_next = None;
+                }
             }
-            self.object_pick_rect_for_viewport(object, viewport)
-                .filter(|rect| rect_contains(*rect, point, 0.0))
-                .map(|_| object.id)
+        }
+        Some(MouseTargetLookupResult {
+            object: None,
+            ocf: query.requested_ocf,
         })
+    }
+
+    fn mouse_target_area_contains(
+        &self,
+        object: &ObjectSnapshot,
+        viewport: &ActiveViewport,
+        query: MouseTargetLookupQuery,
+    ) -> bool {
+        if query.world == Vector2::ZERO && query.width == 0 && query.height == 0 {
+            return true;
+        }
+        if query.width == 0 && query.height == 0 {
+            return self
+                .object_pick_rect_for_viewport(object, viewport)
+                .is_some_and(|rect| rect_contains(rect, query.screen, 0.0));
+        }
+
+        let position = Self::mouse_target_view_position(object, viewport);
+        i64::from(position.x) >= i64::from(query.world.x)
+            && i64::from(position.x)
+                < i64::from(query.world.x).saturating_add(i64::from(query.width))
+            && i64::from(position.y) >= i64::from(query.world.y)
+            && i64::from(position.y)
+                < i64::from(query.world.y).saturating_add(i64::from(query.height))
+    }
+
+    fn mouse_target_view_position(object: &ObjectSnapshot, viewport: &ActiveViewport) -> Vector2 {
+        if object.category & CATEGORY_PARALLAX_FLAG == 0 {
+            return object.position;
+        }
+        let local = |name| {
+            object
+                .local_vars
+                .get(name)
+                .and_then(|value| value.as_c4_int())
+                .unwrap_or(0)
+        };
+        let apply = |position: i32, target: i32, parallax: i32, extent: i32| {
+            if parallax == 0 && position < 0 {
+                position.saturating_add(target).saturating_add(extent)
+            } else {
+                position.wrapping_sub(target.wrapping_mul(parallax.wrapping_sub(100)) / 100)
+            }
+        };
+        Vector2::new(
+            apply(
+                object.position.x,
+                viewport.viewport_x as i32,
+                local("__local_0"),
+                viewport.logical_width,
+            ),
+            apply(
+                object.position.y,
+                viewport.viewport_y as i32,
+                local("__local_1"),
+                viewport.logical_height,
+            ),
+        )
+    }
+
+    fn object_ocf_for_mouse_position(&self, object: &ObjectSnapshot, point: Vector2) -> u32 {
+        let geometry = self
+            .definition_debug_geometry
+            .get(&object.definition_id)
+            .cloned()
+            .unwrap_or_default();
+        let inside = |rect: Option<DefinitionRect>| {
+            rect.is_some_and(|rect| {
+                let relative_x =
+                    i64::from(point.x) - i64::from(object.position.x) - i64::from(rect.x);
+                let relative_y =
+                    i64::from(point.y) - i64::from(object.position.y) - i64::from(rect.y);
+                relative_x >= 0
+                    && relative_x < i64::from(rect.width)
+                    && relative_y >= 0
+                    && relative_y < i64::from(rect.height)
+            })
+        };
+        let mut ocf = object.ocf;
+        if ocf & clonk_engine::ocf::ENTRANCE != 0 && !inside(geometry.entrance) {
+            ocf &= !clonk_engine::ocf::ENTRANCE;
+        }
+        if ocf & clonk_engine::ocf::COLLECTION != 0 && !inside(geometry.collection) {
+            ocf &= !clonk_engine::ocf::COLLECTION;
+        }
+        ocf
     }
 
     fn viewport_for_point(&self, point: GuiPoint) -> Option<&ActiveViewport> {

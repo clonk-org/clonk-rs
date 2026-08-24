@@ -303,6 +303,230 @@ fn right_click_wwng_targets_the_closed_container_behind_it() {
 }
 
 #[test]
+fn right_click_retains_the_last_move_target_until_the_next_refill() {
+    // Move/Tick5 owns UpdateCursorTarget. Button events consume the retained
+    // TargetObject and Cursor without another hit-test
+    // (C4MouseControl.cpp:259-315,982-1023,1230-1259).
+    let mut app = new_running_sandbox_app();
+    let owner = app.local_owner;
+    let crew = app.engine.test_crew_cursor(owner);
+    let crew = app.engine.test_object_snapshot(crew);
+    let shared = Vector2::new(crew.position.x - 60, crew.position.y);
+    let mut definition = test_definition("MRTF", "Mouse retained target", "#strict\n");
+    definition.set_category(clonk_engine::CATEGORY_VEHICLE);
+    definition.set_grab(1);
+    definition.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -8, 16, 16)));
+    app.engine.register_test_definition(definition);
+    let spawn = || {
+        crew.layer
+            .map(|layer| {
+                SpawnConfig::new("MRTF")
+                    .with_position(shared)
+                    .with_layer(layer)
+            })
+            .unwrap_or_else(|| SpawnConfig::new("MRTF").with_position(shared))
+    };
+    let rear = app.engine.spawn_test_object(spawn());
+    let front = app.engine.spawn_test_object(spawn());
+    render_mouse_test_app(&mut app);
+    let point = mouse_test_object_point(&app, owner, front);
+    move_cursor(&mut app, point, "acquire front target on Move");
+    main_assert_eq!(app.ingame_mouse_target => Some(front));
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Grab);
+
+    app.engine
+        .apply_object_update(
+            front,
+            ObjectUpdate::new().with_position(Vector2::new(shared.x + 30, shared.y)),
+        )
+        .test_value();
+    app.snapshot = app.engine.snapshot();
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, point) => Some(rear));
+    let mut commands = install_mouse_network_capture(&mut app);
+
+    app.test_right_button(ElementState::Pressed);
+    app.test_right_button(ElementState::Released);
+    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
+    let [(_, context)] = player_commands.as_slice() else {
+        panic!("expected retained-front Context, got {player_commands:?}");
+    };
+    main_assert_eq!(context.command => CommandId::Context as i32);
+    main_assert_eq!(context.target2 => front.as_u64() as i32);
+
+    app.on_ingame_mouse_double().test_value();
+    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
+    let [(_, grab)] = player_commands.as_slice() else {
+        panic!("expected retained-front Grab, got {player_commands:?}");
+    };
+    main_assert_eq!(grab.command => CommandId::Grab as i32);
+    main_assert_eq!(grab.target => front.as_u64() as i32);
+    main_assert_eq!((grab.x, grab.y) => (0, 0));
+
+    move_cursor(&mut app, point, "refill target after same-frame move");
+    main_assert_eq!(app.ingame_mouse_target => Some(rear));
+    app.test_right_button(ElementState::Pressed);
+    app.test_right_button(ElementState::Released);
+    let (_, player_commands, _) = commands.take_submitted_mouse_controls();
+    let [(_, context)] = player_commands.as_slice() else {
+        panic!("expected refilled-rear Context, got {player_commands:?}");
+    };
+    main_assert_eq!(context.target2 => rear.as_u64() as i32);
+
+    // UpdateTargetRegion runs on button events too and nulls a cached world
+    // target before RightUp dispatch (C4MouseControl.cpp:694-703,1230-1237).
+    let region = viewport_button_point(
+        &app,
+        owner,
+        clonk_frontend::hud::ViewportButton::Help,
+    );
+    let mut pointer = app.ingame_pointer.test_value();
+    pointer.screen = region;
+    app.ingame_pointer = Some(pointer);
+    main_assert!(app.ingame_viewport_region(owner, region).is_some());
+    app.test_right_button(ElementState::Released);
+    main_assert_eq!(app.ingame_mouse_target => None);
+    let (_, player_commands, _) = commands.take_submitted_mouse_controls();
+    main_assert!(player_commands.is_empty(), "a region release must not reuse the cached world target: {player_commands:?}");
+}
+
+#[test]
+fn mouse_clicks_retain_selection_across_same_frame_ocf_mutation() {
+    // UpdateSingleSelection and TargetObject are refilled by Move. A button
+    // event observes both cached identities even if the object's OCF changes
+    // before dispatch (C4MouseControl.cpp:647-662,979,1106-1155,1230-1259).
+    let mut app = new_running_sandbox_app();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    let cursor_snapshot = app.engine.test_object_snapshot(cursor);
+    let position = Vector2::new(cursor_snapshot.position.x - 60, cursor_snapshot.position.y);
+    let spawn = cursor_snapshot
+        .layer
+        .map(|layer| {
+            SpawnConfig::new(cursor_snapshot.definition_id.clone())
+                .with_position(position)
+                .with_owner(owner)
+                .with_crew_member(true)
+                .with_layer(layer)
+        })
+        .unwrap_or_else(|| {
+            SpawnConfig::new(cursor_snapshot.definition_id.clone())
+                .with_position(position)
+                .with_owner(owner)
+                .with_crew_member(true)
+        });
+    let target = app.engine.spawn_test_object(spawn);
+    let mut crew = app.engine.test_player(owner).crew().to_vec();
+    crew.push(target);
+    app.engine.test_player_mut(owner).set_crew(crew);
+    render_mouse_test_app(&mut app);
+    let point = mouse_test_object_point(&app, owner, target);
+    move_cursor(&mut app, point, "acquire selectable crew target");
+    main_assert_eq!(app.ingame_mouse_target => Some(target));
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Select);
+    main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+
+    let mut update = ObjectUpdate::new();
+    update.ocf_override = Some(clonk_engine::ocf::NORMAL);
+    app.engine.apply_object_update(target, update).test_value();
+    app.snapshot = app.engine.snapshot();
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, point) => None);
+    main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+    let mut commands = install_mouse_network_capture(&mut app);
+
+    app.test_right_button(ElementState::Pressed);
+    app.test_right_button(ElementState::Released);
+    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+    main_assert!(direct.is_empty());
+    let [(_, selection)] = selections.as_slice() else {
+        panic!("expected retained right-click selection, got {selections:?}");
+    };
+    main_assert_eq!(selection.objects => vec![target.as_u64() as i32]);
+    let [(_, context)] = player_commands.as_slice() else {
+        panic!("expected retained right-click Context, got {player_commands:?}");
+    };
+    main_assert_eq!(context.command => CommandId::Context as i32);
+    main_assert_eq!(context.target2 => target.as_u64() as i32);
+
+    app.ingame_last_left_down = None;
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
+    let [(_, selection)] = selections.as_slice() else {
+        panic!("expected retained left-click selection, got {selections:?}");
+    };
+    main_assert_eq!(selection.objects => vec![target.as_u64() as i32]);
+}
+
+#[test]
+fn ordinary_moves_clear_single_mouse_selection_over_region_help_and_scroll() {
+    // DragNone always runs UpdateSingleSelection after target/region/scroll/
+    // Help updates; moving off a single crew or MouseSelect object clears it
+    // (C4MouseControl.cpp:440-453,647-662,893-980).
+    let mut app = new_running_sandbox_app();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    let cursor_snapshot = app.engine.test_object_snapshot(cursor);
+    let position = Vector2::new(cursor_snapshot.position.x - 60, cursor_snapshot.position.y);
+    let spawn = cursor_snapshot
+        .layer
+        .map(|layer| {
+            SpawnConfig::new(cursor_snapshot.definition_id.clone())
+                .with_position(position)
+                .with_owner(owner)
+                .with_crew_member(true)
+                .with_layer(layer)
+        })
+        .unwrap_or_else(|| {
+            SpawnConfig::new(cursor_snapshot.definition_id.clone())
+                .with_position(position)
+                .with_owner(owner)
+                .with_crew_member(true)
+        });
+    let target = app.engine.spawn_test_object(spawn);
+    let mut crew = app.engine.test_player(owner).crew().to_vec();
+    crew.push(target);
+    app.engine.test_player_mut(owner).set_crew(crew);
+    render_mouse_test_app(&mut app);
+    let target_point = mouse_test_object_point(&app, owner, target);
+    let acquire = |app: &mut GameApp| {
+        move_cursor(app, target_point, "acquire single crew mouse selection");
+        main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+    };
+
+    acquire(&mut app);
+    let region = viewport_button_point(
+        &app,
+        owner,
+        clonk_frontend::hud::ViewportButton::Help,
+    );
+    move_cursor(&mut app, region, "move selected cursor onto viewport region");
+    main_assert!(app.ingame_dragged_objects.is_empty());
+
+    acquire(&mut app);
+    app.ingame_mouse_help = true;
+    move_cursor(&mut app, target_point, "move selected cursor while Help is active");
+    main_assert!(app.ingame_dragged_objects.is_empty());
+    app.ingame_mouse_help = false;
+
+    acquire(&mut app);
+    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let edge = GuiPoint::new(
+        viewport.x as f32,
+        (viewport.y + i32::try_from(viewport.height).test_value() / 2) as f32,
+    );
+    main_assert!(app.ingame_viewport_region(owner, edge).is_none());
+    move_cursor(&mut app, edge, "move selected cursor onto scrolling edge");
+    main_assert!(app.ingame_edge_scroll.is_some());
+    main_assert!(app.ingame_dragged_objects.is_empty());
+}
+
+#[test]
 fn right_click_lone_wwng_falls_through_to_select_next() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
@@ -661,8 +885,108 @@ fn spawn_mouse_fog_target(
     app.engine.spawn_test_object(spawn)
 }
 
+fn deleted_mouse_fog_ignore_target(
+    definition_id: &str,
+    category: i32,
+) -> (GameApp, i32, ObjectId, GuiPoint) {
+    let mut app = new_running_sandbox_app();
+    let (owner, _cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 40);
+    let target = spawn_mouse_fog_target(
+        &mut app,
+        definition_id,
+        Vector2::new(cursor_position.x + 100, cursor_position.y),
+        layer,
+        category | C4D_IGNORE_FOW,
+    );
+    render_mouse_test_app(&mut app);
+    let point = mouse_test_object_point(&app, owner, target);
+    let pointer = app.graphics.viewport_point_at(point).test_value();
+    main_assert!(app.ingame_pointer_fog_blocked(pointer));
+    move_cursor(&mut app, point, "cache fog-covered IgnoreFoW target");
+    app.engine
+        .apply_object_update(
+            target,
+            ObjectUpdate {
+                status: Some(ObjectStatus::Deleted),
+                ..ObjectUpdate::default()
+            },
+        )
+        .test_value();
+    app.snapshot = app.engine.snapshot();
+    (app, owner, target, point)
+}
+
 #[test]
-fn mouse_fog_blocks_hidden_left_click_and_cycles_hidden_right_target() {
+fn mouse_fog_deleted_ignore_fow_target_suppresses_retained_left_select() {
+    // Every button Move reruns UpdateFogOfWar after ClearPointers; with no
+    // surviving IgnoreFoW target it replaces the retained Select cursor with
+    // Nothing before LeftUp (C4MouseControl.cpp:158-163,266-291,1266-1281).
+    let (mut app, _owner, _target, _point) = deleted_mouse_fog_ignore_target(
+        "MFDL",
+        clonk_engine::CATEGORY_OBJECT | clonk_engine::CATEGORY_MOUSE_SELECT,
+    );
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Select);
+    let mut commands = install_mouse_network_capture(&mut app);
+
+    app.ingame_last_left_down = None;
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+
+    main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()));
+}
+
+#[test]
+fn mouse_fog_deleted_ignore_fow_target_suppresses_retained_right_select() {
+    // The fog pre-dispatch and free-click paths still queue select-next, but
+    // UpdateFogOfWar's Nothing cursor prevents an intervening empty Select
+    // (C4MouseControl.cpp:266-291,1230-1263,1266-1300).
+    let (mut app, owner, _target, _point) = deleted_mouse_fog_ignore_target(
+        "MFDR",
+        clonk_engine::CATEGORY_OBJECT | clonk_engine::CATEGORY_MOUSE_SELECT,
+    );
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Select);
+    let expected_next = app
+        .engine
+        .player_mouse_select_next_object(owner)
+        .test_value();
+    let mut commands = install_mouse_network_capture(&mut app);
+
+    app.test_right_button(ElementState::Pressed);
+    app.test_right_button(ElementState::Released);
+
+    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
+    let [(_, first), (_, second)] = selections.as_slice() else {
+        panic!("expected two select-next packets without empty Select, got {selections:?}");
+    };
+    let expected = vec![expected_next.as_u64() as i32];
+    main_assert_eq!(&first.objects => &expected);
+    main_assert_eq!(&second.objects => &expected);
+}
+
+#[test]
+fn mouse_fog_deleted_ignore_fow_target_suppresses_retained_double_get() {
+    // LeftDouble consumes the cursor after the button Move's UpdateFogOfWar;
+    // a deleted cached object cannot leave a Get command with target zero
+    // (C4MouseControl.cpp:266-315,982-1007,1266-1281).
+    let (mut app, _owner, _target, _point) =
+        deleted_mouse_fog_ignore_target("MFDD", clonk_engine::CATEGORY_OBJECT);
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Carryable);
+    let mut commands = install_mouse_network_capture(&mut app);
+
+    app.ingame_last_left_down = Some(Instant::now());
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+
+    main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()));
+}
+
+#[test]
+fn mouse_fog_hidden_right_click_cycles_then_contexts_hidden_target() {
+    // RightUpDragNone sends SelectNext under fog, then deliberately falls
+    // through to its OCF_All refill without a second fog filter
+    // (C4MouseControl.cpp:1230-1259).
     let mut app = new_running_sandbox_app();
     let (owner, cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 40);
     let target = spawn_mouse_fog_target(
@@ -713,15 +1037,82 @@ fn mouse_fog_blocks_hidden_left_click_and_cycles_hidden_right_target() {
     move_cursor(&mut app, target_point, "move onto hidden target");
     app.test_right_button(ElementState::Pressed);
     app.test_right_button(ElementState::Released);
+    main_assert_eq!(app.ingame_mouse_target => Some(target));
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     main_assert!(direct.is_empty());
-    main_assert!(player_commands.is_empty(), "fog must suppress both MoveTo and hidden Context: {player_commands:?}");
+    let [(_, context)] = player_commands.as_slice() else {
+        panic!("expected hidden Context after fog SelectNext, got {player_commands:?}");
+    };
+    main_assert_eq!(context.command => CommandId::Context as i32);
+    main_assert_eq!(context.target2 => target.as_u64() as i32);
     let [(_, selection)] = selections.as_slice() else {
         panic!("hidden right click must cycle exactly once, got {selections:?}");
     };
     main_assert_eq!(selection.player => owner);
     main_assert_eq!(selection.objects => vec![expected_next.as_u64() as i32]);
+}
+
+#[test]
+fn mouse_fog_free_right_click_reuses_the_preevent_select_next_target() {
+    // Both SendPlayerSelectNext calls enqueue before either packet executes,
+    // so each starts from the same player cursor (C4MouseControl.cpp:273-290,
+    // 1262-1263,1284-1300).
+    let mut app = new_running_sandbox_app();
+    let (owner, first, cursor_position, layer) = configure_mouse_fog(&mut app, 40);
+    let first_snapshot = app.engine.test_object_snapshot(first);
+    let second_spawn = layer
+        .map(|layer| {
+            SpawnConfig::new(first_snapshot.definition_id.clone())
+                .with_position(Vector2::new(cursor_position.x + 12, cursor_position.y))
+                .with_owner(owner)
+                .with_crew_member(true)
+                .with_layer(layer)
+        })
+        .unwrap_or_else(|| {
+            SpawnConfig::new(first_snapshot.definition_id.clone())
+                .with_position(Vector2::new(cursor_position.x + 12, cursor_position.y))
+                .with_owner(owner)
+                .with_crew_member(true)
+        });
+    let second = app.engine.spawn_test_object(second_spawn);
+    app.engine.test_player_mut(owner).set_crew(vec![first, second]);
+    app.engine.set_crew_cursor(owner, Some(first)).test_value();
+    render_mouse_test_app(&mut app);
+    let hidden_empty = [-100, -120, 120]
+        .into_iter()
+        .find_map(|offset| {
+            let world = Vector2::new(cursor_position.x + offset, cursor_position.y);
+            let (x, y) = app.graphics.world_to_screen(owner, world)?;
+            let point = GuiPoint::new(x.ceil(), y.ceil());
+            let pointer = app.graphics.viewport_point_at(point)?;
+            (pointer.owner == owner
+                && app.ingame_pointer_fog_blocked(pointer)
+                && app
+                    .graphics
+                    .object_at_point(&app.snapshot, owner, point)
+                    .is_none()
+                && app.ingame_viewport_region(owner, point).is_none())
+            .then_some(point)
+        })
+        .test_value();
+
+    physical_right_click(&mut app, hidden_empty);
+    main_assert_eq!(app.engine.test_crew_cursor(owner) => second, "offline execution must not advance the second lookup from the first queued select");
+
+    app.engine.set_crew_cursor(owner, Some(first)).test_value();
+    app.snapshot = app.engine.snapshot();
+    let mut commands = install_mouse_network_capture(&mut app);
+    physical_right_click(&mut app, hidden_empty);
+    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
+    let [(_, first_select), (_, second_select)] = selections.as_slice() else {
+        panic!("expected two fog select-next packets, got {selections:?}");
+    };
+    let expected = vec![second.as_u64() as i32];
+    main_assert_eq!(&first_select.objects => &expected);
+    main_assert_eq!(&second_select.objects => &expected);
 }
 
 #[test]
@@ -757,6 +1148,51 @@ fn mouse_fog_keeps_ignore_fow_target_clickable() {
         panic!("IgnoreFoW target must remain clickable, got {selections:?}");
     };
     main_assert_eq!(selection.objects => vec![target.as_u64() as i32]);
+}
+
+#[test]
+fn mouse_fog_ignore_fow_right_click_clears_cached_selection_after_cycling() {
+    // SendPlayerSelectNext temporarily replaces Selection, queues the next
+    // crew member, then clears Selection before RightUpDragNone handles its
+    // retained Select cursor (C4MouseControl.cpp:1230-1259,1284-1300).
+    let mut app = new_running_sandbox_app();
+    let (owner, cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 40);
+    let target = spawn_mouse_fog_target(
+        &mut app,
+        "MFGR",
+        Vector2::new(cursor_position.x + 100, cursor_position.y),
+        layer,
+        clonk_engine::CATEGORY_OBJECT | clonk_engine::CATEGORY_MOUSE_SELECT | C4D_IGNORE_FOW,
+    );
+    render_mouse_test_app(&mut app);
+    let target_point = mouse_test_object_point(&app, owner, target);
+    let target_pointer = app.graphics.viewport_point_at(target_point).test_value();
+    main_assert!(app.ingame_pointer_fog_blocked(target_pointer));
+    let expected_next = app
+        .engine
+        .player_mouse_select_next_object(owner)
+        .test_value();
+    main_assert_eq!(expected_next => cursor);
+    let mut commands = install_mouse_network_capture(&mut app);
+
+    move_cursor(&mut app, target_point, "move onto fog-covered IgnoreFoW target");
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Select);
+    main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+    app.test_right_button(ElementState::Pressed);
+    app.test_right_button(ElementState::Released);
+
+    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+    main_assert!(direct.is_empty());
+    let [(_, cycled), (_, cleared)] = selections.as_slice() else {
+        panic!("expected select-next then empty Select, got {selections:?}");
+    };
+    main_assert_eq!(cycled.objects => vec![expected_next.as_u64() as i32]);
+    main_assert!(cleared.objects.is_empty());
+    let [(_, context)] = player_commands.as_slice() else {
+        panic!("expected Context after fog selections, got {player_commands:?}");
+    };
+    main_assert_eq!(context.command => CommandId::Context as i32);
+    main_assert_eq!(context.target2 => target.as_u64() as i32);
 }
 
 #[test]
@@ -1101,6 +1537,10 @@ fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
     let mut commands = install_mouse_network_capture(&mut app);
 
     for pointer in pointers {
+        // The preceding Move refill turns each out-of-landscape point into
+        // Nothing; LeftUp consumes that retained cursor without checking the
+        // boundary again (C4MouseControl.cpp:259-315,1106-1155).
+        app.ingame_mouse_caption.cursor = IngameMouseCursorKind::Nothing;
         app.handle_ingame_mouse_click(pointer).test_value();
     }
 
@@ -1235,14 +1675,12 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
     main_assert_eq!(open.add_mode => 1);
 
     app.test_modifiers(ModifiersState::CONTROL);
-    physical_left_drag(&mut app, vehicle_point, container_point);
-    app.test_modifiers(ModifiersState::empty());
-    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    main_assert!(direct.is_empty());
-    main_assert!(selections.is_empty());
-    let [(_, put)] = player_commands.as_slice() else {
-        panic!("expected one Control-PushTo, got {player_commands:?}");
-    };
+    app.ingame_last_left_down = None;
+    move_cursor(&mut app, vehicle_point, "move to vehicle drag start");
+    app.test_left_button(ElementState::Pressed);
+    move_cursor(&mut app, container_point, "cross moving drag threshold");
+    move_cursor(&mut app, container_point, "resolve VehiclePut cursor and target");
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::VehiclePut);
     let put_world = app
         .graphics
         .viewport_point_at(GuiPoint::new(
@@ -1251,6 +1689,23 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
         ))
         .map(ingame_pointer_world_pixel)
         .test_value();
+    app.engine
+        .apply_object_update(
+            container,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(crew_position.x + 100, crew_position.y)),
+        )
+        .test_value();
+    app.snapshot = app.engine.snapshot();
+    main_assert_eq!(app.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => None);
+    app.test_left_button(ElementState::Released);
+    app.test_modifiers(ModifiersState::empty());
+    let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
+    let [(_, put)] = player_commands.as_slice() else {
+        panic!("expected one Control-PushTo, got {player_commands:?}");
+    };
     main_assert_eq!(put.command => CommandId::PushTo as i32);
     main_assert_eq!(put.target => vehicle.as_u64() as i32);
     main_assert_eq!(put.target2 => container.as_u64() as i32);
@@ -5698,8 +6153,11 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
             .then_some(pointer)
         })
         .test_value();
-    let point = ingame_pointer_world_pixel(pointer);
-    app.ingame_pointer = Some(pointer);
+    move_cursor(&mut app, pointer.screen, "refill solid Dig cursor");
+    let point = app
+        .ingame_pointer
+        .map(ingame_pointer_world_pixel)
+        .test_value();
 
     let (manager, _event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
@@ -5715,6 +6173,11 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
     );
 
     app.test_modifiers(ModifiersState::CONTROL);
+    move_cursor(
+        &mut app,
+        pointer.screen,
+        "refill solid DigMaterial cursor",
+    );
     app.on_ingame_mouse_double().test_value();
     main_assert_eq!(
         commands.take_submitted_player_commands() =>
@@ -5734,6 +6197,12 @@ fn mouse_jump_zone_click_queues_exact_jump_control() {
     let click = Vector2::new(position.x + 8, position.y - 15);
     let pointer = sandbox_pointer_at_world(&mut app, owner, click);
     main_assert!(app.engine.mouse_jump_zone(owner, click));
+    move_cursor(&mut app, pointer.screen, "refill retained Jump cursor");
+    let pointer = app.ingame_pointer.test_value();
+    main_assert!(matches!(
+        app.ingame_mouse_caption.cursor,
+        IngameMouseCursorKind::JumpLeft | IngameMouseCursorKind::JumpRight
+    ));
 
     let (manager, _event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
@@ -5829,6 +6298,12 @@ fn mouse_jump_zone_overrides_overlapping_crew_selection() {
     let pointer = sandbox_pointer_at_world(&mut app, owner, click);
     main_assert_eq!(app.ingame_mouse_select_target(owner, pointer.screen) => Some(overlap), "the regression point must overlap another selectable crew member");
     main_assert!(app.engine.mouse_jump_zone(owner, click));
+
+    // UpdateCursorTarget's Jump check runs during Move; LeftUp consumes that
+    // retained cursor (C4MouseControl.cpp:522-534,1106-1155).
+    move_cursor(&mut app, pointer.screen, "refill Jump cursor before LeftUp");
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::JumpRight);
+    let pointer = app.ingame_pointer.test_value();
 
     app.handle_ingame_mouse_click(pointer).test_value();
 

@@ -668,10 +668,12 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
         })
         .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(hut))
         .test_value();
-    let bag_pointer = (viewport.y..viewport.y + viewport.height as i32)
+    let mouse_inset = 24;
+    let bag_pointer = (viewport.y + mouse_inset
+        ..viewport.y + viewport.height as i32 - mouse_inset)
         .step_by(4)
         .flat_map(|y| {
-            (viewport.x..viewport.x + viewport.width as i32)
+            (viewport.x + mouse_inset..viewport.x + viewport.width as i32 - mouse_inset)
                 .step_by(4)
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
@@ -701,19 +703,42 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32, y as f32))
         })
-        .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag))
+        .find(|point| {
+            app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag)
+                && app.ingame_viewport_region(owner, *point).is_none()
+        })
         .test_value();
+    main_assert_ne!(app.snapshot.object(bag).test_value().ocf & clonk_engine::ocf::CARRYABLE => 0);
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, bag_point) => Some(bag));
 
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_cursor(PhysicalPosition::new(
         f64::from(bag_point.x),
         f64::from(bag_point.y),
     ));
+    // MouseControl's first Move after Init is viewport-centered; the next
+    // Move performs the target refill consumed by RightDown
+    // (C4MouseControl.cpp:216-239,259-315,1009-1023).
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(bag_point.x),
+        f64::from(bag_point.y),
+    ));
+    main_assert_eq!(app.ingame_mouse_target => Some(bag));
     app.test_right_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(
         f64::from(hut_point.x),
         f64::from(hut_point.y),
     ));
+    // The first Move crosses the drag threshold in DragNone; the next Move
+    // runs DragMoving and refills the Put target before button-up
+    // (C4MouseControl.cpp:893-980,742-770).
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(hut_point.x),
+        f64::from(hut_point.y),
+    ));
+    main_assert!(app.ingame_right_mouse_state.is_some_and(|state| state.motion.world_drag_started));
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Put);
+    main_assert_eq!(app.ingame_mouse_target => Some(hut));
     app.test_right_button(ElementState::Released);
     app.test_modifiers(ModifiersState::empty());
 

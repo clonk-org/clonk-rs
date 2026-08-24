@@ -1280,7 +1280,126 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4MouseControl.cpp" > "$gen/mouse_cursor_cascade.inc"
 
-# 3o. Lift the C4GameSave save-policy query functions and each specialization's
+# 3o. Lift the mouse target lookup and release-time command paths used by the
+#     clonk-org/clonk-rs#521 differential.  FindVisObject, GetTargetObject and
+#     GetOCFForPos are complete production functions.  The event scaffold also
+#     compiles the complete cache-clearing, Tick5 update, right-up, put-target,
+#     put-release, DragMoving and packet-enqueue methods.  Bounded fragments
+#     cover UpdateCursorTarget's acquisition/region/fog prefix (the later
+#     cursor-art cascade is covered above), Move's active and position/control
+#     prefixes plus Button_None dispatch, and Move's fog pre-dispatch guard.
+#     Their source comment/statement boundaries make extraction drift fail.
+awk '
+  /^C4Object \*C4Game::FindVisObject\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/mouse_find_vis_object.inc"
+
+awk '
+  /^C4Object \*C4MouseControl::GetTargetObject\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MouseControl.cpp" > "$gen/mouse_get_target_object.inc"
+
+awk '
+  /^void C4Object::GetOCFForPos\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/mouse_get_ocf_for_pos.inc"
+
+awk '
+  /^int C4ObjectList::ClearPointers\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/mouse_object_list_clear_pointers.inc"
+
+awk '
+  /^int32_t C4ObjectList::ObjectNumber\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/mouse_object_number.inc"
+
+awk '
+  /^C4ControlPlayerSelect::C4ControlPlayerSelect\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Control.cpp" > "$gen/mouse_player_select_constructor.inc"
+
+awk '
+  /^C4ControlPlayerCommand::C4ControlPlayerCommand\(/ { p = 1 }
+  p { print }
+  p && /iData\(iData\), iAddMode\(iAddMode\) \{\}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Control.cpp" > "$gen/mouse_player_command_constructor.inc"
+
+while read -r method slug; do
+  awk -v method="$method" '
+    $0 ~ ("^(void|bool) C4MouseControl::" method "\\(") { p = 1 }
+    p { print }
+    p && /^}$/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$src/C4MouseControl.cpp" > "$gen/mouse_$slug.inc"
+done <<'EOF'
+Execute execute
+ClearPointers clear_pointers
+UpdatePutTarget update_put_target
+ButtonUpDragMoving button_up_drag_moving
+DragMoving drag_moving
+SendCommand send_command
+RightUpDragNone right_up_drag_none
+RightUp right_up
+SendPlayerSelectNext send_player_select_next
+EOF
+
+awk '
+  /^void C4MouseControl::UpdateCursorTarget\(\)$/ { fn = 1 }
+  fn && /^\t\/\/ Scrolling: no other target$/ { p = 1 }
+  p { print }
+  p && /^\tif \(TargetObject && FogOfWar && .*TargetObject = nullptr;$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MouseControl.cpp" > "$gen/mouse_update_target_acquisition.inc"
+
+awk '
+  /^void C4MouseControl::Move\(/ { fn = 1 }
+  fn && /^\t\/\/ Active$/ { p = 1 }
+  p { print }
+  p && /^\tif \(!Active \|\| !fMouseOwned\) return;$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MouseControl.cpp" > "$gen/mouse_move_active.inc"
+
+awk '
+  /^\t\t\/\/ Position$/ { p = 1 }
+  p { print }
+  p && /^\t\tShiftDown = false; if \(dwKeyFlags & MK_SHIFT\) ShiftDown = true;$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MouseControl.cpp" > "$gen/mouse_move_position_control.inc"
+
+awk '
+  /^\tcase C4MC_Button_None:$/ { p = 1 }
+  p { print }
+  p && /^\t\tbreak;$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MouseControl.cpp" > "$gen/mouse_move_none_dispatch.inc"
+
+awk '
+  /^\t\t\/\/ Blocked by fog of war: evaluate button up, dragging and region controls only$/ { p = 1 }
+  p { print }
+  p && /^\t\t}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MouseControl.cpp" > "$gen/mouse_fog_button_up.inc"
+
+awk '
+  /^\tcase C4MC_Button_RightUp:[[:space:]]+RightUp\(\); break;$/ { print; found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MouseControl.cpp" > "$gen/mouse_right_up_dispatch.inc"
+
+# 3p. Lift the C4GameSave save-policy query functions and each specialization's
 #     overrides. Every one is a pure function of Sync, fInitial and the ctor
 #     flags, so the whole five-variant decision matrix extracts as header
 #     fragments and needs no engine link -- the out-of-line virtuals

@@ -4936,6 +4936,7 @@ impl GameApp {
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
         self.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.ingame_mouse_target = None;
         self.running_pointer_position = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;

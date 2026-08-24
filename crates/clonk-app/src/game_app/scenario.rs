@@ -2265,6 +2265,7 @@ impl GameApp {
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
         self.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -2699,6 +2700,7 @@ impl GameApp {
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
         self.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;

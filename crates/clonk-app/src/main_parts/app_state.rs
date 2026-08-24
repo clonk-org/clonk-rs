@@ -816,6 +816,9 @@ pub(crate) struct GameApp {
     pub(crate) free_view_scroll_momentum: FreeViewScrollMomentum,
     /// Presentation-only C4MouseControl caption timing and placement.
     pub(crate) ingame_mouse_caption: IngameMouseCaptionState,
+    /// `C4MouseControl::TargetObject`, retained by the last Move/Tick5 refill.
+    /// Button events consume this identity without repeating hit-testing.
+    pub(crate) ingame_mouse_target: Option<ObjectId>,
     /// Last mouse-only logical position. Touch input intentionally does not
     /// materialize C4GUI's themed mouse pointer.
     pub(crate) window_mouse_position: Option<GuiPoint>,
