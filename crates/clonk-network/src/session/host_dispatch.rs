@@ -5,6 +5,52 @@
 
 use super::*;
 
+pub(crate) async fn handle_client_message_with_restart_fence(
+    connection_id: u32,
+    client_id: ClientId,
+    message: ControlMessage,
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    if let Some(expected_nonce) = state.round_restart_pending_clients.get(&client_id).copied() {
+        match message {
+            ControlMessage::RoundRestartAck { restart_nonce }
+                if restart_nonce == expected_nonce =>
+            {
+                if state
+                    .round_restart_routes
+                    .get(&client_id)
+                    .is_some_and(|expected_route| *expected_route != connection_id)
+                {
+                    return;
+                }
+                state.round_restart_pending_clients.remove(&client_id);
+                state.round_restart_routes.remove(&client_id);
+                let now_seconds = state.resource_epoch.elapsed().as_secs();
+                if let Some(backend) = state.resource_backend.as_mut() {
+                    let mut random = resource_safe_random;
+                    match backend.on_peer_connected(client_id as i32, now_seconds, &mut random) {
+                        Ok(events) => dispatch_host_resource_events(events, false, state).await,
+                        Err(error) => report_host_resource_error(error, state).await,
+                    }
+                } else {
+                    let actions = state.resource_catalog.on_peer_connected(client_id as i32);
+                    dispatch_host_resource_actions(actions, state).await;
+                }
+            }
+            // Route liveness is not round-scoped. Keep answering it while the
+            // application installs the new lobby; everything that can mutate
+            // synchronized or resource state remains behind the fence.
+            ControlMessage::Ping(_) | ControlMessage::Pong(_) => {
+                handle_client_message(connection_id, client_id, message, ping_ms, state).await;
+            }
+            _ => {}
+        }
+        return;
+    }
+    handle_client_message(connection_id, client_id, message, ping_ms, state).await;
+}
+
 pub(crate) async fn handle_client_message(
     connection_id: u32,
     client_id: ClientId,
@@ -30,11 +76,10 @@ pub(crate) async fn handle_client_message(
                 if state.config.voice_enabled && route.protocol == crate::NetworkProtocol::Udp {
                     route.voice_auth.record_peer_capabilities(capabilities);
                 }
-                let announcement = if state.config.voice_enabled {
-                    route.voice_auth.announcement().unwrap_or_default()
-                } else {
-                    crate::PortCapabilities::default()
-                };
+                let announcement = route
+                    .voice_auth
+                    .announcement()
+                    .unwrap_or_else(crate::PortCapabilities::supported_without_voice);
                 let _ = route
                     .outbound
                     .try_send(ControlMessage::PortCapabilities(announcement));
@@ -43,7 +88,8 @@ pub(crate) async fn handle_client_message(
         // Only the host restarts a session. A client claiming to is either
         // confused or hostile; either way there is nothing to act on.
         ControlMessage::HostRestarting { .. }
-        | ControlMessage::HostRestartLobby
+        | ControlMessage::HostRestartLobby { .. }
+        | ControlMessage::RoundRestartAck { .. }
         | ControlMessage::ControlWaitAttribution(_) => {}
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
@@ -722,6 +768,10 @@ pub(crate) async fn handle_client_disconnected(
     mark_client_removing(client_id, state);
     let disconnected = state.clients.remove(&client_id);
     let removed_logical_client = disconnected.is_some();
+    if removed_logical_client {
+        state.round_restart_pending_clients.remove(&client_id);
+        state.round_restart_routes.remove(&client_id);
+    }
     if let Some(client) = &disconnected {
         state.pending_kinds.remove(&client.core.client_id);
         if let Some(remote) = state.status_barrier.remotes.get_mut(&client_id) {
@@ -1685,22 +1735,35 @@ async fn apply_host_membership_controls(
             clonk_engine::ControlPacket::ClientRemove(remove)
                 if remove.by_client == HOST_CLIENT_ID as i32 =>
             {
-                if let Ok(client_id) = ClientId::try_from(remove.client_id) {
-                    close_removed_client_connections(client_id, state).await;
-                    coordination_unregister(client_id, state).await;
-                }
-                if let Some(core) = state.client_cores.remove(&remove.client_id) {
-                    state.admission.remove_client_name(&core.name);
-                    state.invalidate_control_send_time();
-                }
-                state.client_addresses.remove(&remove.client_id);
-                state.resource_catalog.remove_at_client(remove.client_id);
-                if let Some(backend) = state.resource_backend.as_mut() {
-                    backend.remove_at_client(remove.client_id);
-                }
-                state.pending_kinds.remove(&remove.client_id);
+                apply_host_client_remove(remove.client_id, state).await;
             }
             _ => {}
+        }
+    }
+}
+
+async fn apply_host_client_remove(client_id: i32, state: &mut HostState) {
+    if let Ok(client_id) = ClientId::try_from(client_id) {
+        close_removed_client_connections(client_id, state).await;
+        coordination_unregister(client_id, state).await;
+    }
+    if let Some(core) = state.client_cores.remove(&client_id) {
+        state.admission.remove_client_name(&core.name);
+        state.invalidate_control_send_time();
+    }
+    state.client_addresses.remove(&client_id);
+    state.resource_catalog.remove_at_client(client_id);
+    if let Some(backend) = state.resource_backend.as_mut() {
+        backend.remove_at_client(client_id);
+    }
+    state.pending_kinds.remove(&client_id);
+}
+
+pub(crate) async fn finish_host_restart_removals(state: &mut HostState) {
+    let removing = state.removing_clients.iter().copied().collect::<Vec<_>>();
+    for client_id in removing {
+        if let Ok(client_id) = i32::try_from(client_id) {
+            apply_host_client_remove(client_id, state).await;
         }
     }
 }
@@ -1813,13 +1876,25 @@ pub(crate) async fn broadcast_host_restarting(rejoin_seconds: u16, state: &mut H
     );
 }
 
-pub(crate) async fn broadcast_host_restart_lobby(state: &mut HostState) {
-    let _ = broadcast_host_message(
-        state,
-        ConnectionTrafficClass::Message,
-        ControlMessage::HostRestartLobby,
-        None,
-    );
+pub(crate) fn queue_host_restart_lobby(
+    retained_routes: &BTreeMap<ClientId, u32>,
+    state: &mut HostState,
+) -> Result<(), String> {
+    let marker = ControlMessage::HostRestartLobby {
+        restart_nonce: state.round_restart_nonce,
+    };
+    for (client_id, connection_id) in retained_routes {
+        let route = state
+            .accepted_routes
+            .get(connection_id)
+            .filter(|route| route.client_id == *client_id)
+            .ok_or_else(|| format!("retained restart route {connection_id} disappeared"))?;
+        route
+            .outbound
+            .try_send(marker.clone())
+            .map_err(|_| format!("retained restart route {connection_id} closed"))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_ready_check_to_host_state(packet: ReadyCheckPacket, state: &mut HostState) {

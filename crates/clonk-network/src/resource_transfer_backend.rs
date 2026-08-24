@@ -4,7 +4,7 @@
 //! This type executes the filesystem effects, feeds successful writes back into
 //! the catalog, and leaves socket delivery as typed events for its caller.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -174,6 +174,36 @@ impl ResourceTransferBackend {
         })
     }
 
+    /// Clones round-visible state without taking filesystem ownership. The
+    /// caller may reconcile this candidate freely; dropping a rejected
+    /// candidate cannot unlink files still used by the live round.
+    pub(crate) fn clone_for_round(
+        &self,
+        resource_directory: impl AsRef<Path>,
+    ) -> Result<Self, ResourceTransferError> {
+        Ok(Self {
+            catalog: self.catalog.clone(),
+            files: self.files.clone_for_round(resource_directory)?,
+            cores: self.cores.clone(),
+            local_sources: self.local_sources.clone(),
+        })
+    }
+
+    pub(crate) fn disarm_temporary_cleanup(&mut self) {
+        self.files.disarm_temporary_cleanup();
+    }
+
+    pub(crate) fn arm_temporary_cleanup(&mut self) {
+        self.files.arm_temporary_cleanup();
+    }
+
+    /// Transfers temporary-file ownership from the live backend immediately
+    /// before an infallible replacement swap. The displaced backend then
+    /// unlinks only stale round files when it drops.
+    pub(crate) fn arm_after_replacing(&mut self, previous: &mut Self) {
+        self.files.arm_after_replacing(&mut previous.files);
+    }
+
     /// Registers a binary-compatible standalone as a complete local source.
     pub fn register_local_complete(
         &mut self,
@@ -300,6 +330,18 @@ impl ResourceTransferBackend {
             .or_else(|| self.local_sources.get(&resource_id).map(PathBuf::as_path))
     }
 
+    pub(crate) fn is_complete(&self, resource_id: i32) -> bool {
+        self.files.is_complete(resource_id) || self.local_sources.contains_key(&resource_id)
+    }
+
+    pub(crate) fn is_local(&self, resource_id: i32) -> bool {
+        self.files.is_local(resource_id) || self.local_sources.contains_key(&resource_id)
+    }
+
+    pub(crate) fn resource_directory(&self) -> &Path {
+        self.files.root()
+    }
+
     /// Protects a complete resource before its mutable source is rewritten.
     ///
     /// This mirrors `C4Network2Res::Derive`: the old serving bytes are rescued
@@ -387,6 +429,52 @@ impl ResourceTransferBackend {
     /// keeps the entry alive for delayed cleanup after `Remove`.
     pub fn remove_resource(&mut self, resource_id: i32) -> bool {
         self.catalog.remove_resource(resource_id)
+    }
+
+    /// Immediately forgets one resource at a round boundary, including any
+    /// temporary standalone owned by this backend. Ordinary removal remains
+    /// delayed through [`Self::remove_resource`].
+    pub(crate) fn forget_resource(&mut self, resource_id: i32) -> bool {
+        let removed_catalog = self.catalog.forget_resource(resource_id);
+        let removed_file = self.files.remove(resource_id).is_ok();
+        let removed_core = self.cores.remove(&resource_id).is_some();
+        let removed_source = self.local_sources.remove(&resource_id).is_some();
+        removed_catalog || removed_file || removed_core || removed_source
+    }
+
+    /// Reconciles backend-owned state with a fresh round. Exact cores are
+    /// retained so an in-progress remote player download can continue; every
+    /// other entry is unlinked immediately. `ResourceFileStore::remove` only
+    /// deletes files whose ownership is `Temporary`, leaving persistent source
+    /// files untouched.
+    pub(crate) fn retain_resources(
+        &mut self,
+        resources: &BTreeMap<i32, NetworkResourceCore>,
+    ) -> Result<usize, ResourceTransferError> {
+        let retained_ids = resources
+            .iter()
+            .filter_map(|(resource_id, core)| {
+                (self.cores.get(resource_id) == Some(core)).then_some(*resource_id)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut stale_ids = self
+            .cores
+            .iter()
+            .filter_map(|(resource_id, core)| {
+                (resources.get(resource_id) != Some(core)).then_some(*resource_id)
+            })
+            .collect::<BTreeSet<_>>();
+        stale_ids.extend(
+            self.local_sources
+                .keys()
+                .filter(|resource_id| !retained_ids.contains(resource_id))
+                .copied(),
+        );
+        let removed_catalog = self.catalog.retain_resource_ids(&retained_ids);
+        for resource_id in &stale_ids {
+            self.clear_expired_resource(*resource_id)?;
+        }
+        Ok(removed_catalog.max(stale_ids.len()))
     }
 
     pub fn on_peer_connected<F>(

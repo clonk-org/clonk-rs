@@ -635,16 +635,23 @@ fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
         game_over_fixture!(host: 11_112, "Exact Host".to_string(), None),
     ));
 
+    let restart_completion = thread::spawn(move || {
+        let restart = commands.receive_host_round_lobby_restart();
+        main_assert!(restart.complete(Ok(())));
+        commands
+    });
+
     app.mode = AppMode::Running;
     main_assert!(app.show_abort_dialog(app.local_owner));
     finish_abort_dialog(
         &mut app,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
     );
+    let mut commands = restart_completion.join().test_value();
 
     main_assert!(app.network.is_some(), "the session every client is connected to must outlive the round");
     main_assert!(app.network_mode.is_some(), "a retained session keeps the host mode that describes it");
-    main_assert_eq!(commands.take_host_restart_lobby_broadcasts() => 1, "clients are told the round restarted while the session stayed up");
+    main_assert!(commands.take_host_round_lobby_restarts().is_empty(), "the synchronous restart command was consumed exactly once by the completion worker");
     main_assert!(commands.take_host_restart_broadcasts().is_empty(), "the reconnect notice would send every client to re-dial a host that never left");
     main_assert!(app.classic_host_lobby.is_some(), "the host lands back in its own lobby");
     main_assert_eq!(app.mode => AppMode::Menu);
@@ -665,7 +672,7 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
         Some(staged.effective_definition_modules.clone()),
         staged.definition_load,
     ));
-    let (manager, _events, _commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Host(
         game_over_fixture!(host: 11_112, host_name, None),
@@ -684,12 +691,30 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
             ..Default::default()
         },
     ]);
+    let restart_completion = thread::spawn(move || {
+        let restart = commands.receive_host_round_lobby_restart();
+        main_assert!(restart.complete(Ok(())));
+        commands
+    });
 
     app.restart_current_network_scenario().test_value();
+    let _commands = restart_completion.join().test_value();
 
     main_assert!(app.network.is_some(), "the live session must survive restart");
     main_assert!(app.classic_host_lobby.is_some(), "the running scenario's effective definitions must rebuild its lobby");
     main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    let hosted_resource_localities = app
+        .admission_resources
+        .resources
+        .values()
+        .filter_map(|resource| match resource {
+            AdmissionResourceState::Complete { local, .. } => Some(*local),
+            AdmissionResourceState::Loading { .. }
+            | AdmissionResourceState::Unavailable(_) => None,
+        })
+        .collect::<Vec<_>>();
+    main_assert!(!hosted_resource_localities.is_empty(), "the rebuilt host lobby must install its prepared local files");
+    main_assert!(hosted_resource_localities.into_iter().all(|local| local), "temporary ownership must not relabel a host-prepared local file as remote");
     main_assert!(
         app.classic_host_lobby
             .test_ref()
@@ -699,6 +724,882 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
             .any(|row| row.id() == LobbyRosterId::Client(7)),
         "an already-connected client must be present without rejoining"
     );
+}
+
+#[test]
+fn running_host_round_restart_refreshes_retained_advertising() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let reserved_reference = std::net::TcpListener::bind("[::]:0").test_value();
+    let reference_port = reserved_reference.local_addr().test_value().port();
+    drop(reserved_reference);
+    persist_config_value(
+        &paths,
+        "Network",
+        "PortRefServer",
+        reference_port.to_string(),
+    )
+    .test_value();
+    persist_config_value(&paths, "Network", "PortDiscovery", "0").test_value();
+
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    let host_name = staged.lobby.local_name.clone();
+    let host_nick = staged.lobby.nick.clone();
+    app.active_scenario = Some(scenario);
+    app.active_definition_load = Some(activated_definition_load(
+        Some(staged.effective_definition_modules.clone()),
+        staged.definition_load,
+    ));
+    let (manager, _events, mut commands) =
+        NetworkManager::test_stub_with_league_commands_for_client_id(0);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(game_over_fixture!(
+        host: 11_112,
+        host_name.clone(),
+        None,
+    )));
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: LegacyCString::from_bytes(host_name.into_bytes()).test_value(),
+            nick: LegacyCString::from_bytes(host_nick.into_bytes()).test_value(),
+            ..Default::default()
+        }]);
+    let (_snapshot, reference) = default_exact_host_reference();
+    app.start_network_game_advertiser_with_reference(
+        clonk_network::NetworkGameAdvertiserConfig {
+            discovery_port: 0,
+            reference_port: Some(reference_port),
+            language_charset: String::new(),
+        },
+        reference,
+    );
+    let original_reference_addr = app
+        .network_game_advertiser
+        .test_ref()
+        .reference_addr();
+    let mut retained_reference_connection =
+        std::net::TcpStream::connect(("127.0.0.1", reference_port)).test_value();
+    retained_reference_connection
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .test_value();
+    retained_reference_connection
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .test_value();
+    let restart_completion = thread::spawn(move || {
+        let restart = commands.receive_host_round_lobby_restart();
+        main_assert!(restart.complete(Ok(())));
+        commands
+    });
+
+    app.restart_current_network_scenario().test_value();
+    let mut commands = restart_completion.join().test_value();
+
+    let restarted_advertiser = app
+        .network_game_advertiser
+        .test_ref();
+    main_assert_eq!(restarted_advertiser.reference_addr() => original_reference_addr, "the retained host must keep its bound reference endpoint while replacing the round metadata");
+    main_assert_eq!(app.advertised_game_reference.test_ref().summary().state => "Lobby");
+    retained_reference_connection
+        .write_all(b"GET / HTTP/1.0\r\n\r\n")
+        .test_value();
+    let mut response = String::new();
+    retained_reference_connection
+        .read_to_string(&mut response)
+        .test_value();
+    main_assert!(response.contains("Title=\"Fixture\"\r\n"), "the connection accepted before restart must serve the rebuilt round reference: {response:?}");
+    main_assert_eq!(commands.take_league_update_effects().1 => 1, "the retained masterserver session must publish the fresh lobby reference without waiting for its ordinary heartbeat");
+}
+
+#[test]
+fn running_host_round_restart_keeps_live_password_and_comment() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    let host_name = staged.lobby.local_name.clone();
+    let host_nick = staged.lobby.nick.clone();
+    app.active_scenario = Some(scenario);
+    app.active_definition_load = Some(activated_definition_load(
+        Some(staged.effective_definition_modules.clone()),
+        staged.definition_load,
+    ));
+    let (manager, _events, mut commands) =
+        NetworkManager::test_stub_with_commands_for_client_id(0);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(game_over_fixture!(
+        host: 11_112,
+        host_name.clone(),
+        None,
+    )));
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: LegacyCString::from_bytes(host_name.into_bytes()).test_value(),
+            nick: LegacyCString::from_bytes(host_nick.into_bytes()).test_value(),
+            ..Default::default()
+        }]);
+    let (_snapshot, reference) = default_exact_host_reference();
+    app.advertised_game_reference = Some(reference);
+
+    let password_completion = thread::spawn(move || {
+        let (password, completion) = commands.receive_host_password();
+        main_assert_eq!(password.as_bytes() => b"live secret");
+        completion.send(Ok(())).test_value();
+        commands
+    });
+    app.set_running_network_password(b"live secret");
+    let mut commands = password_completion.join().test_value();
+    app.set_running_network_comment(b"live comment");
+    let _ = commands.take_league_update_effects();
+    let restart_completion = thread::spawn(move || {
+        let restart = commands.receive_host_round_lobby_restart();
+        let password = restart.config.password.as_bytes().to_vec();
+        main_assert!(restart.complete(Ok(())));
+        password
+    });
+
+    app.restart_current_network_scenario().test_value();
+    let restarted_password = restart_completion.join().test_value();
+
+    main_assert_eq!(restarted_password => b"live secret");
+    main_assert!(app.advertised_game_reference.test_ref().summary().password_needed);
+    main_assert_eq!(app.advertised_game_reference.test_ref().metadata().comment.as_bytes() => b"live comment");
+}
+
+#[test]
+fn rejected_live_round_restart_falls_back_to_announced_rehosting() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    let host_name = staged.lobby.local_name.clone();
+    app.active_scenario = Some(scenario);
+    app.active_definition_load = Some(activated_definition_load(
+        Some(staged.effective_definition_modules.clone()),
+        staged.definition_load,
+    ));
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(
+        game_over_fixture!(host: 11_112, host_name, None),
+    ));
+    let restart_completion = thread::spawn(move || {
+        let restart = commands.receive_host_round_lobby_restart();
+        main_assert!(restart.complete(Err(
+            "a retained client does not support atomic round restart".to_string()
+        )));
+        commands
+    });
+
+    app.restart_current_network_scenario().test_value();
+    let mut commands = restart_completion.join().test_value();
+
+    main_assert_eq!(
+        commands.take_host_restart_broadcasts() =>
+        vec![clonk_network::DEFAULT_HOST_RESTART_REJOIN_SECONDS],
+        "the compatibility fallback must announce the reconnect before dropping the old session"
+    );
+    main_assert!(app.network.is_none(), "the rejected retained session must not survive as the next host");
+    main_assert!(app.startup_network_connection.is_some(), "the same scenario must immediately begin re-hosting");
+}
+
+#[test]
+fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let scenario_text_path = scenario.path.test_ref().join("Scenario.txt");
+    let scenario_text = fs::read_to_string(&scenario_text_path).test_value();
+    fs::write(
+        &scenario_text_path,
+        scenario_text.replace("MaxPlayer=1", "MaxPlayer=3"),
+    )
+    .test_value();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    let host_name = staged.lobby.local_name.clone();
+    app.active_scenario = Some(scenario);
+    app.active_definition_load = Some(activated_definition_load(
+        Some(staged.effective_definition_modules.clone()),
+        staged.definition_load,
+    ));
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(
+        game_over_fixture!(host: 11_112, host_name, None),
+    ));
+    app.control_clients.replace_snapshot([
+        clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: LegacyCString::from_bytes(b"Exact Host".to_vec()).test_value(),
+            ..Default::default()
+        },
+        clonk_engine::ClientCoreControlData {
+            client_id: 7,
+            activated: true,
+            name: LegacyCString::from_bytes(b"Connected Client".to_vec()).test_value(),
+            ..Default::default()
+        },
+    ]);
+    app.control_player_infos.replace_snapshot(
+        9,
+        [
+            clonk_engine::PlayerInfoControlData {
+                client_id: 7,
+                flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 7,
+                    name: LegacyCString::from_bytes(b"Connected Player".to_vec()).test_value(),
+                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                by_client: 0,
+            },
+            clonk_engine::PlayerInfoControlData {
+                client_id: 9,
+                flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 9,
+                    name: LegacyCString::from_bytes(b"Departed Player".to_vec()).test_value(),
+                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                        | clonk_engine::PLAYER_INFO_FLAG_REMOVED
+                        | clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+                    ..Default::default()
+                }],
+                by_client: 0,
+            },
+        ],
+    );
+    let restart_completion = thread::spawn(move || {
+        let restart = commands.receive_host_round_lobby_restart();
+        main_assert!(restart.complete(Ok(())));
+        commands
+    });
+
+    app.restart_current_network_scenario().test_value();
+    let _commands = restart_completion.join().test_value();
+
+    main_assert_eq!(app.control_player_infos.client_info_ids(7) => vec![7]);
+    main_assert!(
+        app.control_player_infos.client_packet(9).is_none(),
+        "a PlayerInfo row whose client socket is gone must not be revived in the next lobby"
+    );
+}
+
+#[test]
+fn host_round_restart_without_restore_mask_resets_remote_teams() {
+    // Native only reapplies prior team selections when RESTORE_PlayerTeams is
+    // present (src/C4PlayerInfoListBox.cpp:170-181; src/C4Game.cpp:2390-2397).
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let scenario_text_path = scenario.path.test_ref().join("Scenario.txt");
+    let scenario_text = fs::read_to_string(&scenario_text_path).test_value();
+    fs::write(
+        &scenario_text_path,
+        scenario_text.replace("MaxPlayer=1", "MaxPlayer=2"),
+    )
+    .test_value();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    configure_test_startup_participant(&paths, user_data.path());
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    let host_name = staged.lobby.local_name.clone();
+    app.active_scenario = Some(scenario);
+    app.active_definition_load = Some(activated_definition_load(
+        Some(staged.effective_definition_modules.clone()),
+        staged.definition_load,
+    ));
+    let (manager, _events, mut commands) =
+        NetworkManager::test_stub_with_commands_for_client_id(0);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(game_over_fixture!(
+        host: 11_112,
+        host_name,
+        None,
+    )));
+    app.control_clients.replace_snapshot([
+        clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: LegacyCString::from_bytes(b"Exact Host".to_vec()).test_value(),
+            ..Default::default()
+        },
+        clonk_engine::ClientCoreControlData {
+            client_id: 7,
+            activated: true,
+            name: LegacyCString::from_bytes(b"Connected Client".to_vec()).test_value(),
+            ..Default::default()
+        },
+    ]);
+    app.control_player_infos.replace_snapshot(
+        7,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 7,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 7,
+                name: LegacyCString::from_bytes(b"Remote Player".to_vec()).test_value(),
+                team: 5,
+                ..Default::default()
+            }],
+            by_client: 0,
+        }],
+    );
+    main_assert_eq!(app.engine.restart_restore_info_mask() => 0);
+    let restart_completion = thread::spawn(move || {
+        let restart = commands.receive_host_round_lobby_restart();
+        main_assert!(restart.complete(Ok(())));
+    });
+
+    app.restart_current_network_scenario().test_value();
+    restart_completion.join().test_value();
+
+    let remote_teams = app
+        .control_player_infos
+        .client_packet(7)
+        .test_value()
+        .players
+        .iter()
+        .map(|player| player.team)
+        .collect::<Vec<_>>();
+    main_assert_eq!(remote_teams => vec![0], "without RESTORE_PlayerTeams the remote row must not retain a team that the fresh host row lost");
+}
+
+#[test]
+fn observer_host_round_restart_without_profile_does_not_open_first_player_dialog() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    let host_name = staged.lobby.local_name.clone();
+    app.active_scenario = Some(scenario);
+    app.active_definition_load = Some(activated_definition_load(
+        Some(staged.effective_definition_modules.clone()),
+        staged.definition_load,
+    ));
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(
+        game_over_fixture!(host: 11_112, host_name, None),
+    ));
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            observer: true,
+            name: LegacyCString::from_bytes(b"Observer Host".to_vec()).test_value(),
+            ..Default::default()
+        }]);
+    let restart_completion = thread::spawn(move || {
+        let restart = commands.receive_host_round_lobby_restart();
+        main_assert!(restart.complete(Ok(())));
+        commands
+    });
+
+    app.restart_current_network_scenario().test_value();
+    let _commands = restart_completion.join().test_value();
+
+    main_assert!(app.classic_host_lobby.is_some());
+    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert!(
+        app.startup_player_properties_dialog.is_none(),
+        "the retained observer lobby must not inherit main menu's first-profile creation modal"
+    );
+}
+
+fn pump_live_restart_apps_until(
+    host: &mut GameApp,
+    client: &mut GameApp,
+    description: &str,
+    mut completed: impl FnMut(&GameApp, &GameApp) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !completed(host, client) {
+        host.test_update();
+        client.test_update();
+        main_assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {description}: host={:?}/{:?} client={:?}/{:?}; host status={:?}; client status={:?}; host clients={:?}; client clients={:?}; host lobby ack={}; client lobby ack={}; client JoinData={}; host resource progress={:?}; client resource progress={:?}",
+            host.mode,
+            host.startup_view,
+            client.mode,
+            client.startup_view,
+            host.status_text,
+            client.status_text,
+            host.control_clients.snapshot(),
+            client.control_clients.snapshot(),
+            host.initial_lobby_status_ack_pending,
+            client.initial_lobby_status_ack_pending,
+            client.pending_network_join_data.is_some(),
+            host.admission_resources.present_percent,
+            client.admission_resources.present_percent,
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn pump_live_restart_three_apps_until(
+    host: &mut GameApp,
+    retained_client: &mut GameApp,
+    joining_client: &mut GameApp,
+    description: &str,
+    mut completed: impl FnMut(&GameApp, &GameApp, &GameApp) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !completed(host, retained_client, joining_client) {
+        host.test_update();
+        retained_client.test_update();
+        joining_client.test_update();
+        main_assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {description}: host={:?}/{:?} retained={:?}/{:?} joining={:?}/{:?}; host status={:?}; retained status={:?}; joining status={:?}; host clients={:?}; retained clients={:?}; joining clients={:?}; joining JoinData={}",
+            host.mode,
+            host.startup_view,
+            retained_client.mode,
+            retained_client.startup_view,
+            joining_client.mode,
+            joining_client.startup_view,
+            host.status_text,
+            retained_client.status_text,
+            joining_client.status_text,
+            host.control_clients.snapshot(),
+            retained_client.control_clients.snapshot(),
+            joining_client.control_clients.snapshot(),
+            joining_client.pending_network_join_data.is_some(),
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn without_round_player_lifecycle(
+    packet: &clonk_engine::PlayerInfoControlData,
+) -> clonk_engine::PlayerInfoControlData {
+    let mut packet = packet.clone();
+    for player in &mut packet.players {
+        player.flags &= !(clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_REMOVED);
+        player.game_number = -1;
+        player.game_join_frame = -1;
+        player.game_part_frame = -1;
+    }
+    packet
+}
+
+#[test]
+fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
+    // Native schedules Game.ScenarioFilename before Abort and restores it with
+    // fLobby/NetworkActive, bypassing the selector
+    // (src/C4GameDialogs.cpp:94-117;
+    // src/C4Application.cpp:232-295,373-399). Native then drops every
+    // connection in C4Network2::Clear (src/C4Game.cpp:544-654;
+    // src/C4Network2.cpp:746-790), so retaining this live session and roster
+    // is the port's intentional improvement.
+    let _lock = env_lock().lock();
+    let host_user_data = tempdir();
+    let client_user_data = tempdir();
+    let joining_client_user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let scenario_text_path = scenario.path.test_ref().join("Scenario.txt");
+    let scenario_text = fs::read_to_string(&scenario_text_path).test_value();
+    let three_player_scenario = scenario_text.replace("MaxPlayer=1", "MaxPlayer=3");
+    main_assert_ne!(three_player_scenario => scenario_text, "the E2E fixture must actually admit the retained peer and a new peer after restart");
+    fs::write(&scenario_text_path, three_player_scenario).test_value();
+    let (_host_guard, host_paths) =
+        exact_loader_test_paths(host_user_data.path(), Some(content.path()));
+    let (_client_guard, client_paths) =
+        exact_loader_test_paths(client_user_data.path(), Some(content.path()));
+    let (_joining_client_guard, joining_client_paths) =
+        exact_loader_test_paths(joining_client_user_data.path(), Some(content.path()));
+    configure_test_startup_participant(&host_paths, host_user_data.path());
+    configure_test_startup_participant(&client_paths, client_user_data.path());
+    configure_test_startup_participant(&joining_client_paths, joining_client_user_data.path());
+
+    let client_listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+    let client_port = client_listener.local_addr().test_value().port();
+    let joining_client_listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+    let joining_client_port = joining_client_listener.local_addr().test_value().port();
+    for paths in [&host_paths, &client_paths, &joining_client_paths] {
+        persist_config_value(paths, "Network", "PortUDP", "0").test_value();
+        persist_config_value(paths, "Network", "PortDiscovery", "0").test_value();
+        persist_config_value(paths, "Network", "PortRefServer", "0").test_value();
+        persist_config_value(paths, "Network", "EnableUPnP", "0").test_value();
+        persist_config_value(paths, "Network", "MasterServerSignUp", "0").test_value();
+        persist_config_value(paths, "General", "Preloading", "0").test_value();
+    }
+    for paths in [&host_paths, &client_paths] {
+        persist_config_value(paths, "Network", "PortTCP", client_port.to_string()).test_value();
+    }
+    persist_config_value(
+        &joining_client_paths,
+        "Network",
+        "PortTCP",
+        joining_client_port.to_string(),
+    )
+    .test_value();
+    persist_config_value(&client_paths, "Network", "LocalName", "Connected Client").test_value();
+    persist_config_value(
+        &joining_client_paths,
+        "Network",
+        "LocalName",
+        "Joining Client",
+    )
+    .test_value();
+
+    let mut host = new_menu_app_with_paths(800, 600, &host_paths);
+    let staged = prepare_minimal_host_lobby(&host, scenario.clone());
+    host.staged_network_host_scenario = Some(staged);
+    host.activate_prepared_network_host(
+        scenario.clone(),
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    );
+    let host_deadline = Instant::now() + Duration::from_secs(30);
+    while host.network.is_none() {
+        host.test_update();
+        main_assert!(
+            Instant::now() < host_deadline,
+            "timed out starting live host: {}",
+            host.status_text,
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    let host_endpoint = host
+        .network
+        .test_ref()
+        .local_addresses()
+        .into_iter()
+        .find(|address| address.protocol == clonk_network::NetworkProtocol::Tcp)
+        .test_value()
+        .endpoint;
+    drop(client_listener);
+
+    let mut client = new_menu_app_with_paths(800, 600, &client_paths);
+    client.player_name = "Connected Client".to_string();
+    client
+        .activate_network_join(host_endpoint.to_string())
+        .test_value();
+    pump_live_restart_apps_until(
+        &mut host,
+        &mut client,
+        "the real client to enter the host lobby",
+        |host, client| {
+            let Some(client_id) = client
+                .network
+                .as_ref()
+                .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            else {
+                return false;
+            };
+            host.classic_host_lobby.is_some()
+                && client.network_lobby.is_some()
+                && host.control_clients.contains(client_id)
+                && !host.control_player_infos.client_info_ids(client_id).is_empty()
+        },
+    );
+    let client_id = i32::try_from(client.network.test_ref().local_client_id()).test_value();
+    host.start_network_game_now().test_value();
+    pump_live_restart_apps_until(
+        &mut host,
+        &mut client,
+        "the initial synchronized round",
+        |host, client| matches!(host.mode, AppMode::Running) && matches!(client.mode, AppMode::Running),
+    );
+    for _ in 0..64 {
+        host.test_update();
+        client.test_update();
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    let host_scenario = host.active_scenario.clone().test_value();
+    let client_scenario = client.active_scenario.clone().test_value();
+    main_assert_eq!(client_scenario.title => host_scenario.title);
+    let host_player_ids = host.control_player_infos.client_info_ids(client_id);
+    let client_player_ids = client.control_player_infos.client_info_ids(client_id);
+    main_assert!(!host_player_ids.is_empty(), "the connected player's authoritative row must exist before restart");
+    main_assert!(!client_player_ids.is_empty(), "the connected player must see its row before restart");
+    let host_player_packet = host
+        .control_player_infos
+        .client_packet(client_id)
+        .test_value();
+    let client_player_packet = client
+        .control_player_infos
+        .client_packet(client_id)
+        .test_value();
+    let host_addresses = host.network.test_ref().local_addresses();
+    let host_local_id = host.network.test_ref().local_client_id();
+    let client_local_id = client.network.test_ref().local_client_id();
+    let route_keys = |app: &GameApp| {
+        let mut routes = app
+            .network
+            .test_ref()
+            .runtime_connections()
+            .test_value()
+            .into_iter()
+            .map(|route| {
+                (
+                    route.connection_id,
+                    route.client_id,
+                    route.protocol,
+                    route.peer_address,
+                )
+            })
+            .collect::<Vec<_>>();
+        routes.sort_by_key(|route| route.0);
+        routes
+    };
+    let host_routes = route_keys(&host);
+    let client_routes = route_keys(&client);
+    main_assert!(!host_routes.is_empty() && !client_routes.is_empty(), "the E2E must observe both live workers' real routes");
+    main_assert!(host.show_abort_dialog(host.local_owner));
+    finish_abort_dialog(
+        &mut host,
+        clonk_frontend::message_dialog::MessageDialogResult::Restart,
+    );
+    main_assert!(host.network.is_some(), "restart dropped the live host before its peer could follow: status={:?} loader={:?}", host.status_text, host.loader_render_error);
+    main_assert!(host.classic_host_lobby.is_some(), "restart did not rebuild the host lobby: status={:?} loader={:?}", host.status_text, host.loader_render_error);
+    pump_live_restart_apps_until(
+        &mut host,
+        &mut client,
+        "both retained peers to return to the lobby",
+        |host, client| {
+            matches!(host.mode, AppMode::Menu)
+                && matches!(client.mode, AppMode::Menu)
+                && host.classic_host_lobby.is_some()
+                && client.network_lobby.is_some()
+                && host.control_clients.is_activated(client_id)
+                && client.control_clients.is_activated(client_id)
+        },
+    );
+    main_assert_eq!(host.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(client.startup_view => StartupView::NetworkLobby);
+    main_assert!(matches!(host.network_mode, Some(NetworkMode::Host(_))));
+    main_assert!(matches!(client.network_mode, Some(NetworkMode::Client(_))));
+    main_assert_eq!(host.network.test_ref().local_client_id() => host_local_id);
+    main_assert_eq!(client.network.test_ref().local_client_id() => client_local_id);
+    main_assert_eq!(host.network.test_ref().local_addresses() => host_addresses);
+    main_assert!(host.startup_network_connection.is_none());
+    main_assert!(client.startup_network_connection.is_none(), "the retained peer must not re-dial the host");
+    main_assert!(client.pending_host_rejoin.is_none());
+    let host_routes_after = route_keys(&host);
+    let client_routes_after = route_keys(&client);
+    main_assert_eq!(host_routes_after => host_routes, "the host must reuse exactly its original connection IDs and peer endpoints");
+    main_assert_eq!(client_routes_after => client_routes, "the client must reuse exactly its original connection IDs and peer endpoints");
+    main_assert!(host.classic_host_lobby.test_ref().controller.rows().iter().any(|row| row.id() == LobbyRosterId::Client(client_id)), "the connected client must remain in the host lobby");
+    main_assert!(client.network_lobby.test_ref().participants.contains_key(&0));
+    main_assert!(client.network_lobby.test_ref().participants.contains_key(&client_local_id));
+    main_assert_eq!(host.control_player_infos.client_info_ids(client_id) => host_player_ids, "the host must retain the connected player's row");
+    main_assert_eq!(client.control_player_infos.client_info_ids(client_id) => client_player_ids, "the client must retain its player row");
+    let rebuilt_host_packet = host
+        .control_player_infos
+        .client_packet(client_id)
+        .test_value();
+    let rebuilt_client_packet = client
+        .control_player_infos
+        .client_packet(client_id)
+        .test_value();
+    main_assert_eq!(rebuilt_client_packet => rebuilt_host_packet, "the rebuilt lobby must leave both peers with the same authoritative PlayerInfo packet");
+    main_assert_eq!(without_round_player_lifecycle(&rebuilt_host_packet) => without_round_player_lifecycle(&host_player_packet), "the rebuilt host lobby must retain the remote player's full identity and resource packet");
+    main_assert_eq!(without_round_player_lifecycle(&rebuilt_client_packet) => without_round_player_lifecycle(&client_player_packet), "the rebuilt client lobby must retain the local player's full identity and resource packet");
+    main_assert_eq!(host.staged_network_host_scenario.test_ref().frontend.identifier => host_scenario.identifier);
+    // A client executes a local Combined<ID>.c4s artifact, while the title and
+    // network resource core below identify it with the host's scenario.
+    main_assert_eq!(client.network_lobby.test_ref().selected_identifier() => Some(client_scenario.identifier.as_str()));
+    main_assert_eq!(client.network_lobby.test_ref().scenario_label() => host_scenario.title);
+
+    let mut joining_client = new_menu_app_with_paths(800, 600, &joining_client_paths);
+    joining_client.player_name = "Joining Client".to_string();
+    drop(joining_client_listener);
+    joining_client
+        .activate_network_join(host_endpoint.to_string())
+        .test_value();
+    pump_live_restart_three_apps_until(
+        &mut host,
+        &mut client,
+        &mut joining_client,
+        "a new real client to enter the restarted lobby",
+        |host, retained_client, joining_client| {
+            let Some(joining_client_network_id) = joining_client
+                .network
+                .as_ref()
+                .map(NetworkManager::local_client_id)
+            else {
+                return false;
+            };
+            let Ok(joining_client_id) = i32::try_from(joining_client_network_id) else {
+                return false;
+            };
+            host.classic_host_lobby.is_some()
+                && joining_client.network_lobby.is_some()
+                && host.control_clients.contains(joining_client_id)
+                && retained_client.control_clients.contains(joining_client_id)
+                && !host
+                    .control_player_infos
+                    .client_info_ids(joining_client_id)
+                    .is_empty()
+                && !retained_client
+                    .control_player_infos
+                    .client_info_ids(joining_client_id)
+                    .is_empty()
+        },
+    );
+    let joining_client_id =
+        i32::try_from(joining_client.network.test_ref().local_client_id()).test_value();
+    let joining_client_network_id = u32::try_from(joining_client_id).test_value();
+    main_assert_ne!(joining_client_id => client_id);
+    main_assert!(client
+        .network_lobby
+        .test_ref()
+        .participants
+        .contains_key(&joining_client_network_id));
+    let host_joining_player_ids = host
+        .control_player_infos
+        .client_info_ids(joining_client_id);
+    let retained_joining_player_ids = client
+        .control_player_infos
+        .client_info_ids(joining_client_id);
+    main_assert!(!host_joining_player_ids.is_empty());
+    main_assert_eq!(retained_joining_player_ids => host_joining_player_ids);
+    main_assert_eq!(client.control_player_infos.client_packet(joining_client_id) => host.control_player_infos.client_packet(joining_client_id));
+    main_assert_eq!(joining_client.network_lobby.test_ref().scenario_label() => host_scenario.title);
+
+    pump_live_restart_three_apps_until(
+        &mut host,
+        &mut client,
+        &mut joining_client,
+        "both clients to finish loading the restarted lobby",
+        |_host, retained_client, joining_client| {
+            [&retained_client, &joining_client]
+                .into_iter()
+                .all(|client| {
+                    let progress = &client.admission_resources.present_percent;
+                    !progress.is_empty() && progress.values().all(|present| *present == 100)
+                })
+        },
+    );
+    let round_two_host_routes = route_keys(&host);
+    let round_two_client_routes = route_keys(&client);
+    let round_two_joining_client_routes = route_keys(&joining_client);
+    main_assert!(
+        round_two_host_routes.len() > host_routes.len(),
+        "the restarted host must own an additional real route for the newly admitted client"
+    );
+    main_assert!(
+        !round_two_joining_client_routes.is_empty(),
+        "the newly admitted client must own a real route before round two"
+    );
+    let host_scenario_core = host
+        .admission_resources
+        .resource_cores
+        .values()
+        .find(|core| {
+            core.resource_type == clonk_network::HostResourceType::Scenario as u8
+                && core.filename.as_bytes() == host_scenario.identifier.as_bytes()
+        })
+        .cloned()
+        .test_value();
+    main_assert_eq!(client.admission_resources.resource_cores.get(&host_scenario_core.id) => Some(&host_scenario_core));
+    main_assert_eq!(joining_client.admission_resources.resource_cores.get(&host_scenario_core.id) => Some(&host_scenario_core));
+
+    host.start_network_game_now().test_value();
+    main_assert!(
+        !host
+            .status_text
+            .starts_with("Unable to start prepared host"),
+        "the restarted lobby must own a fresh round bootstrap: {}",
+        host.status_text
+    );
+    pump_live_restart_three_apps_until(
+        &mut host,
+        &mut client,
+        &mut joining_client,
+        "the restarted synchronized round",
+        |host, retained_client, joining_client| {
+            matches!(host.mode, AppMode::Running)
+                && matches!(retained_client.mode, AppMode::Running)
+                && matches!(joining_client.mode, AppMode::Running)
+        },
+    );
+    let network_progress = |app: &GameApp| {
+        (
+            app.engine.frame(),
+            app.network_control_clock
+                .map(NetworkControlClock::current_tick)
+                .test_value(),
+        )
+    };
+    let host_round_two_start = network_progress(&host);
+    let client_round_two_start = network_progress(&client);
+    let joining_client_round_two_start = network_progress(&joining_client);
+    pump_live_restart_three_apps_until(
+        &mut host,
+        &mut client,
+        &mut joining_client,
+        "all three peers to execute synchronized round-two controls",
+        |host, retained_client, joining_client| {
+            let progressed = |app: &GameApp, start: (u64, i32)| {
+                let current = network_progress(app);
+                current.0 > start.0 && current.1 > start.1
+            };
+            progressed(host, host_round_two_start)
+                && progressed(retained_client, client_round_two_start)
+                && progressed(joining_client, joining_client_round_two_start)
+        },
+    );
+
+    main_assert!(matches!(host.network_mode, Some(NetworkMode::Host(_))));
+    main_assert!(matches!(client.network_mode, Some(NetworkMode::Client(_))));
+    main_assert!(matches!(
+        joining_client.network_mode,
+        Some(NetworkMode::Client(_))
+    ));
+    main_assert_eq!(host.network.test_ref().local_client_id() => host_local_id);
+    main_assert_eq!(client.network.test_ref().local_client_id() => client_local_id);
+    main_assert_eq!(host.network.test_ref().local_addresses() => host_addresses);
+    main_assert_eq!(route_keys(&host) => round_two_host_routes, "starting round two must preserve every retained and newly admitted host route");
+    main_assert_eq!(route_keys(&client) => round_two_client_routes, "starting round two must preserve the retained client's route");
+    main_assert_eq!(route_keys(&joining_client) => round_two_joining_client_routes, "starting round two must preserve the newly admitted client's route");
+    main_assert!(host.startup_network_connection.is_none());
+    main_assert!(client.startup_network_connection.is_none(), "round two must still use the retained worker instead of dialing again");
+    main_assert!(client.pending_host_rejoin.is_none());
+    let round_two_host_scenario = host.active_scenario.test_ref();
+    let round_two_client_scenario = client.active_scenario.test_ref();
+    let round_two_joining_client_scenario = joining_client.active_scenario.test_ref();
+    main_assert_eq!(round_two_client_scenario.identifier => client_scenario.identifier);
+    main_assert_eq!(round_two_client_scenario.title => round_two_host_scenario.title);
+    // Fresh clients execute a local Combined<ID>.c4s transport artifact; the
+    // matching network resource core above is their scenario identity.
+    main_assert_eq!(round_two_joining_client_scenario.title => round_two_host_scenario.title);
+    let round_two_host_packet = host
+        .control_player_infos
+        .client_packet(client_id)
+        .test_value();
+    let round_two_client_packet = client
+        .control_player_infos
+        .client_packet(client_id)
+        .test_value();
+    main_assert_eq!(without_round_player_lifecycle(&round_two_host_packet) => without_round_player_lifecycle(&host_player_packet), "round two may update lifecycle fields but must preserve the remote player's full identity and resource packet");
+    main_assert_eq!(without_round_player_lifecycle(&round_two_client_packet) => without_round_player_lifecycle(&client_player_packet), "round two may update lifecycle fields but must preserve the local player's full identity and resource packet");
 }
 
 #[test]

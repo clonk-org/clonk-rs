@@ -158,7 +158,7 @@ pub enum ChunkWriteOutcome {
     WrittenOutsideChunkRange,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ResourceFileState {
     Complete,
     Loading {
@@ -167,11 +167,12 @@ enum ResourceFileState {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ResourceFile {
     core: NetworkResourceCore,
     path: PathBuf,
     ownership: ResourceFileOwnership,
+    local: bool,
     state: ResourceFileState,
 }
 
@@ -180,6 +181,9 @@ pub struct ResourceFileStore {
     root: PathBuf,
     resources: HashMap<i32, ResourceFile>,
     pending_derived: HashMap<i32, ResourceFile>,
+    cleanup_temporary_on_drop: bool,
+    non_owning_paths: BTreeSet<PathBuf>,
+    candidate_owned_temporary_paths: BTreeSet<PathBuf>,
 }
 
 impl ResourceFileStore {
@@ -190,7 +194,79 @@ impl ResourceFileStore {
             root,
             resources: HashMap::new(),
             pending_derived: HashMap::new(),
+            cleanup_temporary_on_drop: true,
+            non_owning_paths: BTreeSet::new(),
+            candidate_owned_temporary_paths: BTreeSet::new(),
         })
+    }
+
+    pub(crate) fn clone_for_round(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<Self, ResourceFileStoreError> {
+        let root = root.as_ref().to_path_buf();
+        fs::create_dir_all(&root)?;
+        let non_owning_paths = self
+            .resources
+            .values()
+            .chain(self.pending_derived.values())
+            .map(|resource| resource.path.clone())
+            .collect();
+        Ok(Self {
+            root,
+            resources: self.resources.clone(),
+            // A pending derive belongs to the old round. Its temporary file is
+            // still owned by the old store until the prepared replacement is
+            // committed.
+            pending_derived: HashMap::new(),
+            cleanup_temporary_on_drop: false,
+            non_owning_paths,
+            candidate_owned_temporary_paths: BTreeSet::new(),
+        })
+    }
+
+    pub(crate) fn disarm_temporary_cleanup(&mut self) {
+        self.cleanup_temporary_on_drop = false;
+    }
+
+    pub(crate) fn arm_temporary_cleanup(&mut self) {
+        self.cleanup_unreferenced_candidate_paths();
+        self.non_owning_paths.clear();
+        self.cleanup_temporary_on_drop = true;
+    }
+
+    pub(crate) fn arm_after_replacing(&mut self, previous: &mut Self) {
+        let retained_paths = self
+            .resources
+            .values()
+            .chain(self.pending_derived.values())
+            .map(|resource| resource.path.clone())
+            .collect::<BTreeSet<_>>();
+        previous
+            .resources
+            .values_mut()
+            .chain(previous.pending_derived.values_mut())
+            .filter(|resource| retained_paths.contains(&resource.path))
+            .for_each(|resource| resource.ownership = ResourceFileOwnership::Persistent);
+        self.cleanup_unreferenced_candidate_paths();
+        self.non_owning_paths.clear();
+        self.cleanup_temporary_on_drop = true;
+    }
+
+    fn cleanup_unreferenced_candidate_paths(&mut self) {
+        let referenced_paths = self
+            .resources
+            .values()
+            .chain(self.pending_derived.values())
+            .map(|resource| resource.path.clone())
+            .collect::<BTreeSet<_>>();
+        self.candidate_owned_temporary_paths
+            .iter()
+            .filter(|path| !referenced_paths.contains(*path))
+            .for_each(|path| {
+                let _ = fs::remove_file(path);
+            });
+        self.candidate_owned_temporary_paths.clear();
     }
 
     pub fn root(&self) -> &Path {
@@ -212,6 +288,7 @@ impl ResourceFileStore {
                 core: core.clone(),
                 path: path.clone(),
                 ownership: ResourceFileOwnership::Temporary,
+                local: false,
                 state: ResourceFileState::Loading {
                     received_chunks: BTreeSet::new(),
                     chunk_count,
@@ -252,11 +329,18 @@ impl ResourceFileStore {
             core.id,
             ResourceFile {
                 core: core.clone(),
-                path,
+                path: path.clone(),
                 ownership,
+                local: true,
                 state: ResourceFileState::Complete,
             },
         );
+        if !self.cleanup_temporary_on_drop
+            && ownership == ResourceFileOwnership::Temporary
+            && !self.non_owning_paths.contains(&path)
+        {
+            self.candidate_owned_temporary_paths.insert(path);
+        }
         Ok(())
     }
 
@@ -293,6 +377,7 @@ impl ResourceFileStore {
             ));
         }
         let mut anonymous_core = parent.core.clone();
+        let parent_is_local = parent.local;
         anonymous_core.id = -2;
         anonymous_core.derived_id = parent_resource_id;
 
@@ -319,6 +404,7 @@ impl ResourceFileStore {
                 core: anonymous_core,
                 path: mutable_source,
                 ownership,
+                local: parent_is_local,
                 state: ResourceFileState::Complete,
             },
         );
@@ -395,6 +481,16 @@ impl ResourceFileStore {
         self.resources
             .get(&resource_id)
             .is_some_and(|resource| matches!(resource.state, ResourceFileState::Complete))
+    }
+
+    /// Whether the complete bytes came from a local candidate rather than a
+    /// network download. Ownership is deliberately separate: a locally packed
+    /// standalone can be temporary, while a completed download remains remote
+    /// even after its temporary file becomes complete.
+    pub fn is_local(&self, resource_id: i32) -> bool {
+        self.resources
+            .get(&resource_id)
+            .is_some_and(|resource| resource.local)
     }
 
     pub fn read_chunk(
@@ -511,7 +607,8 @@ impl ResourceFileStore {
             .resources
             .remove(&resource_id)
             .ok_or(ResourceFileStoreError::UnknownResource(resource_id))?;
-        if resource.ownership == ResourceFileOwnership::Temporary {
+        if self.cleanup_temporary_on_drop && resource.ownership == ResourceFileOwnership::Temporary
+        {
             match fs::remove_file(&resource.path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -560,6 +657,14 @@ impl ResourceFileStore {
 
 impl Drop for ResourceFileStore {
     fn drop(&mut self) {
+        if !self.cleanup_temporary_on_drop {
+            self.candidate_owned_temporary_paths
+                .iter()
+                .for_each(|path| {
+                    let _ = fs::remove_file(path);
+                });
+            return;
+        }
         self.resources
             .values()
             .chain(self.pending_derived.values())

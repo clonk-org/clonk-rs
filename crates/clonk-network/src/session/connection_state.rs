@@ -244,6 +244,15 @@ impl HostOutboundSender {
         self.close.borrow().is_none() && self.post_failure.is_accepting()
     }
 
+    pub(crate) fn is_round_restart_route_live(&self) -> bool {
+        self.accepts_post_failure_fifo()
+            && !self.is_retiring()
+            && self
+                .udp
+                .as_ref()
+                .map_or_else(|| !self.sender.is_closed(), |udp| udp.is_accepting())
+    }
+
     #[cfg(test)]
     pub(crate) fn writer_channel_is_closed(&self) -> bool {
         self.sender.is_closed()
@@ -550,7 +559,7 @@ pub(crate) struct ClientResourceState {
     pub(crate) backend: Option<crate::ResourceTransferBackend>,
     pub(crate) local_resource_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
     pub(crate) host_peer_id: i32,
-    pub(crate) initial_complete_resources: Vec<(clonk_engine::NetworkResourceCore, PathBuf)>,
+    pub(crate) initial_complete_resources: Vec<(clonk_engine::NetworkResourceCore, PathBuf, bool)>,
     pub(crate) initial_packets: Vec<ResourcePacket>,
     pub(crate) initial_controls: Vec<ControlPacket>,
     pub(crate) initial_ready_checks: Vec<ReadyCheckPacket>,
@@ -986,6 +995,36 @@ fn resource_is_registered(
         || backend.is_some_and(|backend| backend.catalog().contains_resource(resource_id))
 }
 
+pub(crate) fn round_resource_cores(
+    dynamic: &clonk_engine::NetworkResourceCore,
+    parameters: &crate::JoinGameParametersEnvelope,
+) -> BTreeMap<i32, clonk_engine::NetworkResourceCore> {
+    let mut resources = BTreeMap::new();
+    for core in &parameters.game_resources {
+        resources.insert(core.id, core.clone());
+    }
+    resources.insert(dynamic.id, dynamic.clone());
+    for player in parameters
+        .player_infos
+        .clients
+        .iter()
+        .flat_map(|client| &client.players)
+    {
+        let flags = player.flags;
+        if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
+            || flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+            || flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0
+        {
+            continue;
+        }
+        if let Some(core) = &player.resource {
+            resources.insert(core.id, core.clone());
+        }
+    }
+    resources.insert(parameters.scenario.id, parameters.scenario.clone());
+    resources
+}
+
 pub(crate) fn load_authoritative_player_resources(
     resolver: &crate::client_bootstrap::ClientBootstrapResolver,
     catalog: &mut crate::ResourceCatalog,
@@ -1243,6 +1282,148 @@ impl ClientResourceState {
         resource_is_registered(&self.catalog, self.backend.as_ref(), resource_id)
     }
 
+    fn bootstrap_resource_matches(&self, core: &clonk_engine::NetworkResourceCore) -> bool {
+        self.backend
+            .as_ref()
+            .and_then(|backend| backend.core(core.id))
+            .or_else(|| self.catalog.resource_core(core.id))
+            == Some(core)
+    }
+
+    fn forget_bootstrap_resource(&mut self, resource_id: i32) {
+        self.catalog.forget_resource(resource_id);
+        if let Some(backend) = self.backend.as_mut() {
+            backend.forget_resource(resource_id);
+        }
+        self.local_resource_sources
+            .retain(|_, core| core.id != resource_id);
+        self.initial_complete_resources
+            .retain(|(core, _, _)| core.id != resource_id);
+    }
+
+    fn resolve_restarted_resource(
+        &mut self,
+        resolver: &crate::client_bootstrap::ClientBootstrapResolver,
+        role: crate::ClientBootstrapResourceRole,
+        core: &clonk_engine::NetworkResourceCore,
+    ) -> Result<ClientBootstrapRegistration, String> {
+        if self.contains_bootstrap_resource(core.id) {
+            if self.bootstrap_resource_matches(core) {
+                return Ok(ClientBootstrapRegistration::AlreadyPresent);
+            }
+            self.forget_bootstrap_resource(core.id);
+        }
+        self.resolve_and_add_bootstrap_resource(resolver, role, core)
+    }
+
+    pub(crate) fn apply_restart_join_data(
+        &mut self,
+        mut join_data: JoinDataEnvelope,
+    ) -> Result<JoinDataEnvelope, String> {
+        if join_data.client_id != self.catalog.local_client_id() {
+            return Err(format!(
+                "restarted JoinData reassigned client {} to {}",
+                self.catalog.local_client_id(),
+                join_data.client_id
+            ));
+        }
+        let resolver = self.resource_resolver.clone();
+        for core in &join_data.parameters.game_resources {
+            self.resolve_restarted_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                core,
+            )?;
+        }
+        self.resolve_restarted_resource(
+            &resolver,
+            crate::ClientBootstrapResourceRole::Dynamic,
+            &join_data.dynamic,
+        )?;
+        for player in join_data
+            .parameters
+            .player_infos
+            .clients
+            .iter_mut()
+            .flat_map(|client| &mut client.players)
+        {
+            let flags = player.flags;
+            if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
+                || flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+            {
+                continue;
+            }
+            if flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+                crate::client_bootstrap::clear_player_resource(player);
+                continue;
+            }
+            let Some(core) = player.resource.clone() else {
+                crate::client_bootstrap::clear_player_resource(player);
+                continue;
+            };
+            match self.resolve_restarted_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::Player,
+                &core,
+            ) {
+                Ok(
+                    ClientBootstrapRegistration::AlreadyPresent
+                    | ClientBootstrapRegistration::Registered,
+                ) => {}
+                Ok(ClientBootstrapRegistration::UnavailableNonLoadable) | Err(_) => {
+                    crate::client_bootstrap::clear_player_resource(player);
+                }
+            }
+        }
+        self.resolve_restarted_resource(
+            &resolver,
+            crate::ClientBootstrapResourceRole::Scenario,
+            &join_data.parameters.scenario,
+        )?;
+        let retained_resources = round_resource_cores(&join_data.dynamic, &join_data.parameters);
+        let retained_resource_ids = retained_resources.keys().copied().collect();
+        self.catalog.retain_resource_ids(&retained_resource_ids);
+        if let Some(backend) = self.backend.as_mut() {
+            backend
+                .retain_resources(&retained_resources)
+                .map_err(|error| error.to_string())?;
+            backend.set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE);
+        }
+        let retained_complete = self
+            .backend
+            .as_ref()
+            .into_iter()
+            .flat_map(|backend| {
+                retained_resources.values().filter_map(|core| {
+                    (backend.core(core.id) == Some(core) && backend.is_complete(core.id))
+                        .then_some(core)
+                        .and_then(|core| {
+                            backend.path(core.id).map(|path| {
+                                (core.clone(), path.to_path_buf(), backend.is_local(core.id))
+                            })
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        let already_reported = self
+            .initial_complete_resources
+            .iter()
+            .map(|(core, _, _)| core.id)
+            .collect::<BTreeSet<_>>();
+        self.initial_complete_resources.extend(
+            retained_complete
+                .into_iter()
+                .filter(|(core, _, _)| !already_reported.contains(&core.id)),
+        );
+        self.catalog
+            .set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE);
+        self.local_resource_sources
+            .retain(|_, core| retained_resource_ids.contains(&core.id));
+        self.control = ClientControlState::from_join_data(&join_data)?;
+        self.next_control_request_at = tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL;
+        Ok(join_data)
+    }
+
     pub(crate) fn add_bootstrap_resource(
         &mut self,
         resource: &crate::ClientBootstrapResourcePlan,
@@ -1252,16 +1433,22 @@ impl ClientResourceState {
         if registration == ClientBootstrapRegistration::Registered {
             match &resource.source {
                 crate::ClientBootstrapResourceSource::Local(local) => {
-                    self.initial_complete_resources
-                        .push((resource.core.clone(), local.path().to_path_buf()));
+                    self.initial_complete_resources.push((
+                        resource.core.clone(),
+                        local.path().to_path_buf(),
+                        true,
+                    ));
                     if let Some(path) = local_resource_lookup_path(local) {
                         self.local_resource_sources
                             .insert(path, resource.core.clone());
                     }
                 }
                 crate::ClientBootstrapResourceSource::TrustedLocalSystem(path) => {
-                    self.initial_complete_resources
-                        .push((resource.core.clone(), path.clone()));
+                    self.initial_complete_resources.push((
+                        resource.core.clone(),
+                        path.clone(),
+                        true,
+                    ));
                 }
                 crate::ClientBootstrapResourceSource::Download
                 | crate::ClientBootstrapResourceSource::UnavailableNonLoadable(_) => {}

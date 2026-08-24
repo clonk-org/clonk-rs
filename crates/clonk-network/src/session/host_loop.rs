@@ -450,6 +450,7 @@ pub(crate) async fn run_host(
         netpuncher_game_ids: NetpuncherGameIds { ipv4: 0, ipv6: 0 },
         pending_kinds: BTreeMap::new(),
         join_snapshot: config.initial_join_snapshot.clone(),
+        dynamic_required_clients: BTreeSet::new(),
         resource_catalog,
         resource_backend,
         published_player_sources,
@@ -461,6 +462,9 @@ pub(crate) async fn run_host(
         pending_admissions: BTreeMap::new(),
         pending_post_mortems: BTreeMap::new(),
         removing_clients: BTreeSet::new(),
+        round_restart_pending_clients: BTreeMap::new(),
+        round_restart_routes: BTreeMap::new(),
+        round_restart_nonce: 0,
         lobby_chat_history: VecDeque::new(),
         event_tx: event_tx.clone(),
         config,
@@ -675,7 +679,7 @@ pub(crate) async fn run_host(
                             .get(&connection_id)
                             .is_some_and(|route| route.client_id == client_id)
                         {
-                            handle_client_message(
+                            handle_client_message_with_restart_fence(
                                 connection_id,
                                 client_id,
                                 message,
@@ -810,13 +814,57 @@ pub(crate) async fn run_host(
                         broadcast_host_restarting(rejoin_seconds, &mut state).await;
                         let _ = completion.send(());
                     }
-                    HostCommand::BroadcastHostRestartLobby { completion } => {
-                        broadcast_host_restart_lobby(&mut state).await;
-                        let _ = completion.send(());
+                    HostCommand::RestartRoundInLobby { config, completion } => {
+                        let prepared = (|| {
+                            let retained_client_ids = state
+                                .clients
+                                .keys()
+                                .filter(|client_id| !state.removing_clients.contains(client_id))
+                                .map(|client_id| *client_id as i32)
+                                .collect::<Vec<_>>();
+                            let restart_supported = retained_client_ids.is_empty()
+                                || state.peer_capabilities.session_supports(
+                                    retained_client_ids,
+                                    crate::PortCapabilities::ROUND_RESTART_V2,
+                                );
+                            if !restart_supported {
+                                return Err(
+                                    "a retained client does not support atomic round restart"
+                                        .to_string(),
+                                );
+                            }
+                            let retained_routes = prepare_host_restart_routes(&state)?;
+                            let prepared = prepare_host_round_config(*config, &state)?;
+                            Ok((retained_routes, prepared))
+                        })();
+                        let result = match prepared {
+                            Ok((retained_routes, prepared)) => {
+                                finish_host_restart_removals(&mut state).await;
+                                install_prepared_host_round_config(prepared, &mut state);
+                                retain_host_restart_routes(&retained_routes, &mut state);
+                                state.round_restart_routes = retained_routes.clone();
+                                queue_host_restart_lobby(&retained_routes, &mut state)
+                            }
+                            Err(error) => Err(error),
+                        };
+                        if result.is_ok() {
+                            #[cfg(test)]
+                            notify_accepted_route_waiters(&mut state);
+                            let _ = state.event_tx.send(HostEvent::RoundRestarted).await;
+                            publish_pending_join_data(&mut state).await;
+                        }
+                        let _ = completion.send(result);
                     }
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
                     HostCommand::PublishJoinSnapshot(snapshot) => {
+                        if state
+                            .join_snapshot
+                            .as_ref()
+                            .is_none_or(|current| current.dynamic != snapshot.dynamic)
+                        {
+                            state.dynamic_required_clients.clear();
+                        }
                         state.join_snapshot = Some(*snapshot);
                         publish_pending_join_data(&mut state).await;
                     }
@@ -1236,7 +1284,10 @@ pub(crate) fn spawn_host_transport<S>(
     });
 }
 
-async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mut HostState) {
+pub(crate) async fn handle_host_admission_request(
+    request: HostAdmissionRequest,
+    state: &mut HostState,
+) {
     if ClientId::try_from(request.request.core.client_id)
         .is_ok_and(|client_id| state.removing_clients.contains(&client_id))
     {
@@ -1377,7 +1428,9 @@ pub(crate) async fn handle_client_accepted(
     } else {
         crate::voice::VoiceRouteAuthentication::default()
     };
-    let voice_announcement = voice_auth.announcement();
+    let capability_announcement = voice_auth
+        .announcement()
+        .unwrap_or_else(crate::PortCapabilities::supported_without_voice);
     let replaced_route = state.accepted_routes.insert(
         connection_id,
         AcceptedConnectionRoute {
@@ -1394,16 +1447,14 @@ pub(crate) async fn handle_client_accepted(
     state.invalidate_control_send_time();
     debug_assert!(replaced_route.is_none());
     if peer_is_port {
-        if let Some(announcement) = voice_announcement {
-            if let Some(cookie) = state
-                .accepted_routes
-                .get(&connection_id)
-                .and_then(|route| route.voice_auth.receive_cookie())
-            {
-                outbound.set_voice_receive_cookie(cookie);
-            }
-            let _ = outbound.try_send(ControlMessage::PortCapabilities(announcement));
+        if let Some(cookie) = state
+            .accepted_routes
+            .get(&connection_id)
+            .and_then(|route| route.voice_auth.receive_cookie())
+        {
+            outbound.set_voice_receive_cookie(cookie);
         }
+        let _ = outbound.try_send(ControlMessage::PortCapabilities(capability_announcement));
     }
     if state.clients.contains_key(&client_id) {
         if setup_tx.send(Ok(())).is_err() {
@@ -1448,7 +1499,7 @@ pub(crate) async fn handle_client_accepted(
         .await;
 
     let setup_result = match build_client_setup(client_id, state) {
-        Ok(Some(setup)) => match enqueue_client_setup_prefix(&outbound, setup) {
+        Ok(Some(setup)) => match enqueue_client_setup_prefix(client_id, &outbound, setup, state) {
             Ok(()) => {
                 mark_join_data_sent(client_id, state);
                 Ok(())
@@ -1528,8 +1579,10 @@ pub(crate) fn notify_accepted_route_waiters(state: &mut HostState) {
 }
 
 fn enqueue_client_setup_prefix(
+    client_id: ClientId,
     outbound: &HostOutboundSender,
     setup: ClientSetup,
+    state: &mut HostState,
 ) -> Result<(), String> {
     let ClientSetup {
         join_data,
@@ -1539,6 +1592,7 @@ fn enqueue_client_setup_prefix(
     outbound
         .try_send(ControlMessage::JoinData(Box::new(join_data)))
         .map_err(|_| "accepted route closed while queueing JoinData".to_string())?;
+    mark_join_data_dynamic_required(client_id, state);
     for address in addresses {
         outbound
             .try_send(ControlMessage::Address(address))
@@ -1606,6 +1660,14 @@ fn mark_join_data_sent(client_id: ClientId, state: &mut HostState) {
         .set_remote_state(client_id, RemoteBarrierState::Chasing);
     if state.last_chase_target_update.is_none() {
         state.last_chase_target_update = Some(tokio::time::Instant::now());
+    }
+}
+
+fn mark_join_data_dynamic_required(client_id: ClientId, state: &mut HostState) {
+    if state.join_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.dynamic.resource_type == crate::HostResourceType::Dynamic as u8
+    }) {
+        state.dynamic_required_clients.insert(client_id);
     }
 }
 
@@ -1738,7 +1800,7 @@ pub(crate) fn pending_join_data_client_ids(
         .collect()
 }
 
-async fn publish_pending_join_data(state: &mut HostState) {
+pub(crate) async fn publish_pending_join_data(state: &mut HostState) {
     let pending = pending_join_data_client_ids(&state.clients, &state.removing_clients);
     for client_id in pending {
         let setup = match build_client_setup(client_id, state) {
@@ -1768,6 +1830,7 @@ async fn publish_pending_join_data(state: &mut HostState) {
         {
             continue;
         }
+        mark_join_data_dynamic_required(client_id, state);
         let mut failed = false;
         for address in setup.addresses {
             if !send_host_message(

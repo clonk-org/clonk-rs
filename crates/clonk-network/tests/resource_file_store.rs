@@ -75,6 +75,33 @@ fn cpp_local_complete_registration_retains_non_temporary_file() {
 }
 
 #[test]
+fn completing_a_download_does_not_relabel_it_as_a_local_resource() {
+    let directory = TestDirectory::new();
+    let local_path = directory.path().join("local.bin");
+    fs::write(&local_path, b"L").unwrap();
+    let mut store = ResourceFileStore::new(directory.path()).unwrap();
+    store
+        .register_local_complete(
+            &core_with_crc(8, b"local.bin", 1, 1, 0xad68_e236),
+            &local_path,
+            ResourceFileOwnership::Persistent,
+        )
+        .unwrap();
+    store
+        .create_remote(&core(9, b"downloaded.c4s", 1, 1))
+        .unwrap();
+
+    assert!(store.is_local(8));
+    assert!(!store.is_local(9));
+    assert!(matches!(
+        store.write_chunk(9, 0, b"R").unwrap(),
+        ChunkWriteOutcome::Stored { complete: true, .. }
+    ));
+    assert!(store.is_complete(9));
+    assert!(!store.is_local(9));
+}
+
+#[test]
 fn cpp_chunk_reads_offset_and_size_by_the_core_chunk_size() {
     // C4Network2ResChunk::Set offsets by Core.ChunkSize and sizes with
     // min(FileSize-offset, C4NetResChunkSize) (src/C4Network2Res.cpp:1268-1269;

@@ -79,10 +79,24 @@ impl PortCapabilities {
     /// peer sees no voice offer at all, which is the only honest answer: the
     /// two builds cannot carry voice between them.
     pub const VOICE_CHAT: u32 = 1 << 5;
+    /// The host can replace the round bootstrap in-place, fencing retained
+    /// client ingress with a nonce until each client installs fresh JoinData.
+    ///
+    /// The original lobby-restart packet was shipped without negotiation.
+    /// This second-generation contract is explicit because a peer that does
+    /// not understand the marker would keep sending old-round traffic on a
+    /// connection the host has already repurposed.
+    pub const ROUND_RESTART_V2: u32 = 1 << 6;
 
     /// Everything this build knows how to do.
     pub fn supported() -> Self {
-        Self::from_bits(Self::VOICE_CHAT | Self::CONTROL_WAIT_ATTRIBUTION)
+        Self::from_bits(Self::ROUND_RESTART_V2 | Self::VOICE_CHAT | Self::CONTROL_WAIT_ATTRIBUTION)
+    }
+
+    /// Capabilities every port route can advertise without a voice media
+    /// cookie or key exchange.
+    pub fn supported_without_voice() -> Self {
+        Self::from_bits(Self::supported().bits() & !Self::VOICE_CHAT)
     }
 
     pub fn from_bits(bits: u32) -> Self {
@@ -368,10 +382,11 @@ mod tests {
                 // Packet ID, above every ID C++ dispatches.
                 0x70, // Vocabulary version 1, little-endian u16.
                 0x01, 0x00,
-                // Bits, little-endian u32: VOICE_CHAT (1 << 5) |
-                // CONTROL_WAIT_ATTRIBUTION (1 << 4). Bit 3 is retired and
-                // stays clear — see the retired-capability test above.
-                0x30, 0x00, 0x00, 0x00,
+                // Bits, little-endian u32: ROUND_RESTART_V2 (1 << 6) |
+                // VOICE_CHAT (1 << 5) | CONTROL_WAIT_ATTRIBUTION (1 << 4).
+                // Bit 3 is retired and stays clear — see the retired-capability
+                // test above.
+                0x70, 0x00, 0x00, 0x00,
             ],
             "the bare announcement moved; an older peer reads these offsets",
         );
@@ -384,7 +399,7 @@ mod tests {
             .with_voice_cookie(crate::voice::VoiceRouteCookie::from_bytes(cookie))
             .with_voice_public_key(public_key);
 
-        let mut expected = vec![0x70, 0x01, 0x00, 0x30, 0x00, 0x00, 0x00];
+        let mut expected = vec![0x70, 0x01, 0x00, 0x70, 0x00, 0x00, 0x00];
         expected.extend_from_slice(&cookie);
         expected.extend_from_slice(&public_key);
         assert_eq!(
@@ -399,7 +414,7 @@ mod tests {
             encode_port_capabilities(
                 PortCapabilities::supported().with_voice_public_key(public_key)
             ),
-            vec![0x70, 0x01, 0x00, 0x30, 0x00, 0x00, 0x00],
+            vec![0x70, 0x01, 0x00, 0x70, 0x00, 0x00, 0x00],
             "a public key without its cookie must not reach the wire",
         );
     }
@@ -413,6 +428,30 @@ mod tests {
 
         assert_eq!(registry.of(7), PortCapabilities::default());
         assert!(!registry.peer_supports(7, PortCapabilities::CONTROL_CHANNEL));
+    }
+
+    #[test]
+    fn round_restart_requires_every_retained_peer_to_announce_v2() {
+        let mut registry = PeerCapabilityRegistry::default();
+        registry.record(7, PortCapabilities::supported_without_voice());
+        registry.record(
+            8,
+            PortCapabilities::from_bits(PortCapabilities::CONTROL_WAIT_ATTRIBUTION),
+        );
+
+        assert!(registry.peer_supports(7, PortCapabilities::ROUND_RESTART_V2));
+        assert!(!registry.peer_supports(8, PortCapabilities::ROUND_RESTART_V2));
+        assert!(!registry.session_supports([7, 8], PortCapabilities::ROUND_RESTART_V2));
+        assert!(registry.session_supports([7], PortCapabilities::ROUND_RESTART_V2));
+    }
+
+    #[test]
+    fn non_voice_announcement_keeps_every_supported_session_capability() {
+        let capabilities = PortCapabilities::supported_without_voice();
+
+        assert!(capabilities.has(PortCapabilities::CONTROL_WAIT_ATTRIBUTION));
+        assert!(capabilities.has(PortCapabilities::ROUND_RESTART_V2));
+        assert!(!capabilities.has(PortCapabilities::VOICE_CHAT));
     }
 
     #[test]
@@ -477,7 +516,9 @@ mod tests {
         // this build cannot keep, and the peer would encode for it.
         assert_eq!(
             PortCapabilities::supported().bits(),
-            PortCapabilities::VOICE_CHAT | PortCapabilities::CONTROL_WAIT_ATTRIBUTION,
+            PortCapabilities::VOICE_CHAT
+                | PortCapabilities::CONTROL_WAIT_ATTRIBUTION
+                | PortCapabilities::ROUND_RESTART_V2,
             "the advertised mask must name exactly the implemented extensions"
         );
     }

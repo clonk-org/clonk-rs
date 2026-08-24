@@ -1030,6 +1030,49 @@ mod tests {
         receiver
     }
 
+    #[tokio::test]
+    async fn retained_round_restart_route_discards_auxiliary_round_traffic() {
+        let mut routes = ClientRouteManager::new();
+        let _tcp_commands =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
+        let _udp_commands =
+            add_test_route_queue(&mut routes, 2, HOST_CLIENT_ID, crate::NetworkProtocol::Udp);
+        let _mesh_commands = add_test_route_queue(&mut routes, 3, 7, crate::NetworkProtocol::Tcp);
+        routes.closed_routes.retain(4, HOST_CLIENT_ID, 0);
+        routes.pending_post_mortems.insert(
+            1,
+            crate::PostMortemPacket {
+                connection_id: 11,
+                packet_counter: 0,
+                packets: Vec::new(),
+            },
+        );
+        routes.replay_packets.push_back((
+            HOST_CLIENT_ID,
+            crate::transport::InboundPacket::Message(ControlMessage::Resource(
+                ResourcePacket::Data(crate::ResourceDataPacket {
+                    resource_id: 9,
+                    chunk: 0,
+                    data: vec![0xaa],
+                }),
+            )),
+            None,
+        ));
+
+        assert_eq!(
+            routes.retain_round_restart_route(2),
+            Some(RoundRestartRetiredHostRoutes {
+                tcp: true,
+                udp: false,
+            })
+        );
+
+        assert_eq!(routes.routes.keys().copied().collect::<Vec<_>>(), vec![2]);
+        assert!(routes.pending_post_mortems.is_empty());
+        assert!(routes.replay_packets.is_empty());
+        assert!(!routes.closed_routes.contains(4));
+    }
+
     async fn expect_control_wait_attribution_capability<S>(
         transport: &mut crate::ControlTransport<S>,
     ) where
@@ -1038,7 +1081,7 @@ mod tests {
         assert!(matches!(
             transport.read_message().await.test_value(),
             ControlMessage::PortCapabilities(capabilities)
-                if capabilities.bits() == crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION
+                if capabilities == crate::PortCapabilities::supported_without_voice()
         ));
     }
 
@@ -1057,7 +1100,7 @@ mod tests {
         assert!(matches!(
             host.try_recv().test_value(),
             ClientRouteCommand::Message(ControlMessage::PortCapabilities(capabilities))
-                if capabilities.bits() == crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION
+                if capabilities == crate::PortCapabilities::supported_without_voice()
         ));
         assert!(matches!(
             host.try_recv().test_value(),
@@ -1165,6 +1208,7 @@ mod tests {
             netpuncher_game_ids: NetpuncherGameIds::default(),
             pending_kinds: BTreeMap::new(),
             join_snapshot: config.initial_join_snapshot.clone(),
+            dynamic_required_clients: BTreeSet::new(),
             resource_catalog: crate::ResourceCatalog::new(HOST_CLIENT_ID as i32),
             resource_backend: None,
             published_player_sources: BTreeMap::new(),
@@ -1176,6 +1220,9 @@ mod tests {
             pending_admissions: BTreeMap::new(),
             pending_post_mortems: BTreeMap::new(),
             removing_clients: BTreeSet::new(),
+            round_restart_pending_clients: BTreeMap::new(),
+            round_restart_routes: BTreeMap::new(),
+            round_restart_nonce: 0,
             lobby_chat_history: VecDeque::new(),
             event_tx,
             config,
@@ -2708,7 +2755,7 @@ mod tests {
             .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
                 negative_list: true,
                 clients: Vec::new(),
-                nested_packet: crate::encode_host_restart_lobby_notice(),
+                nested_packet: crate::encode_host_restart_lobby_notice(0),
             }))
             .await
             .test_value();
@@ -2716,7 +2763,7 @@ mod tests {
         assert!(
             !raw_client_received_message(
                 &mut victim,
-                &ControlMessage::HostRestartLobby,
+                &ControlMessage::HostRestartLobby { restart_nonce: 0 },
                 Duration::from_millis(200)
             )
             .await,
@@ -2728,24 +2775,485 @@ mod tests {
         host.shutdown().await.test_value();
     }
 
-    /// Unlike the reconnect notice, this one is followed by the session staying
-    /// up, so it has to reach every client on the connection it will keep using.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_lobby_restart_notice_reaches_every_client_on_the_live_session() {
+    async fn restarting_a_round_reuses_routes_and_sends_fresh_join_data() {
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_test_player(address, "Alice").await;
+        let client_id = client.client_id();
+        let before_routes = host
+            .runtime_connections()
+            .await
+            .test_value()
+            .into_iter()
+            .map(|route| {
+                (
+                    route.connection_id,
+                    route.client_id,
+                    route.protocol,
+                    route.peer_address,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut events = client.take_event_receiver();
+        let mut fresh_config = HostConfig::default();
+        let mut fresh_snapshot =
+            synthetic_join_snapshot(fresh_config.local_core.clone(), fresh_config.max_players);
+        fresh_snapshot.parameters.title = c4(b"Fresh round");
+        fresh_config.initial_join_snapshot = Some(fresh_snapshot.clone());
+
+        host.restart_round_in_lobby(fresh_config).await.test_value();
+
+        let mut saw_notice = false;
+        let restarted = loop {
+            match timeout(EVENT_WAIT, events.recv()).await.test_value() {
+                Some(ClientEvent::HostRestartLobby) => saw_notice = true,
+                Some(ClientEvent::JoinData { join_data }) => break *join_data,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client disconnected while restarting the round: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before fresh JoinData"),
+            }
+        };
+        assert!(saw_notice, "fresh JoinData overtook the restart marker");
+        assert_eq!(restarted.client_id, client_id as i32);
+        assert_eq!(restarted.parameters.title, c4(b"Fresh round"));
+        assert_eq!(restarted.dynamic, fresh_snapshot.dynamic);
+        client.acknowledge_round_restart().await.test_value();
+        let after_routes = host
+            .runtime_connections()
+            .await
+            .test_value()
+            .into_iter()
+            .map(|route| {
+                (
+                    route.connection_id,
+                    route.client_id,
+                    route.protocol,
+                    route.peer_address,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after_routes, before_routes);
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x55))
+            .await
+            .test_value();
+        let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(ready.tick(), 0);
+        assert_eq!(control_commands(&ready), vec![0x55]);
+
+        shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_rejects_a_second_round_restart_until_the_first_is_acknowledged() {
         let (address, host) = start_test_host(HostConfig::default()).await;
-        let (mut alice, _) = raw_client_transport(address, b"Alice").await;
-        let (mut bob, _) = raw_client_transport(address, b"Bob").await;
-        drain_raw_client(&mut alice).await;
-        drain_raw_client(&mut bob).await;
+        let mut client = connect_test_player(address, "Alice").await;
+        let mut events = client.take_event_receiver();
+        let mut first = HostConfig::default();
+        first
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .parameters
+            .title = c4(b"First fresh round");
 
-        host.broadcast_host_restart_lobby().await.test_value();
+        host.restart_round_in_lobby(first).await.test_value();
 
-        let expected = ControlMessage::HostRestartLobby;
-        assert!(raw_client_received_message(&mut alice, &expected, EVENT_WAIT).await);
-        assert!(raw_client_received_message(&mut bob, &expected, EVENT_WAIT).await);
+        let first_join_data = loop {
+            match timeout(EVENT_WAIT, events.recv()).await.test_value() {
+                Some(ClientEvent::JoinData { join_data }) => break *join_data,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client disconnected during the first restart: {reason:?}")
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended during the first restart"),
+            }
+        };
+        assert_eq!(first_join_data.parameters.title, c4(b"First fresh round"));
 
-        drop(alice);
-        drop(bob);
+        let mut premature_second = HostConfig::default();
+        premature_second
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .parameters
+            .title = c4(b"Premature second round");
+        let error = host
+            .restart_round_in_lobby(premature_second)
+            .await
+            .expect_err("the first restart fence must survive until its client ACK");
+
+        assert!(
+            error.to_string().contains("acknowledgement"),
+            "unexpected second-restart rejection: {error}"
+        );
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Some(event)) = timeout_at(quiet_deadline, events.recv()).await {
+            assert!(
+                !matches!(
+                    event,
+                    ClientEvent::HostRestartLobby | ClientEvent::JoinData { .. }
+                ),
+                "rejected second restart published another client fence: {event:?}"
+            );
+        }
+
+        client.acknowledge_round_restart().await.test_value();
+        timeout(EVENT_WAIT, async {
+            loop {
+                let mut second = HostConfig::default();
+                second
+                    .initial_join_snapshot
+                    .as_mut()
+                    .test_value()
+                    .parameters
+                    .title = c4(b"Second fresh round");
+                match host.restart_round_in_lobby(second).await {
+                    Ok(()) => break,
+                    Err(error) if error.to_string().contains("acknowledgement") => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("second restart failed after ACK: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("host did not reduce the first restart ACK");
+
+        let second_join_data = loop {
+            match timeout(EVENT_WAIT, events.recv()).await.test_value() {
+                Some(ClientEvent::JoinData { join_data }) => break *join_data,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client disconnected during the second restart: {reason:?}")
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended during the second restart"),
+            }
+        };
+        assert_eq!(second_join_data.parameters.title, c4(b"Second fresh round"));
+        client.acknowledge_round_restart().await.test_value();
+
+        shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dual_route_round_restart_reconnects_auxiliary_route_without_rejoining() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let tcp_address = listener.local_addr().test_value();
+        let mut host = start_host(
+            listener,
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0)))),
+        )
+        .await
+        .test_value();
+        let udp_address = host.udp_local_addr().test_value();
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_dual_client(
+            tcp_address,
+            udp_address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .test_value();
+        let client_id = client.client_id();
+        let route_wait = Duration::from_millis(crate::PING_TIMEOUT_MS as u64);
+        timeout(route_wait, async {
+            while host.accepted_routes().await.len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .test_value();
+        wait_for_client_host_protocols(&client, route_wait).await;
+        while host_events.try_recv().is_ok() {}
+
+        let mut events = client.take_event_receiver();
+        let mut fresh = HostConfig::default();
+        fresh
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .parameters
+            .title = c4(b"Dual-route fresh round");
+        host.restart_round_in_lobby(fresh).await.test_value();
+
+        let join_data = loop {
+            match timeout(EVENT_WAIT, events.recv()).await.test_value() {
+                Some(ClientEvent::JoinData { join_data }) => break *join_data,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("dual-route client disconnected during restart: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("dual-route client events ended during restart"),
+            }
+        };
+        assert_eq!(join_data.client_id, client_id as i32);
+        assert_eq!(join_data.parameters.title, c4(b"Dual-route fresh round"));
+        client.acknowledge_round_restart().await.test_value();
+
+        timeout(route_wait, async {
+            while host.accepted_routes().await.len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .test_value();
+        wait_for_client_host_protocols(&client, route_wait).await;
+        while let Ok(event) = host_events.try_recv() {
+            assert!(
+                !matches!(event, HostEvent::ClientJoined { client_id: joined, .. } if joined == client_id),
+                "auxiliary route rejoined the retained logical client"
+            );
+        }
+
+        shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stock_peer_rejects_atomic_restart_without_mutating_the_live_session() {
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
+        let mut host_events = host.take_event_receiver();
+        let mut modern = connect_test_player(address, "Alice").await;
+        let mut modern_events = modern.take_event_receiver();
+        let (mut stock, _) = raw_client_transport(address, b"Legacy Bob").await;
+        drain_raw_client(&mut stock).await;
+        while host_events.try_recv().is_ok() {}
+        while modern_events.try_recv().is_ok() {}
+        let before = host.runtime_connections().await.test_value();
+        let mut fresh = HostConfig::default();
+        fresh
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .parameters
+            .title = c4(b"Rejected fresh round");
+
+        let error = host
+            .restart_round_in_lobby(fresh)
+            .await
+            .expect_err("stock peer cannot install the port-only restart extension");
+
+        assert!(error
+            .to_string()
+            .contains("does not support atomic round restart"));
+        assert_eq!(host.runtime_connections().await.test_value(), before);
+        assert!(
+            !raw_client_received_message(
+                &mut stock,
+                &ControlMessage::HostRestartLobby { restart_nonce: 0 },
+                Duration::from_millis(150),
+            )
+            .await
+        );
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+        while let Ok(Some(event)) = timeout_at(quiet_deadline, modern_events.recv()).await {
+            assert!(!matches!(event, ClientEvent::HostRestartLobby));
+        }
+        while let Ok(event) = host_events.try_recv() {
+            assert!(!matches!(event, HostEvent::RoundRestarted));
+        }
+
+        drop(stock);
+        shutdown_test_session(modern, host).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn solo_host_can_restart_directly_into_the_fresh_lobby() {
+        let (_address, mut host) = start_test_host(HostConfig::default()).await;
+        let mut events = host.take_event_receiver();
+        let mut fresh = HostConfig::default();
+        fresh
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .parameters
+            .title = c4(b"Solo fresh round");
+
+        host.restart_round_in_lobby(fresh).await.test_value();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, events.recv()).await.test_value(),
+            Some(HostEvent::RoundRestarted)
+        ));
+        assert!(host.runtime_connections().await.test_value().is_empty());
+        host.shutdown().await.test_value();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_ack_starts_transfer_of_a_replaced_dynamic_resource() {
+        let directories = SessionResourceDirectories::new();
+        let old_path = directories.host.join("DynFixture.c4s");
+        let fresh_path = directories.host.join("DynFixture_2.c4s");
+        fs::write(&old_path, b"local").test_value();
+        fs::write(&fresh_path, b"local").test_value();
+        let old_dynamic = network_core!(resource_type: 2,
+        id: 4,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        contents_crc: 0x8bd6_88e8,
+        chunk_size: 2,
+        filename: c4(b"DynFixture.c4s"));
+        let fresh_dynamic = network_core!(resource_type: 2,
+        id: 4,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        contents_crc: 0x8bd6_88e8,
+        chunk_size: 2,
+        filename: c4(b"DynFixture_2.c4s"));
+
+        let initial_defaults = HostConfig::default();
+        let mut initial_snapshot = synthetic_join_snapshot(
+            initial_defaults.local_core.clone(),
+            initial_defaults.max_players,
+        );
+        initial_snapshot.dynamic = old_dynamic.clone();
+        let initial_config = HostConfig {
+            initial_join_snapshot: Some(initial_snapshot),
+            resource_directory: Some(directories.host.clone()),
+            resource_registrations: vec![crate::ResourceRegistration::from_core(
+                &old_dynamic,
+                true,
+                false,
+            )],
+            resource_files: vec![HostedResourceFile {
+                core: old_dynamic.clone(),
+                path: old_path,
+                ownership: crate::ResourceFileOwnership::Temporary,
+                binary_compatible: true,
+            }],
+            ..initial_defaults
+        };
+
+        let (address, host) = start_test_host(initial_config).await;
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await
+        .test_value();
+        loop {
+            match timeout(EVENT_WAIT, client.events().recv())
+                .await
+                .test_value()
+                .test_value()
+            {
+                ClientEvent::ResourceComplete { resource_id: 4, .. } => break,
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected loading the first dynamic: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+
+        let fresh_defaults = HostConfig::default();
+        let mut fresh_snapshot = synthetic_join_snapshot(
+            fresh_defaults.local_core.clone(),
+            fresh_defaults.max_players,
+        );
+        fresh_snapshot.dynamic = fresh_dynamic.clone();
+        let fresh_config = HostConfig {
+            initial_join_snapshot: Some(fresh_snapshot),
+            resource_directory: Some(directories.host.clone()),
+            resource_registrations: vec![crate::ResourceRegistration::from_core(
+                &fresh_dynamic,
+                true,
+                false,
+            )],
+            resource_files: vec![HostedResourceFile {
+                core: fresh_dynamic.clone(),
+                path: fresh_path,
+                ownership: crate::ResourceFileOwnership::Temporary,
+                binary_compatible: true,
+            }],
+            ..fresh_defaults
+        };
+
+        host.restart_round_in_lobby(fresh_config).await.test_value();
+        loop {
+            match timeout(EVENT_WAIT, client.events().recv())
+                .await
+                .test_value()
+                .test_value()
+            {
+                ClientEvent::JoinData { .. } => break,
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected installing fresh JoinData: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+        client.acknowledge_round_restart().await.test_value();
+
+        loop {
+            match timeout(EVENT_WAIT, client.events().recv())
+                .await
+                .expect("fresh dynamic transfer stalled")
+                .test_value()
+            {
+                ClientEvent::ResourceComplete {
+                    resource_id: 4,
+                    core,
+                    path,
+                    local: false,
+                } => {
+                    assert_eq!(core, fresh_dynamic);
+                    assert_eq!(fs::read(path).test_value(), b"local");
+                    break;
+                }
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected loading the fresh dynamic: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+
+        shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_round_restart_emits_no_client_marker_or_host_event_fence() {
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
+        let mut host_events = host.take_event_receiver();
+        let (mut client, _) = raw_client_transport(address, b"Alice").await;
+        drain_raw_client(&mut client).await;
+        while host_events.try_recv().is_ok() {}
+        let before_routes = host.runtime_connections().await.test_value();
+        let mut invalid = HostConfig {
+            start_tick: 7,
+            ..HostConfig::default()
+        };
+        invalid
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .dynamic_tick = 8;
+
+        assert!(host.restart_round_in_lobby(invalid).await.is_err());
+
+        assert!(
+            !raw_client_received_message(
+                &mut client,
+                &ControlMessage::HostRestartLobby { restart_nonce: 0 },
+                Duration::from_millis(150),
+            )
+            .await
+        );
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+        while let Ok(Some(event)) = timeout_at(quiet_deadline, host_events.recv()).await {
+            assert!(
+                !matches!(event, HostEvent::RoundRestarted),
+                "rejected restart emitted its host event fence"
+            );
+        }
+        assert_eq!(host.runtime_connections().await.test_value(), before_routes);
+
+        drop(client);
         host.shutdown().await.test_value();
     }
 
@@ -3842,6 +4350,148 @@ mod tests {
         );
 
         shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_restart_excludes_client_whose_remove_awaits_sync_execution() {
+        let (address, mut host) = start_test_host(host_config!(
+            initial_status: NetworkStatus::new(NETWORK_STATE_GO, 0, 0)
+        ))
+        .await;
+        let mut host_events = host.take_event_receiver();
+        let mut removing = connect_test_player(address, "Alice").await;
+        let removing_id = removing.client_id();
+        let mut retained = connect_test_player(address, "Bob").await;
+        let retained_id = retained.client_id();
+        let mut removing_events = removing.take_event_receiver();
+        let mut retained_events = retained.take_event_receiver();
+        while host_events.try_recv().is_ok() {}
+        while removing_events.try_recv().is_ok() {}
+        while retained_events.try_recv().is_ok() {}
+        let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
+            clonk_engine::ClientRemoveControlData {
+                client_id: i32::try_from(removing_id).unwrap(),
+                reason: c4(b"removed"),
+                by_client: HOST_CLIENT_ID as i32,
+            },
+        ))
+        .test_value();
+        host.submit_packet(ControlDelivery::Sync, remove)
+            .await
+            .test_value();
+        let before_routes = host.runtime_connections().await.test_value();
+        let mut fresh = HostConfig::default();
+        fresh
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .parameters
+            .title = c4(b"Fresh round");
+
+        host.restart_round_in_lobby(fresh).await.test_value();
+
+        let restarted = loop {
+            match timeout(EVENT_WAIT, retained_events.recv())
+                .await
+                .test_value()
+            {
+                Some(ClientEvent::JoinData { join_data }) => break *join_data,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("retained client disconnected during restart: {reason:?}")
+                }
+                Some(_) => {}
+                None => panic!("retained client event stream ended during restart"),
+            }
+        };
+        assert_eq!(restarted.client_id, retained_id as i32);
+        assert_eq!(restarted.parameters.title, c4(b"Fresh round"));
+        assert_eq!(
+            restarted
+                .parameters
+                .clients
+                .clients
+                .iter()
+                .map(|core| core.client_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([HOST_CLIENT_ID as i32, retained_id as i32])
+        );
+        retained.acknowledge_round_restart().await.test_value();
+
+        loop {
+            match timeout(EVENT_WAIT, removing_events.recv())
+                .await
+                .test_value()
+            {
+                Some(ClientEvent::HostRestartLobby) => {
+                    panic!("client awaiting removal was retained into the fresh round")
+                }
+                Some(ClientEvent::Disconnected { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        timeout(EVENT_WAIT, async {
+            loop {
+                let routes = host.runtime_connections().await.test_value();
+                if routes.len() == 1 && routes[0].client_id == retained_id {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .test_value();
+        assert_eq!(before_routes.len(), 2);
+
+        timeout(EVENT_WAIT, async {
+            loop {
+                let mut second = HostConfig::default();
+                second
+                    .initial_join_snapshot
+                    .as_mut()
+                    .test_value()
+                    .parameters
+                    .title = c4(b"Second fresh round");
+                match host.restart_round_in_lobby(second).await {
+                    Ok(()) => break,
+                    Err(error) if error.to_string().contains("acknowledgement") => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("second restart failed after retained ACK: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("removed client remained in the restart acknowledgement fence");
+        loop {
+            match timeout(EVENT_WAIT, retained_events.recv())
+                .await
+                .test_value()
+            {
+                Some(ClientEvent::JoinData { join_data }) => {
+                    assert_eq!(join_data.parameters.title, c4(b"Second fresh round"));
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("retained client disconnected during second restart: {reason:?}")
+                }
+                Some(_) => {}
+                None => panic!("retained client event stream ended during second restart"),
+            }
+        }
+        retained.acknowledge_round_restart().await.test_value();
+
+        let mut saw_left = false;
+        let mut saw_restart = false;
+        while let Ok(event) = host_events.try_recv() {
+            saw_left |=
+                matches!(event, HostEvent::ClientLeft { client_id } if client_id == removing_id);
+            saw_restart |= matches!(event, HostEvent::RoundRestarted);
+        }
+        assert!(saw_left, "restart did not finalize the pending removal");
+        assert!(saw_restart, "restart did not publish its host event fence");
+
+        drop(removing);
+        shutdown_test_session(retained, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6374,6 +7024,870 @@ mod tests {
         .test_value();
 
         assert_eq!(state.catalog.discovery_packet().resource_ids, vec![8, 7]);
+    }
+
+    #[test]
+    fn restarted_client_forgets_stale_round_resources_and_retains_remote_player_resource() {
+        let directories = SessionResourceDirectories::new();
+        let stale_path = directories.root.join("stale.c4d");
+        fs::write(&stale_path, b"local").test_value();
+        let stale = network_core!(resource_type: 4,
+        id: 900,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        chunk_size: 5,
+        filename: c4(b"Stale.c4d"));
+        let retained_player = network_core!(resource_type: 3,
+        id: 1 << 16,
+        loadable: true,
+        file_size: 5,
+        chunk_size: 5,
+        filename: c4(b"Remote.c4p"));
+        let mut state = empty_client_resource_state(1, directories.client.clone());
+        state
+            .catalog
+            .set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
+        let backend = state.backend.as_mut().test_value();
+        backend.set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
+        backend
+            .register_hosted_resource(
+                stale.clone(),
+                &stale_path,
+                crate::ResourceFileOwnership::Persistent,
+                true,
+            )
+            .test_value();
+        let retained_path = backend
+            .register_remote_loadable(retained_player.clone())
+            .test_value();
+        let mut no_random = |_| 0;
+        let completion = backend
+            .on_packet(
+                0,
+                &ResourcePacket::Data(crate::ResourceDataPacket {
+                    resource_id: retained_player.id,
+                    chunk: 0,
+                    data: b"local".to_vec(),
+                }),
+                0,
+                &mut no_random,
+            )
+            .test_value();
+        assert!(completion.iter().any(|event| matches!(
+            event,
+            crate::ResourceTransferEvent::Completed { resource_id, .. }
+                if *resource_id == retained_player.id
+        )));
+        assert!(!backend.is_local(retained_player.id));
+        assert!(state
+            .catalog
+            .register(crate::ResourceRegistration::from_core(&stale, true, false,)));
+        assert!(state
+            .catalog
+            .register(crate::ResourceRegistration::from_core(
+                &retained_player,
+                true,
+                true,
+            )));
+
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        snapshot.parameters.player_infos = crate::PlayerInfoListSnapshot {
+            last_player_id: 1,
+            clients: vec![crate::ClientPlayerInfosSnapshot {
+                client_id: 1,
+                flags: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(retained_player.clone()),
+                    ..Default::default()
+                }],
+            }],
+        };
+        let join_data = test_join_data(1, host.initial_status, snapshot);
+
+        state.apply_restart_join_data(join_data).test_value();
+
+        assert!(!state.catalog.contains_resource(stale.id));
+        assert!(state.catalog.contains_resource(retained_player.id));
+        assert_eq!(
+            state.catalog.max_loads_per_peer(),
+            crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE
+        );
+        assert!(state
+            .initial_complete_resources
+            .iter()
+            .any(|(core, path, local)| core == &retained_player
+                && path == &retained_path
+                && !local));
+        let backend = state.backend.as_mut().test_value();
+        assert_eq!(
+            backend.catalog().max_loads_per_peer(),
+            crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE
+        );
+        assert_eq!(backend.core(stale.id), None);
+        assert_eq!(backend.core(retained_player.id), Some(&retained_player));
+        assert_eq!(
+            backend.path(retained_player.id),
+            Some(retained_path.as_path())
+        );
+        let stale_request = backend
+            .on_packet(
+                0,
+                &ResourcePacket::Request(crate::ResourceRequestPacket {
+                    resource_id: stale.id,
+                    chunk: 0,
+                }),
+                0,
+                &mut no_random,
+            )
+            .test_value();
+        assert!(stale_request.is_empty());
+        assert!(stale_path.is_file());
+        assert!(retained_path.is_file());
+    }
+
+    #[test]
+    fn rejected_round_restart_preserves_the_live_host_state() {
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state
+            .resource_catalog
+            .register(crate::ResourceRegistration {
+                resource_id: 900,
+                chunk_count: 1,
+                binary_compatible: true,
+                loading: false,
+            });
+        let old_title = state
+            .join_snapshot
+            .as_ref()
+            .test_value()
+            .parameters
+            .title
+            .clone();
+        let old_tick = state.coordinator.current_tick();
+        let old_client_cores = state.client_cores.clone();
+
+        let mut invalid = HostConfig {
+            start_tick: 7,
+            ..HostConfig::default()
+        };
+        invalid
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .dynamic_tick = 8;
+
+        assert!(install_host_round_config(invalid, &mut state).is_err());
+        assert_eq!(state.coordinator.current_tick(), old_tick);
+        assert_eq!(state.client_cores, old_client_cores);
+        assert_eq!(
+            state.join_snapshot.as_ref().test_value().parameters.title,
+            old_title
+        );
+        assert!(state.resource_catalog.contains_resource(900));
+        assert!(state.round_restart_pending_clients.is_empty());
+    }
+
+    #[test]
+    fn round_restart_rejects_unequal_resource_cores_that_share_an_id() {
+        let client_id = 7;
+        let (outbound, _outbound_receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        let old_snapshot = state.join_snapshot.clone();
+        let mut fresh = HostConfig::default();
+        let snapshot = fresh.initial_join_snapshot.as_mut().test_value();
+        let colliding_player = network_core!(resource_type: 3,
+        id: snapshot.dynamic.id,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        contents_crc: 0x8bd6_88e8,
+        chunk_size: 5,
+        filename: c4(b"Retained.c4p"));
+        snapshot.parameters.player_infos.clients = vec![crate::ClientPlayerInfosSnapshot {
+            client_id: client_id as i32,
+            flags: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 1,
+                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(colliding_player),
+                ..Default::default()
+            }],
+        }];
+
+        let error = install_host_round_config(fresh, &mut state)
+            .expect_err("one resource ID cannot name unequal fresh-round cores");
+
+        assert!(
+            error.contains("conflicting resource ID 1"),
+            "unexpected resource collision rejection: {error}"
+        );
+        assert_eq!(state.join_snapshot, old_snapshot);
+        assert!(state.round_restart_pending_clients.is_empty());
+    }
+
+    #[test]
+    fn round_restart_rejects_resource_file_core_conflicting_with_join_data() {
+        let mut fresh = HostConfig::default();
+        let dynamic = fresh
+            .initial_join_snapshot
+            .as_ref()
+            .test_value()
+            .dynamic
+            .clone();
+        let mut conflicting = dynamic.clone();
+        conflicting.filename = c4(b"Different.c4s");
+        fresh.resource_directory = Some(PathBuf::from("Network"));
+        fresh.resource_files = vec![HostedResourceFile {
+            core: conflicting,
+            path: PathBuf::from("Network/Different.c4s"),
+            ownership: crate::ResourceFileOwnership::Persistent,
+            binary_compatible: true,
+        }];
+
+        let error = validate_host_round_config(&fresh)
+            .expect_err("a hosted file must describe the same core published in JoinData");
+
+        assert!(
+            error.contains(&format!("resource file ID {}", dynamic.id)),
+            "unexpected hosted resource conflict rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn round_restart_installs_fresh_password_for_admission() {
+        let (outbound, _outbound_receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let secret = c4(b"fresh secret");
+        let fresh = host_config!(password: secret.clone());
+
+        install_host_round_config(fresh, &mut state).test_value();
+
+        let mut wrong = test_connection_request(compatibility_test_core(-1, b"Wrong"), 8, true);
+        wrong.password = c4(b"old secret");
+        assert!(matches!(
+            state.admission.admit_new_peer(&wrong),
+            AdmissionDecision::Reject {
+                wrong_password: true,
+                ..
+            }
+        ));
+        let mut correct = test_connection_request(compatibility_test_core(-1, b"Correct"), 9, true);
+        correct.password = secret;
+        assert!(matches!(
+            state.admission.admit_new_peer(&correct),
+            AdmissionDecision::Accept { .. }
+        ));
+    }
+
+    #[test]
+    fn round_restart_allows_identical_resource_cores_that_share_an_id() {
+        let client_id = 7;
+        let (outbound, _outbound_receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        let shared_player_resource = network_core!(resource_type: 3,
+        id: 77,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        contents_crc: 0x8bd6_88e8,
+        chunk_size: 5,
+        filename: c4(b"Shared.c4p"));
+        let mut fresh = HostConfig::default();
+        fresh
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .parameters
+            .player_infos
+            .clients = vec![crate::ClientPlayerInfosSnapshot {
+            client_id: client_id as i32,
+            flags: 0,
+            players: vec![
+                clonk_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(shared_player_resource.clone()),
+                    ..Default::default()
+                },
+                clonk_engine::ControlPlayerInfoEntry {
+                    id: 2,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(shared_player_resource),
+                    ..Default::default()
+                },
+            ],
+        }];
+
+        install_host_round_config(fresh, &mut state)
+            .expect("multiple active players may reference the same resource core");
+    }
+
+    #[test]
+    fn restarted_coordinator_waits_only_for_the_host_until_synchronized_activation() {
+        let client_id = 7;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        state.coordinator.register_client(client_id).test_value();
+
+        install_host_round_config(HostConfig::default(), &mut state).test_value();
+
+        let outcome = state
+            .coordinator
+            .ingest(legacy_packet(HOST_CLIENT_ID, 0, 0x55))
+            .test_value();
+        assert_eq!(outcome.ready.len(), 1);
+        assert_eq!(outcome.ready[0].packets().len(), 1);
+        assert_eq!(control_commands(&outcome.ready[0].packets()[0]), vec![0x55]);
+        assert_eq!(
+            state.round_restart_pending_clients,
+            BTreeMap::from([(client_id, 1)])
+        );
+        assert!(!state.client_cores[&(client_id as i32)].activated);
+    }
+
+    #[test]
+    fn host_round_restart_retains_only_each_clients_marker_route() {
+        let client_id = 7;
+        let (tcp_outbound, _tcp_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, tcp_outbound);
+        let (udp_outbound, _udp_rx) = HostOutboundSender::channel();
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id,
+                remote_connection_id: 12,
+                peer_addr: "127.0.0.1:11112".parse().test_value(),
+                protocol: crate::NetworkProtocol::Udp,
+                outbound: udp_outbound.clone(),
+                ping: RoutePingLag::default(),
+                voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: true,
+            },
+        );
+        state.closed_routes.retain(3, client_id, 0);
+        state.pending_post_mortems.insert(
+            1,
+            (
+                client_id,
+                crate::PostMortemPacket {
+                    connection_id: 11,
+                    packet_counter: 0,
+                    packets: Vec::new(),
+                },
+                0,
+            ),
+        );
+
+        let retained = prepare_host_restart_routes(&state).test_value();
+        retain_host_restart_routes(&retained, &mut state);
+
+        assert_eq!(retained, BTreeMap::from([(client_id, 2)]));
+        assert_eq!(
+            state.accepted_routes.keys().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(state.clients[&client_id]
+            .outbound
+            .same_channel(&udp_outbound));
+        assert!(state.pending_post_mortems.is_empty());
+        assert!(!state.closed_routes.contains(3));
+    }
+
+    #[test]
+    fn round_restart_preflight_skips_writer_dead_route_before_disconnect_reduction() {
+        let client_id = 7;
+        let (dead, dead_receiver) = HostOutboundSender::channel();
+        drop(dead_receiver);
+        assert!(dead.writer_channel_is_closed());
+        assert!(
+            dead.accepts_post_failure_fifo(),
+            "the failed route must still retain ordinary sends for PostMortem"
+        );
+        let mut state = host_state_with_test_route(client_id, dead);
+        let (healthy, _healthy_receiver) = HostOutboundSender::channel();
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id,
+                remote_connection_id: 12,
+                peer_addr: "127.0.0.1:11112".parse().test_value(),
+                protocol: crate::NetworkProtocol::Tcp,
+                outbound: healthy,
+                ping: RoutePingLag::default(),
+                voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: true,
+            },
+        );
+
+        assert_eq!(
+            prepare_host_restart_routes(&state).test_value(),
+            BTreeMap::from([(client_id, 2)]),
+            "restart must use the healthy route while the dead route's disconnect event is queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn round_restart_cancels_provisional_admission_and_retains_established_clients() {
+        let (outbound, _outbound_receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let connection_id = 99;
+        state
+            .pending_route_peers
+            .insert(connection_id, "127.0.0.1:11113".parse().test_value());
+        let (decision_tx, decision_rx) = oneshot::channel();
+
+        handle_host_admission_request(
+            HostAdmissionRequest {
+                connection_id,
+                request: test_connection_request(
+                    compatibility_test_core(-1, b"Joining peer"),
+                    12,
+                    true,
+                ),
+                decision_tx,
+            },
+            &mut state,
+        )
+        .await;
+
+        assert!(matches!(
+            decision_rx.await.test_value(),
+            AdmissionDecision::Accept { .. }
+        ));
+        assert!(state.pending_route_peers.contains_key(&connection_id));
+        assert!(state.pending_route_clients.contains_key(&connection_id));
+        assert!(state.pending_admissions.contains_key(&connection_id));
+        let provisional_id = state.pending_admissions[&connection_id];
+        let retained = prepare_host_restart_routes(&state).test_value();
+        let prepared = prepare_host_round_config(HostConfig::default(), &state).test_value();
+        install_prepared_host_round_config(prepared, &mut state);
+        retain_host_restart_routes(&retained, &mut state);
+
+        assert_eq!(retained, BTreeMap::from([(7, 1)]));
+        assert!(state.pending_route_peers.is_empty());
+        assert!(state.pending_route_clients.is_empty());
+        assert!(state.pending_admissions.is_empty());
+        assert!(!state.client_cores.contains_key(&provisional_id));
+        assert!(state.clients.contains_key(&7));
+        let retry = test_connection_request(
+            compatibility_test_core(-1, b"Joining peer"),
+            connection_id + 1,
+            true,
+        );
+        assert!(matches!(
+            state.admission.admit_new_peer(&retry),
+            AdmissionDecision::Accept { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fresh_restart_join_data_pins_its_dynamic_for_the_retained_client() {
+        let client_id = 7;
+        let (outbound, mut outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+
+        install_host_round_config(HostConfig::default(), &mut state).test_value();
+        assert!(state.dynamic_required_clients.is_empty());
+
+        publish_pending_join_data(&mut state).await;
+
+        assert!(matches!(
+            outbound_rx.try_recv().test_value(),
+            HostOutboundMessage::Message(ControlMessage::JoinData(_))
+        ));
+        assert_eq!(state.dynamic_required_clients, BTreeSet::from([client_id]));
+    }
+
+    #[test]
+    fn restarted_join_data_excludes_a_disconnected_client_from_a_stale_snapshot() {
+        let live_client_id = 7;
+        let stale_client_id = 8_i32;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(live_client_id, outbound);
+        let stale_core = compatibility_test_core(stale_client_id, b"Disconnected");
+        let mut fresh = HostConfig::default();
+        let snapshot = fresh.initial_join_snapshot.as_mut().test_value();
+        snapshot.parameters.clients.clients.push(stale_core);
+        snapshot
+            .parameters
+            .player_infos
+            .clients
+            .push(crate::ClientPlayerInfosSnapshot {
+                client_id: stale_client_id,
+                flags: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 88,
+                    ..Default::default()
+                }],
+            });
+
+        install_host_round_config(fresh, &mut state).test_value();
+
+        let snapshot = state.join_snapshot.as_ref().test_value();
+        assert_eq!(
+            snapshot
+                .parameters
+                .clients
+                .clients
+                .iter()
+                .map(|core| core.client_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([HOST_CLIENT_ID as i32, live_client_id as i32])
+        );
+        assert!(snapshot
+            .parameters
+            .player_infos
+            .clients
+            .iter()
+            .all(|client| client.client_id != stale_client_id));
+        assert!(!state.client_cores.contains_key(&stale_client_id));
+    }
+
+    #[test]
+    fn restarted_join_data_preserves_non_live_savegame_restore_rows() {
+        let client_id = 7;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        let restore = crate::ClientPlayerInfosSnapshot {
+            client_id: -1,
+            flags: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 88,
+                savegame_player: 1,
+                ..Default::default()
+            }],
+        };
+        let mut fresh = HostConfig::default();
+        fresh
+            .initial_join_snapshot
+            .as_mut()
+            .test_value()
+            .parameters
+            .restore_player_infos
+            .clients = vec![restore.clone()];
+
+        install_host_round_config(fresh, &mut state).test_value();
+
+        assert_eq!(
+            state
+                .join_snapshot
+                .as_ref()
+                .test_value()
+                .parameters
+                .restore_player_infos
+                .clients,
+            vec![restore]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retained_client_ingress_is_quarantined_until_its_restart_ack() {
+        let client_id = 7;
+        let (outbound, mut outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        let (event_tx, mut events) = mpsc::channel(16);
+        state.event_tx = event_tx;
+        state.round_restart_pending_clients.insert(client_id, 9);
+        assert!(state
+            .resource_catalog
+            .register(crate::ResourceRegistration {
+                resource_id: 77,
+                chunk_count: 1,
+                binary_compatible: true,
+                loading: false,
+            }));
+        let old_backlog = legacy_packet(HOST_CLIENT_ID, 0, 0x31);
+        state.backlog.record_packet(&old_backlog);
+
+        for message in [
+            ControlMessage::Control(legacy_packet(client_id, 0, 0x41)),
+            ControlMessage::Request { from_tick: 0 },
+            ControlMessage::Resource(ResourcePacket::Discover(crate::ResourceDiscoverPacket {
+                resource_ids: vec![77],
+            })),
+            ControlMessage::ActivationRequest { tick: 0 },
+        ] {
+            handle_client_message_with_restart_fence(1, client_id, message, 17, &mut state).await;
+        }
+        assert!(outbound_rx.try_recv().is_err());
+        assert!(events.try_recv().is_err());
+
+        handle_client_message_with_restart_fence(
+            1,
+            client_id,
+            ControlMessage::RoundRestartAck { restart_nonce: 9 },
+            17,
+            &mut state,
+        )
+        .await;
+        assert!(!state.round_restart_pending_clients.contains_key(&client_id));
+        while outbound_rx.try_recv().is_ok() {}
+
+        handle_client_message_with_restart_fence(
+            1,
+            client_id,
+            ControlMessage::Request { from_tick: 0 },
+            17,
+            &mut state,
+        )
+        .await;
+        assert!(matches!(
+            outbound_rx.try_recv().test_value(),
+            HostOutboundMessage::Message(ControlMessage::Control(packet))
+                if packet == old_backlog
+        ));
+
+        handle_client_message_with_restart_fence(
+            1,
+            client_id,
+            ControlMessage::Resource(ResourcePacket::Discover(crate::ResourceDiscoverPacket {
+                resource_ids: vec![77],
+            })),
+            17,
+            &mut state,
+        )
+        .await;
+        assert!(matches!(
+            outbound_rx.try_recv().test_value(),
+            HostOutboundMessage::Message(ControlMessage::Resource(ResourcePacket::Status(
+                crate::ResourceStatusPacket {
+                    resource_id: 77,
+                    ..
+                }
+            )))
+        ));
+
+        handle_client_message_with_restart_fence(
+            1,
+            client_id,
+            ControlMessage::ActivationRequest { tick: 0 },
+            17,
+            &mut state,
+        )
+        .await;
+        assert!(matches!(
+            events.recv().await,
+            Some(HostEvent::ActivationRequest {
+                client_id: 7,
+                tick: 0,
+                ping_ms: 17,
+                ..
+            })
+        ));
+
+        state.coordinator.register_client(client_id).test_value();
+        handle_client_message_with_restart_fence(
+            1,
+            client_id,
+            ControlMessage::Control(legacy_packet(client_id, 0, 0x42)),
+            17,
+            &mut state,
+        )
+        .await;
+        ingest_control(
+            legacy_packet(HOST_CLIENT_ID, 0, 0x32),
+            ControlIngress::Local,
+            &mut state,
+        )
+        .await;
+        assert!(matches!(
+            events.recv().await,
+            Some(HostEvent::Ready { packet })
+                if control_commands(&packet) == vec![0x32, 0x42]
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_ack_queued_before_restart_cannot_release_the_new_quarantine() {
+        let client_id = 7;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        state.round_restart_nonce = 40;
+        let mut already_queued =
+            VecDeque::from([ControlMessage::RoundRestartAck { restart_nonce: 40 }]);
+
+        install_host_round_config(HostConfig::default(), &mut state).test_value();
+        let message = already_queued.pop_front().test_value();
+        handle_client_message_with_restart_fence(1, client_id, message, 0, &mut state).await;
+
+        assert_eq!(
+            state.round_restart_pending_clients.get(&client_id),
+            Some(&41)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_the_current_restart_nonce_releases_an_active_quarantine() {
+        let client_id = 7;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        state.round_restart_nonce = 8;
+        install_host_round_config(HostConfig::default(), &mut state).test_value();
+
+        handle_client_message_with_restart_fence(
+            1,
+            client_id,
+            ControlMessage::RoundRestartAck { restart_nonce: 8 },
+            0,
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            state.round_restart_pending_clients.get(&client_id),
+            Some(&9)
+        );
+
+        handle_client_message_with_restart_fence(
+            1,
+            client_id,
+            ControlMessage::RoundRestartAck { restart_nonce: 9 },
+            0,
+            &mut state,
+        )
+        .await;
+        assert!(!state.round_restart_pending_clients.contains_key(&client_id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_ack_must_return_on_the_marker_route() {
+        let client_id = 7;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        state.round_restart_pending_clients.insert(client_id, 9);
+        state.round_restart_routes.insert(client_id, 2);
+
+        handle_client_message_with_restart_fence(
+            1,
+            client_id,
+            ControlMessage::RoundRestartAck { restart_nonce: 9 },
+            0,
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            state.round_restart_pending_clients.get(&client_id),
+            Some(&9)
+        );
+
+        handle_client_message_with_restart_fence(
+            2,
+            client_id,
+            ControlMessage::RoundRestartAck { restart_nonce: 9 },
+            0,
+            &mut state,
+        )
+        .await;
+        assert!(!state.round_restart_pending_clients.contains_key(&client_id));
+    }
+
+    #[test]
+    fn restarted_host_forgets_stale_round_resources_and_retains_remote_player_resource() {
+        let directories = SessionResourceDirectories::new();
+        let stale_path = directories.root.join("stale.c4d");
+        fs::write(&stale_path, b"local").test_value();
+        let stale = network_core!(resource_type: 4,
+        id: 900,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        chunk_size: 5,
+        filename: c4(b"Stale.c4d"));
+        let retained_player = network_core!(resource_type: 3,
+        id: 7 << 16,
+        loadable: true,
+        file_size: 5,
+        chunk_size: 5,
+        filename: c4(b"Remote.c4p"));
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state
+            .resource_catalog
+            .set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
+        let mut backend =
+            crate::ResourceTransferBackend::new(0, directories.host.clone()).test_value();
+        backend.set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
+        backend
+            .register_hosted_resource(
+                stale.clone(),
+                &stale_path,
+                crate::ResourceFileOwnership::Persistent,
+                true,
+            )
+            .test_value();
+        let retained_path = backend
+            .register_remote_loadable(retained_player.clone())
+            .test_value();
+        state.resource_backend = Some(backend);
+        assert!(state
+            .resource_catalog
+            .register(crate::ResourceRegistration::from_core(&stale, true, false),));
+        assert!(state
+            .resource_catalog
+            .register(crate::ResourceRegistration::from_core(
+                &retained_player,
+                true,
+                true
+            ),));
+        state
+            .published_player_sources
+            .insert(stale_path.clone(), stale.clone());
+
+        let mut fresh_config = HostConfig::default();
+        let snapshot = fresh_config.initial_join_snapshot.as_mut().test_value();
+        snapshot.parameters.player_infos = crate::PlayerInfoListSnapshot {
+            last_player_id: 1,
+            clients: vec![crate::ClientPlayerInfosSnapshot {
+                client_id: 7,
+                flags: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(retained_player.clone()),
+                    ..Default::default()
+                }],
+            }],
+        };
+
+        install_host_round_config(fresh_config, &mut state).test_value();
+
+        assert!(!state.resource_catalog.contains_resource(stale.id));
+        assert!(state.resource_catalog.contains_resource(retained_player.id));
+        assert_eq!(
+            state.resource_catalog.max_loads_per_peer(),
+            crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE
+        );
+        assert!(state.published_player_sources.is_empty());
+        let backend = state.resource_backend.as_mut().test_value();
+        assert_eq!(
+            backend.catalog().max_loads_per_peer(),
+            crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE
+        );
+        assert_eq!(backend.core(stale.id), None);
+        assert_eq!(backend.core(retained_player.id), Some(&retained_player));
+        assert_eq!(
+            backend.path(retained_player.id),
+            Some(retained_path.as_path())
+        );
+        let mut no_random = |_| 0;
+        let stale_request = backend
+            .on_packet(
+                7,
+                &ResourcePacket::Request(crate::ResourceRequestPacket {
+                    resource_id: stale.id,
+                    chunk: 0,
+                }),
+                0,
+                &mut no_random,
+            )
+            .test_value();
+        assert!(stale_request.is_empty());
+        assert!(stale_path.is_file());
+        assert!(retained_path.is_file());
     }
 
     #[test]
@@ -10985,7 +12499,15 @@ mod tests {
         );
         assert_eq!(
             messages,
-            vec![ControlMessage::Request { from_tick: 0 }],
+            vec![
+                ControlMessage::Request { from_tick: 0 },
+                // The Rust port extension advertises retained-round support as
+                // soon as the admitted port route exists. It must not disturb
+                // the native control-before-resource ordering pinned here.
+                ControlMessage::PortCapabilities(
+                    crate::PortCapabilities::supported_without_voice(),
+                ),
+            ],
             "control initialization must precede Dynamic retrieval, but addresses must not"
         );
         assert!(
@@ -11159,6 +12681,379 @@ mod tests {
             Ok(Some(ClientEvent::Status(received))) => assert_eq!(received, status),
             other => panic!("expected the Status following a dropped JoinData, got {other:?}"),
         }
+
+        shutdown_tx.send(()).test_value();
+        drop(command_tx);
+        task.await.test_value();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_accepts_exactly_one_join_data_after_a_lobby_restart_notice() {
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, task) =
+            start_test_client_loop_with_state(512, 4, 4, BTreeMap::new(), resource_state);
+        let mut host = crate::ControlTransport::new(host_stream);
+        let config = HostConfig::default();
+        let mut first_snapshot = synthetic_join_snapshot(config.local_core.clone(), 8);
+        first_snapshot.parameters.title = c4(b"Accepted restart");
+        first_snapshot.parameters.clients.local_client_id = None;
+        let first = test_join_data(1, config.initial_status, first_snapshot);
+        let mut second = first.clone();
+        second.parameters.title = c4(b"Unsolicited duplicate");
+
+        host.send_message(ControlMessage::HostRestartLobby { restart_nonce: 42 })
+            .await
+            .test_value();
+        host.send_message(ControlMessage::JoinData(Box::new(first.clone())))
+            .await
+            .test_value();
+        host.send_message(ControlMessage::JoinData(Box::new(second)))
+            .await
+            .test_value();
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1);
+        host.send_message(ControlMessage::Status(status))
+            .await
+            .test_value();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.test_value(),
+            Some(ClientEvent::HostRestartLobby)
+        ));
+        loop {
+            match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
+                Some(ClientEvent::JoinData { join_data }) => {
+                    assert_eq!(*join_data, first);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before restarted JoinData"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
+                Some(ClientEvent::Status(received)) => {
+                    assert_eq!(received, status);
+                    break;
+                }
+                Some(ClientEvent::JoinData { join_data }) => {
+                    panic!("client accepted duplicate restart JoinData: {join_data:?}")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended after restarted JoinData"),
+            }
+        }
+
+        let (completion, acknowledged) = oneshot::channel();
+        command_tx
+            .send(ClientCommand::AcknowledgeRoundRestart { completion })
+            .await
+            .test_value();
+        acknowledged.await.test_value().test_value();
+        let deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        loop {
+            match timeout_at(deadline, host.read_message()).await {
+                Ok(Ok(ControlMessage::RoundRestartAck { restart_nonce: 42 })) => break,
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => panic!("restart acknowledgement read failed: {error}"),
+                Err(_) => panic!("client never sent its restart acknowledgement"),
+            }
+        }
+
+        shutdown_tx.send(()).test_value();
+        drop(command_tx);
+        task.await.test_value();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restarted_client_pauses_resource_timer_until_delayed_ack() {
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, task) =
+            start_test_client_loop_with_state(512, 4, 8, BTreeMap::new(), resource_state);
+        let mut host = crate::ControlTransport::new(host_stream);
+        let config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(config.local_core, 8);
+        snapshot.parameters.clients.local_client_id = None;
+        snapshot.dynamic = network_core!(resource_type: 2,
+        id: 4,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        contents_crc: 0x8bd6_88e8,
+        chunk_size: 5,
+        filename: c4(b"FreshDynamic.c4d"));
+        let join_data = test_join_data(1, config.initial_status, snapshot);
+        host.send_message(ControlMessage::HostRestartLobby { restart_nonce: 42 })
+            .await
+            .test_value();
+        host.send_message(ControlMessage::JoinData(Box::new(join_data)))
+            .await
+            .test_value();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.test_value(),
+            Some(ClientEvent::HostRestartLobby)
+        ));
+        loop {
+            match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
+                Some(ClientEvent::JoinData { .. }) => break,
+                Some(_) => continue,
+                None => panic!("client event stream ended before restarted JoinData"),
+            }
+        }
+
+        // The periodic resource timer must remain behind the same application
+        // ACK fence as packets arriving from the host. The empty pre-restart
+        // catalog makes the first post-JoinData tick deterministically want to
+        // discover both fresh resources.
+        tokio::time::advance(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS)).await;
+        tokio::task::yield_now().await;
+        let timer_deadline = tokio::time::Instant::now() + Duration::from_millis(1);
+        while let Ok(Ok(message)) = timeout_at(timer_deadline, host.read_message()).await {
+            assert!(
+                !matches!(message, ControlMessage::Resource(_)),
+                "the client resource timer ran before releasing the restart fence: {message:?}"
+            );
+        }
+
+        let (completion, acknowledged) = oneshot::channel();
+        command_tx
+            .send(ClientCommand::AcknowledgeRoundRestart { completion })
+            .await
+            .test_value();
+        acknowledged.await.test_value().test_value();
+        let ack_deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        loop {
+            match timeout_at(ack_deadline, host.read_message()).await {
+                Ok(Ok(ControlMessage::RoundRestartAck { restart_nonce: 42 })) => break,
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => panic!("restart acknowledgement read failed: {error}"),
+                Err(_) => panic!("client never sent its restart acknowledgement"),
+            }
+        }
+
+        shutdown_tx.send(()).test_value();
+        drop(command_tx);
+        task.await.test_value();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restarted_client_ignores_resource_status_until_ack_releases_round_fence() {
+        let directories = SessionResourceDirectories::new();
+        let resource_state = empty_client_resource_state(1, directories.client.clone());
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, task) =
+            start_test_client_loop_with_state(512, 4, 8, BTreeMap::new(), resource_state);
+        let mut host = crate::ControlTransport::new(host_stream);
+        let config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(config.local_core, 8);
+        snapshot.parameters.clients.local_client_id = None;
+        snapshot.dynamic = network_core!(resource_type: 2,
+        id: 4,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        contents_crc: 0x8bd6_88e8,
+        chunk_size: 5,
+        filename: c4(b"FreshDynamic.c4d"));
+        let join_data = test_join_data(1, config.initial_status, snapshot);
+        let complete_status =
+            ControlMessage::Resource(ResourcePacket::Status(crate::ResourceStatusPacket {
+                resource_id: 4,
+                chunks: crate::ResourceChunkAvailability {
+                    chunk_count: 1,
+                    ranges: vec![crate::ResourceChunkRange {
+                        start: 0,
+                        length: 1,
+                    }],
+                },
+            }));
+
+        host.send_message(ControlMessage::HostRestartLobby { restart_nonce: 42 })
+            .await
+            .test_value();
+        host.send_message(ControlMessage::JoinData(Box::new(join_data)))
+            .await
+            .test_value();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.test_value(),
+            Some(ClientEvent::HostRestartLobby)
+        ));
+        loop {
+            match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
+                Some(ClientEvent::JoinData { .. }) => break,
+                Some(_) => continue,
+                None => panic!("client event stream ended before restarted JoinData"),
+            }
+        }
+
+        // A fresh Status arriving while the app installs JoinData must not
+        // schedule traffic that the host will quarantine before the ACK.
+        host.send_message(complete_status.clone())
+            .await
+            .test_value();
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Ok(message)) = timeout_at(quiet_deadline, host.read_message()).await {
+            assert!(
+                !matches!(
+                    message,
+                    ControlMessage::Resource(ResourcePacket::Request(
+                        crate::ResourceRequestPacket { resource_id: 4, .. }
+                    ))
+                ),
+                "the client started fresh resource transfer before releasing the restart fence"
+            );
+        }
+
+        let (completion, acknowledged) = oneshot::channel();
+        command_tx
+            .send(ClientCommand::AcknowledgeRoundRestart { completion })
+            .await
+            .test_value();
+        acknowledged.await.test_value().test_value();
+        let ack_deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        loop {
+            match timeout_at(ack_deadline, host.read_message()).await {
+                Ok(Ok(ControlMessage::RoundRestartAck { restart_nonce: 42 })) => break,
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => panic!("restart acknowledgement read failed: {error}"),
+                Err(_) => panic!("client never sent its restart acknowledgement"),
+            }
+        }
+
+        host.send_message(complete_status).await.test_value();
+        let request_deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        loop {
+            match timeout_at(request_deadline, host.read_message()).await {
+                Ok(Ok(ControlMessage::Resource(ResourcePacket::Request(request))))
+                    if request.resource_id == 4 =>
+                {
+                    assert_eq!(request.chunk, 0);
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => panic!("resource request read failed: {error}"),
+                Err(_) => panic!("post-ACK resource status did not schedule a request"),
+            }
+        }
+
+        shutdown_tx.send(()).test_value();
+        drop(command_tx);
+        task.await.test_value();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ordinary_client_session_rejects_a_round_restart_ack_without_sending_it() {
+        let (host_stream, command_tx, _event_rx, shutdown_tx, task) =
+            start_test_client_loop(512, 4, 4);
+        let mut host = crate::ControlTransport::new(host_stream);
+        let (completion, acknowledged) = oneshot::channel();
+
+        command_tx
+            .send(ClientCommand::AcknowledgeRoundRestart { completion })
+            .await
+            .test_value();
+
+        assert!(acknowledged.await.test_value().is_err());
+        assert!(timeout(Duration::from_millis(50), host.read_message())
+            .await
+            .is_err());
+
+        shutdown_tx.send(()).test_value();
+        drop(command_tx);
+        task.await.test_value();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restarted_join_data_precedes_its_fresh_local_resource_completions() {
+        let directories = SessionResourceDirectories::new();
+        let local_system = directories.root.join("System.c4g");
+        let local_dynamic = directories.root.join("fresh-dynamic.c4d");
+        fs::write(&local_system, b"system").test_value();
+        fs::write(&local_dynamic, b"local").test_value();
+        let system = network_core!(resource_type: 5,
+        id: 2,
+        loadable: false,
+        filename: c4(b"System.c4g"));
+        let dynamic = network_core!(resource_type: 2,
+        id: 77,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        contents_crc: 0x8bd6_88e8,
+        chunk_size: 5,
+        filename: c4(b"FreshDynamic.c4d"));
+        let mut resource_state = empty_client_resource_state(1, directories.client.clone());
+        resource_state
+            .backend
+            .as_mut()
+            .test_value()
+            .register_local_logical(system.clone(), &local_system)
+            .test_value();
+        resource_state
+            .backend
+            .as_mut()
+            .test_value()
+            .register_hosted_resource(
+                dynamic.clone(),
+                &local_dynamic,
+                crate::ResourceFileOwnership::Persistent,
+                true,
+            )
+            .test_value();
+        assert!(resource_state
+            .catalog
+            .register(crate::ResourceRegistration::from_core(
+                &system, false, false
+            ),));
+        assert!(resource_state
+            .catalog
+            .register(crate::ResourceRegistration::from_core(
+                &dynamic, true, false
+            ),));
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, task) =
+            start_test_client_loop_with_state(512, 4, 8, BTreeMap::new(), resource_state);
+        let mut host = crate::ControlTransport::new(host_stream);
+        let config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(config.local_core, 8);
+        snapshot.dynamic = dynamic.clone();
+        snapshot.parameters.scenario.id = 78;
+        snapshot.parameters.game_resources.push(system.clone());
+        snapshot.parameters.clients.local_client_id = None;
+        let join_data = test_join_data(1, config.initial_status, snapshot);
+
+        host.send_message(ControlMessage::HostRestartLobby { restart_nonce: 9 })
+            .await
+            .test_value();
+        host.send_message(ControlMessage::JoinData(Box::new(join_data.clone())))
+            .await
+            .test_value();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.test_value(),
+            Some(ClientEvent::HostRestartLobby)
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.test_value(),
+            Some(ClientEvent::JoinData { join_data: received }) if *received == join_data
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.test_value(),
+            Some(ClientEvent::ResourceComplete {
+                resource_id: 2,
+                core,
+                path,
+                local: true,
+            }) if core == system && path == local_system
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.test_value(),
+            Some(ClientEvent::ResourceComplete {
+                resource_id: 77,
+                core,
+                path,
+                local: true,
+            }) if core == dynamic && path == local_dynamic
+        ));
 
         shutdown_tx.send(()).test_value();
         drop(command_tx);
@@ -11802,9 +13697,21 @@ mod tests {
                 .await
                 .test_value();
             timeout(Duration::from_millis(500), async {
+                let mut saw_capabilities = false;
                 loop {
                     match transport.read_message().await.test_value() {
                         ControlMessage::Pong(reply) if reply == ping => break,
+                        ControlMessage::PortCapabilities(capabilities) => {
+                            assert_eq!(
+                                capabilities,
+                                crate::PortCapabilities::supported_without_voice()
+                            );
+                            assert!(
+                                !saw_capabilities,
+                                "the primary port route advertised capabilities more than once"
+                            );
+                            saw_capabilities = true;
+                        }
                         ControlMessage::Ping(probe) => {
                             transport
                                 .send_message(ControlMessage::Pong(probe))
@@ -11816,6 +13723,10 @@ mod tests {
                         ),
                     }
                 }
+                assert!(
+                    saw_capabilities,
+                    "the admitted port route did not advertise retained-round support"
+                );
             })
             .await
             .test_value();
@@ -11877,6 +13788,9 @@ mod tests {
             .await;
 
             let control_request = await_test(transport.read_message()).await;
+            // This Rust port extension is emitted once the production route is
+            // admitted, before later post-JoinData address announcements.
+            expect_control_wait_attribution_capability(&mut transport).await;
             let initial = await_test(transport.read_message()).await;
             let learned = crate::AddressPacket {
                 client_id: 0,
@@ -12210,6 +14124,192 @@ mod tests {
         );
 
         host.shutdown().await.test_value();
+    }
+
+    #[test]
+    fn stale_runtime_dynamic_waits_for_every_live_peer_to_report_complete_chunks() {
+        let client_id = 7;
+        let directories = SessionResourceDirectories::new();
+        let dynamic_path = directories.host.join("DynFixture_2.c4s");
+        fs::write(&dynamic_path, b"local").test_value();
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        let dynamic = network_core!(resource_type: crate::HostResourceType::Dynamic as u8,
+        id: 4,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        chunk_size: 3,
+        filename: c4(b"DynFixture_2.c4s"));
+        let mut backend =
+            crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directories.host.clone())
+                .test_value();
+        backend
+            .register_hosted_resource(
+                dynamic.clone(),
+                dynamic_path,
+                crate::ResourceFileOwnership::Persistent,
+                true,
+            )
+            .test_value();
+        state.resource_backend = Some(backend);
+        state.join_snapshot.as_mut().test_value().dynamic = dynamic.clone();
+        state.join_snapshot.as_mut().test_value().dynamic_tick = 0;
+        state.dynamic_required_clients.insert(client_id);
+        assert!(state
+            .resource_catalog
+            .register(crate::ResourceRegistration::from_core(
+                &dynamic, true, false
+            ),));
+        state
+            .coordinator
+            .ingest(legacy_packet(HOST_CLIENT_ID, 0, 0x44))
+            .test_value();
+
+        assert!(
+            !remove_stale_host_runtime_dynamic(&mut state),
+            "absence of a retained peer's chunk status must pin the fresh dynamic"
+        );
+
+        let mut random = |_| 0;
+        state
+            .resource_backend
+            .as_mut()
+            .test_value()
+            .on_packet(
+                client_id as i32,
+                &ResourcePacket::Status(crate::ResourceStatusPacket {
+                    resource_id: dynamic.id,
+                    chunks: crate::ResourceChunkAvailability {
+                        chunk_count: 2,
+                        ranges: vec![crate::ResourceChunkRange {
+                            start: 0,
+                            length: 1,
+                        }],
+                    },
+                }),
+                0,
+                &mut random,
+            )
+            .test_value();
+        assert!(
+            !remove_stale_host_runtime_dynamic(&mut state),
+            "a partial retained-peer download must pin the fresh dynamic"
+        );
+
+        state
+            .resource_backend
+            .as_mut()
+            .test_value()
+            .on_packet(
+                client_id as i32,
+                &ResourcePacket::Status(crate::ResourceStatusPacket {
+                    resource_id: dynamic.id,
+                    chunks: crate::ResourceChunkAvailability {
+                        chunk_count: 2,
+                        ranges: vec![crate::ResourceChunkRange {
+                            start: 0,
+                            length: 2,
+                        }],
+                    },
+                }),
+                0,
+                &mut random,
+            )
+            .test_value();
+        assert!(
+            remove_stale_host_runtime_dynamic(&mut state),
+            "the stale dynamic may be removed after every live peer reports completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_join_runtime_dynamic_is_not_pinned_by_an_already_joined_peer() {
+        let existing_client_id = 7;
+        let pending_client_id = 8;
+        let directories = SessionResourceDirectories::new();
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(existing_client_id, outbound);
+        state.config.resource_directory = Some(directories.host.clone());
+        state.resource_backend = Some(
+            crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directories.host.clone())
+                .test_value(),
+        );
+        let (pending_outbound, mut pending_outbound_rx) = HostOutboundSender::channel();
+        let pending_core = compatibility_test_core(pending_client_id as i32, b"Pending");
+        state.clients.insert(
+            pending_client_id,
+            ClientConnection {
+                outbound: pending_outbound.clone(),
+                core: pending_core.clone(),
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
+                join_data_sent: false,
+                join_data_needed_emitted: true,
+            },
+        );
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id: pending_client_id,
+                remote_connection_id: 3,
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: pending_outbound,
+                voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
+            },
+        );
+        state
+            .client_cores
+            .insert(pending_core.client_id, pending_core);
+        state.dynamic_required_clients.insert(existing_client_id);
+        let parameters = state.join_snapshot.as_ref().test_value().parameters.clone();
+        let published = publish_host_runtime_dynamic(
+            runtime_dynamic_for_session_test(),
+            0,
+            parameters,
+            &mut state,
+        )
+        .test_value();
+        publish_pending_join_data(&mut state).await;
+        assert!(matches!(
+            pending_outbound_rx.try_recv().test_value(),
+            HostOutboundMessage::Message(ControlMessage::JoinData(_))
+        ));
+        state
+            .coordinator
+            .ingest(legacy_packet(HOST_CLIENT_ID, 0, 0x45))
+            .test_value();
+
+        let chunk_count =
+            crate::ResourceRegistration::from_core(&published.core, true, false).chunk_count;
+        let mut random = |_| 0;
+        state
+            .resource_backend
+            .as_mut()
+            .test_value()
+            .on_packet(
+                pending_client_id as i32,
+                &ResourcePacket::Status(crate::ResourceStatusPacket {
+                    resource_id: published.core.id,
+                    chunks: crate::ResourceChunkAvailability {
+                        chunk_count,
+                        ranges: vec![crate::ResourceChunkRange {
+                            start: 0,
+                            length: chunk_count,
+                        }],
+                    },
+                }),
+                0,
+                &mut random,
+            )
+            .test_value();
+
+        assert!(
+            remove_stale_host_runtime_dynamic(&mut state),
+            "a peer that received an earlier JoinData must not pin a late-join-only dynamic"
+        );
     }
 
     #[test]
@@ -14747,6 +16847,7 @@ mod tests {
                 | ClientEvent::LeagueRoundResults { .. }
                 | ClientEvent::HostRestarting { .. }
                 | ClientEvent::HostRestartLobby
+                | ClientEvent::JoinData { .. }
                 | ClientEvent::UnhandledPacket { .. }
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
@@ -16811,6 +18912,7 @@ mod tests {
                 | Ok(Some(HostEvent::ResourceComplete { .. }))
                 | Ok(Some(HostEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(HostEvent::ResourceDeriveUnsupported { .. }))
+                | Ok(Some(HostEvent::RoundRestarted))
                 | Ok(Some(HostEvent::StatusAck { .. }))
                 | Ok(Some(HostEvent::StatusChanged(_)))
                 | Ok(Some(HostEvent::SyncScheduled { .. }))
@@ -16848,6 +18950,7 @@ mod tests {
                 Ok(Some(ClientEvent::LeagueRoundResults { .. })) => continue,
                 Ok(Some(ClientEvent::HostRestarting { .. })) => continue,
                 Ok(Some(ClientEvent::HostRestartLobby)) => continue,
+                Ok(Some(ClientEvent::JoinData { .. })) => continue,
                 Ok(Some(ClientEvent::UnhandledPacket { .. })) => continue,
                 Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {

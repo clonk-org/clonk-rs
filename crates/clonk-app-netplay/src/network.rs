@@ -1,11 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use clonk_engine::{
@@ -1503,6 +1503,7 @@ pub struct NetworkManager {
     control_tick_probe: Mutex<Option<ControlTickProbe>>,
     current_frame: Arc<AtomicI32>,
     event_rx: Receiver<NetworkEvent>,
+    round_restart_retained_events: Mutex<VecDeque<NetworkEvent>>,
     voice_sender: Option<clonk_network::VoiceSender>,
     voice_event_rx: Option<tokio_mpsc::Receiver<clonk_network::VoiceFrame>>,
     telemetry_rx: Receiver<NetworkEvent>,
@@ -1672,6 +1673,7 @@ struct NetworkNetpuncherState {
 #[cfg(any(test, feature = "test-hooks"))]
 pub struct TestNetworkCommands {
     command_rx: tokio_mpsc::Receiver<NetworkCommand>,
+    event_tx: NetworkEventSender,
     // The app's test-hooks feature constructs this probe without consuming
     // performance events; clonk-app-netplay's own regression does consume it.
     #[allow(dead_code)]
@@ -1693,6 +1695,35 @@ pub struct TestLeaguePlayerAuthCommand {
     pub auth: clonk_network::LeagueAuthRequestHead,
     pub player: clonk_engine::ControlPlayerInfoEntry,
     completion: Sender<std::result::Result<clonk_network::LeagueAuthResponse, String>>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestHostRoundRestartCommand {
+    pub config: HostConfig,
+    completion: Sender<std::result::Result<(), String>>,
+    event_tx: NetworkEventSender,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestRoundRestartAckCommand {
+    completion: Sender<std::result::Result<(), String>>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl TestRoundRestartAckCommand {
+    pub fn complete(self, result: std::result::Result<(), String>) -> bool {
+        self.completion.send(result).is_ok()
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl TestHostRoundRestartCommand {
+    pub fn complete(self, result: std::result::Result<(), String>) -> bool {
+        let marker_sent =
+            result.is_err() || self.event_tx.send(NetworkEvent::RoundRestarted).is_ok();
+        let completion_sent = self.completion.send(result).is_ok();
+        marker_sent && completion_sent
+    }
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -1873,16 +1904,53 @@ impl TestNetworkCommands {
         observed
     }
 
-    /// The lobby restart carries no payload, so the count is the whole
-    /// observation.
-    pub fn take_host_restart_lobby_broadcasts(&mut self) -> usize {
-        let mut observed = 0;
+    pub fn take_host_round_lobby_restarts(&mut self) -> Vec<HostConfig> {
+        let mut observed = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
-            if matches!(command, NetworkCommand::BroadcastHostRestartLobby) {
-                observed += 1;
+            if let NetworkCommand::RestartHostRoundInLobby { config, completion } = command {
+                let _ = self.event_tx.send(NetworkEvent::RoundRestarted);
+                let _ = completion.send(Ok(()));
+                observed.push(config);
             }
         }
         observed
+    }
+
+    pub fn receive_host_round_lobby_restart(&mut self) -> TestHostRoundRestartCommand {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::RestartHostRoundInLobby { config, completion }) => {
+                TestHostRoundRestartCommand {
+                    config,
+                    completion,
+                    event_tx: self.event_tx.clone(),
+                }
+            }
+            Some(command) => panic!("unexpected host round restart command: {command:?}"),
+            None => panic!("network command channel ended before host round restart command"),
+        }
+    }
+
+    pub fn receive_round_restart_ack(&mut self) -> TestRoundRestartAckCommand {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::AcknowledgeRoundRestart { completion }) => {
+                TestRoundRestartAckCommand { completion }
+            }
+            Some(command) => panic!("unexpected round restart acknowledgement: {command:?}"),
+            None => panic!("network command channel ended before round restart acknowledgement"),
+        }
+    }
+
+    pub fn try_complete_round_restart_ack(
+        &mut self,
+        result: std::result::Result<(), String>,
+    ) -> bool {
+        match self.command_rx.try_recv() {
+            Ok(NetworkCommand::AcknowledgeRoundRestart { completion }) => {
+                completion.send(result).is_ok()
+            }
+            Ok(command) => panic!("unexpected round restart acknowledgement: {command:?}"),
+            Err(_) => false,
+        }
     }
 
     pub fn take_lobby_start_commands(&mut self) -> Vec<TestLobbyStartCommand> {
@@ -2754,8 +2822,8 @@ impl TestNetworkCommands {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-// JoinData is a one-shot event moved through an unbounded channel. Keeping the
-// envelope inline avoids a separate allocation on the compatibility boundary.
+// JoinData is moved through an unbounded channel once per round. Keeping the
+// envelope inline avoids a second allocation on the app-facing boundary.
 #[allow(clippy::large_enum_variant)]
 pub enum NetworkEvent {
     HostPingMeasured {
@@ -2865,6 +2933,11 @@ pub enum NetworkEvent {
     Error(String),
     /// The network worker exited and can no longer service the session.
     FatalError(String),
+    /// Internal FIFO fence between the finished and freshly installed host
+    /// rounds. [`NetworkManager`] consumes this before returning from the
+    /// synchronous restart operation; applications never observe it.
+    #[doc(hidden)]
+    RoundRestarted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3092,7 +3165,13 @@ enum NetworkCommand {
     BroadcastHostRestarting {
         rejoin_seconds: u16,
     },
-    BroadcastHostRestartLobby,
+    RestartHostRoundInLobby {
+        config: HostConfig,
+        completion: Sender<std::result::Result<(), String>>,
+    },
+    AcknowledgeRoundRestart {
+        completion: Sender<std::result::Result<(), String>>,
+    },
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -3434,6 +3513,7 @@ impl NetworkManager {
             control_tick_probe: Mutex::new(None),
             current_frame,
             event_rx,
+            round_restart_retained_events: Mutex::new(VecDeque::new()),
             voice_sender: Some(ready.voice_sender),
             voice_event_rx: Some(ready.voice_event_rx),
             telemetry_rx,
@@ -4126,21 +4206,81 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting a restart notice"))
     }
 
-    /// Announces that the round has restarted while this session stays up, so
-    /// every client returns to the lobby on its existing connection.
-    ///
-    /// Unlike [`Self::broadcast_host_restarting`] no teardown follows, so the
-    /// ordering this relies on is the ordinary one: the notice precedes the
-    /// lobby state the app publishes next on the same channel.
-    pub fn broadcast_host_restart_lobby(&self) -> Result<()> {
+    /// Replaces the finished round while retaining the host's live routes.
+    /// The host loop publishes the restart notice and fresh JoinData as one
+    /// operation, so no admission can observe state between those two steps.
+    pub fn restart_host_round_in_lobby(&self, config: HostConfig) -> Result<()> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(
-                "only the network host may announce a round restart"
+                "only the network host may restart a round in the lobby"
             ));
         }
+        let restarted_resource_cores = retained_host_round_player_resource_cores(&config);
+        let (completion, restarted) = mpsc::channel();
         self.command_tx
-            .blocking_send(NetworkCommand::BroadcastHostRestartLobby)
-            .map_err(|_| anyhow!("network worker is not accepting a restart notice"))
+            .blocking_send(NetworkCommand::RestartHostRoundInLobby { config, completion })
+            .map_err(|_| anyhow!("network worker is not accepting a round restart"))?;
+        restarted
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before restarting the round"))?
+            .map_err(|message| anyhow!(message))?;
+        self.consume_host_round_restart_fence(&restarted_resource_cores)?;
+        *self.control_tick_probe.lock() = None;
+        self.current_frame.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn consume_host_round_restart_fence(
+        &self,
+        restarted_resource_cores: &HashMap<i32, clonk_engine::NetworkResourceCore>,
+    ) -> Result<()> {
+        let mut retained = VecDeque::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = match self.event_rx.recv_timeout(remaining) {
+                Ok(event) => event,
+                Err(error) => {
+                    self.round_restart_retained_events.lock().extend(retained);
+                    return Err(match error {
+                        mpsc::RecvTimeoutError::Timeout => anyhow!(
+                            "network worker timed out before publishing the round restart fence"
+                        ),
+                        mpsc::RecvTimeoutError::Disconnected => anyhow!(
+                            "network worker ended before publishing the round restart fence"
+                        ),
+                    });
+                }
+            };
+            if matches!(event, NetworkEvent::RoundRestarted) {
+                self.round_restart_retained_events.lock().extend(retained);
+                return Ok(());
+            }
+            if network_event_survives_round_restart_fence(&event, restarted_resource_cores) {
+                retained.push_back(event);
+            }
+        }
+    }
+
+    /// Releases a retained client route into the freshly installed round.
+    /// The app calls this only after it has consumed the restart marker and
+    /// JoinData and reset all app-owned round state.
+    pub fn acknowledge_round_restart(&self) -> Result<()> {
+        if self.role != NetworkRole::Client {
+            return Err(anyhow!(
+                "only a network client may acknowledge a retained round restart"
+            ));
+        }
+        let (completion, acknowledged) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::AcknowledgeRoundRestart { completion })
+            .map_err(|_| {
+                anyhow!("network worker is not accepting a round restart acknowledgement")
+            })?;
+        acknowledged
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before acknowledging the round restart"))?
+            .map_err(|message| anyhow!(message))
     }
 
     pub fn publish_runtime_dynamic(
@@ -5085,15 +5225,28 @@ impl NetworkManager {
     }
 
     pub fn poll_events(&mut self) -> Vec<NetworkEvent> {
-        let mut events = Vec::new();
+        let mut events = self
+            .round_restart_retained_events
+            .lock()
+            .drain(..)
+            .collect::<Vec<_>>();
         loop {
             match self.event_rx.try_recv() {
+                Ok(NetworkEvent::RoundRestarted) => continue,
                 Ok(event) => {
                     if self.role == NetworkRole::Client {
                         match &event {
                             NetworkEvent::JoinData(join_data) => {
+                                self.client_status = ClientStatusState::default();
                                 self.client_status
                                     .receive_request(initial_client_status(join_data));
+                                *self.control_tick_probe.lock() = None;
+                                self.current_frame.store(0, Ordering::Relaxed);
+                            }
+                            NetworkEvent::HostRestartLobby => {
+                                self.client_status = ClientStatusState::default();
+                                *self.control_tick_probe.lock() = None;
+                                self.current_frame.store(0, Ordering::Relaxed);
                             }
                             NetworkEvent::StatusRequested(status) => {
                                 self.client_status.receive_request(*status);
@@ -5194,6 +5347,7 @@ impl NetworkManager {
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
+                round_restart_retained_events: Mutex::new(VecDeque::new()),
                 voice_sender: None,
                 voice_event_rx: None,
                 telemetry_rx,
@@ -5232,6 +5386,7 @@ impl NetworkManager {
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
+                round_restart_retained_events: Mutex::new(VecDeque::new()),
                 voice_sender: None,
                 voice_event_rx: None,
                 telemetry_rx,
@@ -5304,6 +5459,7 @@ impl NetworkManager {
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
+                round_restart_retained_events: Mutex::new(VecDeque::new()),
                 voice_sender: None,
                 voice_event_rx: None,
                 telemetry_rx,
@@ -5329,9 +5485,10 @@ impl NetworkManager {
                 test_voice_outbound: None,
                 test_voice_available: false,
             },
-            event_tx,
+            event_tx.clone(),
             TestNetworkCommands {
                 command_rx,
+                event_tx,
                 control_performance_rx,
             },
         )
@@ -7235,13 +7392,34 @@ async fn run_host_worker_with_voice_enabled(
                             .await
                             .map_err(|error| anyhow!("host restart notice failed: {error}"))?;
                     }
-                    // Awaited for ordering rather than teardown: the lobby state
-                    // the app publishes next must not overtake the notice that
-                    // explains it.
-                    NetworkCommand::BroadcastHostRestartLobby => {
-                        host.broadcast_host_restart_lobby()
-                            .await
-                            .map_err(|error| anyhow!("host lobby restart failed: {error}"))?;
+                    NetworkCommand::RestartHostRoundInLobby { config, completion } => {
+                        let restarted_resource_cores =
+                            retained_host_round_player_resource_cores(&config);
+                        let result = await_host_round_restart_while_fencing_events(
+                            host.restart_round_in_lobby(config),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                            &restarted_resource_cores,
+                        )
+                        .await?
+                            .map_err(|error| error.to_string());
+                        if result.is_ok() {
+                            frame_builder = ControlFrameAccumulator::new(HOST_CLIENT_ID);
+                            player_info_echo_provenance.clear();
+                            reset_client_performance_pending = true;
+                            while control_tick_rx.try_recv().is_ok() {}
+                            while control_performance_rx.try_recv().is_ok() {}
+                        }
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::AcknowledgeRoundRestart { completion } => {
+                        let _ = completion.send(Err(
+                            "host attempted to acknowledge a retained round restart".to_string(),
+                        ));
                     }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
@@ -7453,6 +7631,223 @@ where
     }
 }
 
+/// Resource completions whose previous-round paths remain authoritative.
+///
+/// Round-owned files and the host's player files are freshly materialized by
+/// the app. Only an unchanged remote PlayerInfo resource absent from the new
+/// publication keeps its backend file across the restart.
+fn retained_host_round_player_resource_cores(
+    config: &HostConfig,
+) -> HashMap<i32, clonk_engine::NetworkResourceCore> {
+    let Some(snapshot) = config.initial_join_snapshot.as_ref() else {
+        return HashMap::new();
+    };
+    let replaced_resource_ids = config
+        .resource_registrations
+        .iter()
+        .map(|registration| registration.resource_id)
+        .chain(
+            config
+                .resource_files
+                .iter()
+                .map(|resource| resource.core.id),
+        )
+        .collect::<HashSet<_>>();
+    snapshot
+        .parameters
+        .player_infos
+        .clients
+        .iter()
+        .filter(|client| client.client_id != config.local_core.client_id)
+        .flat_map(|client| &client.players)
+        .filter(|player| {
+            player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0
+                && player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0
+                && player.flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE == 0
+        })
+        .filter_map(|player| player.resource.as_ref())
+        .filter(|core| {
+            core.resource_type == clonk_network::HostResourceType::Player as u8
+                && !replaced_resource_ids.contains(&core.id)
+        })
+        .map(|core| (core.id, core.clone()))
+        .collect()
+}
+
+fn network_event_survives_round_restart_fence(
+    event: &NetworkEvent,
+    restarted_resource_cores: &HashMap<i32, clonk_engine::NetworkResourceCore>,
+) -> bool {
+    match event {
+        NetworkEvent::PeerConnected { .. }
+        | NetworkEvent::PeerDisconnected { .. }
+        | NetworkEvent::PeerConnectionFailed { .. }
+        | NetworkEvent::NetpuncherStateChanged { .. }
+        | NetworkEvent::RecoverableRouteDiagnostic { .. }
+        | NetworkEvent::UnassociatedConnectionFailed { .. }
+        | NetworkEvent::TransportDiagnostic { .. }
+        | NetworkEvent::Error(_)
+        | NetworkEvent::FatalError(_) => true,
+        NetworkEvent::ResourceComplete {
+            resource_id, core, ..
+        } => restarted_resource_cores.get(resource_id) == Some(core),
+        NetworkEvent::HostPingMeasured { .. }
+        | NetworkEvent::HostStatusChanged(_)
+        | NetworkEvent::HostStatusAck { .. }
+        | NetworkEvent::JoinData(_)
+        | NetworkEvent::LeagueRoundResults(_)
+        | NetworkEvent::LeagueUpdate(_)
+        | NetworkEvent::LobbyCountdown(_)
+        | NetworkEvent::ReadyCheck(_)
+        | NetworkEvent::StatusRequested(_)
+        | NetworkEvent::StatusCommitted(_)
+        | NetworkEvent::ActivationRequest { .. }
+        | NetworkEvent::JoinDataNeeded { .. }
+        | NetworkEvent::PlayerInfoUpdateRequest { .. }
+        | NetworkEvent::PreexecutedPlayerInfoEcho { .. }
+        | NetworkEvent::ReadyTick { .. }
+        | NetworkEvent::ScheduledSync { .. }
+        | NetworkEvent::DirectControl(_)
+        | NetworkEvent::HostRestarting { .. }
+        | NetworkEvent::HostRestartLobby
+        | NetworkEvent::ResourceAction(_)
+        | NetworkEvent::ResourceProgress { .. }
+        | NetworkEvent::ResourceLoadFailed { .. }
+        | NetworkEvent::ResourceDeriveUnsupported { .. }
+        | NetworkEvent::RoundRestarted => false,
+    }
+}
+
+fn host_event_survives_round_restart_fence(event: &HostEvent) -> bool {
+    match event {
+        HostEvent::LocalAddressesChanged { .. }
+        | HostEvent::NetpuncherStateChanged { .. }
+        | HostEvent::ClientJoined { .. }
+        | HostEvent::ClientLeft { .. }
+        | HostEvent::ClientConnectionFailed { .. }
+        | HostEvent::UnhandledPacket { .. }
+        | HostEvent::RecoverableRouteDiagnostic { .. }
+        | HostEvent::UnassociatedConnectionFailed { .. }
+        | HostEvent::TransportError { .. }
+        | HostEvent::FatalError { .. } => true,
+        HostEvent::RoundRestarted
+        | HostEvent::StatusChanged(_)
+        | HostEvent::StatusCommitted(_)
+        | HostEvent::StatusAck { .. }
+        | HostEvent::ActivationRequest { .. }
+        | HostEvent::JoinDataNeeded { .. }
+        | HostEvent::PlayerInfoUpdate { .. }
+        | HostEvent::LobbyCountdown { .. }
+        | HostEvent::ReadyCheck { .. }
+        | HostEvent::ResourceAction(_)
+        | HostEvent::ResourceProgress { .. }
+        | HostEvent::ResourceComplete { .. }
+        | HostEvent::ResourceLoadFailed { .. }
+        | HostEvent::ResourceDeriveUnsupported { .. }
+        | HostEvent::Ready { .. }
+        | HostEvent::Direct { .. }
+        | HostEvent::SyncScheduled { .. }
+        | HostEvent::ExecSync { .. } => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn await_host_round_restart_while_fencing_events<F, T, E>(
+    operation: F,
+    host_events: &mut tokio_mpsc::Receiver<HostEvent>,
+    local_owner: i32,
+    event_tx: &NetworkEventSender,
+    telemetry_tx: &SyncSender<NetworkEvent>,
+    player_info_echo_provenance: &mut VecDeque<PlayerInfoEchoProvenance>,
+    netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
+    restarted_resource_cores: &HashMap<i32, clonk_engine::NetworkResourceCore>,
+) -> Result<std::result::Result<T, E>>
+where
+    F: std::future::Future<Output = std::result::Result<T, E>>,
+{
+    tokio::pin!(operation);
+    let mut completed = None;
+    let mut fence_crossed = false;
+    let mut fenced_events = VecDeque::new();
+    loop {
+        tokio::select! {
+            output = &mut operation, if completed.is_none() => {
+                match output {
+                    Ok(value) if fence_crossed => return Ok(Ok(value)),
+                    Ok(value) => completed = Some(value),
+                    Err(error) => {
+                        for event in fenced_events {
+                            handle_host_event(
+                                event,
+                                local_owner,
+                                event_tx,
+                                telemetry_tx,
+                                player_info_echo_provenance,
+                                netpuncher_state,
+                            ).await?;
+                        }
+                        return Ok(Err(error));
+                    }
+                }
+            }
+            maybe_event = host_events.recv() => {
+                let event = maybe_event.ok_or_else(|| anyhow!("host event stream ended"))?;
+                if matches!(&event, HostEvent::RoundRestarted) {
+                    fence_crossed = true;
+                    let retained_resource_completions = fenced_events
+                        .drain(..)
+                        .filter(|event| {
+                            matches!(
+                                event,
+                                HostEvent::ResourceComplete {
+                                    resource_id,
+                                    core,
+                                    ..
+                                } if restarted_resource_cores.get(resource_id) == Some(core)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    player_info_echo_provenance.clear();
+                    handle_host_event(
+                        event,
+                        local_owner,
+                        event_tx,
+                        telemetry_tx,
+                        player_info_echo_provenance,
+                        netpuncher_state,
+                    )
+                    .await?;
+                    for event in retained_resource_completions {
+                        handle_host_event(
+                            event,
+                            local_owner,
+                            event_tx,
+                            telemetry_tx,
+                            player_info_echo_provenance,
+                            netpuncher_state,
+                        )
+                        .await?;
+                    }
+                    if let Some(value) = completed.take() {
+                        return Ok(Ok(value));
+                    }
+                } else if fence_crossed || host_event_survives_round_restart_fence(&event) {
+                    handle_host_event(
+                        event,
+                        local_owner,
+                        event_tx,
+                        telemetry_tx,
+                        player_info_echo_provenance,
+                        netpuncher_state,
+                    ).await?;
+                } else {
+                    fenced_events.push_back(event);
+                }
+            }
+        }
+    }
+}
+
 async fn handle_host_event(
     event: HostEvent,
     local_owner: i32,
@@ -7462,6 +7857,9 @@ async fn handle_host_event(
     netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
     match event {
+        HostEvent::RoundRestarted => {
+            let _ = event_tx.send(NetworkEvent::RoundRestarted);
+        }
         HostEvent::LocalAddressesChanged { local_addresses } => {
             netpuncher_state.lock().local_addresses = local_addresses;
         }
@@ -7810,6 +8208,10 @@ async fn run_client_worker_with_voice_enabled(
                     &mut client_events,
                     &mut client_status,
                     &mut client_activation,
+                    &mut frame_builder,
+                    &mut rebase_pending_on_activation,
+                    &mut reset_client_performance_pending,
+                    &current_frame_source,
                     &mut client_events_open,
                     local_owner,
                     client_id,
@@ -7842,6 +8244,10 @@ async fn run_client_worker_with_voice_enabled(
                             &mut client_events,
                             &mut client_status,
                             &mut client_activation,
+                            &mut frame_builder,
+                            &mut rebase_pending_on_activation,
+                            &mut reset_client_performance_pending,
+                            &current_frame_source,
                             &mut client_events_open,
                             local_owner,
                             client_id,
@@ -7861,6 +8267,10 @@ async fn run_client_worker_with_voice_enabled(
                     maybe_event,
                     &mut client_status,
                     &mut client_activation,
+                    &mut frame_builder,
+                    &mut rebase_pending_on_activation,
+                    &mut reset_client_performance_pending,
+                    &current_frame_source,
                     &mut client_events_open,
                     local_owner,
                     client_id,
@@ -7943,6 +8353,7 @@ async fn run_client_worker_with_voice_enabled(
                         | NetworkCommand::BeginGo { completion, .. }
                         | NetworkCommand::SetJoinAllowed { completion, .. }
                         | NetworkCommand::SetHostPassword { completion, .. }
+                        | NetworkCommand::AcknowledgeRoundRestart { completion }
                         | NetworkCommand::GracefulPart { completion } => {
                             let _ = completion.send(Err(unavailable));
                         }
@@ -7967,6 +8378,10 @@ async fn run_client_worker_with_voice_enabled(
                             &mut client_events,
                             &mut client_status,
                             &mut client_activation,
+                            &mut frame_builder,
+                            &mut rebase_pending_on_activation,
+                            &mut reset_client_performance_pending,
+                            &current_frame_source,
                             &mut client_events_open,
                             local_owner,
                             client_id,
@@ -7987,6 +8402,10 @@ async fn run_client_worker_with_voice_enabled(
                             &mut client_events,
                             &mut client_status,
                             &mut client_activation,
+                            &mut frame_builder,
+                            &mut rebase_pending_on_activation,
+                            &mut reset_client_performance_pending,
+                            &current_frame_source,
                             &mut client_events_open,
                             local_owner,
                             client_id,
@@ -8037,6 +8456,10 @@ async fn run_client_worker_with_voice_enabled(
                             &mut client_events,
                             &mut client_status,
                             &mut client_activation,
+                            &mut frame_builder,
+                            &mut rebase_pending_on_activation,
+                            &mut reset_client_performance_pending,
+                            &current_frame_source,
                             &mut client_events_open,
                             local_owner,
                             client_id,
@@ -8305,10 +8728,36 @@ async fn run_client_worker_with_voice_enabled(
                         ));
                     }
                     NetworkCommand::BroadcastHostRestarting { .. }
-                    | NetworkCommand::BroadcastHostRestartLobby => {
+                    | NetworkCommand::RestartHostRoundInLobby { .. } => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to announce a host round restart".to_string(),
                         ));
+                    }
+                    NetworkCommand::AcknowledgeRoundRestart { completion } => {
+                        discard_client_round_probes_before_acknowledgement(
+                            control_tick_rx,
+                            control_performance_rx,
+                            &mut reset_client_performance_pending,
+                        );
+                        let result = await_client_operation_while_forwarding_events(
+                            client.acknowledge_round_restart(),
+                            &mut client_events,
+                            &mut client_status,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &mut rebase_pending_on_activation,
+                            &mut reset_client_performance_pending,
+                            &current_frame_source,
+                            &mut client_events_open,
+                            local_owner,
+                            client_id,
+                            &event_tx,
+                            &telemetry_tx,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
                     }
                     NetworkCommand::SubmitReadyCheck(packet) => {
                         client
@@ -8589,6 +9038,33 @@ fn initial_client_status(join_data: &clonk_network::JoinDataEnvelope) -> Network
         .with_target_tick(join_data.start_control_tick)
 }
 
+fn reset_client_worker_round(
+    client_id: ClientId,
+    client_status: &mut ClientStatusState,
+    client_activation: &mut ClientActivationState,
+    frame_builder: &mut ControlFrameAccumulator,
+    rebase_pending_on_activation: &mut bool,
+    reset_client_performance_pending: &mut bool,
+    current_frame_source: &AtomicI32,
+) {
+    *client_status = ClientStatusState::default();
+    *client_activation = ClientActivationState::default();
+    *frame_builder = ControlFrameAccumulator::new(client_id);
+    *rebase_pending_on_activation = false;
+    *reset_client_performance_pending = true;
+    current_frame_source.store(0, Ordering::Relaxed);
+}
+
+fn discard_client_round_probes_before_acknowledgement(
+    control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
+    control_performance_rx: &mut tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
+    reset_client_performance_pending: &mut bool,
+) {
+    while control_tick_rx.try_recv().is_ok() {}
+    while control_performance_rx.try_recv().is_ok() {}
+    *reset_client_performance_pending = true;
+}
+
 // Event forwarding deliberately receives each independently mutable state
 // machine; grouping them would obscure which state an event may update.
 #[allow(clippy::too_many_arguments)]
@@ -8596,6 +9072,10 @@ async fn handle_client_worker_event(
     maybe_event: Option<ClientEvent>,
     client_status: &mut ClientStatusState,
     client_activation: &mut ClientActivationState,
+    frame_builder: &mut ControlFrameAccumulator,
+    rebase_pending_on_activation: &mut bool,
+    reset_client_performance_pending: &mut bool,
+    current_frame_source: &AtomicI32,
     client_events_open: &mut bool,
     local_owner: i32,
     client_id: ClientId,
@@ -8604,6 +9084,46 @@ async fn handle_client_worker_event(
     netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
     match maybe_event {
+        Some(ClientEvent::JoinData { join_data }) => {
+            reset_client_worker_round(
+                client_id,
+                client_status,
+                client_activation,
+                frame_builder,
+                rebase_pending_on_activation,
+                reset_client_performance_pending,
+                current_frame_source,
+            );
+            client_status.receive_request(initial_client_status(&join_data));
+            client_activation.status_requested();
+            handle_client_event(
+                ClientEvent::JoinData { join_data },
+                local_owner,
+                client_id,
+                event_tx,
+                telemetry_tx,
+            )
+            .await?;
+        }
+        Some(ClientEvent::HostRestartLobby) => {
+            reset_client_worker_round(
+                client_id,
+                client_status,
+                client_activation,
+                frame_builder,
+                rebase_pending_on_activation,
+                reset_client_performance_pending,
+                current_frame_source,
+            );
+            handle_client_event(
+                ClientEvent::HostRestartLobby,
+                local_owner,
+                client_id,
+                event_tx,
+                telemetry_tx,
+            )
+            .await?;
+        }
         Some(ClientEvent::Status(status)) => {
             if client_status.receive_request(status) {
                 client_activation.status_requested();
@@ -8659,6 +9179,10 @@ async fn await_client_operation_while_forwarding_events<F>(
     client_events: &mut tokio_mpsc::Receiver<ClientEvent>,
     client_status: &mut ClientStatusState,
     client_activation: &mut ClientActivationState,
+    frame_builder: &mut ControlFrameAccumulator,
+    rebase_pending_on_activation: &mut bool,
+    reset_client_performance_pending: &mut bool,
+    current_frame_source: &AtomicI32,
     client_events_open: &mut bool,
     local_owner: i32,
     client_id: ClientId,
@@ -8678,6 +9202,10 @@ where
                     maybe_event,
                     client_status,
                     client_activation,
+                    frame_builder,
+                    rebase_pending_on_activation,
+                    reset_client_performance_pending,
+                    current_frame_source,
                     client_events_open,
                     local_owner,
                     client_id,
@@ -8698,6 +9226,9 @@ async fn handle_client_event(
     _telemetry_tx: &SyncSender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        ClientEvent::JoinData { join_data } => {
+            let _ = event_tx.send(NetworkEvent::JoinData(*join_data));
+        }
         ClientEvent::LocalAddressesChanged { .. } => {}
         ClientEvent::PingMeasured { round_trip_ms } => {
             let _ = event_tx.send(NetworkEvent::HostPingMeasured { round_trip_ms });
@@ -9667,6 +10198,10 @@ mod tests {
         };
         let mut client_status = ClientStatusState::default();
         let mut client_activation = ClientActivationState::default();
+        let mut frame_builder = ControlFrameAccumulator::new(1);
+        let mut rebase_pending_on_activation = false;
+        let mut reset_client_performance_pending = false;
+        let current_frame_source = AtomicI32::new(0);
         let mut client_events_open = true;
         let client_result = tokio::time::timeout(
             Duration::from_secs(1),
@@ -9675,6 +10210,10 @@ mod tests {
                 &mut client_events,
                 &mut client_status,
                 &mut client_activation,
+                &mut frame_builder,
+                &mut rebase_pending_on_activation,
+                &mut reset_client_performance_pending,
+                &current_frame_source,
                 &mut client_events_open,
                 0,
                 1,
@@ -9738,6 +10277,223 @@ mod tests {
                 client_id: 7,
                 current_control_tick: 23,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn host_round_restart_discards_old_events_through_the_fence_marker() {
+        let old_status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 41);
+        let also_old_status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 42);
+        let fresh_status = NetworkStatus::new(clonk_network::NETWORK_STATE_LOBBY, 0, 0);
+        let (host_event_tx, mut host_events) = tokio_mpsc::channel(2);
+        host_event_tx
+            .send(HostEvent::StatusChanged(old_status))
+            .await
+            .test_value();
+        host_event_tx
+            .send(HostEvent::ClientLeft { client_id: 7 })
+            .await
+            .test_value();
+        let operation_tx = host_event_tx.clone();
+        let operation = async move {
+            operation_tx
+                .send(HostEvent::StatusChanged(also_old_status))
+                .await
+                .test_value();
+            operation_tx
+                .send(HostEvent::JoinDataNeeded {
+                    client_id: 8,
+                    current_control_tick: 41,
+                })
+                .await
+                .test_value();
+            operation_tx
+                .send(HostEvent::RoundRestarted)
+                .await
+                .test_value();
+            operation_tx
+                .send(HostEvent::StatusChanged(fresh_status))
+                .await
+                .test_value();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok::<_, &'static str>(41)
+        };
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(1);
+        let mut provenance = VecDeque::new();
+        let netpuncher_state = test_netpuncher_state();
+        let restarted_resource_cores = HashMap::new();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            await_host_round_restart_while_fencing_events(
+                operation,
+                &mut host_events,
+                0,
+                &event_tx,
+                &telemetry_tx,
+                &mut provenance,
+                &netpuncher_state,
+                &restarted_resource_cores,
+            ),
+        )
+        .await
+        .test_value()
+        .test_value()
+        .test_value();
+
+        assert_eq!(result, 41);
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).test_value(),
+            NetworkEvent::PeerDisconnected {
+                client_id: 7,
+                reason: None,
+            }
+        );
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).test_value(),
+            NetworkEvent::RoundRestarted
+        );
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).test_value(),
+            NetworkEvent::HostStatusChanged(fresh_status)
+        );
+        assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn host_round_restart_releases_only_retained_player_completion_after_the_fence() {
+        let mut host_config = HostConfig::default();
+        let snapshot = host_config.initial_join_snapshot.as_mut().test_value();
+        let scenario_core = snapshot.parameters.scenario.clone();
+        let dynamic_core = snapshot.dynamic.clone();
+        let game_core = clonk_engine::NetworkResourceCore {
+            id: 23,
+            resource_type: clonk_network::HostResourceType::Definitions as u8,
+            ..Default::default()
+        };
+        let retained_core = clonk_engine::NetworkResourceCore {
+            id: 24,
+            resource_type: clonk_network::HostResourceType::Player as u8,
+            ..Default::default()
+        };
+        snapshot.parameters.game_resources.push(game_core.clone());
+        snapshot
+            .parameters
+            .player_infos
+            .clients
+            .push(clonk_network::ClientPlayerInfosSnapshot {
+                client_id: 7,
+                flags: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(retained_core.clone()),
+                    ..Default::default()
+                }],
+            });
+        let stale_core = clonk_engine::NetworkResourceCore {
+            id: 25,
+            ..Default::default()
+        };
+        let retained_path = PathBuf::from("Network/Alice.c4p");
+        let (host_event_tx, mut host_events) = tokio_mpsc::channel(5);
+        for (core, path) in [
+            (scenario_core, PathBuf::from("Network/OldScenario.c4s")),
+            (game_core, PathBuf::from("Network/OldDefinitions.c4d")),
+            (dynamic_core, PathBuf::from("Network/OldDynamic.c4d")),
+            (retained_core.clone(), retained_path.clone()),
+            (stale_core, PathBuf::from("Network/Old.c4s")),
+        ] {
+            host_event_tx
+                .send(HostEvent::ResourceComplete {
+                    resource_id: core.id,
+                    core,
+                    path,
+                    local: false,
+                })
+                .await
+                .test_value();
+        }
+        let operation_tx = host_event_tx.clone();
+        let operation = async move {
+            operation_tx
+                .send(HostEvent::RoundRestarted)
+                .await
+                .test_value();
+            Ok::<_, &'static str>(())
+        };
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(1);
+        let mut provenance = VecDeque::new();
+        let netpuncher_state = test_netpuncher_state();
+        let restarted_resource_cores = retained_host_round_player_resource_cores(&host_config);
+
+        await_host_round_restart_while_fencing_events(
+            operation,
+            &mut host_events,
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut provenance,
+            &netpuncher_state,
+            &restarted_resource_cores,
+        )
+        .await
+        .test_value()
+        .test_value();
+
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).test_value(),
+            NetworkEvent::RoundRestarted
+        );
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).test_value(),
+            NetworkEvent::ResourceComplete {
+                resource_id: retained_core.id,
+                core: retained_core,
+                path: retained_path,
+                local: false,
+            }
+        );
+        assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn rejected_host_round_restart_releases_fenced_old_events() {
+        let old_status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 41);
+        let (host_event_tx, mut host_events) = tokio_mpsc::channel(1);
+        host_event_tx
+            .send(HostEvent::StatusChanged(old_status))
+            .await
+            .test_value();
+        let operation = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Err::<(), _>("restart rejected")
+        };
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(1);
+        let mut provenance = VecDeque::new();
+        let netpuncher_state = test_netpuncher_state();
+        let restarted_resource_cores = HashMap::new();
+
+        let error = await_host_round_restart_while_fencing_events(
+            operation,
+            &mut host_events,
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut provenance,
+            &netpuncher_state,
+            &restarted_resource_cores,
+        )
+        .await
+        .test_value()
+        .expect_err("the lower restart error must propagate");
+
+        assert_eq!(error, "restart rejected");
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).test_value(),
+            NetworkEvent::HostStatusChanged(old_status)
         );
     }
 
@@ -13788,19 +14544,288 @@ Message=Server says Andr\xe9\r\n\
     }
 
     /// Same host-only rule as the reconnect notice: a client that could
-    /// broadcast this would end everybody else's round.
+    /// restart this state would end everybody else's round.
     #[test]
-    fn only_a_host_broadcasts_a_lobby_restart() {
+    fn only_a_host_restarts_a_round_in_the_lobby() {
         let (host, _host_events, mut host_commands) =
             NetworkManager::test_stub_with_commands_for_client_id(0);
         let (client, _client_events, mut client_commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
+        let host_config = HostConfig::default();
+        let expected_snapshot = host_config.initial_join_snapshot.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+        let requester = thread::spawn(move || {
+            let _ = result_tx.send(host.restart_host_round_in_lobby(host_config));
+        });
 
-        host.broadcast_host_restart_lobby().test_value();
-        assert!(client.broadcast_host_restart_lobby().is_err());
+        assert!(client
+            .restart_host_round_in_lobby(HostConfig::default())
+            .is_err());
+        let restart = host_commands.receive_host_round_lobby_restart();
+        assert_eq!(restart.config.initial_join_snapshot, expected_snapshot);
+        assert!(matches!(result_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(restart.complete(Err("lower restart rejected".to_string())));
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .test_value()
+            .expect_err("the manager must report the lower restart result");
+        requester.join().test_value();
 
-        assert_eq!(host_commands.take_host_restart_lobby_broadcasts(), 1);
-        assert_eq!(client_commands.take_host_restart_lobby_broadcasts(), 0);
+        assert!(error.to_string().contains("lower restart rejected"));
+        assert!(client_commands.take_host_round_lobby_restarts().is_empty());
+    }
+
+    #[test]
+    fn host_round_restart_fences_events_already_forwarded_to_the_manager() {
+        let (mut host, event_tx, mut host_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        let mut host_config = HostConfig::default();
+        let snapshot = host_config.initial_join_snapshot.as_mut().test_value();
+        let scenario_core = snapshot.parameters.scenario.clone();
+        let dynamic_core = snapshot.dynamic.clone();
+        let game_core = clonk_engine::NetworkResourceCore {
+            id: 3,
+            resource_type: clonk_network::HostResourceType::Definitions as u8,
+            ..Default::default()
+        };
+        let retained_player_core = clonk_engine::NetworkResourceCore {
+            id: 4,
+            resource_type: clonk_network::HostResourceType::Player as u8,
+            ..Default::default()
+        };
+        snapshot.parameters.game_resources.push(game_core.clone());
+        snapshot
+            .parameters
+            .player_infos
+            .clients
+            .push(clonk_network::ClientPlayerInfosSnapshot {
+                client_id: 7,
+                flags: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(retained_player_core.clone()),
+                    ..Default::default()
+                }],
+            });
+        let retained_player_path = PathBuf::from("Network/Alice.c4p");
+        let fresh_status = NetworkStatus::new(clonk_network::NETWORK_STATE_LOBBY, 0, 0);
+        for (core, path) in [
+            (scenario_core, PathBuf::from("Network/OldScenario.c4s")),
+            (game_core, PathBuf::from("Network/OldDefinitions.c4d")),
+            (dynamic_core, PathBuf::from("Network/OldDynamic.c4d")),
+            (retained_player_core.clone(), retained_player_path.clone()),
+        ] {
+            event_tx
+                .send(NetworkEvent::ResourceComplete {
+                    resource_id: core.id,
+                    core,
+                    path,
+                    local: false,
+                })
+                .test_value();
+        }
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: i32::MAX,
+                core: clonk_engine::NetworkResourceCore {
+                    id: i32::MAX,
+                    ..Default::default()
+                },
+                path: PathBuf::from("Network/Old.c4s"),
+                local: false,
+            })
+            .test_value();
+        event_tx
+            .send(NetworkEvent::ScheduledSync {
+                tick: 41,
+                controls: Vec::new(),
+            })
+            .test_value();
+        event_tx
+            .send(NetworkEvent::JoinDataNeeded {
+                client_id: 8,
+                current_control_tick: 41,
+            })
+            .test_value();
+        event_tx
+            .send(NetworkEvent::TransportDiagnostic {
+                client_id: Some(7),
+                error: "preferred route changed".to_string(),
+            })
+            .test_value();
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: 7,
+                reason: None,
+            })
+            .test_value();
+        let completion = thread::spawn(move || {
+            let restart = host_commands.receive_host_round_lobby_restart();
+            assert!(restart.complete(Ok(())));
+            event_tx
+                .send(NetworkEvent::HostStatusChanged(fresh_status))
+                .test_value();
+        });
+
+        host.restart_host_round_in_lobby(host_config).test_value();
+        completion.join().test_value();
+
+        assert_eq!(
+            host.poll_events(),
+            vec![
+                NetworkEvent::ResourceComplete {
+                    resource_id: retained_player_core.id,
+                    core: retained_player_core,
+                    path: retained_player_path,
+                    local: false,
+                },
+                NetworkEvent::TransportDiagnostic {
+                    client_id: Some(7),
+                    error: "preferred route changed".to_string(),
+                },
+                NetworkEvent::PeerDisconnected {
+                    client_id: 7,
+                    reason: None,
+                },
+                NetworkEvent::HostStatusChanged(fresh_status),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_manager_restart_fence_fails_without_losing_session_events() {
+        let (mut host, event_tx, mut host_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        event_tx
+            .send(NetworkEvent::TransportDiagnostic {
+                client_id: Some(7),
+                error: "preferred route changed".to_string(),
+            })
+            .test_value();
+        drop(event_tx);
+        let completion = thread::spawn(move || match host_commands.command_rx.blocking_recv() {
+            Some(NetworkCommand::RestartHostRoundInLobby { completion, .. }) => {
+                completion.send(Ok(())).test_value();
+            }
+            Some(command) => panic!("unexpected host round restart command: {command:?}"),
+            None => panic!("network command channel ended before host round restart command"),
+        });
+
+        let error = host
+            .restart_host_round_in_lobby(HostConfig::default())
+            .expect_err("a successful completion without its FIFO fence must be rejected");
+        completion.join().test_value();
+
+        assert!(error.to_string().contains("round restart fence"));
+        assert_eq!(
+            host.poll_events(),
+            vec![NetworkEvent::TransportDiagnostic {
+                client_id: Some(7),
+                error: "preferred route changed".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn only_a_client_acknowledges_a_retained_round_after_lower_completion() {
+        let (host, _host_events, mut host_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        let (client, _client_events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let (result_tx, result_rx) = mpsc::channel();
+        let requester = thread::spawn(move || {
+            let _ = result_tx.send(client.acknowledge_round_restart());
+        });
+
+        assert!(host.acknowledge_round_restart().is_err());
+        let acknowledgement = client_commands.receive_round_restart_ack();
+        assert!(matches!(result_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(acknowledgement.complete(Err("lower ack rejected".to_string())));
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .test_value()
+            .expect_err("the manager must report the lower acknowledgement result");
+        requester.join().test_value();
+
+        assert!(error.to_string().contains("lower ack rejected"));
+        assert!(!host_commands.try_complete_round_restart_ack(Ok(())));
+    }
+
+    #[test]
+    fn client_round_ack_discards_stale_tick_and_performance_probes() {
+        let (tick_tx, mut tick_rx) = tokio_mpsc::unbounded_channel();
+        let (performance_tx, mut performance_rx) = tokio_mpsc::unbounded_channel();
+        let reached_at = tokio::time::Instant::now();
+        tick_tx
+            .send(ControlTickProbe {
+                tick: 41,
+                control_rate: 2,
+                target_fps: DEFAULT_CONTROL_TARGET_FPS,
+                reached_at,
+                queued: true,
+            })
+            .test_value();
+        performance_tx
+            .send(ControlPerformanceEvent::TickConsumed {
+                tick: 41,
+                consumed_at: reached_at,
+                client_ids: vec![7],
+            })
+            .test_value();
+        let mut reset_client_performance_pending = false;
+
+        discard_client_round_probes_before_acknowledgement(
+            &mut tick_rx,
+            &mut performance_rx,
+            &mut reset_client_performance_pending,
+        );
+
+        assert!(matches!(
+            tick_rx.try_recv(),
+            Err(tokio_mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            performance_rx.try_recv(),
+            Err(tokio_mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(reset_client_performance_pending);
+    }
+
+    #[test]
+    fn failed_worker_round_restart_preserves_manager_round_probes() {
+        let host = NetworkManager::for_mode(
+            NetworkMode::Host(test_host_settings(
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                None,
+            )),
+            0,
+        )
+        .test_value();
+        let reached_at = tokio::time::Instant::now();
+        host.control_tick_reached(23, 2, DEFAULT_CONTROL_TARGET_FPS, reached_at);
+        host.refresh_current_frame(47);
+        let rejected_config = HostConfig {
+            initial_join_snapshot: None,
+            ..HostConfig::default()
+        };
+
+        let error = host
+            .restart_host_round_in_lobby(rejected_config)
+            .expect_err("the manager must return the worker's rejected restart");
+
+        assert!(error
+            .to_string()
+            .contains("restarted round has no JoinData snapshot"));
+        assert_eq!(host.current_frame.load(Ordering::Relaxed), 47);
+        let probe = host.control_tick_probe.lock().test_value();
+        assert_eq!(probe.tick, 23);
+        assert_eq!(probe.reached_at, reached_at);
+
+        host.restart_host_round_in_lobby(HostConfig::default())
+            .test_value();
+
+        assert_eq!(host.current_frame.load(Ordering::Relaxed), 0);
+        assert!(host.control_tick_probe.lock().is_none());
     }
 
     /// The app owns the round teardown, so the worker surfaces this verbatim
@@ -13811,6 +14836,80 @@ Message=Server says Andr\xe9\r\n\
         let event = forwarded_client_event(ClientEvent::HostRestartLobby).await;
 
         assert_eq!(event, NetworkEvent::HostRestartLobby);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restarted_join_data_resets_the_client_round_before_it_is_forwarded() {
+        let host_config = HostConfig::default();
+        let snapshot = host_config.initial_join_snapshot.test_value();
+        let join_data = clonk_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 0,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let events = EventHarness::new();
+        let mut client_status = ClientStatusState::default();
+        let old_status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 41);
+        assert!(client_status.receive_request(old_status));
+        assert!(client_status
+            .acknowledge_requested_at(old_status, 41)
+            .is_some());
+        let mut client_activation = ClientActivationState {
+            armed: true,
+            status_reached: true,
+            last_request_at: Some(tokio::time::Instant::now()),
+            local: LocalClientActivation::Activated,
+        };
+        let mut frame_builder = ControlFrameAccumulator::new(7);
+        assert!(frame_builder.record_control(
+            41,
+            clonk_engine::ControlPacket::PlayerControl(PlayerControlData::new(0, 0, 0, 7)),
+            1,
+        ));
+        assert!(frame_builder.finalize_tick(41).is_some());
+        let mut rebase_pending_on_activation = true;
+        let mut reset_client_performance_pending = false;
+        let current_frame = AtomicI32::new(99);
+        let mut client_events_open = true;
+
+        handle_client_worker_event(
+            Some(ClientEvent::JoinData {
+                join_data: Box::new(join_data.clone()),
+            }),
+            &mut client_status,
+            &mut client_activation,
+            &mut frame_builder,
+            &mut rebase_pending_on_activation,
+            &mut reset_client_performance_pending,
+            &current_frame,
+            &mut client_events_open,
+            0,
+            7,
+            &events.sender,
+            &events.telemetry,
+            &events.netpuncher_state,
+        )
+        .await
+        .test_value();
+
+        assert_eq!(
+            client_status.requested,
+            Some(initial_client_status(&join_data))
+        );
+        assert_eq!(client_status.awaiting_commit, None);
+        assert_eq!(client_activation.local, LocalClientActivation::Deactivated);
+        assert!(!client_activation.armed);
+        assert!(!client_activation.status_reached);
+        assert_eq!(client_activation.last_request_at, None);
+        assert_eq!(frame_builder.current_tick, None);
+        assert_eq!(frame_builder.last_sent_tick, None);
+        assert!(!rebase_pending_on_activation);
+        assert!(reset_client_performance_pending);
+        assert_eq!(current_frame.load(Ordering::Relaxed), 0);
+        assert!(client_events_open);
+        assert_eq!(events.recv(), NetworkEvent::JoinData(join_data));
     }
 
     /// The app is the only layer that can act on a restart notice — it owns the

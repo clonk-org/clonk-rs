@@ -6506,6 +6506,91 @@ fn synchronized_player_derivation_registers_the_latest_core_before_event_drain()
 }
 
 #[test]
+fn round_restart_resources_only_reuse_exact_player_cores() {
+    let core = |id, resource_type, filename: &[u8]| {
+        n2_fixture!(resource {
+            id,
+            resource_type: resource_type as u8,
+            loadable: true,
+            filename: LegacyCString::from_bytes(filename.to_vec()).test_value(),
+        })
+    };
+    let scenario = core(10, clonk_network::HostResourceType::Scenario, b"Old.c4s");
+    let dynamic = core(11, clonk_network::HostResourceType::Dynamic, b"OldDyn.c4s");
+    let stale_round = core(12, clonk_network::HostResourceType::Definitions, b"Old.c4d");
+    let retained_player = core(20, clonk_network::HostResourceType::Player, b"Alice.c4p");
+    let replaced_player = core(21, clonk_network::HostResourceType::Player, b"OldBob.c4p");
+    let stale_player = core(22, clonk_network::HostResourceType::Player, b"Gone.c4p");
+    let mut resources = AdmissionResourceStore::default();
+    for (resource, path) in [
+        (&scenario, "old-scenario"),
+        (&dynamic, "old-dynamic"),
+        (&stale_round, "stale-round"),
+        (&retained_player, "alice"),
+        (&replaced_player, "old-bob"),
+        (&stale_player, "gone"),
+    ] {
+        resources.register_lobby_resource(resource);
+        resources.mark_complete(resource.id, PathBuf::from(path));
+    }
+
+    let mut snapshot = clonk_network::HostConfig::default()
+        .initial_join_snapshot
+        .test_value();
+    snapshot.parameters.scenario = core(
+        scenario.id,
+        clonk_network::HostResourceType::Scenario,
+        b"Fresh.c4s",
+    );
+    snapshot.dynamic = core(
+        dynamic.id,
+        clonk_network::HostResourceType::Dynamic,
+        b"FreshDyn.c4s",
+    );
+    snapshot.parameters.game_resources = vec![core(
+        13,
+        clonk_network::HostResourceType::Definitions,
+        b"Fresh.c4d",
+    )];
+    let fresh_replaced_player = core(
+        replaced_player.id,
+        clonk_network::HostResourceType::Player,
+        b"FreshBob.c4p",
+    );
+    snapshot.parameters.player_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 2,
+        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 7,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![
+                n2_fixture!(player {
+                    id: 1,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(retained_player.clone()),
+                }),
+                n2_fixture!(player {
+                    id: 2,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(fresh_replaced_player),
+                }),
+            ],
+        }],
+    };
+
+    resources.reconcile_host_join_snapshot(&snapshot);
+
+    main_assert_eq!(resources.resource_cores.keys().copied().collect::<Vec<_>>() => vec![10, 11, 13, 20, 21]);
+    main_assert_eq!(resources.complete_path(retained_player.id) => Some(Path::new("alice")));
+    for resource_id in [10, 11, 13, 21] {
+        main_assert_eq!(resources.status(resource_id) => Some(&AdmissionResourceState::Loading { removed: false }));
+        main_assert_eq!(resources.present_percent.get(&resource_id) => Some(&0));
+    }
+    main_assert!(resources.complete_path(replaced_player.id).is_none());
+    main_assert!(!resources.resources.contains_key(&stale_round.id));
+    main_assert!(!resources.resources.contains_key(&stale_player.id));
+}
+
+#[test]
 fn main_menu_player_join_uses_active_network_max_players() {
     // ActivateMain compares the live Game.Players count with the host's
     // synchronized Game.Parameters.MaxPlayers before adding New Player;
@@ -9824,6 +9909,7 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+    let restarted_scenario = app.active_scenario.clone().test_value();
     let native = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).test_value();
     app.player_name = "Player".to_string();
     app.control_clients.replace_snapshot([
@@ -9849,9 +9935,11 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
 
     main_assert_eq!(app.mode => AppMode::Menu, "the round the host restarted is torn down");
     main_assert!(app.network.is_some(), "the session the host kept up is the one this client keeps");
-    main_assert!(app.startup_network_connection.is_none(), "nothing is re-dialled: that is the whole point of the notice");
+    main_assert!(app.startup_network_connection.is_none(), "the restart must not launch a new client admission");
     main_assert!(app.pending_host_rejoin.is_none(), "a preserved session has no reconnect to arm");
     main_assert!(app.network_lobby.is_some(), "the client lands in the lobby rather than the game list");
+    main_assert_eq!(app.network_lobby.test_ref().selected_identifier() => Some(restarted_scenario.identifier.as_str()), "the retained lobby must still identify the round's scenario");
+    main_assert_eq!(app.network_lobby.test_ref().scenario_label() => restarted_scenario.title, "the client must not see the scenario-selection placeholder after restart");
     let participants = &app.network_lobby.test_ref().participants;
     main_assert_eq!(participants.keys().copied().collect::<Vec<_>>() => [0, 7, 9]);
     main_assert_eq!(participants[&0].name => "Exact host");
@@ -9866,6 +9954,73 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
             .any(|row| row.id() == LobbyRosterId::Client(0)),
         "the connected host must remain in the restarted lobby roster"
     );
+}
+
+#[test]
+fn restarted_client_acknowledges_join_data_before_reaffirming_player_info() {
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx, mut commands) =
+        NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
+    app.control_clients.replace_snapshot([
+        n2_fixture!(client {
+            client_id: 0,
+            activated: true,
+        }),
+        n2_fixture!(client {
+            client_id: local_client,
+            activated: true,
+        }),
+    ]);
+    n2_send_event(&event_tx, NetworkEvent::HostRestartLobby);
+    app.test_network_events();
+    main_assert!(app.pending_round_restart_join_data);
+
+    let host_config = clonk_network::HostConfig::default();
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
+    snapshot.parameters.clients.clients.push(n2_fixture!(client {
+        client_id: local_client,
+        activated: false,
+    }));
+    snapshot.parameters.clients.local_client_id = Some(local_client);
+    let retained_player = n2_fixture!(player {
+        id: 7,
+        name: LegacyCString::from_bytes(b"Retained player".to_vec()).test_value(),
+    });
+    snapshot
+        .parameters
+        .player_infos
+        .clients
+        .push(clonk_network::ClientPlayerInfosSnapshot {
+            client_id: local_client,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![retained_player.clone()],
+        });
+    let join_data = n2_fixture!(join_data:
+        local_client,
+        snapshot.dynamic_tick,
+        host_config.initial_status,
+        snapshot.dynamic,
+        snapshot.parameters
+    );
+    let acknowledgement = thread::spawn(move || {
+        let acknowledgement = commands.receive_round_restart_ack();
+        main_assert!(acknowledgement.complete(Ok(())));
+        commands
+    });
+    n2_send_event(&event_tx, NetworkEvent::JoinData(join_data));
+
+    app.test_network_events();
+    let mut commands = acknowledgement.join().test_value();
+
+    main_assert!(!app.pending_round_restart_join_data);
+    main_assert_eq!(commands.take_player_info_updates() => vec![n2_fixture!(player_update:
+        local_client,
+        clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+        vec![retained_player],
+    )]);
 }
 
 #[test]

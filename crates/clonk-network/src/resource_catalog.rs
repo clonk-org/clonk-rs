@@ -543,6 +543,41 @@ impl ResourceCatalog {
             .is_some()
     }
 
+    /// Removes a round-scoped resource immediately so a fresh round may reuse
+    /// its numeric ID. Normal session removal remains delayed through
+    /// [`Self::remove_resource`]; only the session-preserving restart boundary
+    /// can prove that no control from the previous round remains relevant.
+    pub(crate) fn forget_resource(&mut self, resource_id: i32) -> bool {
+        let before = self.resources.len();
+        self.resources
+            .retain(|resource| resource.registration.resource_id != resource_id);
+        let removed = self.resources.len() != before;
+        if removed {
+            self.next_periodic_discovery_index = 0;
+        }
+        removed
+    }
+
+    /// Starts a retained transport session's next round with exactly the
+    /// resources referenced by that round. This is immediate rather than the
+    /// ordinary delayed `Remove` path: old-round IDs must no longer answer
+    /// discovery or chunk requests after fresh JoinData is installed.
+    pub(crate) fn retain_resource_ids(&mut self, resource_ids: &BTreeSet<i32>) -> usize {
+        let before = self.resources.len();
+        self.resources.retain_mut(|resource| {
+            let retained = resource_ids.contains(&resource.registration.resource_id);
+            if retained {
+                resource.removed = false;
+            }
+            retained
+        });
+        let removed = before - self.resources.len();
+        self.last_discover_at = None;
+        self.next_periodic_discovery_index = 0;
+        self.last_status_at = None;
+        removed
+    }
+
     /// Mirrors `C4Network2ResList::OnClientConnect` without owning a socket.
     pub fn on_peer_connected(&self, peer_id: i32) -> Vec<ResourceCatalogAction> {
         let packet = self.discovery_packet();

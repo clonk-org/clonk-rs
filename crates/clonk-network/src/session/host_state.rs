@@ -129,6 +129,10 @@ pub(crate) struct HostState {
     pub(crate) netpuncher_game_ids: NetpuncherGameIds,
     pub(crate) pending_kinds: BTreeMap<i32, ParticipantKind>,
     pub(crate) join_snapshot: Option<HostJoinSnapshot>,
+    /// Peers that received the current runtime dynamic in JoinData and have
+    /// not yet reported every chunk. An already joined peer is not required
+    /// to fetch a dynamic published solely for a later joiner.
+    pub(crate) dynamic_required_clients: BTreeSet<ClientId>,
     pub(crate) resource_catalog: crate::ResourceCatalog,
     pub(crate) resource_backend: Option<crate::ResourceTransferBackend>,
     pub(crate) published_player_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
@@ -140,6 +144,13 @@ pub(crate) struct HostState {
     pub(crate) pending_admissions: BTreeMap<u32, i32>,
     pub(crate) pending_post_mortems: BTreeMap<u32, (ClientId, crate::PostMortemPacket, i32)>,
     pub(crate) removing_clients: BTreeSet<ClientId>,
+    /// Retained clients whose old-round ingress is quarantined until their
+    /// fresh JoinData has reached and been installed by the runtime.
+    pub(crate) round_restart_pending_clients: BTreeMap<ClientId, u64>,
+    /// The single FIFO route on which each retained client received its
+    /// marker and must return the matching acknowledgement.
+    pub(crate) round_restart_routes: BTreeMap<ClientId, u32>,
+    pub(crate) round_restart_nonce: u64,
     /// Bounded, presentation-only NORMAL/ME controls for late lobby joiners.
     pub(crate) lobby_chat_history: VecDeque<Vec<u8>>,
     pub(crate) event_tx: mpsc::Sender<HostEvent>,
@@ -157,6 +168,360 @@ impl HostState {
     pub(crate) fn invalidate_control_send_time(&mut self) {
         self.control_send_time_epoch = self.control_send_time_epoch.wrapping_add(1);
     }
+}
+
+fn validate_host_round_resource_cores(snapshot: &HostJoinSnapshot) -> Result<(), String> {
+    let mut cores_by_id = BTreeMap::<i32, clonk_engine::NetworkResourceCore>::new();
+    let external_player_cores = snapshot
+        .parameters
+        .player_infos
+        .clients
+        .iter()
+        .flat_map(|client| &client.players)
+        .filter_map(|player| {
+            let flags = player.flags;
+            (flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0
+                && flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0
+                && flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE == 0)
+                .then_some(player.resource.as_ref())
+                .flatten()
+        });
+    for core in std::iter::once(&snapshot.parameters.scenario)
+        .chain(&snapshot.parameters.game_resources)
+        .chain(std::iter::once(&snapshot.dynamic))
+        .chain(external_player_cores)
+    {
+        if let Some(existing) = cores_by_id.get(&core.id) {
+            if existing != core {
+                return Err(format!(
+                    "restarted round has conflicting resource ID {}",
+                    core.id
+                ));
+            }
+        } else {
+            cores_by_id.insert(core.id, core.clone());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_host_round_config(config: &HostConfig) -> Result<(), String> {
+    if config.initial_status.state != NETWORK_STATE_LOBBY {
+        return Err("restarted round must begin in the network lobby".to_string());
+    }
+    let snapshot = config
+        .initial_join_snapshot
+        .as_ref()
+        .ok_or_else(|| "restarted round has no JoinData snapshot".to_string())?;
+    validate_host_round_resource_cores(snapshot)?;
+    let join_data_cores = round_resource_cores(&snapshot.dynamic, &snapshot.parameters);
+    for resource in &config.resource_files {
+        if join_data_cores
+            .get(&resource.core.id)
+            .is_some_and(|join_data_core| join_data_core != &resource.core)
+        {
+            return Err(format!(
+                "restarted round resource file ID {} conflicts with its JoinData core",
+                resource.core.id
+            ));
+        }
+    }
+    if snapshot.dynamic.resource_type == clonk_engine::NETWORK_RESOURCE_TYPE_NULL {
+        return Err("restarted round has no loadable dynamic".to_string());
+    }
+    let start_tick = i32::try_from(config.start_tick)
+        .map_err(|_| "restarted round start tick does not fit JoinData".to_string())?;
+    if snapshot.dynamic_tick != start_tick {
+        return Err(format!(
+            "restarted round dynamic tick {} does not equal control tick {start_tick}",
+            snapshot.dynamic_tick
+        ));
+    }
+
+    let mut catalog = crate::ResourceCatalog::new(HOST_CLIENT_ID as i32);
+    for registration in &config.resource_registrations {
+        if !catalog.register(*registration) {
+            return Err(format!(
+                "restarted round repeats resource ID {}",
+                registration.resource_id
+            ));
+        }
+    }
+    if config.resource_directory.is_none() && !config.resource_files.is_empty() {
+        return Err(
+            "restarted round resource files require a network working directory".to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) struct PreparedHostRoundConfig {
+    config: HostConfig,
+    coordinator: ControlCoordinator,
+    resource_catalog: crate::ResourceCatalog,
+    resource_backend: Option<crate::ResourceTransferBackend>,
+    published_player_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
+    join_snapshot: Option<HostJoinSnapshot>,
+    client_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+}
+
+pub(crate) fn prepare_host_round_config(
+    mut config: HostConfig,
+    state: &HostState,
+) -> Result<PreparedHostRoundConfig, String> {
+    config.local_core.lobby_ready = false;
+    let live_client_ids = state
+        .clients
+        .keys()
+        .filter(|client_id| !state.removing_clients.contains(client_id))
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut client_cores = BTreeMap::from([(HOST_CLIENT_ID as i32, config.local_core.clone())]);
+    client_cores.extend(live_client_ids.iter().filter_map(|client_id| {
+        state.clients.get(client_id).map(|client| {
+            let mut core = client.core.clone();
+            core.activated = false;
+            core.lobby_ready = false;
+            (core.client_id, core)
+        })
+    }));
+    if let Some(snapshot) = config.initial_join_snapshot.as_mut() {
+        let live_wire_ids = client_cores.keys().copied().collect::<BTreeSet<_>>();
+        snapshot.parameters.clients =
+            JoinClientRegistrySnapshot::new(client_cores.values().cloned().collect());
+        snapshot
+            .parameters
+            .player_infos
+            .clients
+            .retain(|client| live_wire_ids.contains(&client.client_id));
+    }
+    let referenced_resource_ids = config
+        .initial_join_snapshot
+        .as_ref()
+        .map(|snapshot| round_resource_cores(&snapshot.dynamic, &snapshot.parameters))
+        .unwrap_or_default()
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    config
+        .resource_registrations
+        .retain(|registration| referenced_resource_ids.contains(&registration.resource_id));
+    config
+        .resource_files
+        .retain(|resource| referenced_resource_ids.contains(&resource.core.id));
+    config
+        .player_resource_sources
+        .retain(|(_, core)| referenced_resource_ids.contains(&core.id));
+    validate_host_round_config(&config)?;
+    let retained_resources = host_round_resources(&config);
+    let retained_resource_ids = retained_resources.keys().copied().collect::<BTreeSet<_>>();
+    let fresh_resource_ids = config
+        .resource_registrations
+        .iter()
+        .map(|registration| registration.resource_id)
+        .chain(
+            config
+                .resource_files
+                .iter()
+                .map(|resource| resource.core.id),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut resource_catalog = state.resource_catalog.clone();
+    for resource_id in &fresh_resource_ids {
+        resource_catalog.forget_resource(*resource_id);
+    }
+    for registration in &config.resource_registrations {
+        if !resource_catalog.register(*registration) {
+            return Err(format!(
+                "could not install restarted round resource ID {}",
+                registration.resource_id
+            ));
+        }
+    }
+    resource_catalog.retain_resource_ids(&retained_resource_ids);
+    resource_catalog.set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE);
+
+    let backend_directory = config.resource_directory.as_deref().or_else(|| {
+        state
+            .resource_backend
+            .as_ref()
+            .map(crate::ResourceTransferBackend::resource_directory)
+    });
+    let mut resource_backend = match (&state.resource_backend, backend_directory) {
+        (Some(backend), Some(directory)) => Some(
+            backend
+                .clone_for_round(directory)
+                .map_err(|error| error.to_string())?,
+        ),
+        (None, Some(directory)) => {
+            let mut backend = crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directory)
+                .map_err(|error| error.to_string())?;
+            backend.disarm_temporary_cleanup();
+            Some(backend)
+        }
+        (_, None) => None,
+    };
+    for resource_id in &fresh_resource_ids {
+        if let Some(backend) = resource_backend.as_mut() {
+            backend.forget_resource(*resource_id);
+        }
+    }
+    if !config.resource_files.is_empty() {
+        let backend = resource_backend
+            .as_mut()
+            .ok_or_else(|| "restarted round has no filesystem resource backend".to_string())?;
+        for resource in &config.resource_files {
+            backend
+                .register_hosted_resource(
+                    resource.core.clone(),
+                    &resource.path,
+                    resource.ownership,
+                    resource.binary_compatible,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if let Some(backend) = resource_backend.as_mut() {
+        backend
+            .retain_resources(&retained_resources)
+            .map_err(|error| error.to_string())?;
+        backend.set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE);
+    }
+
+    let mut local_candidates = crate::ClientBootstrapLocalCandidates::default();
+    local_candidates.extend_search_roots(&config.local_resource_roots);
+    let resource_resolver = crate::client_bootstrap::ClientBootstrapResolver::new_with_group_maker(
+        &local_candidates,
+        config
+            .resource_directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("Network")),
+        config.group_maker.clone(),
+    );
+    let mut published_player_sources = state.published_player_sources.clone();
+    published_player_sources.retain(|_, core| retained_resource_ids.contains(&core.id));
+    published_player_sources.extend(
+        config
+            .player_resource_sources
+            .iter()
+            .filter(|(_, core)| retained_resource_ids.contains(&core.id))
+            .cloned(),
+    );
+    let join_snapshot = config.initial_join_snapshot.clone();
+
+    let mut coordinator =
+        ControlCoordinator::with_start_tick(config.backlog_limit, config.start_tick);
+    coordinator
+        .register_client(HOST_CLIENT_ID)
+        .map_err(|error| error.to_string())?;
+
+    // Transport fields describe the already-running listeners. Retaining the
+    // fresh value is still useful because later publications consume its
+    // round-scoped fields.
+    config.initial_join_snapshot = join_snapshot.clone();
+    Ok(PreparedHostRoundConfig {
+        config,
+        coordinator,
+        resource_catalog,
+        resource_backend,
+        published_player_sources,
+        resource_resolver,
+        join_snapshot,
+        client_cores,
+    })
+}
+
+pub(crate) fn install_prepared_host_round_config(
+    mut prepared: PreparedHostRoundConfig,
+    state: &mut HostState,
+) {
+    if let Some(next_backend) = prepared.resource_backend.as_mut() {
+        if let Some(previous_backend) = state.resource_backend.as_mut() {
+            next_backend.arm_after_replacing(previous_backend);
+        } else {
+            next_backend.arm_temporary_cleanup();
+        }
+    }
+    state.resource_backend = prepared.resource_backend.take();
+    state.resource_catalog = prepared.resource_catalog;
+    state.published_player_sources = prepared.published_player_sources;
+    state.resource_resolver = prepared.resource_resolver;
+    state.join_snapshot = prepared.join_snapshot;
+    state.dynamic_required_clients.clear();
+    state.client_cores = prepared.client_cores;
+    let required_password =
+        (!prepared.config.password.is_empty()).then(|| prepared.config.password.clone());
+    state.admission = HostAdmission::new(
+        state.admission.next_client_id(),
+        prepared.config.allow_join,
+        required_password,
+        state.client_cores.values().map(|core| core.name.clone()),
+    );
+    state
+        .client_addresses
+        .retain(|client_id, _| state.client_cores.contains_key(client_id));
+    state
+        .pending_kinds
+        .retain(|client_id, _| state.client_cores.contains_key(client_id));
+    state.coordinator = prepared.coordinator;
+    state.pending_complete.clear();
+    state.backlog = ControlBacklog::new(prepared.config.backlog_limit);
+    state.client_performance = ClientPerformanceStats::new(prepared.config.backlog_limit);
+    state.local_control_backlog = ControlBacklog::new(prepared.config.backlog_limit);
+    state.scheduler = ResyncScheduler::new(prepared.config.resync_cooldown);
+    state.pending_sync.clear();
+    state.status_barrier = StatusBarrier::stable(prepared.config.initial_status);
+    state.last_chase_target_update = None;
+    state.game_started = false;
+    state.control_mode = prepared.config.initial_status.control_mode;
+    state.control_waiting_clients.clear();
+    state.control_discarded_clients.clear();
+    state.straggler_late.clear();
+    state.async_control_wait = None;
+    state.lobby_chat_history.clear();
+    state.invalidate_control_send_time();
+
+    for client in state.clients.values_mut() {
+        client.core.activated = false;
+        client.core.lobby_ready = false;
+        client.join_data_sent = false;
+        client.join_data_needed_emitted = false;
+    }
+    state.round_restart_nonce = state.round_restart_nonce.wrapping_add(1).max(1);
+    state.round_restart_pending_clients = state
+        .clients
+        .keys()
+        .copied()
+        .map(|client_id| (client_id, state.round_restart_nonce))
+        .collect();
+    state.round_restart_routes.clear();
+
+    state.config = prepared.config;
+}
+
+#[cfg(test)]
+pub(crate) fn install_host_round_config(
+    config: HostConfig,
+    state: &mut HostState,
+) -> Result<(), String> {
+    let prepared = prepare_host_round_config(config, state)?;
+    install_prepared_host_round_config(prepared, state);
+    Ok(())
+}
+
+fn host_round_resources(config: &HostConfig) -> BTreeMap<i32, clonk_engine::NetworkResourceCore> {
+    let mut resources = config
+        .initial_join_snapshot
+        .as_ref()
+        .map(|snapshot| round_resource_cores(&snapshot.dynamic, &snapshot.parameters))
+        .unwrap_or_default();
+    resources.extend(
+        config
+            .resource_files
+            .iter()
+            .map(|resource| (resource.core.id, resource.core.clone())),
+    );
+    resources
 }
 
 fn same_peer_host(left: SocketAddr, right: SocketAddr) -> bool {
@@ -191,6 +556,7 @@ pub(crate) fn invalidate_pending_client_routes(client_id: ClientId, state: &mut 
 
 pub(crate) fn mark_client_removing(client_id: ClientId, state: &mut HostState) {
     state.removing_clients.insert(client_id);
+    state.dynamic_required_clients.remove(&client_id);
     if let Some(remote) = state.status_barrier.remotes.get_mut(&client_id) {
         *remote = RemoteBarrierState::Removing;
     }
@@ -242,6 +608,86 @@ pub(crate) fn preferred_host_route(
             | (ConnectionTrafficClass::Data, crate::NetworkProtocol::Udp) => 1,
             _ => 2,
         })
+}
+
+pub(crate) fn prepare_host_restart_routes(
+    state: &HostState,
+) -> Result<BTreeMap<ClientId, u32>, String> {
+    if !state.round_restart_pending_clients.is_empty() || !state.round_restart_routes.is_empty() {
+        return Err(
+            "the previous round restart is awaiting retained client acknowledgement".to_string(),
+        );
+    }
+    state
+        .clients
+        .keys()
+        .filter(|client_id| !state.removing_clients.contains(client_id))
+        .copied()
+        .map(|client_id| {
+            state
+                .accepted_routes
+                .iter()
+                .filter(|(_, route)| {
+                    route.client_id == client_id && route.outbound.is_round_restart_route_live()
+                })
+                .min_by_key(|(connection_id, route)| {
+                    let protocol_rank = match route.protocol {
+                        crate::NetworkProtocol::Udp => 0_u8,
+                        crate::NetworkProtocol::Tcp => 1_u8,
+                        _ => 2_u8,
+                    };
+                    (protocol_rank, **connection_id)
+                })
+                .map(|(connection_id, _)| (client_id, *connection_id))
+                .ok_or_else(|| format!("retained client {client_id} has no accepted message route"))
+        })
+        .collect()
+}
+
+pub(crate) fn retain_host_restart_routes(
+    retained_routes: &BTreeMap<ClientId, u32>,
+    state: &mut HostState,
+) {
+    // A connection which has not completed route setup has not joined the
+    // stable roster being carried across the round boundary. Forget its
+    // provisional association so a later Accepted message is released with
+    // setup failure against the fresh round instead of reviving stale state.
+    state.pending_route_peers.clear();
+    state.pending_route_clients.clear();
+    state.pending_admissions.clear();
+
+    let retained_connection_ids = retained_routes.values().copied().collect::<BTreeSet<_>>();
+    let retired_connection_ids = state
+        .accepted_routes
+        .keys()
+        .copied()
+        .filter(|connection_id| !retained_connection_ids.contains(connection_id))
+        .collect::<Vec<_>>();
+    for connection_id in retired_connection_ids {
+        if let Some(route) = state.accepted_routes.remove(&connection_id) {
+            drop(route.outbound.retire_and_take_post_failure());
+        }
+    }
+
+    for (client_id, connection_id) in retained_routes {
+        let route = state
+            .accepted_routes
+            .get(connection_id)
+            .expect("prepared restart route remains accepted");
+        if let Some(client) = state.clients.get_mut(client_id) {
+            client.outbound = route.outbound.clone();
+            client.peer_addr = route.peer_addr;
+        }
+        if route.protocol != crate::NetworkProtocol::Udp {
+            state
+                .peer_capabilities
+                .clear(*client_id as i32, crate::PortCapabilities::VOICE_CHAT);
+        }
+    }
+
+    state.pending_post_mortems.clear();
+    state.closed_routes = crate::post_mortem::ClosedConnectionRouter::default();
+    state.invalidate_control_send_time();
 }
 
 fn preferred_host_send_route(
@@ -709,6 +1155,7 @@ pub(crate) fn publish_host_runtime_dynamic(
         (snapshot.dynamic.resource_type == crate::HostResourceType::Dynamic as u8)
             .then_some(snapshot.dynamic.id)
     });
+    state.dynamic_required_clients.clear();
     state.join_snapshot = Some(HostJoinSnapshot {
         dynamic: core.clone(),
         dynamic_tick,
@@ -722,9 +1169,11 @@ pub(crate) fn publish_host_runtime_dynamic(
 
 pub(crate) fn remove_host_runtime_dynamic(state: &mut HostState) -> Result<bool, String> {
     let Some(snapshot) = state.join_snapshot.as_mut() else {
+        state.dynamic_required_clients.clear();
         return Ok(false);
     };
     if snapshot.dynamic.resource_type == clonk_engine::NETWORK_RESOURCE_TYPE_NULL {
+        state.dynamic_required_clients.clear();
         return Ok(false);
     }
     if snapshot.dynamic.resource_type != crate::HostResourceType::Dynamic as u8 {
@@ -736,17 +1185,37 @@ pub(crate) fn remove_host_runtime_dynamic(state: &mut HostState) -> Result<bool,
     let resource_id = snapshot.dynamic.id;
     snapshot.dynamic = clonk_engine::NetworkResourceCore::default();
     snapshot.dynamic_tick = -1;
+    state.dynamic_required_clients.clear();
     mark_host_resource_removed(resource_id, state);
     Ok(true)
 }
 
 pub(crate) fn remove_stale_host_runtime_dynamic(state: &mut HostState) -> bool {
     let current_tick = i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX);
-    let stale = state.join_snapshot.as_ref().is_some_and(|snapshot| {
-        snapshot.dynamic.resource_type == crate::HostResourceType::Dynamic as u8
-            && current_tick > snapshot.dynamic_tick
+    let stale_resource_id = state.join_snapshot.as_ref().and_then(|snapshot| {
+        (snapshot.dynamic.resource_type == crate::HostResourceType::Dynamic as u8
+            && current_tick > snapshot.dynamic_tick)
+            .then_some(snapshot.dynamic.id)
     });
-    stale && remove_host_runtime_dynamic(state).unwrap_or(false)
+    let Some(resource_id) = stale_resource_id else {
+        return false;
+    };
+    let catalog = state
+        .resource_backend
+        .as_ref()
+        .map(crate::ResourceTransferBackend::catalog)
+        .unwrap_or(&state.resource_catalog);
+    let clients = &state.clients;
+    let removing_clients = &state.removing_clients;
+    state.dynamic_required_clients.retain(|client_id| {
+        clients.contains_key(client_id)
+            && !removing_clients.contains(client_id)
+            && !i32::try_from(*client_id)
+                .ok()
+                .and_then(|client_id| catalog.peer_chunks(resource_id, client_id))
+                .is_some_and(crate::ChunkSet::is_complete)
+    });
+    state.dynamic_required_clients.is_empty() && remove_host_runtime_dynamic(state).unwrap_or(false)
 }
 
 pub(crate) fn mark_host_resource_removed(resource_id: i32, state: &mut HostState) {

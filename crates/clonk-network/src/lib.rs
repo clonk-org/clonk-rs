@@ -78,9 +78,10 @@ pub use control_wait::{
     ControlWaitAttribution, ControlWaitAttributionSnapshot, PID_PORT_CONTROL_WAIT_ATTRIBUTION,
 };
 pub use host_restart::{
-    decode_host_restart_lobby_notice, decode_host_restart_notice, encode_host_restart_lobby_notice,
-    encode_host_restart_notice, DEFAULT_HOST_RESTART_REJOIN_SECONDS, PID_PORT_HOST_RESTARTING,
-    PID_PORT_HOST_RESTART_LOBBY,
+    decode_host_restart_lobby_notice, decode_host_restart_notice, decode_round_restart_ack,
+    encode_host_restart_lobby_notice, encode_host_restart_notice, encode_round_restart_ack,
+    DEFAULT_HOST_RESTART_REJOIN_SECONDS, PID_PORT_HOST_RESTARTING, PID_PORT_HOST_RESTART_LOBBY,
+    PID_PORT_ROUND_RESTART_ACK,
 };
 pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
 pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};

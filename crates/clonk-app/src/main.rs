@@ -2802,6 +2802,7 @@ impl GameApp {
             host_join_snapshot,
             pending_runtime_dynamic_request: None,
             pending_network_join_data: None,
+            pending_round_restart_join_data: false,
             initial_lobby_status_ack_pending: false,
             client_start_barrier: ClientStartBarrier::default(),
             pending_client_start_status: None,
