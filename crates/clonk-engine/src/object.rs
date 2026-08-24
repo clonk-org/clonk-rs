@@ -485,7 +485,11 @@ impl ObjectState {
         }
     }
 
-    fn apply_delta(&mut self, delta: &ObjectDelta, library: &ActionLibrary) -> ApplyDeltaOutcome {
+    pub(crate) fn apply_delta(
+        &mut self,
+        delta: &ObjectDelta,
+        library: &ActionLibrary,
+    ) -> ApplyDeltaOutcome {
         let previous_container = self.container;
         let mut container_change = None;
         let mut action_change = None;

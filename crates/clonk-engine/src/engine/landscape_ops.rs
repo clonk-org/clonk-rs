@@ -2316,92 +2316,101 @@ impl Engine {
             };
 
             self.record_effect_dispatch(|stats| stats.global_timer_events += 1);
-            let world = self.host_world_context();
-            let rng_state = self.rng.clone();
-            let mut global_effects = std::mem::take(&mut self.global_effects);
-            let outcome = Self::run_effect_events_for_global(
-                self.game_over_triggered,
-                rng_state,
-                vec![event],
-                &mut global_effects,
-                &mut self.environment,
-                self.physics,
-                self.frame,
-                world,
-                self.audio_registry.clone(),
-            );
-            self.global_effects = global_effects;
-            let GlobalEffectRunOutcome {
-                particles,
-                physics_delta,
-                audio_events,
-                messages,
-                player_commands,
-                object_order_commands,
-                next_mission_commands,
-                landscape_ops,
-                solid_mask_operations,
-                host_raster_preview,
-                transfer_zones,
-                spawns,
-                other_objects,
-                next_object_id,
-                game_over,
-                script_go,
-                script_counter,
-                audio_state,
-                rng,
-            } = outcome?;
-            let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
-            let mut outermost =
-                self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
-            let fold_result = (|| -> Result<(), EngineError> {
-                self.rng = rng;
-                self.audio_registry = audio_state;
-                self.sync_next_object_id(next_object_id);
-                if !spawns.is_empty() {
-                    self.process_spawn_queue(spawns)?;
-                }
-                if !transfer_zones.is_empty() {
-                    self.apply_transfer_zone_commands(transfer_zones)?;
-                }
-                if !other_objects.is_empty() {
-                    self.apply_nested_object_outcomes(other_objects)?;
-                }
-                if !landscape_ops.is_empty() {
-                    self.apply_landscape_operations(landscape_ops);
-                }
-                if !player_commands.is_empty() {
-                    self.apply_player_commands(player_commands)?;
-                }
-                self.pending_object_order_commands
-                    .extend(object_order_commands);
-                self.apply_next_mission_commands(next_mission_commands);
-                if !audio_events.is_empty() {
-                    self.emit_audio_commands(audio_events);
-                }
-                for command in messages {
-                    self.messages.apply_command(command);
-                }
-                if let Some(go) = script_go {
-                    self.scenario_script_go = go;
-                }
-                if let Some(counter) = script_counter {
-                    self.scenario_script_counter = counter;
-                }
-                if game_over {
-                    self.request_game_over()?;
-                }
-                if !physics_delta.is_empty() {
-                    self.apply_physics_delta(physics_delta);
-                }
-                self.apply_particle_commands(particles);
-                Ok(())
-            })();
-            outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
-            self.finish_host_solid_mask_operations(outermost, fold_result)?;
+            self.dispatch_global_effect_events(vec![event])?;
         }
         Ok(())
+    }
+
+    /// Runs one already-selected batch from the global effect list and folds
+    /// every callback side channel back into the live engine.
+    pub(crate) fn dispatch_global_effect_events(
+        &mut self,
+        events: Vec<EffectEvent>,
+    ) -> Result<(), EngineError> {
+        let world = self.host_world_context();
+        let rng_state = self.rng.clone();
+        let mut global_effects = std::mem::take(&mut self.global_effects);
+        let outcome = Self::run_effect_events_for_global(
+            self.game_over_triggered,
+            rng_state,
+            events,
+            &mut global_effects,
+            &mut self.environment,
+            self.physics,
+            self.frame,
+            world,
+            self.audio_registry.clone(),
+        );
+        self.global_effects = global_effects;
+        let GlobalEffectRunOutcome {
+            particles,
+            physics_delta,
+            audio_events,
+            messages,
+            player_commands,
+            object_order_commands,
+            next_mission_commands,
+            landscape_ops,
+            solid_mask_operations,
+            host_raster_preview,
+            transfer_zones,
+            spawns,
+            other_objects,
+            next_object_id,
+            game_over,
+            script_go,
+            script_counter,
+            audio_state,
+            rng,
+        } = outcome?;
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
+        let mut outermost =
+            self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
+        let fold_result = (|| -> Result<(), EngineError> {
+            self.rng = rng;
+            self.audio_registry = audio_state;
+            self.sync_next_object_id(next_object_id);
+            if !spawns.is_empty() {
+                self.process_spawn_queue(spawns)?;
+            }
+            if !transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(transfer_zones)?;
+            }
+            if !other_objects.is_empty() {
+                self.apply_nested_object_outcomes(other_objects)?;
+            }
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
+            }
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
+            self.pending_object_order_commands
+                .extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
+            if !audio_events.is_empty() {
+                self.emit_audio_commands(audio_events);
+            }
+            for command in messages {
+                self.messages.apply_command(command);
+            }
+            if let Some(go) = script_go {
+                self.scenario_script_go = go;
+            }
+            if let Some(counter) = script_counter {
+                self.scenario_script_counter = counter;
+            }
+            if game_over {
+                self.request_game_over()?;
+            }
+            if !physics_delta.is_empty() {
+                self.apply_physics_delta(physics_delta);
+            }
+            self.apply_particle_commands(particles);
+            Ok(())
+        })();
+        outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, fold_result)
     }
 
     /// Executes deferred Fx* events of the GLOBAL effect list — the
