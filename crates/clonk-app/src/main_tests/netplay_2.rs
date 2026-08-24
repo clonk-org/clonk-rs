@@ -13808,8 +13808,15 @@ fn save_to_slot_writes_native_c4group_savegame() {
     );
     main_assert_eq!(restore_plan.restore_infos.clients.len() => 1);
 
+    app.clear_message_board_log();
     app.save_to_slot(10);
 
+    // QuickSave announces the write and its successful outcome through the
+    // in-game message board (src/C4Game.cpp:2270-2285).
+    main_assert_eq!(
+        message_board_logical_entries(&app) =>
+        vec!["Saving game...".to_string(), "Game saved.".to_string()]
+    );
     main_assert!(!app.status_text.starts_with("Save failed:"), "{}", app.status_text);
     main_assert!(slot.is_file(), "numbered save must be a packed file");
     let saved = Group::open(&slot).test_value();

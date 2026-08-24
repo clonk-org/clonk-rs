@@ -956,15 +956,28 @@ impl GameApp {
                 .context("classic savegame slot has no scenario folder")?;
             ensure_classic_save_folder(scenario_folder, &language, &label)?;
 
+            let saving = self.runtime_resource_text("IDS_HOLD_SAVINGGAME", "Saving game...");
+            tracing::info!(slot, "{saving}");
+            let line = self.timestamp_log_line(saving);
+            self.enqueue_control_message_board_line(line);
             let saved = self.save_main_menu_slot_game(&path, title_png)?;
             anyhow::ensure!(saved, "native savegame write was rejected");
             self.status_text = format!("Saved {status_label}");
+            let message = self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.");
+            tracing::info!(slot, "{message}");
+            let line = self.timestamp_log_line(message);
+            self.enqueue_control_message_board_line(line);
             Ok(path)
         })();
 
         if let Err(err) = &result {
             tracing::error!(error = ?err, slot, "slot save failed");
             self.status_text = format!("Save failed: {err:#}");
+            let message =
+                self.runtime_resource_text("IDS_GAME_FAILSAVEGAME", "Error while saving the game.");
+            tracing::info!(slot, "{message}");
+            let line = self.timestamp_log_line(message);
+            self.enqueue_control_message_board_line(line);
         }
         result.ok()
     }
