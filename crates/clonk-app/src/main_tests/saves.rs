@@ -4515,6 +4515,39 @@ fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
 }
 
 #[test]
+fn quick_save_folder_error_is_visible_in_game() {
+    // QuickSave reports folder-creation failures through the in-game log
+    // (src/C4Game.cpp:2240-2244).
+    let fixture = tempdir();
+    let user_data = fixture.path().join("user-data");
+    let blocked_save_folder = fixture.path().join("blocked-save-folder");
+    fs::write(&blocked_save_folder, b"not a directory").test_value();
+    let (_guard, paths) = exact_loader_test_paths(&user_data, None);
+    persist_config_value(
+        &paths,
+        "General",
+        "SaveGameFolder",
+        blocked_save_folder.to_string_lossy().into_owned(),
+    )
+    .test_value();
+
+    let mut app = new_state_only_lightweight_running_sandbox_app();
+    app.app_paths = Some(paths);
+    app.startup_tooltip_resources.insert(
+        "IDS_GAME_FAILSAVEGAME".to_string(),
+        "Localized save failure.".to_string(),
+    );
+    app.clear_message_board_log();
+
+    app.save_to_slot(1);
+
+    main_assert_eq!(
+        latest_message_board_logical_entry(&app).as_deref() =>
+        Some("Localized save failure.")
+    );
+}
+
+#[test]
 fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
     let fixture = tempdir();
     let user_data = fixture.path().join("user-data");
