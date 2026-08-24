@@ -6599,6 +6599,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         &app.control_player_infos,
         app.engine.teams(),
         app.engine.max_players().expect("live maximum is set"),
+        app.engine.startup_player_count(),
         &app.snapshot,
     )
     .test_value();

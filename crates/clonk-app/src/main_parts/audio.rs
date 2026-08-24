@@ -7055,6 +7055,7 @@ pub(crate) fn game_over_host_reference(
     player_infos: &ControlPlayerInfoRegistry,
     teams: &[clonk_engine::TeamInfo],
     max_players: i32,
+    startup_player_count: Option<i32>,
     snapshot: &SimulationSnapshot,
 ) -> Result<clonk_network::HostGameReference, clonk_network::HostGameReferenceError> {
     let winner_ids = snapshot
@@ -7069,6 +7070,7 @@ pub(crate) fn game_over_host_reference(
         player_infos,
         teams,
         max_players,
+        startup_player_count,
         Some(&winner_ids),
     );
     template.replacing_game_over(
@@ -7093,12 +7095,20 @@ pub(crate) fn running_host_reference(
     player_infos: &ControlPlayerInfoRegistry,
     teams: &[clonk_engine::TeamInfo],
     max_players: i32,
+    startup_player_count: Option<i32>,
     state: &str,
     join_allowed: bool,
     snapshot: &SimulationSnapshot,
 ) -> Result<clonk_network::HostGameReference, clonk_network::HostGameReferenceError> {
-    let parameters =
-        live_host_reference_parameters(parameters, clients, player_infos, teams, max_players, None);
+    let parameters = live_host_reference_parameters(
+        parameters,
+        clients,
+        player_infos,
+        teams,
+        max_players,
+        startup_player_count,
+        None,
+    );
     template.replacing_runtime(
         parameters,
         state,
@@ -7115,9 +7125,16 @@ pub(crate) fn live_host_reference_parameters(
     player_infos: &ControlPlayerInfoRegistry,
     teams: &[clonk_engine::TeamInfo],
     max_players: i32,
+    startup_player_count: Option<i32>,
     winner_ids: Option<&HashSet<i32>>,
 ) -> clonk_network::JoinGameParametersEnvelope {
     parameters.max_players = max_players;
+    // The prepared JoinData predates InitGame. At frame zero native replaces
+    // this scalar from the synchronized PlayerInfos, and every later runtime
+    // save retains that exact value (src/C4Game.cpp:2456).
+    if let Some(startup_player_count) = startup_player_count {
+        parameters.startup_player_count = startup_player_count;
+    }
     parameters.clients = clonk_network::JoinClientRegistrySnapshot::new(clients.snapshot());
     let (last_player_id, retained_rows) = player_infos.retained_rows_snapshot();
     parameters.player_infos = clonk_network::PlayerInfoListSnapshot {

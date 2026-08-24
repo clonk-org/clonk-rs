@@ -5680,6 +5680,7 @@ impl GameApp {
             &self.control_player_infos,
             self.engine.teams(),
             max_players,
+            self.engine.startup_player_count(),
             if self.host_reference_paused {
                 "Paused"
             } else {
@@ -7200,6 +7201,7 @@ impl GameApp {
             &self.control_player_infos,
             self.engine.teams(),
             max_players,
+            self.engine.startup_player_count(),
             None,
         );
         let restore_plan = runtime_join_save::set_as_runtime_join_restore_infos(
@@ -7395,6 +7397,7 @@ impl GameApp {
                     &self.control_player_infos,
                     self.engine.teams(),
                     max_players,
+                    self.engine.startup_player_count(),
                     &self.snapshot,
                 )
             } else {

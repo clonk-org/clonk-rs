@@ -614,6 +614,7 @@ impl GameApp {
             &self.control_player_infos,
             self.engine.teams(),
             max_players,
+            self.engine.startup_player_count(),
             &self.snapshot,
         ) {
             Ok(reference) => reference,
