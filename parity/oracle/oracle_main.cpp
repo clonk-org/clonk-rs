@@ -10665,6 +10665,15 @@ struct PxsLoadCase
     int32_t chunks;    // whole chunks of payload
     int32_t extra;     // stray bytes appended, to break the length arithmetic
     std::vector<PxsLoadSlot> live;
+    // A component loaded successfully BEFORE this one, so the case observes
+    // what a later Load leaves of it. Load clears before it validates, so a
+    // refusal empties the system rather than preserving the earlier content.
+    int32_t preload_chunks = 0;
+    std::vector<PxsLoadSlot> preload;
+    // The public Count ledger standing when the Load runs. Only Execute sets
+    // it in the engine; stamping it here isolates what Load and Clear do to
+    // it, which is nothing (C4PXS.cpp:171-179).
+    int32_t count_before = 0;
 };
 
 static void buildPxsLoadEntry(const PxsLoadCase &c)
@@ -10735,6 +10744,28 @@ static void printPxsLoadCases()
         // `Mat != MNone` branch.
         {"float_format", true, 2, 1, 0,
          {{0, 5, 1, f2_5, fm0_75, f2_5, fm0_75}}},
+        // Nothing in Load validates the material index: every record whose
+        // Mat differs from MNone is stored verbatim and counted. A negative
+        // one that is not MNone, and one far past any live material map,
+        // both hold their slots until C4PXS::Execute's MatValid guard runs.
+        {"raw_invalid_material", true, 1, 1, 0,
+         {{0, 1, -5, 11, 12, 13, 14},
+          {0, 2, 70000, 21, 22, 23, 24},
+          {0, 3, 2, 31, 32, 33, 34}}},
+        // A refused Load leaves the system EMPTY, not holding what it had:
+        // Clear runs before the number format is validated.
+        {"failure_after_clear", true, 3, 1, 0, {},
+         1, {{0, 3, 2, 100, 200, 300, 400}}, 9},
+        // The same, refused by the chunk ceiling instead of the tag.
+        {"chunk_ceiling_failure_after_clear", true, 1, 21, 0, {},
+         1, {{0, 3, 2, 100, 200, 300, 400}}, 9},
+        // Refused before anything is cleared: no entry means Load returns
+        // without reaching Clear, so the earlier content survives intact.
+        {"absent_entry_keeps_the_loaded_system", false, 0, 0, 0, {},
+         1, {{0, 3, 2, 100, 200, 300, 400}}, 9},
+        // A successful Load also leaves the Count ledger alone.
+        {"success_keeps_the_count_ledger", true, 1, 1, 0,
+         {{0, 3, 2, 100, 200, 300, 400}}, 0, {}, 9},
     };
 
     bool first = true;
@@ -10743,23 +10774,38 @@ static void printPxsLoadCases()
         if (!first) printf(",");
         first = false;
 
-        buildPxsLoadEntry(c);
-        pxs_slots::Game.PXS.Clear();
+        pxs_slots::Game.PXS.reset();
         pxs_slots::C4Group group;
+        if (c.preload_chunks)
+        {
+            const PxsLoadCase seed{"", true, 1, c.preload_chunks, 0, c.preload};
+            buildPxsLoadEntry(seed);
+            if (!pxs_slots::Game.PXS.Load(group)) { printf("{\"name\":\"%s\",\"preload_failed\":true}", c.name); continue; }
+        }
+        pxs_slots::Game.PXS.Count = c.count_before;
+        buildPxsLoadEntry(c);
         const bool ok = pxs_slots::Game.PXS.Load(group);
 
-        printf("{\"name\":\"%s\",\"present\":%s,\"tag\":%d,\"chunks\":%d,\"extra\":%d,"
-               "\"input\":[",
-               c.name, c.present ? "true" : "false", c.tag, c.chunks, c.extra);
-        bool first_in = true;
-        for (const auto &live : c.live)
+        const auto printSlots = [](const std::vector<PxsLoadSlot> &slots)
         {
-            if (!first_in) printf(",");
-            first_in = false;
-            printf("{\"chunk\":%d,\"slot\":%d,\"mat\":%d,\"x\":%d,\"y\":%d,"
-                   "\"xdir\":%d,\"ydir\":%d}",
-                   live.chunk, live.slot, live.mat, live.x, live.y, live.xdir, live.ydir);
-        }
+            bool first_slot = true;
+            for (const auto &live : slots)
+            {
+                if (!first_slot) printf(",");
+                first_slot = false;
+                printf("{\"chunk\":%d,\"slot\":%d,\"mat\":%d,\"x\":%d,\"y\":%d,"
+                       "\"xdir\":%d,\"ydir\":%d}",
+                       live.chunk, live.slot, live.mat, live.x, live.y, live.xdir, live.ydir);
+            }
+        };
+        printf("{\"name\":\"%s\",\"present\":%s,\"tag\":%d,\"chunks\":%d,\"extra\":%d,"
+               "\"preload_chunks\":%d,\"count_before\":%d,\"count_after\":%d,"
+               "\"preload\":[",
+               c.name, c.present ? "true" : "false", c.tag, c.chunks, c.extra,
+               c.preload_chunks, c.count_before, pxs_slots::Game.PXS.Count);
+        printSlots(c.preload);
+        printf("],\"input\":[");
+        printSlots(c.live);
         printf("],\"ok\":%s,\"counts\":[", ok ? "true" : "false");
         for (size_t chunk = 0; chunk < 3; chunk++)
         {

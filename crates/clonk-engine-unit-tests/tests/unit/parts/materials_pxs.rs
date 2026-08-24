@@ -1625,7 +1625,7 @@
         engine.set_landscape(world);
 
         let dead = pxs::Pxs {
-            mat: water,
+            mat: water.into(),
             x: C4Fixed::from_raw(0x1122_3344),
             y: C4Fixed::from_raw(-17),
             xdir: C4Fixed::from_raw(0x5566_7788),
@@ -1642,7 +1642,7 @@
                 0,
                 slot,
                 pxs::Pxs {
-                    mat: water,
+                    mat: water.into(),
                     x: itofix(10),
                     y: itofix(2),
                     xdir: C4Fixed::ZERO,
@@ -2034,7 +2034,7 @@
         unit_assert_eq!(landscape.material_at(2, 2) => None, "DigFree Earth clears");
         unit_assert_eq!(landscape.material_at(3, 2) => Some(granite), "non-DigFree Granite survives");
         unit_assert_eq!(engine.pxs_system.count() => 1);
-        unit_assert_eq!(engine.pxs_system.iter().next().map(|pxs| pxs.mat) => Some(earth), "the cleared Earth becomes one zero-velocity PXS");
+        unit_assert_eq!(engine.pxs_system.iter().next().map(|pxs| pxs.mat) => Some(earth.into()), "the cleared Earth becomes one zero-velocity PXS");
     }
 
     #[test]

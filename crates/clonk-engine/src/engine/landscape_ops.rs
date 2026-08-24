@@ -1266,6 +1266,19 @@ impl Engine {
             .and_then(|landscape| landscape.border_material_at(x, y))
     }
 
+    /// `MatValid` for a raw `C4PXS::Mat` (C4Wrappers.h:100-103): inside
+    /// `[0, Material.Num - 1]`. A slot may legitimately hold something else
+    /// between the write that put it there and the Execute guard that reads
+    /// it, so this answers `None` rather than refusing to represent it.
+    pub(crate) fn pxs_material_id(&self, mat: pxs::PxsMaterial) -> Option<MaterialId> {
+        mat.id()
+            .filter(|id| self.materials.get_by_id(*id).is_some())
+    }
+
+    fn pxs_material(&self, mat: pxs::PxsMaterial) -> Option<&crate::material::Material> {
+        mat.id().and_then(|id| self.materials.get_by_id(id))
+    }
+
     /// `C4PXS::Execute` (C4PXS.cpp:28-127). Returns the surviving PXS, or
     /// `None` when it deactivates.
     pub(crate) fn execute_pxs(&mut self, pixel: pxs::Pxs) -> Option<pxs::Pxs> {
@@ -1280,7 +1293,7 @@ impl Engine {
         if (17..=19).contains(&self.frame) && std::env::var("LC_RUST_RNG_TRACE").is_ok() {
             crate::rng::rng_trace_line(&format!(
                 "PXS {} {} {} {} {} {}",
-                pixel.mat.index(),
+                pixel.mat.raw(),
                 fixtoi_prec(pixel.x, 256),
                 fixtoi_prec(pixel.y, 256),
                 fixtoi_prec(pixel.xdir, 256),
@@ -1288,8 +1301,10 @@ impl Engine {
                 self.frame
             ));
         }
-        // Safety (C4PXS.cpp:40-43)
-        if self.materials.get_by_id(pixel.mat).is_none() {
+        // Safety: MatValid(Mat) (C4PXS.cpp:46-50; C4Wrappers.h:100-103). A
+        // raw index Load or a script reaction stored survives in the slot
+        // until exactly here.
+        if self.pxs_material(pixel.mat).is_none() {
             return Err(pixel);
         }
         // Out of bounds (C4PXS.cpp:45-49)
@@ -1310,7 +1325,7 @@ impl Engine {
         let mut iy = fixtoi(pixel.y);
         let inmat = self.landscape_material(ix, iy);
         let reaction = self.materials.reaction_for_event(
-            Some(pixel.mat),
+            self.pxs_material_id(pixel.mat),
             inmat,
             MaterialInteractionEvent::PxsPos,
         );
@@ -1337,7 +1352,7 @@ impl Engine {
         // mrfConvert and mrfScript may replace it, and C++ reads the density
         // and WindDrift from that replacement for this same tick
         // (C4PXS.cpp:59-80; C4Material.cpp:643-649, 822-832).
-        let Some(material) = self.materials.get_by_id(pixel.mat) else {
+        let Some(material) = self.pxs_material(pixel.mat) else {
             return Err(pixel);
         };
         let density = material.density();
@@ -1389,7 +1404,7 @@ impl Engine {
             let in_y = iy + (ito_y - iy).signum();
             let inmat = self.landscape_material(in_x, in_y);
             let reaction = self.materials.reaction_for_event(
-                Some(pixel.mat),
+                self.pxs_material_id(pixel.mat),
                 inmat,
                 MaterialInteractionEvent::PxsMove,
             );
@@ -1445,6 +1460,13 @@ impl Engine {
         event: MaterialInteractionEvent,
         pos_changed: &mut bool,
     ) -> bool {
+        // Every reaction below reads the PXS material as a live map entry.
+        // An earlier reaction in this same Execute may have written a raw
+        // index back (C4Material.cpp:822); C++ then indexes its map out of
+        // range, so answer the guard's verdict — deactivate — instead.
+        let Some(pxs_mat) = self.pxs_material_id(pixel.mat) else {
+            return true;
+        };
         // mrfUserCheck (C4Material.cpp:612-625): user-defined reactions do
         // the splash/slide check up front, gated on CheckSlide; the ExecMask
         // gate was applied when the reaction table was built.
@@ -1456,7 +1478,7 @@ impl Engine {
                 y,
                 &mut pixel.xdir,
                 &mut pixel.ydir,
-                pixel.mat,
+                pxs_mat,
                 ls_mat,
                 pos_changed,
             )
@@ -1481,7 +1503,7 @@ impl Engine {
                 }
                 match target.filter(|id| self.materials.get_by_id(*id).is_some()) {
                     Some(target) => {
-                        pixel.mat = target;
+                        pixel.mat = target.into();
                         pixel.xdir = C4Fixed::ZERO;
                         pixel.ydir = C4Fixed::ZERO;
                         *pos_changed = true;
@@ -1502,7 +1524,7 @@ impl Engine {
                         y,
                         &mut pixel.xdir,
                         &mut pixel.ydir,
-                        pixel.mat,
+                        pxs_mat,
                         ls_mat,
                         pos_changed,
                     )
@@ -1545,7 +1567,7 @@ impl Engine {
                         y,
                         &mut pixel.xdir,
                         &mut pixel.ydir,
-                        pixel.mat,
+                        pxs_mat,
                         ls_mat,
                         pos_changed,
                     )
@@ -1589,7 +1611,7 @@ impl Engine {
                 } else {
                     // Else: dead. C++ routes through the full InsertMaterial
                     // slide/reaction/thrust path (C4Material.cpp:737-740).
-                    let _ = self.insert_material(pixel.mat, *x, *y, 0, 0);
+                    let _ = self.insert_material(pxs_mat, *x, *y, 0, 0);
                 }
                 true
             }
@@ -1601,7 +1623,7 @@ impl Engine {
                         y,
                         &mut pixel.xdir,
                         &mut pixel.ydir,
-                        pixel.mat,
+                        pxs_mat,
                         ls_mat,
                         pos_changed,
                     )
@@ -1623,7 +1645,7 @@ impl Engine {
                 if event == MaterialInteractionEvent::PxsMove {
                     // Else: dead. C++ routes through the full InsertMaterial
                     // slide/reaction/thrust path (C4Material.cpp:765-767).
-                    let _ = self.insert_material(pixel.mat, *x, *y, 0, 0);
+                    let _ = self.insert_material(pxs_mat, *x, *y, 0, 0);
                     return true;
                 }
                 false
@@ -1651,7 +1673,7 @@ impl Engine {
                     Value::Int(ls_y),
                     Value::Int(xdir1),
                     Value::Int(ydir1),
-                    Value::Int(pixel.mat.index() as i32),
+                    Value::Int(pixel.mat.raw()),
                     Value::Int(
                         ls_mat.map(|id| id.index() as i32).unwrap_or(-1), // MNone
                     ),
@@ -1669,19 +1691,10 @@ impl Engine {
                 // Write back parameters (C4Material.cpp:822-832).
                 let final_int =
                     |index: usize| finals.get(index).and_then(Value::as_c4_int).unwrap_or(0);
-                // iPxsMat writes back UNCONDITIONALLY. C++ keeps even an
-                // invalid index (the PXS dies on its next Execute via the
-                // MatValid check); MaterialId cannot hold one, so the
-                // pixel is killed here — one tick early, no sim effects.
-                let new_mat = final_int(6);
-                match usize::try_from(new_mat)
-                    .ok()
-                    .and_then(MaterialId::new)
-                    .filter(|id| self.materials.get_by_id(*id).is_some())
-                {
-                    Some(id) => pixel.mat = id,
-                    None => return true,
-                }
+                // iPxsMat writes back UNCONDITIONALLY (C4Material.cpp:822),
+                // whatever the reaction returned. The slot keeps that raw
+                // index; the MatValid guard is what rejects an invalid one.
+                pixel.mat = pxs::PxsMaterial::from_raw(final_int(6));
                 let (x2, y2) = (final_int(0), final_int(1));
                 let (xdir2, ydir2) = (final_int(4), final_int(5));
                 if *x != x2 || *y != y2 || xdir1 != xdir2 || ydir1 != ydir2 {
@@ -1706,7 +1719,7 @@ impl Engine {
                         y,
                         &mut pixel.xdir,
                         &mut pixel.ydir,
-                        pixel.mat,
+                        pxs_mat,
                         ls_mat,
                         pos_changed,
                     )
@@ -1716,7 +1729,7 @@ impl Engine {
                 }
                 // Else: dead. Insert material here (C4Material.cpp:789 →
                 // C4Landscape::InsertMaterial full port)
-                let (ix, iy, mat) = (*x, *y, pixel.mat);
+                let (ix, iy, mat) = (*x, *y, pxs_mat);
                 self.insert_material(mat, ix, iy, 0, 0);
                 true
             }
@@ -2000,7 +2013,7 @@ impl Engine {
         );
         if !matches!(reaction.kind, MaterialReactionKind::None) || reaction.user_defined {
             let mut probe = pxs::Pxs {
-                mat,
+                mat: mat.into(),
                 x: itofix(tx),
                 y: itofix(ty),
                 xdir: fixed10(vx),
@@ -2028,7 +2041,10 @@ impl Engine {
             // applied before the dead-pixel SetPix (C4Landscape.cpp:1198-1218).
             tx = rx;
             ty = ry;
-            mat = probe.mat;
+            // mrfScript may have written a raw index back. C++ carries it
+            // into the insert and indexes its material map with it; keep the
+            // last representable one rather than repeating that read.
+            mat = self.pxs_material_id(probe.mat).unwrap_or(mat);
         }
         // Insert dead material, keeping the current pixel's IFT. C++ only
         // captures and re-inserts the displaced material when the runtime

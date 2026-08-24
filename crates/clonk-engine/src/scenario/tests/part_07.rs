@@ -2032,7 +2032,7 @@
         let pixel = engine
             .pxs_system
             .peek_slot(0, 3).test_value();
-        assert_eq!(pixel.mat.index(), 0);
+        assert_eq!(pixel.mat.raw(), 0);
         assert_eq!(
             [
                 pixel.x.val(),

@@ -337,7 +337,7 @@ impl Engine {
     pub fn clear_landscape(&mut self) {
         self.landscape = None;
         self.sectors = None;
-        self.pxs_system.clear();
+        self.pxs_system.reset_to_default();
     }
 
     pub(crate) fn load_scenario_landscape_systems(
@@ -347,7 +347,7 @@ impl Engine {
     ) {
         match &systems.pxs {
             Some(pxs) => self.pxs_system = pxs.clone(),
-            None if clear_missing => self.pxs_system.clear(),
+            None if clear_missing => self.pxs_system.reset_to_default(),
             None => {}
         }
         match &systems.mass_movers {

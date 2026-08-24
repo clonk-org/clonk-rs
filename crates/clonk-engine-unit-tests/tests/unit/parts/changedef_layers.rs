@@ -214,7 +214,7 @@ fn presentation_snapshot_preserves_pxs_chunk_slot_identity() {
         0,
         417,
         clonk_engine::pxs::Pxs {
-            mat: snow,
+            mat: snow.into(),
             x: math::itofix(12),
             y: math::itofix(34),
             xdir: C4Fixed::ZERO,

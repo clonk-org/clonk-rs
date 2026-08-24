@@ -135,7 +135,7 @@ fn run_depth_conversion(engine: &mut Engine, source_name: &str) -> (MaterialId, 
         MaterialInteractionEvent::PxsPos,
     );
     let mut pixel = pxs::Pxs {
-        mat: source,
+        mat: source.into(),
         x: itofix(0),
         y: itofix(2),
         xdir: itofix(1),
@@ -154,7 +154,13 @@ fn run_depth_conversion(engine: &mut Engine, source_name: &str) -> (MaterialId, 
         MaterialInteractionEvent::PxsPos,
         &mut pos_changed,
     ));
-    (pixel.mat, pos_changed)
+    (
+        pixel
+            .mat
+            .id()
+            .expect("fixture material stays representable"),
+        pos_changed,
+    )
 }
 
 #[test]

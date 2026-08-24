@@ -2415,8 +2415,10 @@ fn system_particle_snapshot(particle: &particles::Particle) -> ParticleSnapshot 
 /// each graphical phase and size from the slot within its 500-entry chunk
 /// (C4PXS.cpp:285-304).
 fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet, slot: Option<u32>) -> ParticleSnapshot {
-    let definition_id = materials
-        .get_by_id(pxs.mat)
+    let definition_id = pxs
+        .mat
+        .id()
+        .and_then(|mat| materials.get_by_id(mat))
         .map(|material| format!("material/pxs/{}", material.normalized_name()))
         .unwrap_or_else(|| "material/pxs/unknown".to_string());
     ParticleSnapshot {
@@ -2425,7 +2427,7 @@ fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet, slot: Option<u32>) -> P
         velocity: FloatVector2::new(math::fixtof(pxs.xdir), math::fixtof(pxs.ydir)),
         life: 0,
         parameter_a: 0.0,
-        parameter_b: pxs.mat.index() as i32,
+        parameter_b: pxs.mat.raw(),
         layer: ParticleLayer::Global,
         pxs_fixed: Some([pxs.x.val(), pxs.y.val(), pxs.xdir.val(), pxs.ydir.val()]),
         pxs_slot: slot,
