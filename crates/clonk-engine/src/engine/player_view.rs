@@ -607,8 +607,15 @@ impl Engine {
             .with_position(Vector2::new(x.max(0), y))
             .with_fixed_velocity(FixedVec2::new(xdir, ydir))
             .with_rotation_velocity(rdir);
-        let meteor_id = match self.spawn_object(config) {
-            Ok(id) => id,
+        // C4Weather::Execute reaches the meteor through Game.CreateObject
+        // (C4Weather.cpp:116-120), which runs the full creation lifecycle.
+        // That matters for the synchronized ledger, not just for state:
+        // METO's only action carries StartCall=SmokeTrail, and its script
+        // reaches that action from Completion, so a raw spawn silently skips
+        // every draw SmokeTrail makes (clonk-org/clonk-rs#1085).
+        let meteor_id = match self.spawn_object_with_initial_lifecycle(config, None) {
+            Ok(Some(id)) => id,
+            Ok(None) => return Ok(false),
             Err(EngineError::UnknownDefinition(_)) => return Ok(false),
             Err(err) => return Err(err),
         };
