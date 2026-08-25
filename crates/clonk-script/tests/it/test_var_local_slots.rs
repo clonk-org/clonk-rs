@@ -9,9 +9,13 @@
 //   - `C4ValueList::GetItem` (C4ValueList.cpp:50) clamps a negative index to 0 and
 //     auto-extends (nil-filled) for indices past the end.
 //
-// These tests pin the separateness, round-trip, auto-extend, and negative-index
-// clamping. The first few confirm the existing Rust behavior is already faithful;
-// the negative-index ones expose the one VM divergence (distinct `__var_-1` key).
+// The two accessors differ on a NEGATIVE index, and only `Var` reaches the
+// clamp: `FnVar` indexes `NumVars` directly, while `FnLocal` returns
+// `C4VNull` first (`if (iIndex < 0) return C4VNull;`, C4Script.cpp:3421), so
+// `Local(-1)` never aliases `Local(0)`.
+//
+// These tests pin the separateness, round-trip, auto-extend, and the two
+// different negative-index rules.
 
 use clonk_script::{Engine, Value};
 use std::collections::HashMap;
@@ -35,8 +39,24 @@ eval_cases! {
     // C4ValueList::GetItem clamps index < 0 to 0, so Var(-1) aliases Var(0).
     negative_var_index_clamps_to_zero:
         "func Test() { Var(0) = 42; return Var(-1); }" => Value::Int(42);
-    negative_local_index_clamps_to_zero:
-        "func Test() { Local(0) = 8; return Local(-1); }" => Value::Int(8);
+    // FnLocal returns C4VNull before the C4ValueList clamp can apply
+    // (C4Script.cpp:3421), so a negative index reads nil rather than slot 0.
+    // Objects.c4d/Environment.c4d/Glint.c4d depends on this: it keys a lookup
+    // table by material index and probes it with GetMaterial, which returns -1
+    // for sky. Aliasing slot 0 there made the port sparkle where C++ does not
+    // and consumed synchronized Random() draws (clonk-org/clonk-rs#1066).
+    negative_local_index_reads_nil:
+        "func Test() { Local(0) = 8; return Local(-1); }" => Value::Nil;
+    // The shape Glint actually uses: the table lookup is a CONDITION, so a
+    // clamped -1 silently took the branch keyed at slot 0.
+    negative_local_index_is_falsy_in_a_condition:
+        // Sentinels are both non-zero: a literal 0 folds to nil below
+        // strict 3 and would mask the branch under test.
+        "func Test() { Local(0) = 3; if (Local(-1)) { return 1; } return 2; }"
+            => Value::Int(2);
+    // A write through a negative index must not reach slot 0 either.
+    negative_local_index_write_does_not_touch_slot_zero:
+        "func Test() { Local(0) = 5; Local(-1) = 9; return Local(0); }" => Value::Int(5);
 
     // Var/Local slots are function-scoped, not block-scoped (C++ NumVars/Local are
     // flat per-call/object arrays), so a write inside a block persists after it.
