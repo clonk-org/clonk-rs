@@ -967,9 +967,14 @@ pub(crate) fn get_wind(args: &[Value]) -> Result<Value, RuntimeError> {
             global_x = global_x.saturating_add(position.x);
             global_y = global_y.saturating_add(position.y);
         }
+        // GBackIFT is the IFT bit in the pixel byte, which is what
+        // `is_ift_at` reads; `is_tunnel_at` consults only the synthetic
+        // tunnel-range map and never the grid, so it answered false on every
+        // loaded landscape (clonk-org/clonk-rs#1141). The engine-side
+        // `wind_at` already uses `is_ift_at`.
         let in_tunnel = context
             .landscape_ref()
-            .map(|landscape| landscape.is_tunnel_at(global_x, global_y))
+            .map(|landscape| landscape.is_ift_at(global_x, global_y))
             .unwrap_or(false);
         Ok(Value::Int(if in_tunnel { 0 } else { wind }))
     })
