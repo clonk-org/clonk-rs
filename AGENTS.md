@@ -380,7 +380,11 @@ Without that, `-DUSE_RUST_ENGINE_VALIDATION` links the Rust snapshot bundled at
 the pinned commit rather than your tree — and as shipped it does not configure
 at all, because the pinned `CMakeLists.txt` carries a stray `0x08` byte in the
 `clonk_engine_static` target name. `parity/bridge/README.md` has the details and
-the traps; the most expensive one is that an **unarmed run compares nothing and
-still looks clean**, so always pass `LC_RUST_ENGINE_RUNTIME=1`. No gate runs
-this, so it is an investigation tool, not coverage. The rest of the
+the traps; two of them silently invalidate a run. An **unarmed run compares
+nothing and still looks clean**, so always pass `LC_RUST_ENGINE_RUNTIME=1`. And
+the port resolves its install root from the **scenario path's ancestors**, so an
+absolute path inside this checkout loads the repo's `planet/System.c4g` — whose
+port-authored `#appendto` scripts the oracle never runs — and the diff reports
+content only one side was given; pass the scenario through the build tree
+instead. No gate runs this, so it is an investigation tool, not coverage. The rest of the
 `LC_RUST_ENGINE_*` env channel is live too, including seed pinning.

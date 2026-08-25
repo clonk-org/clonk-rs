@@ -65,6 +65,41 @@ LC_RUST_ENGINE_RECORD=<path> ./clonk    # C++ snapshots as JSON, for triage
 
 Divergences are reported as `Rust runtime parity mismatch: ...`.
 
+### Passing the scenario — both engines must load the same `System.c4g`
+
+The port resolves its install root by walking the **ancestors of the scenario
+path** for `planet/System.c4g` (`crates/clonk-engine/src/ffi.rs:2609`), while
+C++ resolves it from its own working directory. Pass an absolute scenario path
+inside this repository and the two engines silently load **different** system
+groups: the port picks up `planet/System.c4g` from the checkout, whose
+port-authored `#appendto` scripts (`BirdFlight.c`, `EkeAirbikeSteering.c`,
+`GatherTask.c`, `FoWReveal.c`, ... — the set the compatibility profile
+withholds, `crates/clonk-app/src/compat_readiness.rs`) never run under the
+oracle.
+
+The diff then reports content that only one side was given. It looks like a
+port defect and is not one: on `Races.c4f/Goldrace.c4s` it surfaced as
+
+```
+frame 1: ... effects rust [BirdFlight(prio 1 int 1 t 1)], cpp []
+```
+
+with the velocity and command-direction differences that `BirdFlight.c`'s own
+`SetXDir`/`SetCommand` calls produce. Scenarios that pull in no port append
+(the tutorials) are unaffected, so a sweep can be half valid.
+
+Pass the scenario **through the build tree** instead, so the ancestor walk finds
+the group C++ is using:
+
+```sh
+cd <oracle>/build-validation
+printf '/open %s/Races.c4f/Goldrace.c4s %s/Tyler.c4p\n' "$PWD" "$PWD" \
+  | LC_RUST_ENGINE_RUNTIME=1 ./clonk
+```
+
+Comparing an install-root-sensitive scenario any other way is not a parity
+result.
+
 ## What is and is not wired
 
 The loop runs. On Tutorial01 with a fresh player it reports exactly one
