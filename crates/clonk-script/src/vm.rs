@@ -1,12 +1,11 @@
 use rustc_hash::FxHashMap;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use indexmap::IndexMap;
 use smallvec::SmallVec;
 
 use crate::ast::{
@@ -15,8 +14,8 @@ use crate::ast::{
 };
 use crate::debugger::DebuggerHooks;
 use crate::engine::{
-    EvalDirectExecHook, GlobalCallContextHook, HostFunction, HostReferenceFunction,
-    RegisteredHostFunction,
+    EvalDirectExecHook, GlobalCallContextHook, GlobalSlots, GlobalVariables, HostFunction,
+    HostReferenceFunction, RegisteredHostFunction,
 };
 use crate::error::{RuntimeCallFrame, RuntimeError};
 use crate::lookup_profile;
@@ -97,6 +96,12 @@ thread_local! {
     static ACTIVE_OBJECT_REFERENCE_CELLS: RefCell<Vec<Vec<Weak<RefCell<Value>>>>> = const {
         RefCell::new(Vec::new())
     };
+    /// Shared object/global tables already discovered by an active frame.
+    /// Entries retain their `Rc` owners so allocator address reuse cannot make
+    /// a later, distinct table look registered.
+    static ACTIVE_OBJECT_REFERENCE_TABLES: RefCell<Option<ActiveObjectReferenceTables>> = const {
+        RefCell::new(None)
+    };
     /// Ordered AssignRemoval events observed during the current re-entrant VM
     /// execution. Plain Rust temporaries that cannot be registered as cells
     /// replay only events occurring after they were evaluated.
@@ -121,6 +126,8 @@ thread_local! {
     static DIAGNOSTIC_FRAME_STRING_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static OBJECT_REFERENCE_TABLE_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static GENERIC_HOST_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
@@ -171,6 +178,7 @@ test_counter_accessors! {
     fn reset_diagnostic_object_formatter_calls, diagnostic_object_formatter_calls => DIAGNOSTIC_OBJECT_FORMATTER_CALLS;
     fn reset_diagnostic_frame_string_allocations, diagnostic_frame_string_allocations => DIAGNOSTIC_FRAME_STRING_ALLOCATIONS;
     fn reset_runtime_container_registration_traversals, runtime_container_registration_traversals => RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS;
+    fn reset_object_reference_table_traversals, object_reference_table_traversals => OBJECT_REFERENCE_TABLE_TRAVERSALS;
     fn reset_generic_host_resolutions, generic_host_resolutions => GENERIC_HOST_RESOLUTIONS;
     fn reset_direct_binding_allocations, direct_binding_allocations => DIRECT_BINDING_ALLOCATIONS;
     fn reset_nested_generic_script_resolutions, nested_generic_script_resolutions => NESTED_GENERIC_SCRIPT_RESOLUTIONS;
@@ -358,6 +366,16 @@ pub fn value_cell(value: Value) -> ValueCell {
     cell
 }
 
+fn register_shared_object_reference_cells(cells: impl IntoIterator<Item = Weak<RefCell<Value>>>) {
+    ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
+        frames
+            .borrow_mut()
+            .first_mut()
+            .expect("shared-table discovery runs inside a reference guard")
+            .extend(cells);
+    });
+}
+
 /// Clear one object's references from every active C4Aul value cell, like
 /// AssignRemoval's `while (FirstRef) FirstRef->Set0()` (C4Object.cpp:312).
 #[doc(hidden)]
@@ -445,6 +463,29 @@ fn object_target_id(value: &Value) -> Option<u64> {
 struct ObjectState {
     named_locals: NamedLocalMap,
     local_slots: SlotMap,
+}
+
+#[derive(Default)]
+struct ActiveObjectReferenceTables {
+    object_states: SmallVec<[(ObjectState, usize); 4]>,
+}
+
+impl ActiveObjectReferenceTables {
+    fn register_object_state(&mut self, state: &ObjectState, depth: usize) -> bool {
+        if self.object_states.iter().any(|(registered, _)| {
+            Rc::ptr_eq(&registered.named_locals, &state.named_locals)
+                && Rc::ptr_eq(&registered.local_slots, &state.local_slots)
+        }) {
+            return false;
+        }
+        self.object_states.push((state.clone(), depth));
+        true
+    }
+
+    fn leave_depth(&mut self, depth: usize) {
+        self.object_states
+            .retain(|(_, registered_depth)| *registered_depth != depth);
+    }
 }
 
 impl ObjectState {
@@ -2323,27 +2364,45 @@ struct ActiveObjectReferenceCellsGuard {
 }
 
 impl ActiveObjectReferenceCellsGuard {
-    fn enter(cells: Vec<Weak<RefCell<Value>>>) -> Self {
+    fn enter(env: &Environment, vm: &Vm<'_>) -> Self {
         let outermost = ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
             let mut frames = frames.borrow_mut();
             let outermost = frames.is_empty();
-            frames.push(cells);
+            frames.push(Vec::new());
             outermost
         });
         if outermost {
             ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow_mut().clear());
+            ACTIVE_OBJECT_REFERENCE_TABLES
+                .with(|tables| *tables.borrow_mut() = Some(ActiveObjectReferenceTables::default()));
         }
-        Self { outermost }
+        let guard = Self { outermost };
+        let cells = env.object_reference_cells(vm);
+        ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
+            frames
+                .borrow_mut()
+                .last_mut()
+                .expect("the reference guard frame was just installed")
+                .extend(cells);
+        });
+        guard
     }
 }
 
 impl Drop for ActiveObjectReferenceCellsGuard {
     fn drop(&mut self) {
+        let depth = ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| frames.borrow().len());
+        ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| {
+            if let Some(tables) = tables.borrow_mut().as_mut() {
+                tables.leave_depth(depth);
+            }
+        });
         ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
             frames.borrow_mut().pop();
         });
         if self.outermost {
             ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow_mut().clear());
+            ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| *tables.borrow_mut() = None);
         }
     }
 }
@@ -3473,13 +3532,13 @@ pub struct Vm<'a> {
     retain_global_call_context_for_host_paths: bool,
     /// The engine-global `static` table (GlobalNamed); resolved after
     /// locals, before global constants (C4AulParse.cpp:2836-2839).
-    globals_named: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
+    globals_named: Option<&'a GlobalVariables>,
     /// The engine-global numbered-variable table (`C4AulScriptEngine::Global`).
-    globals_numbered: Option<&'a std::cell::RefCell<BTreeMap<i32, ValueCell>>>,
+    globals_numbered: Option<&'a GlobalSlots>,
     /// The engine-global `static const` registry (GetGlobalConstant,
     /// C4Aul.cpp:494): script-declared constants shared across hosts,
     /// resolvable via the pre-#strict-2 `NAME()` call idiom.
-    globals_consts: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
+    globals_consts: Option<&'a GlobalVariables>,
     /// Cross-object LocalN cell supplier (crate::engine::LocalCellHook).
     local_cell_hook: Option<&'a crate::engine::LocalCellHook>,
     /// Embedding-world receiver check used before every nonzero Object
@@ -3711,28 +3770,19 @@ impl<'a> Vm<'a> {
         self
     }
 
-    pub fn with_global_variables(
-        mut self,
-        table: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
-    ) -> Self {
+    pub fn with_global_variables(mut self, table: Option<&'a GlobalVariables>) -> Self {
         self.globals_named = table;
         self
     }
 
-    pub fn with_global_slots(
-        mut self,
-        table: Option<&'a std::cell::RefCell<BTreeMap<i32, ValueCell>>>,
-    ) -> Self {
+    pub fn with_global_slots(mut self, table: Option<&'a GlobalSlots>) -> Self {
         self.globals_numbered = table;
         self
     }
 
     /// Attach the engine-global `static const` registry (GetGlobalConstant,
     /// C4Aul.cpp:494) consulted by the old-style constant-call idiom.
-    pub fn with_global_constants(
-        mut self,
-        table: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
-    ) -> Self {
+    pub fn with_global_constants(mut self, table: Option<&'a GlobalVariables>) -> Self {
         self.globals_consts = table;
         self
     }
@@ -4294,8 +4344,7 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
-        let _object_reference_cells =
-            ActiveObjectReferenceCellsGuard::enter(env.object_reference_cells(self));
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter(&env, self);
         let value = self.evaluate(&expr, &mut env, 0)?;
         if let Some(diagnostic) = &mut diagnostic {
             diagnostic.returned(&value);
@@ -4341,8 +4390,7 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
-        let _object_reference_cells =
-            ActiveObjectReferenceCellsGuard::enter(env.object_reference_cells(self));
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter(&env, self);
         let value = self.evaluate(&expr, &mut env, 0)?;
         if let Some(diagnostic) = &mut diagnostic {
             diagnostic.returned(&value);
@@ -4380,8 +4428,7 @@ impl<'a> Vm<'a> {
                 env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
             }
         }
-        let _object_reference_cells =
-            ActiveObjectReferenceCellsGuard::enter(env.object_reference_cells(self));
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter(&env, self);
         let value = self.evaluate(&expr, &mut env, depth)?;
         diagnostic.returned(&value);
         Ok(value)
@@ -4949,10 +4996,10 @@ impl<'a> Vm<'a> {
             .fold(0_u16, |mask, (index, arg)| {
                 mask | (u16::from(matches!(arg, CallArg::Reference(_))) << index)
             });
-        let compiled = function
+        let compiled_cache = function
             .compiled
-            .get_or_init(|| CompiledFunctionCache::new(function))
-            .validated(function, target.validate_compiled_source);
+            .get_or_init(|| CompiledFunctionCache::new(function));
+        let compiled = compiled_cache.validated(function, target.validate_compiled_source);
         let mut env = Environment::new_with_params(
             &function.params,
             &args,
@@ -5061,24 +5108,29 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
-        let _object_reference_cells =
-            ActiveObjectReferenceCellsGuard::enter(env.object_reference_cells(self));
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter(&env, self);
 
         let result = if let Some(compiled) = compiled {
             match compiled.execute(self, &env, depth)? {
                 Some(result) => {
+                    crate::execution_profile::record_compiled();
                     #[cfg(test)]
                     COMPILED_FUNCTION_EXECUTIONS.with(|count| count.set(count.get() + 1));
                     result
                 }
-                None => self.execute_statements(
-                    &function.body,
-                    &mut env,
-                    depth,
-                    function.returns_reference,
-                )?,
+                None => {
+                    crate::execution_profile::record_ast_after_runtime_guard();
+                    self.execute_statements(
+                        &function.body,
+                        &mut env,
+                        depth,
+                        function.returns_reference,
+                    )?
+                }
             }
         } else {
+            #[cfg(any(test, feature = "execution-profile"))]
+            crate::execution_profile::record_ast_without_plan(&compiled_cache.fallback_reasons);
             self.execute_statements(&function.body, &mut env, depth, function.returns_reference)?
         };
         let value = match result {
@@ -10584,7 +10636,13 @@ enum CompiledInstruction {
         slot: usize,
         segments: Vec<CompiledPathSegment>,
     },
+    BeginAssignment(usize),
     Store(usize),
+    StoreAssignment(usize),
+    StoreKeep {
+        slot: usize,
+        copy_result: bool,
+    },
     Unary(UnaryOp),
     Binary(BinaryOp),
     CompoundStore {
@@ -10641,16 +10699,27 @@ pub(crate) struct CompiledFunctionCache {
     strict_level: Option<u8>,
     returns_reference: bool,
     compiled: Option<Arc<CompiledFunction>>,
+    #[cfg(any(test, feature = "execution-profile"))]
+    fallback_reasons: SmallVec<[crate::execution_profile::AstFallbackReason; 4]>,
 }
 
 impl CompiledFunctionCache {
     fn new(function: &Function) -> Self {
+        let compiled = CompiledFunction::compile(function).map(Arc::new);
+        #[cfg(any(test, feature = "execution-profile"))]
+        let fallback_reasons = if compiled.is_none() {
+            compiled_fallback_reasons(function)
+        } else {
+            SmallVec::new()
+        };
         Self {
             params: function.params.clone(),
             body: function.body.clone(),
             strict_level: function.strict_level,
             returns_reference: function.returns_reference,
-            compiled: CompiledFunction::compile(function).map(Arc::new),
+            compiled,
+            #[cfg(any(test, feature = "execution-profile"))]
+            fallback_reasons,
         }
     }
 
@@ -10667,6 +10736,227 @@ impl CompiledFunctionCache {
             .then_some(self.compiled.as_deref())
             .flatten()
     }
+}
+
+#[cfg(any(test, feature = "execution-profile"))]
+fn compiled_fallback_reasons(
+    function: &Function,
+) -> SmallVec<[crate::execution_profile::AstFallbackReason; 4]> {
+    use crate::execution_profile::AstFallbackReason as Reason;
+
+    fn insert(reasons: &mut SmallVec<[Reason; 4]>, reason: Reason) {
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    }
+
+    fn expression(reasons: &mut SmallVec<[Reason; 4]>, expr: &Expr, discarded: bool) {
+        match expr {
+            Expr::Literal(_) | Expr::Variable(_) => {}
+            Expr::This => insert(reasons, Reason::SpecialOrForwardedCall),
+            Expr::Unary(_, value) => expression(reasons, value, false),
+            Expr::Binary(left, operation, right) => {
+                if matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing) {
+                    insert(reasons, Reason::UnsupportedOperator);
+                }
+                expression(reasons, left, false);
+                expression(reasons, right, false);
+            }
+            Expr::Call {
+                callee,
+                args,
+                is_optional,
+                forward_rest,
+            } => {
+                match callee.as_ref() {
+                    Expr::Variable(name)
+                        if !is_optional
+                            && !forward_rest
+                            && !matches!(
+                                name.as_str(),
+                                "inherited"
+                                    | "_inherited"
+                                    | "this"
+                                    | "Par"
+                                    | "SetLocal"
+                                    | "SetGlobal"
+                            ) => {}
+                    Expr::Variable(_) => insert(reasons, Reason::SpecialOrForwardedCall),
+                    _ => insert(reasons, Reason::MethodOrOptionalCall),
+                }
+                for arg in args {
+                    expression(reasons, arg, false);
+                }
+            }
+            Expr::LegacyParameterList { args, forward_rest } => {
+                if *forward_rest || args.len() != 1 {
+                    insert(reasons, Reason::LegacyOrGlobalCall);
+                }
+                for arg in args {
+                    expression(reasons, arg, false);
+                }
+            }
+            Expr::GlobalCall { args, .. } => {
+                insert(reasons, Reason::LegacyOrGlobalCall);
+                for arg in args {
+                    expression(reasons, arg, false);
+                }
+            }
+            Expr::Array(elements) => {
+                for element in elements {
+                    expression(reasons, element, false);
+                }
+            }
+            Expr::Proplist(entries) => {
+                for (key, value) in entries {
+                    expression(reasons, key, false);
+                    expression(reasons, value, false);
+                }
+            }
+            Expr::Index(base, index) => {
+                expression(reasons, base, false);
+                if let IndexOperand::Dynamic(index) = index {
+                    if !matches!(index.as_ref(), Expr::Literal(_)) {
+                        insert(reasons, Reason::DynamicIndex);
+                    }
+                    expression(reasons, index, false);
+                }
+            }
+            Expr::Property(base, _) => expression(reasons, base, false),
+            Expr::PreIncrement(value)
+            | Expr::PostIncrement(value)
+            | Expr::PreDecrement(value)
+            | Expr::PostDecrement(value) => {
+                let supported_discard = discarded && matches!(value.as_ref(), Expr::Variable(_));
+                let supported_effect = matches!(
+                    value.as_ref(),
+                    Expr::Call {
+                        callee,
+                        is_optional: false,
+                        forward_rest: false,
+                        ..
+                    } if matches!(callee.as_ref(), Expr::Variable(name) if name == "EffectVar")
+                );
+                if !supported_discard && !supported_effect {
+                    insert(reasons, Reason::ComplexAssignment);
+                }
+            }
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                value,
+                ..
+            } => {
+                if !discarded
+                    || !matches!(target, AssignmentTarget::Variable(_))
+                    || matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing)
+                {
+                    insert(reasons, Reason::ComplexAssignment);
+                }
+                expression(reasons, value, false);
+            }
+            Expr::Assignment(target, value) => {
+                if !matches!(target, AssignmentTarget::Variable(_)) {
+                    insert(reasons, Reason::ComplexAssignment);
+                }
+                expression(reasons, value, false);
+            }
+            Expr::ArrayAppend(_)
+            | Expr::ArrayAppendAssignment { .. }
+            | Expr::SafeNavigation { .. } => insert(reasons, Reason::ComplexAssignment),
+        }
+    }
+
+    fn statements(reasons: &mut SmallVec<[Reason; 4]>, body: &[Stmt]) {
+        for statement in body {
+            match statement {
+                Stmt::ParseError { .. } => insert(reasons, Reason::ParseError),
+                Stmt::VarDecl { init, .. } => {
+                    if let Some(init) = init {
+                        expression(reasons, init, false);
+                    }
+                }
+                Stmt::Assignment { target, value } => {
+                    if !matches!(target, AssignmentTarget::Variable(_)) {
+                        insert(reasons, Reason::ComplexAssignment);
+                    }
+                    expression(reasons, value, false);
+                }
+                Stmt::LegacyGoto {
+                    call,
+                    expression: full,
+                } => {
+                    insert(reasons, Reason::LegacyOrGlobalCall);
+                    expression(reasons, call, false);
+                    expression(reasons, full, false);
+                }
+                Stmt::Return(value) => {
+                    if let Some(value) = value {
+                        expression(reasons, value, false);
+                    }
+                }
+                Stmt::Break | Stmt::Continue => insert(reasons, Reason::LoopControl),
+                Stmt::Expr(expr) => expression(reasons, expr, true),
+                Stmt::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    expression(reasons, condition, false);
+                    statements(reasons, then_branch);
+                    if let Some(else_branch) = else_branch {
+                        statements(reasons, else_branch);
+                    }
+                }
+                Stmt::While { condition, body } => {
+                    expression(reasons, condition, false);
+                    statements(reasons, body);
+                }
+                Stmt::For {
+                    init,
+                    condition,
+                    increment,
+                    body,
+                } => {
+                    if let Some(init) = init {
+                        match init {
+                            ForInit::VarDecls(declarations) => {
+                                for (_, value) in declarations {
+                                    if let Some(value) = value {
+                                        expression(reasons, value, false);
+                                    }
+                                }
+                            }
+                            ForInit::Expr(expr) => expression(reasons, expr, true),
+                        }
+                    }
+                    if let Some(condition) = condition {
+                        expression(reasons, condition, false);
+                    }
+                    if let Some(increment) = increment {
+                        expression(reasons, increment, true);
+                    }
+                    statements(reasons, body);
+                }
+                Stmt::ForIn { iterable, body, .. } => {
+                    insert(reasons, Reason::Foreach);
+                    expression(reasons, iterable, false);
+                    statements(reasons, body);
+                }
+                Stmt::Block(body) | Stmt::Sequence(body) => statements(reasons, body),
+            }
+        }
+    }
+
+    let mut reasons = SmallVec::new();
+    if function.returns_reference || function.params.iter().any(|param| param.is_reference) {
+        insert(&mut reasons, Reason::ReferenceSignature);
+    }
+    statements(&mut reasons, &function.body);
+    if reasons.is_empty() {
+        reasons.push(Reason::Other);
+    }
+    reasons
 }
 
 struct CompiledFunctionBuilder {
@@ -10956,15 +11246,124 @@ impl CompiledFunctionBuilder {
             }
             Expr::Proplist(entries) => {
                 for (key, value) in entries {
-                    self.compile_expression(key)?;
-                    self.compile_expression(value)?;
+                    self.compile_set_no_ref_expression(key)?;
+                    self.compile_set_no_ref_expression(value)?;
                 }
                 self.collection_instruction(
                     entries.len().checked_mul(2)?,
                     CompiledInstruction::MakeProplist(entries.len()),
                 )?;
             }
+            Expr::Assignment(AssignmentTarget::Variable(name), value) => {
+                self.compile_assignment_expression(name, value, false)?;
+            }
             _ => return None,
+        }
+        Some(())
+    }
+
+    fn compile_set_no_ref_expression(&mut self, expression: &Expr) -> Option<()> {
+        match expression {
+            Expr::Assignment(AssignmentTarget::Variable(name), value) => {
+                self.compile_assignment_expression(name, value, true)
+            }
+            Expr::Binary(left, operation @ (BinaryOp::And | BinaryOp::Or), right)
+                if self.strict_level.unwrap_or(0) >= 2 =>
+            {
+                self.compile_set_no_ref_expression(left)?;
+                let short_circuit = self.instructions.len();
+                self.instructions.push(match operation {
+                    BinaryOp::And => CompiledInstruction::JumpAnd(usize::MAX),
+                    BinaryOp::Or => CompiledInstruction::JumpOr(usize::MAX),
+                    _ => unreachable!(),
+                });
+                self.stack_depth = self.stack_depth.checked_sub(1)?;
+                self.compile_set_no_ref_expression(right)?;
+                let end = self.instructions.len();
+                self.instructions[short_circuit] = match operation {
+                    BinaryOp::And => CompiledInstruction::JumpAnd(end),
+                    BinaryOp::Or => CompiledInstruction::JumpOr(end),
+                    _ => unreachable!(),
+                };
+                Some(())
+            }
+            _ => self.compile_expression(expression),
+        }
+    }
+
+    fn compile_assignment_expression(
+        &mut self,
+        name: &str,
+        value: &Expr,
+        preserve_result_reference: bool,
+    ) -> Option<()> {
+        let slot = self.bare_slot(name);
+        self.instructions
+            .push(CompiledInstruction::BeginAssignment(slot));
+        self.stack_depth += 1;
+        self.max_stack = self.max_stack.max(self.stack_depth);
+        self.compile_set_no_ref_expression(value)?;
+        self.stack_depth = self.stack_depth.checked_sub(1)?;
+        self.instructions.push(CompiledInstruction::StoreKeep {
+            slot,
+            copy_result: !preserve_result_reference,
+        });
+        Some(())
+    }
+
+    fn compile_discarded_expression(&mut self, expression: &Expr) -> Option<()> {
+        match expression {
+            Expr::Assignment(AssignmentTarget::Variable(name), value) => {
+                let slot = self.bare_slot(name);
+                self.instructions
+                    .push(CompiledInstruction::BeginAssignment(slot));
+                self.stack_depth += 1;
+                self.max_stack = self.max_stack.max(self.stack_depth);
+                self.compile_set_no_ref_expression(value)?;
+                self.stack_depth = self.stack_depth.checked_sub(2)?;
+                self.instructions
+                    .push(CompiledInstruction::StoreAssignment(slot));
+            }
+            Expr::CompoundAssignment {
+                target: AssignmentTarget::Variable(name),
+                operation,
+                operator,
+                value,
+            } if !matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing) => {
+                let slot = self.bare_slot(name);
+                self.instructions
+                    .push(CompiledInstruction::BeginAssignment(slot));
+                self.stack_depth += 1;
+                self.max_stack = self.max_stack.max(self.stack_depth);
+                self.compile_expression(value)?;
+                self.stack_depth = self.stack_depth.checked_sub(2)?;
+                self.instructions.push(CompiledInstruction::CompoundStore {
+                    slot,
+                    operation: operation.clone(),
+                    operator,
+                });
+            }
+            Expr::PreIncrement(value)
+            | Expr::PostIncrement(value)
+            | Expr::PreDecrement(value)
+            | Expr::PostDecrement(value) => {
+                let Expr::Variable(name) = value.as_ref() else {
+                    return None;
+                };
+                let delta = if matches!(expression, Expr::PreIncrement(_) | Expr::PostIncrement(_))
+                {
+                    1
+                } else {
+                    -1
+                };
+                let slot = self.bare_slot(name);
+                self.instructions
+                    .push(CompiledInstruction::IncrementSlot { slot, delta });
+            }
+            _ => {
+                self.compile_expression(expression)?;
+                self.pop_instruction(CompiledInstruction::Pop)?;
+            }
         }
         Some(())
     }
@@ -10984,9 +11383,15 @@ impl CompiledFunctionBuilder {
                     target: AssignmentTarget::Variable(name),
                     value,
                 } => {
-                    self.compile_expression(value)?;
                     let slot = self.bare_slot(name);
-                    self.pop_instruction(CompiledInstruction::Store(slot))?;
+                    self.instructions
+                        .push(CompiledInstruction::BeginAssignment(slot));
+                    self.stack_depth += 1;
+                    self.max_stack = self.max_stack.max(self.stack_depth);
+                    self.compile_set_no_ref_expression(value)?;
+                    self.stack_depth = self.stack_depth.checked_sub(2)?;
+                    self.instructions
+                        .push(CompiledInstruction::StoreAssignment(slot));
                 }
                 Stmt::Return(expression) => {
                     match expression {
@@ -11002,13 +11407,18 @@ impl CompiledFunctionBuilder {
                         operator,
                         value,
                     } if !matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing) => {
-                        self.compile_expression(value)?;
                         let slot = self.bare_slot(name);
-                        self.pop_instruction(CompiledInstruction::CompoundStore {
+                        self.instructions
+                            .push(CompiledInstruction::BeginAssignment(slot));
+                        self.stack_depth += 1;
+                        self.max_stack = self.max_stack.max(self.stack_depth);
+                        self.compile_expression(value)?;
+                        self.stack_depth = self.stack_depth.checked_sub(2)?;
+                        self.instructions.push(CompiledInstruction::CompoundStore {
                             slot,
                             operation: operation.clone(),
                             operator,
-                        })?;
+                        });
                     }
                     Expr::PreIncrement(value)
                     | Expr::PostIncrement(value)
@@ -11066,6 +11476,52 @@ impl CompiledFunctionBuilder {
                     self.instructions.push(CompiledInstruction::Jump(start));
                     let end = self.instructions.len();
                     self.instructions[end_jump] = CompiledInstruction::JumpIfFalse(end);
+                }
+                Stmt::For {
+                    init,
+                    condition,
+                    increment,
+                    body,
+                } => {
+                    if let Some(init) = init {
+                        match init {
+                            ForInit::VarDecls(declarations) => {
+                                for (name, value) in declarations {
+                                    match value {
+                                        Some(value) => self.compile_expression(value)?,
+                                        None => self.push_instruction(
+                                            CompiledInstruction::Literal(Literal::Nil),
+                                        ),
+                                    }
+                                    let slot = *self.function_var_slots.get(name)?;
+                                    self.pop_instruction(CompiledInstruction::Store(slot))?;
+                                }
+                            }
+                            ForInit::Expr(expression) => {
+                                self.compile_discarded_expression(expression)?;
+                            }
+                        }
+                    }
+
+                    let condition_start = self.instructions.len();
+                    let end_jump = if let Some(condition) = condition {
+                        self.compile_expression(condition)?;
+                        let jump = self.instructions.len();
+                        self.pop_instruction(CompiledInstruction::JumpIfFalse(usize::MAX))?;
+                        Some(jump)
+                    } else {
+                        None
+                    };
+                    self.compile_statements(body)?;
+                    if let Some(increment) = increment {
+                        self.compile_discarded_expression(increment)?;
+                    }
+                    self.instructions
+                        .push(CompiledInstruction::Jump(condition_start));
+                    if let Some(end_jump) = end_jump {
+                        let end = self.instructions.len();
+                        self.instructions[end_jump] = CompiledInstruction::JumpIfFalse(end);
+                    }
                 }
                 Stmt::Block(statements) | Stmt::Sequence(statements) => {
                     self.compile_statements(statements)?;
@@ -11504,6 +11960,8 @@ impl CompiledFunction {
         drop(profiled_prelude);
         let mut stack = SmallVec::<[TrackedValue; 16]>::with_capacity(self.max_stack);
         let mut registered_slots = SmallVec::<[bool; 16]>::from_elem(false, bindings.len());
+        let mut assignment_targets =
+            SmallVec::<[(usize, LValueRef, ValueStackReservation); 4]>::new();
         #[cfg(test)]
         if stack.spilled() {
             COMPILED_STACK_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
@@ -11576,11 +12034,50 @@ impl CompiledFunction {
                     };
                     stack.push(value);
                 }
+                CompiledInstruction::BeginAssignment(slot) => {
+                    let reference = bindings[*slot].lvalue();
+                    let stack_slot = ValueStackReservation::reserve(1)?;
+                    assignment_targets.push((*slot, reference, stack_slot));
+                }
                 CompiledInstruction::Store(slot) => {
                     let value = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
                     bindings[*slot].write_tracked(value)?;
+                    registered_slots[*slot] = true;
+                }
+                CompiledInstruction::StoreAssignment(slot) => {
+                    let value = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let (target_slot, reference, _stack_slot) =
+                        assignment_targets.pop().ok_or_else(|| {
+                            RuntimeError::new("internal compiled assignment target underflow")
+                        })?;
+                    debug_assert_eq!(target_slot, *slot);
+                    reference.write_tracked(value)?;
+                    registered_slots[*slot] = true;
+                }
+                CompiledInstruction::StoreKeep { slot, copy_result } => {
+                    let (target_slot, reference, _stack_slot) =
+                        assignment_targets.pop().ok_or_else(|| {
+                            RuntimeError::new("internal compiled assignment target underflow")
+                        })?;
+                    debug_assert_eq!(target_slot, *slot);
+                    let value = stack
+                        .last()
+                        .cloned()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    reference.write_tracked(value)?;
+                    let value = reference.read_tracked()?;
+                    *stack
+                        .last_mut()
+                        .expect("the assigned value was just read from this slot") = if *copy_result
+                    {
+                        value.set_copy()
+                    } else {
+                        value
+                    };
                     registered_slots[*slot] = true;
                 }
                 CompiledInstruction::Unary(operation) => {
@@ -11642,7 +12139,11 @@ impl CompiledFunction {
                     let right = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    let reference = bindings[*slot].lvalue();
+                    let (target_slot, reference, _stack_slot) =
+                        assignment_targets.pop().ok_or_else(|| {
+                            RuntimeError::new("internal compiled assignment target underflow")
+                        })?;
+                    debug_assert_eq!(target_slot, *slot);
                     let left = reference.read_tracked()?;
                     let value = TrackedValue::runtime(vm.eval_binary(
                         left.value,
@@ -12070,28 +12571,39 @@ impl Environment {
         for (_, binding) in &self.named_parameters {
             binding.collect_object_reference_cells(&mut cells);
         }
-        cells.extend(
-            self.object_state
-                .named_locals
-                .borrow()
-                .values()
-                .map(Rc::downgrade),
-        );
-        cells.extend(
-            self.object_state
-                .local_slots
-                .borrow()
-                .values()
-                .map(Rc::downgrade),
-        );
+        let depth = ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| frames.borrow().len());
+        let scan_object_state = ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| {
+            tables
+                .borrow_mut()
+                .as_mut()
+                .expect("the reference guard installs its table registry first")
+                .register_object_state(&self.object_state, depth)
+        });
+        if scan_object_state {
+            #[cfg(test)]
+            OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 2));
+            let named_locals = self.object_state.named_locals.borrow();
+            register_shared_object_reference_cells(named_locals.values().map(Rc::downgrade));
+            let local_slots = self.object_state.local_slots.borrow();
+            register_shared_object_reference_cells(local_slots.values().map(Rc::downgrade));
+        }
         if let Some(globals) = vm.globals_named {
-            cells.extend(globals.borrow().values().map(Rc::downgrade));
+            #[cfg(test)]
+            OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
+            let globals = globals.borrow();
+            register_shared_object_reference_cells(globals.values().map(Rc::downgrade));
         }
         if let Some(globals) = vm.globals_numbered {
-            cells.extend(globals.borrow().values().map(Rc::downgrade));
+            #[cfg(test)]
+            OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
+            let globals = globals.borrow();
+            register_shared_object_reference_cells(globals.values().map(Rc::downgrade));
         }
         if let Some(globals) = vm.globals_consts {
-            cells.extend(globals.borrow().values().map(Rc::downgrade));
+            #[cfg(test)]
+            OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
+            let globals = globals.borrow();
+            register_shared_object_reference_cells(globals.values().map(Rc::downgrade));
         }
         cells
     }
@@ -12284,6 +12796,299 @@ mod tests {
             strong_owners,
             "the removal guard must not clone strong owners before downgrading them"
         );
+    }
+
+    #[test]
+    fn nested_calls_scan_shared_object_reference_state_once() {
+        // C++ attaches every live C4Value to one process-global intrusive
+        // FirstRef list, so AB_CALL only adds its frame values
+        // (C4AulExec.cpp:62-63,1217-1223; C4Object.cpp:312). Rust can retain
+        // the private object-state scan, while public mutable global tables
+        // must still be checked at each nested frame.
+        let script = parse_script(
+            "static persisted; local target; func Leaf() { return target; } func Probe() { return Leaf(); }",
+            "script parses",
+        );
+        let functions = function_map(script.clone());
+        let globals = crate::engine::new_global_variables();
+        crate::engine::register_global_declarations(&script.var_decls, &globals, None)
+            .expect("static declaration registers");
+        reset_object_reference_table_traversals();
+
+        let result = test_vm(&functions, &script.var_decls)
+            .with_global_variables(Some(&globals))
+            .call_with_locals(
+                "Probe",
+                &[],
+                &HashMap::from([("target".to_owned(), Value::Object(7))]),
+            )
+            .expect("nested call succeeds")
+            .0;
+
+        check_eq!(result => Value::Object(7));
+        check_eq!(object_reference_table_traversals() => 4);
+    }
+
+    #[test]
+    fn nested_call_tracks_preexisting_cell_replacing_shared_global_entry() {
+        // Every live C4Value remains on C++'s process-global FirstRef list even
+        // when a table starts owning it between calls (C4AulExec.cpp:62-63,
+        // 1217-1223; C4Object.cpp:312).
+        let functions = FxHashMap::default();
+        let globals = crate::engine::new_global_variables();
+        globals
+            .borrow_mut()
+            .insert("late".to_owned(), value_cell(Value::Nil));
+        let replacement = value_cell(Value::Object(7));
+        let vm = test_vm(&functions, &[]).with_global_variables(Some(&globals));
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        globals
+            .borrow_mut()
+            .insert("late".to_owned(), Rc::clone(&replacement));
+        let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+
+        clear_active_object_references(7);
+
+        check_eq!(*replacement.borrow() => Value::Nil);
+    }
+
+    #[test]
+    fn execution_profile_separates_compiled_and_foreach_fallbacks() {
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "func Compiled() { return 42; }\n\
+                 func Ast(values) { var total = 0; for (var value in values) total += value; return total; }",
+            )
+            .expect("profile script loads");
+        crate::execution_profile::reset();
+
+        check_eq!(engine.call("Compiled", &[]).expect("compiled call succeeds") => Value::Int(42));
+        check_eq!(engine.call("Ast", &[Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])]).expect("AST call succeeds") => Value::Int(6));
+        let profile = crate::execution_profile::snapshot();
+
+        check_eq!(profile.compiled => 1);
+        check_eq!(profile.ast_without_plan => 1);
+        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::Foreach) => 1);
+    }
+
+    #[test]
+    fn execution_profile_does_not_blame_supported_classic_for_for_loop_control_fallback() {
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "func Probe() {\n\
+                     var total = 0;\n\
+                     for (var i = 0; i < 3; i++) {\n\
+                         if (i == 1) continue;\n\
+                         total += i;\n\
+                     }\n\
+                     return total;\n\
+                 }",
+            )
+            .expect("profile script loads");
+        crate::execution_profile::reset();
+
+        check_eq!(engine.call("Probe", &[]).expect("AST call succeeds") => Value::Int(2));
+        let profile = crate::execution_profile::snapshot();
+
+        check_eq!(profile.ast_without_plan => 1);
+        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::LoopControl) => 1);
+        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::ClassicFor) => 0);
+    }
+
+    #[test]
+    fn classic_for_with_local_counter_uses_compiled_executor() {
+        // C++ lowers the initializer, condition, body, increment and back edge
+        // into the ordinary C4Aul bytecode stream (C4AulParse.cpp:2789-3088;
+        // C4AulExec.cpp:330-1297).
+        reset_compiled_function_execution_count();
+        check_script!(
+            "func Sum(count) { var total = 0; for (var i = 0; i < count; i++) total += i; return total; }",
+            "Sum",
+            &[Value::Int(5)];
+            expect "classic for loop succeeds" => Value::Int(10)
+        );
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn compiled_classic_for_preserves_clause_order_and_short_circuiting() {
+        // C4Aul emits init once, then condition/body/increment in that order;
+        // AB_JUMPAND skips the right condition operand once the left is false
+        // (C4AulParse.cpp:2789-3088; C4AulExec.cpp:730-737).
+        reset_compiled_function_execution_count();
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\n\
+                 local trace;\n\
+                 func Mark(value) { trace = trace * 10 + value; return value; }\n\
+                 func Probe() {\n\
+                     trace = 0; var i;\n\
+                     for (i = Mark(1); i < 3 && Mark(2); i = Mark(i + 1)) Mark(3);\n\
+                     return trace;\n\
+                 }",
+            )
+            .expect("loop script loads");
+        let result = engine
+            .call_with_locals("Probe", &[], &HashMap::new())
+            .expect("compiled loop preserves clause order")
+            .0;
+
+        check_eq!(result => Value::Int(1_232_233));
+        check_eq!(compiled_function_execution_count() => 8);
+    }
+
+    #[test]
+    fn compiled_classic_for_assignment_keeps_target_live_during_clause_rhs() {
+        // The for initializer is emitted before its condition, and AB_Set keeps
+        // its target reference live across the RHS AB_CALL
+        // (C4AulParse.cpp:2789-3088; C4AulExec.cpp:404-415,1216-1297).
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let host_observed = std::sync::Arc::clone(&observed);
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("ObserveStack", move |_| {
+            host_observed
+                .lock()
+                .expect("stack observation lock")
+                .push(VALUE_STACK_SIZE.with(Cell::get));
+            Ok(Value::Int(7))
+        });
+        engine
+            .load_script(
+                "func Compiled() {\n\
+                     var value = 0;\n\
+                     for (value = ObserveStack(); false;) {}\n\
+                     return value;\n\
+                 }\n\
+                 func Interpreted() {\n\
+                     var value = 0;\n\
+                     if (false) return nil ?? 1;\n\
+                     for (value = ObserveStack(); false;) {}\n\
+                     return value;\n\
+                 }",
+            )
+            .expect("classic-for assignment script loads");
+
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Compiled", &[]).expect("compiled loop succeeds") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(engine.call("Interpreted", &[]).expect("AST loop succeeds") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+        let observed = observed.lock().expect("stack observation lock");
+
+        check_eq!(observed.len() => 2);
+        check_eq!(observed[0] => observed[1]);
+    }
+
+    #[test]
+    fn local_assignment_expression_uses_compiled_executor() {
+        // AB_Set leaves the assigned reference on C4AulExec::Values; the
+        // surrounding arithmetic then dereferences its just-written value
+        // (C4AulExec.cpp:404-415,490-593).
+        reset_compiled_function_execution_count();
+        check_script!(
+            "func Probe() { var value = 0; return (value = 2) + (value = 3) * 10; }",
+            "Probe",
+            &[];
+            expect "assignment expressions yield their stored values" => Value::Int(32)
+        );
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn compiled_assignment_keeps_target_reference_live_during_rhs_call() {
+        // AB_Set's target reference is already on C4AulExec::Values while the
+        // RHS AB_CALL runs (C4AulExec.cpp:404-415,1216-1297).
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let host_observed = std::sync::Arc::clone(&observed);
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("ObserveStack", move |_| {
+            host_observed
+                .lock()
+                .expect("stack observation lock")
+                .push(VALUE_STACK_SIZE.with(Cell::get));
+            Ok(Value::Int(7))
+        });
+        engine
+            .load_script(
+                "func Compiled() { var value = 0; return value = ObserveStack(); }\n\
+                 func Interpreted() {\n\
+                     var value = 0;\n\
+                     if (false) return nil ?? 1;\n\
+                     return value = ObserveStack();\n\
+                 }",
+            )
+            .expect("assignment script loads");
+
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Compiled", &[]).expect("compiled assignment succeeds") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(engine.call("Interpreted", &[]).expect("AST assignment succeeds") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+        let observed = observed.lock().expect("stack observation lock");
+
+        check_eq!(observed.len() => 2);
+        check_eq!(observed[0] => observed[1]);
+    }
+
+    #[test]
+    fn compiled_map_key_keeps_same_zero_id_assignment_reference() {
+        // AB_Set leaves its destination reference on the stack, and AB_MAP
+        // copies GetRefVal without an intervening SetNoRef conversion
+        // (C4AulExec.cpp:404-415; C4Value.cpp:121-140).
+        let zero_id = Value::C4Id(crate::value::c4_id_from_raw(0));
+        let expected = Value::Proplist(ValueMap::from([(zero_id.clone(), Value::Int(1))]));
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function_with_arity("ToId", 1, |args| Ok(args[0].clone()));
+        check!(engine.set_host_function_parameter_types("ToId", [crate::value::C4VType::C4Id]));
+        engine
+            .load_script(
+                "#strict 3\n\
+                 local slot;\n\
+                 func Probe() { return { [(slot = ToId(0))] = 1 }; }\n\
+                 func Interpreted() {\n\
+                     if (false) return nil ?? 1;\n\
+                     return { [(slot = ToId(0))] = 1 };\n\
+                 }",
+            )
+            .expect("assignment map script loads");
+        let locals = HashMap::from([("slot".to_owned(), zero_id)]);
+
+        reset_compiled_function_execution_count();
+        let (ast_result, ast_locals) = engine
+            .call_with_locals("Interpreted", &[], &locals)
+            .expect("AST assignment map succeeds");
+        check_eq!(ast_locals.get("slot") => locals.get("slot"));
+        check_eq!(ast_result => expected.clone());
+        check_eq!(compiled_function_execution_count() => 0);
+        check_eq!(engine.call_with_locals("Probe", &[], &locals).expect("compiled assignment map succeeds").0 => expected);
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn classic_for_with_continue_keeps_exact_ast_fallback() {
+        // AB_CONTINUE targets the increment clause while AB_BREAK targets the
+        // loop exit (C4AulParse.cpp:2789-3088). Until the compiled builder has
+        // explicit loop fixups, retaining the AST path preserves both edges.
+        reset_compiled_function_execution_count();
+        check_script!(
+            "func Sum(count) {\n\
+                 var total = 0;\n\
+                 for (var i = 0; i < count; i++) {\n\
+                     if (i == 2) continue;\n\
+                     total += i;\n\
+                 }\n\
+                 return total;\n\
+             }",
+            "Sum",
+            &[Value::Int(5)];
+            expect "continue reaches the increment clause" => Value::Int(8)
+        );
+        check_eq!(compiled_function_execution_count() => 0);
     }
 
     #[cfg(target_pointer_width = "64")]

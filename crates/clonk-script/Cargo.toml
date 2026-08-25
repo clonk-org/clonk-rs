@@ -16,6 +16,9 @@ bench = ["dep:criterion"]
 # VM's hottest paths, where leaving them live would cost real time and perturb
 # the measurement they exist to take.
 lookup-profile = []
+# Count compiled execution, AST fallback, and the syntax families blocking
+# lowering. Off by default because every script invocation touches it.
+execution-profile = []
 
 [dependencies]
 thiserror = "2"
