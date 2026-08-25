@@ -2,6 +2,29 @@
 // by `include!` from the parent module so every test id is unchanged.
 
     #[test]
+    fn map_creation_rng_can_be_traced_without_moving_the_stream() {
+        // Native traces map-creation draws like any other, because it has no
+        // separate map generator -- it brackets the phase with FixRandom
+        // instead (C4Landscape.cpp:579,735). An untraced map RNG here hides
+        // that phase from LC_RUST_RNG_TRACE while the oracle records it, so
+        // the two traces cannot be diffed across initialisation
+        // (clonk-org/clonk-rs#1050).
+        use crate::scenario::map::{legacy_map_creation_rng, legacy_map_creation_rng_traced};
+
+        let traced = legacy_map_creation_rng_traced(0xC4, true);
+        assert!(traced.trace, "arming must survive construction");
+
+        let plain = legacy_map_creation_rng_traced(0xC4, false);
+        assert!(!plain.trace);
+        assert_eq!(traced.count, plain.count);
+        assert_eq!(traced.rnd3_ptr(), plain.rnd3_ptr());
+
+        let existing = legacy_map_creation_rng(0xC4);
+        assert_eq!(existing.count, plain.count);
+        assert_eq!(existing.rnd3_ptr(), plain.rnd3_ptr());
+    }
+
+    #[test]
     fn weather_init_retains_the_precipitation_material_name() {
         // C4SWeather::CompileFunc stores `Precipitation` and
         // C4Weather::Init passes that exact name to LaunchCloud
