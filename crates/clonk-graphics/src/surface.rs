@@ -838,6 +838,27 @@ impl Surface {
         true
     }
 
+    /// Drain one owned scratch surface's retained commands into this surface.
+    ///
+    /// Unlike [`Self::append_gpu_scene_from`], this does not clone command
+    /// vectors or texture maps. Taking the child recorder first also preserves
+    /// its observed capacity hints, so a pooled scratch surface can reserve the
+    /// same topology on its next capture.
+    pub fn append_gpu_scene_from_mut(&mut self, child: &mut Surface, offset: Point) -> bool {
+        if self.gpu_scene.is_none() || child.gpu_scene.is_none() {
+            return false;
+        }
+        let child_bounds = Rect::new(0, 0, child.width, child.height);
+        let Some(source) = child.take_gpu_scene_capture() else {
+            return false;
+        };
+        let Some(destination) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        destination.append_translated(source, offset.x, offset.y, child_bounds, self.clip);
+        true
+    }
+
     pub fn gpu_texture_resource(&self) -> GpuTextureResource {
         let dirty = self.gpu_dirty.take().into_iter().collect::<Vec<_>>();
         let base_revision =
@@ -2537,7 +2558,11 @@ mod tests {
         let mut parent = Surface::new(20, 20, PixelFormat::Rgba8888);
         parent.set_clip(Rect::new(5, 6, 4, 3));
         parent.begin_gpu_scene_capture();
-        assert!(parent.append_gpu_scene_from(&child, Point::new(3, 4)));
+        assert!(parent.append_gpu_scene_from_mut(&mut child, Point::new(3, 4)));
+        assert!(
+            !child.is_gpu_scene_capture_active(),
+            "flattening an owned scratch surface must drain rather than clone its recorder"
+        );
         let scene = finish_gpu_scene(&mut parent);
         let GpuCommand::Solid {
             alpha_mode, clip, ..

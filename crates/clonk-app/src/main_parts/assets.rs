@@ -8812,8 +8812,9 @@ pub(crate) fn configured_high_dpi_cursor(config: &[u8]) -> bool {
     configured_remaster_feature(config, "HighDpiCursor")
 }
 
-/// `Graphics.Mipmaps`: opt in to trilinear + anisotropic minification of
-/// retained art. C++ binds GL_LINEAR with no mip chain.
+/// Legacy `Graphics.Mipmaps` preference retained for config compatibility.
+/// Art shaders currently pin LOD zero, so the renderer does not allocate or
+/// upload unreachable lower texture levels.
 pub(crate) fn configured_mipmaps(config: &[u8]) -> bool {
     configured_remaster_feature(config, "Mipmaps")
 }

@@ -1370,7 +1370,7 @@ impl DefinitionSelController {
         }
         let offset = Point::new(layout.list_client.x, layout.list_client.y);
         if capture_gpu_scene {
-            let _ = surface.append_gpu_scene_from(&clipped, offset);
+            let _ = surface.append_gpu_scene_from_mut(&mut clipped, offset);
         } else {
             copy_surface_region(surface, &mut clipped, layout.list_client, true);
         }

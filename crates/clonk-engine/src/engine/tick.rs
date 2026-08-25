@@ -83,14 +83,14 @@ impl Engine {
             self.apply_scenario_batch(batch)?;
         }
         let mut spawn_requests = Vec::new();
-        let selected_objects: HashSet<_> = self
-            .objects
-            .iter()
-            .filter(|object| object.state.selected)
-            .map(|object| object.id)
-            .collect();
-        let solid_mask_indices = self.active_solid_mask_indices();
-
+        let duplicate_object_ids = !self.object_ids_are_unique();
+        let selected_objects = duplicate_object_ids.then(|| {
+            self.objects
+                .iter()
+                .filter(|object| object.state.selected)
+                .map(|object| object.id)
+                .collect::<HashSet<_>>()
+        });
         let master_list_indices = self
             .exec_list
             .iter()
@@ -221,7 +221,11 @@ impl Engine {
                         controller: object.state.controller,
                         base: object.state.base,
                         crew_member: object.state.crew_member,
-                        selected: selected_objects.contains(&object.id),
+                        selected: selected_objects
+                            .as_ref()
+                            .map_or(object.state.selected, |selected| {
+                                selected.contains(&object.id)
+                            }),
                         alive: object.state.alive,
                         need_energy: object.state.need_energy,
                         on_fire: object.state.on_fire,
@@ -299,24 +303,38 @@ impl Engine {
         let mut exec_list = std::mem::take(&mut self.exec_list);
         exec_list.retain(|&id| self.find_object_index(id).is_some());
         self.exec_list = exec_list;
-        let mut exec_order: Vec<usize> = self
-            .exec_list
-            .iter()
-            .filter_map(|&id| self.find_object_index(id))
-            .collect();
-        let listed: HashSet<usize> = exec_order.iter().copied().collect();
+        let mut duplicate_exec_order = duplicate_object_ids.then(|| {
+            self.exec_list
+                .iter()
+                .filter_map(|&id| self.find_object_index(id))
+                .collect::<Vec<_>>()
+        });
+        let listed_indices = duplicate_exec_order
+            .as_ref()
+            .map(|order| order.iter().copied().collect::<HashSet<_>>());
+        let listed_ids =
+            (!duplicate_object_ids).then(|| self.exec_list.iter().copied().collect::<HashSet<_>>());
         for idx in 0..self.objects.len() {
             let object = &self.objects[idx];
             // Inactive objects belong only to C4GameObjects::InactiveObjects;
             // deleted/destroyed objects must never be repaired back into the
             // executable main list after ResortUnsorted removed their link.
-            if !object.destroyed && object.state.status.is_active() && !listed.contains(&idx) {
+            let is_listed = listed_indices
+                .as_ref()
+                .is_some_and(|listed| listed.contains(&idx))
+                || listed_ids
+                    .as_ref()
+                    .is_some_and(|listed| listed.contains(&object.id));
+            if !object.destroyed && object.state.status.is_active() && !is_listed {
+                let object_id = object.id;
                 tracing::warn!(
-                    object = object.id.as_u64(),
+                    object = object_id.as_u64(),
                     "active object missing from exec_list; appending"
                 );
-                self.insert_exec_link(self.exec_list.len(), object.id);
-                exec_order.push(idx);
+                self.insert_exec_link(self.exec_list.len(), object_id);
+                if let Some(exec_order) = duplicate_exec_order.as_mut() {
+                    exec_order.push(idx);
+                }
             }
         }
         // Command scans walk `Game.Objects` from First to Next, while
@@ -364,7 +382,13 @@ impl Engine {
                 None => (1..=2).contains(&frame),
             };
             if hit {
-                for &idx in &exec_order {
+                let exec_order = duplicate_exec_order.clone().unwrap_or_else(|| {
+                    self.exec_list
+                        .iter()
+                        .filter_map(|&id| self.find_object_index(id))
+                        .collect()
+                });
+                for idx in exec_order {
                     let id = self.objects[idx].id.as_u64();
                     if requested.is_some() || (1449..=1460).contains(&id) {
                         crate::rng::rng_trace_line(
@@ -1068,12 +1092,12 @@ impl Engine {
                         idx,
                         &action_library,
                         &definition_id,
-                        &solid_mask_indices,
+                        &[],
                     )?;
                 } else {
                     // Static objects stabilize every frame
                     // (C4Movement.cpp:579).
-                    self.stabilize_object(idx, &solid_mask_indices)?;
+                    self.stabilize_object(idx, &[])?;
                     if frame.is_multiple_of(10) {
                         // Gravity mobilization (C4Movement.cpp:581-586).
                         let object = &mut self.objects[idx];
@@ -1839,10 +1863,9 @@ impl Engine {
             }
         });
         if !removed_ids.is_empty() {
+            let removed: HashSet<_> = removed_ids.iter().copied().collect();
             if let Some(sectors) = self.sectors.as_mut() {
-                for id in &removed_ids {
-                    sectors.remove(*id);
-                }
+                sectors.remove_many(removed_ids.iter().copied());
             }
             // C4Object::Clear drops both attached particle lists
             // (C4Object.cpp:272-273). Without it a removed object's
@@ -1851,17 +1874,14 @@ impl Engine {
             // MaxCount refuses every new particle of that kind. Engine fire
             // makes that reachable in ordinary play: burning objects decay
             // to nothing while still emitting.
-            for id in &removed_ids {
-                self.particle_system
-                    .remove(None, &crate::ParticleScope::Object(*id));
-                self.particles.retain(|particle| {
-                    !matches!(
-                        particle.snapshot.layer,
-                        ParticleLayer::ObjectFront(layer_id) | ParticleLayer::ObjectBack(layer_id)
-                            if layer_id == *id
-                    )
-                });
-            }
+            self.particle_system.remove_object_scopes(&removed);
+            self.particles.retain(|particle| {
+                !matches!(
+                    particle.snapshot.layer,
+                    ParticleLayer::ObjectFront(id) | ParticleLayer::ObjectBack(id)
+                        if removed.contains(&id)
+                )
+            });
             self.note_objects_changed();
         }
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
@@ -4095,6 +4115,50 @@ mod tests {
         // C4Game::ExecObjects preserves one master-list order during this
         // walk (C4Game.cpp:1582); the frame snapshot already records it.
         assert_eq!(EXEC_LIST_MASTER_ORDER_SCANS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn tick_repairs_each_restored_duplicate_id_object_by_index() {
+        let mut source = Engine::new();
+        source
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        let duplicate_id = source
+            .spawn_object(SpawnConfig::new("Plain"))
+            .expect("first object spawns");
+        let second = source
+            .spawn_object(SpawnConfig::new("Plain"))
+            .expect("second object spawns");
+        source
+            .queue_object_command(second, QueuedCommand::new(10, ObjectUpdate::default()))
+            .expect("canonical duplicate gets delayed work");
+        let mut state = source.capture_state();
+        state.objects[1].snapshot.id = duplicate_id;
+        state.object_order = vec![duplicate_id];
+
+        let mut restored = Engine::new();
+        restored
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers for restore");
+        restored
+            .restore_state(&state)
+            .expect("duplicate ids retain the public restore behavior");
+        assert_eq!(restored.exec_list, [duplicate_id]);
+        let canonical = restored
+            .find_object_index(duplicate_id)
+            .expect("duplicate id resolves to one restored object");
+        assert_eq!(restored.objects[canonical].command_queue[0].delay, 10);
+
+        restored.tick().expect("duplicate-id frame advances");
+
+        assert_eq!(restored.exec_list, [duplicate_id, duplicate_id]);
+        let canonical = restored
+            .find_object_index(duplicate_id)
+            .expect("duplicate id still resolves after execution");
+        assert_eq!(
+            restored.objects[canonical].command_queue[0].delay, 8,
+            "the pre-optimization index repair executes one link per restored object"
+        );
     }
 
     #[test]

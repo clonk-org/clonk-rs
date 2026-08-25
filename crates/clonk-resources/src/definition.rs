@@ -821,9 +821,9 @@ fn format_rank_extension(format: &[u8], base_name: &[u8]) -> Result<Vec<u8>, &'s
 
 /// Decodes a single named image from the def group, `None` when absent.
 fn load_plain_image(group: &Group, name: &str) -> Option<GraphicsImage> {
-    let data = group.read_file(name).ok()?;
+    let data = group.read_file_cow(name).ok()?;
     let format = definition_image_format(Path::new(name))?;
-    let image = decode_definition_image(&data, format)?;
+    let image = decode_definition_image(data.as_ref(), format)?;
     let (width, height) = image.dimensions();
     (width > 0 && height > 0).then(|| GraphicsImage::new(width, height, image.into_raw()))
 }
@@ -3101,19 +3101,20 @@ fn load_graphics_group_entry(
     color_by_owner: bool,
 ) -> Result<(GraphicsImage, Option<ColorByOwnerMask>), DefinitionError> {
     let path = entry.relative_path.clone();
-    let data = group
-        .read_entry_bytes_exact(entry)
-        .map_err(|error| DefinitionError::Graphics {
-            path: path.clone(),
-            reason: error.to_string(),
-        })?;
+    let data =
+        group
+            .read_entry_bytes_exact_cow(entry)
+            .map_err(|error| DefinitionError::Graphics {
+                path: path.clone(),
+                reason: error.to_string(),
+            })?;
     let format = definition_image_format_bytes(&entry.name_bytes).ok_or_else(|| {
         DefinitionError::Graphics {
             path: path.clone(),
             reason: "unsupported image format".to_string(),
         }
     })?;
-    let mut image = decode_definition_image_result(&data, format).map_err(|reason| {
+    let mut image = decode_definition_image_result(data.as_ref(), format).map_err(|reason| {
         DefinitionError::Graphics {
             path: path.clone(),
             reason,
@@ -3205,7 +3206,7 @@ fn load_color_by_owner_overlay(
         return Ok(None);
     };
     let path = candidate.relative_path.clone();
-    let data = match group.read_entry_bytes_exact(candidate) {
+    let data = match group.read_entry_bytes_exact_cow(candidate) {
         Ok(data) => data,
         Err(GroupError::EntryNotFound(_)) => return Ok(None),
         Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -3216,12 +3217,10 @@ fn load_color_by_owner_overlay(
             });
         }
     };
-    let overlay =
-        image::load_from_memory_with_format(&data, image::ImageFormat::Png).map_err(|error| {
-            DefinitionError::ColorByOwnerOverlay {
-                path: path.clone(),
-                reason: error.to_string(),
-            }
+    let overlay = image::load_from_memory_with_format(data.as_ref(), image::ImageFormat::Png)
+        .map_err(|error| DefinitionError::ColorByOwnerOverlay {
+            path: path.clone(),
+            reason: error.to_string(),
         })?;
     let mut overlay = overlay.into_rgba8();
     blacken_fully_transparent_rgba(overlay.as_mut());

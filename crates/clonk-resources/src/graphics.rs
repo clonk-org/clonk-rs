@@ -124,8 +124,8 @@ impl GraphicsResource {
             return Ok((**cached).clone());
         }
 
-        let data = self.group.read_entry_bytes_exact(entry)?;
-        let image = decode_image(&data).map_err(|source| GraphicsError::ImageDecode {
+        let data = self.group.read_entry_bytes_exact_cow(entry)?;
+        let image = decode_image(data.as_ref()).map_err(|source| GraphicsError::ImageDecode {
             name: String::from_utf8_lossy(&entry.name_bytes).into_owned(),
             source,
         })?;

@@ -166,6 +166,7 @@ shard_modules!(
     real_tutorial_campaign,
     scenario_activation_profile,
     script_lookup_profile,
+    script_execution_profile,
     skies_of_fire_activation,
     sky_lighting_is_static,
     snapshot_section_profile,

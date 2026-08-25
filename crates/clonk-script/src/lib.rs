@@ -2,6 +2,7 @@ mod ast;
 mod debugger;
 mod engine;
 mod error;
+pub mod execution_profile;
 mod lexer;
 pub mod lookup_profile;
 mod parser;

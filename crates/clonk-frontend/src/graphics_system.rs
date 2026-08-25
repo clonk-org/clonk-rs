@@ -32,6 +32,7 @@ struct PendingViewportForeground {
 }
 
 const MAX_TILED_UNDERLAY_CACHE_ENTRIES: usize = 8;
+const MAX_VIEWPORT_SCRATCH_SURFACES: usize = 16;
 const CELESTIAL_BODY_TEXTURE_SIZE: u32 = 24;
 const LEGACY_TIME_CYCLE: i64 = 10_000;
 
@@ -402,6 +403,11 @@ struct PreparedObjectRenderPlan {
     phases: [Vec<usize>; 4],
     by_id: HashMap<ObjectId, usize>,
     seen: HashSet<ObjectId>,
+}
+
+struct CachedPreparedObjectRenderPlan {
+    generation: u64,
+    plan: PreparedObjectRenderPlan,
 }
 
 impl PreparedObjectRenderPlan {
@@ -790,12 +796,23 @@ pub struct GraphicsSystem {
     render_phase_identity: Arc<()>,
     render_phase_generation: u64,
     pending_viewport_foregrounds: Vec<PendingViewportForeground>,
+    /// Drained GPU-only render targets, keyed by exact extent and format on
+    /// checkout. The cap covers four viewports with underlay/content/text
+    /// layers without retaining an unbounded resize history.
+    viewport_surface_pool: Vec<Surface>,
+    #[cfg(test)]
+    viewport_scratch_surface_creations: usize,
     /// Particle offsets grouped by layer for the object pass in flight, and
     /// the reused draw order one layer walk copies out of it.
     particle_layer_index: ParticleLayerIndex,
     particle_draw_order: Vec<u32>,
     /// Reusable backing storage for one viewport's painter-ordered phase plan.
     object_render_plan_scratch: PreparedObjectRenderPlan,
+    /// Same-owner viewports share ordering and visibility within one immutable
+    /// frame snapshot. Entries retain their backing storage across frames but
+    /// are rebuilt on the first use of each generation.
+    object_render_plan_generation: u64,
+    object_render_plan_cache: HashMap<i32, CachedPreparedObjectRenderPlan>,
     /// C4ConfigGeneral::ScrollSmooth. Config plumbing lives above the
     /// frontend; retain the exact C++ default and clamp at use meanwhile.
     scroll_smooth: i32,
@@ -926,9 +943,14 @@ impl GraphicsSystem {
             render_phase_identity: Arc::new(()),
             render_phase_generation: 0,
             pending_viewport_foregrounds: Vec::new(),
+            viewport_surface_pool: Vec::new(),
+            #[cfg(test)]
+            viewport_scratch_surface_creations: 0,
             particle_layer_index: ParticleLayerIndex::default(),
             particle_draw_order: Vec::new(),
             object_render_plan_scratch: PreparedObjectRenderPlan::default(),
+            object_render_plan_generation: 0,
+            object_render_plan_cache: HashMap::new(),
             scroll_smooth: DEFAULT_SCROLL_SMOOTH,
             sky: None,
             retained_lit_sky: None,
@@ -1292,6 +1314,65 @@ impl GraphicsSystem {
 
     pub fn surface_mut(&mut self) -> &mut Surface {
         &mut self.surface
+    }
+
+    fn take_viewport_scratch_surface(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        capture_gpu_scene: bool,
+    ) -> Surface {
+        if !capture_gpu_scene {
+            return Surface::new(width, height, format);
+        }
+        let matching = self.viewport_surface_pool.iter().position(|surface| {
+            surface.width() == width && surface.height() == height && surface.format() == format
+        });
+        let mut surface = match matching {
+            Some(index) => self.viewport_surface_pool.swap_remove(index),
+            None => {
+                if self.viewport_surface_pool.len() >= MAX_VIEWPORT_SCRATCH_SURFACES {
+                    self.viewport_surface_pool.swap_remove(0);
+                }
+                #[cfg(test)]
+                {
+                    self.viewport_scratch_surface_creations =
+                        self.viewport_scratch_surface_creations.saturating_add(1);
+                }
+                Surface::new(width, height, format)
+            }
+        };
+        surface.clear_clip();
+        if surface.is_clonk_text_capture_active() {
+            let _ = surface.take_clonk_text_capture();
+        }
+        surface.begin_gpu_scene_capture();
+        surface
+    }
+
+    fn recycle_viewport_scratch_surface(&mut self, mut surface: Surface) {
+        debug_assert!(!surface.is_gpu_scene_capture_active());
+        surface.clear_clip();
+        if surface.is_clonk_text_capture_active() {
+            let _ = surface.take_clonk_text_capture();
+        }
+        if self.viewport_surface_pool.len() < MAX_VIEWPORT_SCRATCH_SURFACES {
+            self.viewport_surface_pool.push(surface);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn viewport_scratch_surface_creations(&self) -> usize {
+        self.viewport_scratch_surface_creations
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_viewport_scratch_surfaces(&self) -> usize {
+        self.viewport_surface_pool
+            .iter()
+            .filter(|surface| surface.has_pixel_plane())
+            .count()
     }
 
     pub fn begin_gpu_scene_capture(&mut self) {
@@ -3462,6 +3543,7 @@ impl GraphicsSystem {
         viewports: &[ViewportInput<'_>],
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
+        self.object_render_plan_generation = self.object_render_plan_generation.wrapping_add(1);
         self.active_viewports.clear();
         self.rendered_object_audibility_calls.clear();
         self.pending_viewport_foregrounds.clear();
@@ -3477,20 +3559,29 @@ impl GraphicsSystem {
 
         let owner_colors = Self::collect_owner_colors(snapshot);
         self.render_viewports(snapshot, viewports, &owner_colors, gamma);
+        let generation = self.object_render_plan_generation;
+        self.object_render_plan_cache
+            .retain(|_, cached| cached.generation == generation);
     }
 
     fn draw_pending_viewport_foregrounds(&mut self) {
-        for mut pending in self.pending_viewport_foregrounds.drain(..) {
-            blit_surface(
+        let mut pending_foregrounds = std::mem::take(&mut self.pending_viewport_foregrounds);
+        for mut pending in pending_foregrounds.drain(..) {
+            let gpu_scratch = pending.surface.is_gpu_scene_capture_active();
+            blit_surface_from(
                 &mut self.surface,
-                &pending.surface,
+                &mut pending.surface,
                 pending.destination.x,
                 pending.destination.y,
             );
             let _ = self
                 .surface
                 .extend_clonk_text_capture_from(&mut pending.surface, pending.destination);
+            if gpu_scratch && !pending.surface.is_gpu_scene_capture_active() {
+                self.recycle_viewport_scratch_surface(pending.surface);
+            }
         }
+        self.pending_viewport_foregrounds = pending_foregrounds;
     }
 
     fn render_viewports(
@@ -3730,11 +3821,13 @@ impl GraphicsSystem {
             || content_height != rect.height;
         let background = self.hud_graphics.background.clone();
         let capture_gpu_scene = self.surface.is_gpu_scene_capture_active();
-        let mut viewport_surface = has_scroll_borders.then(|| {
-            let mut surface = Surface::new(rect.width, rect.height, format);
-            if capture_gpu_scene {
-                surface.begin_gpu_scene_capture();
-            }
+        let mut viewport_surface = if has_scroll_borders {
+            let mut surface = self.take_viewport_scratch_surface(
+                rect.width,
+                rect.height,
+                format,
+                capture_gpu_scene,
+            );
             draw_viewport_underlay(
                 &mut self.tiled_underlay_cache,
                 &mut surface,
@@ -3743,14 +3836,18 @@ impl GraphicsSystem {
                 rect.y,
                 gamma,
             );
-            surface
-        });
+            Some(surface)
+        } else {
+            None
+        };
 
         let capture_native_text = self.surface.is_clonk_text_capture_active();
-        let mut content_surface = Surface::new(content_width.max(1), content_height.max(1), format);
-        if capture_gpu_scene {
-            content_surface.begin_gpu_scene_capture();
-        }
+        let mut content_surface = self.take_viewport_scratch_surface(
+            content_width.max(1),
+            content_height.max(1),
+            format,
+            capture_gpu_scene,
+        );
         if capture_native_text {
             content_surface.begin_clonk_text_capture();
         }
@@ -3773,9 +3870,22 @@ impl GraphicsSystem {
         if fade_transparent {
             // Reset draws FoWColor onto the viewport before enabling the map.
             // Preserve the tiled viewport underlay for translucent colors.
-            if let Some(viewport_surface) = viewport_surface.as_ref() {
+            if let Some(viewport_surface) = viewport_surface.as_mut() {
                 if capture_gpu_scene {
-                    blit_surface(&mut self.surface, viewport_surface, -offset_x, -offset_y);
+                    blit_surface_from(&mut self.surface, viewport_surface, -offset_x, -offset_y);
+                    // Its underlay commands now lead the content stream. Re-arm
+                    // the emptied border target and restore the full underlay:
+                    // only the content-sized portion survives the transfer
+                    // above, but the scroll-border-only area must remain filled.
+                    viewport_surface.begin_gpu_scene_capture();
+                    draw_viewport_underlay(
+                        &mut self.tiled_underlay_cache,
+                        viewport_surface,
+                        background.as_ref(),
+                        rect.x,
+                        rect.y,
+                        gamma,
+                    );
                 } else {
                     for y in 0..content_height {
                         for x in 0..content_width {
@@ -3802,13 +3912,17 @@ impl GraphicsSystem {
         let environment = &snapshot.environment;
         let events = &snapshot.weather_events;
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
-        let object_render_plan = self.prepare_object_render_plan(
+        let object_render_plan = self.prepare_viewport_object_render_plan(
             &snapshot.objects,
             &snapshot.render_order,
             &snapshot.players,
             input.owner,
             PreparedObjectRenderPlan::ALL_PHASES,
         );
+        // All four native object phases and the intervening global-particle
+        // draw consume the same immutable snapshot slice. Group it once for
+        // the whole viewport instead of once at every phase boundary.
+        self.particle_layer_index.rebuild(&snapshot.particles);
 
         self.draw_sky(
             snapshot.sky.as_ref(),
@@ -3912,10 +4026,12 @@ impl GraphicsSystem {
         // custom parallax GUI/overlay pass.
         self.active_fog_map = None;
         let pending_foreground = if capture_native_text {
-            let mut foreground = Surface::new(content_width.max(1), content_height.max(1), format);
-            if capture_gpu_scene {
-                foreground.begin_gpu_scene_capture();
-            }
+            let mut foreground = self.take_viewport_scratch_surface(
+                content_width.max(1),
+                content_height.max(1),
+                format,
+                capture_gpu_scene,
+            );
             foreground.begin_clonk_text_capture();
             let base_surface = std::mem::replace(&mut self.surface, foreground);
             self.draw_prepared_objects_at_frame(
@@ -3952,7 +4068,18 @@ impl GraphicsSystem {
             );
             None
         };
-        self.object_render_plan_scratch = object_render_plan;
+        // The pointer/length key is only a guard against using this index with
+        // another slice inside the viewport. A future snapshot may reuse the
+        // same allocation after mutating its particles, so never retain the
+        // key across viewport boundaries.
+        self.particle_layer_index.invalidate();
+        self.object_render_plan_cache.insert(
+            input.owner,
+            CachedPreparedObjectRenderPlan {
+                generation: self.object_render_plan_generation,
+                plan: object_render_plan,
+            },
+        );
 
         let mut content_surface = std::mem::replace(&mut self.surface, main_surface);
 
@@ -3970,7 +4097,7 @@ impl GraphicsSystem {
         present_viewport_content(
             &mut self.surface,
             viewport_surface.as_mut(),
-            &content_surface,
+            &mut content_surface,
             rect,
             offset_x,
             offset_y,
@@ -3983,6 +4110,12 @@ impl GraphicsSystem {
         }
         if let Some(foreground) = pending_foreground {
             self.pending_viewport_foregrounds.push(foreground);
+        }
+        if capture_gpu_scene {
+            if let Some(viewport_surface) = viewport_surface.take() {
+                self.recycle_viewport_scratch_surface(viewport_surface);
+            }
+            self.recycle_viewport_scratch_surface(content_surface);
         }
 
         self.active_viewports.push(ActiveViewport {
@@ -6873,6 +7006,31 @@ impl GraphicsSystem {
         plan
     }
 
+    fn prepare_viewport_object_render_plan(
+        &mut self,
+        objects: &[ObjectSnapshot],
+        render_order: &[ObjectId],
+        players: &[PlayerState],
+        for_player: i32,
+        requested_phases: u8,
+    ) -> PreparedObjectRenderPlan {
+        if let Some(cached) = self.object_render_plan_cache.remove(&for_player) {
+            if cached.generation == self.object_render_plan_generation {
+                return cached.plan;
+            }
+            let mut plan = cached.plan;
+            plan.rebuild(objects, render_order, players, for_player, requested_phases);
+            return plan;
+        }
+        self.prepare_object_render_plan(
+            objects,
+            render_order,
+            players,
+            for_player,
+            requested_phases,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn draw_objects(
         &mut self,
@@ -6923,6 +7081,7 @@ impl GraphicsSystem {
             for_player,
             PreparedObjectRenderPlan::phase_bit(pass),
         );
+        self.particle_layer_index.rebuild(particles);
         self.draw_prepared_objects_at_frame(
             frame,
             objects,
@@ -6936,6 +7095,7 @@ impl GraphicsSystem {
             pass,
             gamma,
         );
+        self.particle_layer_index.invalidate();
         self.object_render_plan_scratch = plan;
     }
 
@@ -6955,11 +7115,6 @@ impl GraphicsSystem {
     ) {
         let saved_current_audibility_facet = self.current_audibility_facet;
         self.current_audibility_facet = self.audibility_facet_for_pass(pass);
-        // Group the particle slice by layer once instead of letting every
-        // object's two `draw_definition_particles` calls filter all of it.
-        let mut particle_layer_index = std::mem::take(&mut self.particle_layer_index);
-        particle_layer_index.rebuild(particles);
-        self.particle_layer_index = particle_layer_index;
         let selected = plan.objects_for(pass);
 
         for &index in selected {
@@ -7059,10 +7214,6 @@ impl GraphicsSystem {
                 self.paint_object_top_face(object, blit, gamma);
             }
         }
-
-        // The index describes this call's slice only; anything drawn outside
-        // an object pass scans linearly rather than trusting it.
-        self.particle_layer_index.invalidate();
         self.current_audibility_facet = saved_current_audibility_facet;
     }
 

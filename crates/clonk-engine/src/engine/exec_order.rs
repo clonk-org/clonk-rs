@@ -1539,6 +1539,17 @@ impl Engine {
         cache.1.get(&id).copied()
     }
 
+    pub(crate) fn object_ids_are_unique(&self) -> bool {
+        let Some(first) = self.objects.first() else {
+            return true;
+        };
+        // `find_object_index` refreshes the generation-keyed cache on demand.
+        // Its one-entry-per-id length then detects duplicate restored ids
+        // without allocating another set on every ordinary frame.
+        let _ = self.find_object_index(first.id);
+        self.object_index_cache.borrow().1.len() == self.objects.len()
+    }
+
     pub(crate) fn note_objects_changed(&self) {
         self.objects_generation
             .set(self.objects_generation.get().wrapping_add(1));

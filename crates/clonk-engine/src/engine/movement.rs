@@ -1501,8 +1501,7 @@ impl Engine {
         // Synthetic fixture worlds without a landscape keep their historical
         // movement path; a real game always has GBack available here.
         if matches!(procedure, ActionProcedure::Dig) && self.landscape.is_some() {
-            let solid_mask_indices = (0..self.objects.len()).collect::<Vec<_>>();
-            let solid_masks = self.solid_masks_for_movement(&solid_mask_indices);
+            let solid_masks = self.live_movement_solid_masks();
             let attachment = self.landscape.as_ref().map(|landscape| {
                 let object = &self.objects[idx];
                 let mut sample_position = object.state.position;

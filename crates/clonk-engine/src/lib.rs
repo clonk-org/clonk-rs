@@ -387,6 +387,7 @@ std::thread_local! {
     static RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOLID_MASK_DEFINITION_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+    static BLAST_SHIFT_BYTE_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
     static EXEC_LIST_MASTER_ORDER_SCANS: Cell<usize> = const { Cell::new(0) };
     static HOST_SOLID_MASK_STATE_OBJECT_VISITS: Cell<usize> = const { Cell::new(0) };
     static HOST_SOLID_MASK_BAKE_VECTOR_CLONES: Cell<usize> = const { Cell::new(0) };
@@ -396,12 +397,14 @@ std::thread_local! {
     static NO_ATTACH_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static CONTAINED_CALL_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static PARTICLE_DEF_NAME_REBUILDS: Cell<usize> = const { Cell::new(0) };
+    static PARTICLE_LIST_RETAIN_PASSES: Cell<usize> = const { Cell::new(0) };
     static SET_VERTEX_DEFINITION_METADATA_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static ACTION_TRANSITION_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static EFFECT_DEF_CORE_VALUE_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_LOCAL_VAR_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static COMMAND_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SECTOR_FULL_REBUILDS: Cell<usize> = const { Cell::new(0) };
+    static SECTOR_RANK_REBUILDS: Cell<usize> = const { Cell::new(0) };
     static EMPTY_COMMAND_QUEUE_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
     static SYNTHETIC_COMMAND_FOLDS: Cell<usize> = const { Cell::new(0) };
     static ACTION_CALLBACK_DRAIN_INVOCATIONS: Cell<usize> = const { Cell::new(0) };

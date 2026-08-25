@@ -510,9 +510,24 @@ impl Engine {
     /// exact enumeration needed if that virtual savegame later starts an
     /// initial C4 record.
     pub fn enumerate_live_c4_string_table_for_save(&mut self) -> Vec<Vec<u8>> {
+        self.capture_state_and_live_c4_string_table_for_save().1
+    }
+
+    /// Capture the standalone JSON save state and enumerate its live strings
+    /// from that same immutable projection.
+    ///
+    /// Keeping these together avoids projecting the entire simulation twice
+    /// immediately before a virtual save is written.
+    pub fn capture_state_and_live_c4_string_table_for_save(
+        &self,
+    ) -> (crate::EngineState, Vec<Vec<u8>>) {
         let state = self.capture_state();
         let referenced_strings = collect_live_referenced_strings(self, &state);
-        clonk_script::enumerate_c4_strings(&self.script_string_registrations, &referenced_strings)
+        let values = clonk_script::enumerate_c4_strings(
+            &self.script_string_registrations,
+            &referenced_strings,
+        );
+        (state, values)
     }
 
     /// Install the exact `Strings.txt` line order loaded with a virtual JSON
@@ -4128,6 +4143,26 @@ mod tests {
 
         let values = engine.enumerate_live_c4_string_table_for_save();
 
+        assert_eq!(
+            values,
+            vec![
+                b"zeta created first".to_vec(),
+                b"alpha created second".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn virtual_save_captures_state_and_string_table_together() {
+        let mut engine = Engine::new();
+        engine.adopt_loaded_c4_string_table(&[
+            b"zeta created first".to_vec(),
+            b"alpha created second".to_vec(),
+        ]);
+
+        let (state, values) = engine.capture_state_and_live_c4_string_table_for_save();
+
+        assert_eq!(state.frame, engine.frame());
         assert_eq!(
             values,
             vec![

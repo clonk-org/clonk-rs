@@ -3079,6 +3079,34 @@ mod tests {
     }
 
     #[test]
+    fn grid_world_tick_does_not_scan_solid_mask_definitions_before_movement() {
+        // C4Object::Execute dispatches each object's own movement directly;
+        // there is no frame-global solid-mask candidate enumeration before
+        // that dispatch (C4Object.cpp:1082-1105; C4Movement.cpp:553-616).
+        // Grid worlds already bake masks into the landscape plane, so such an
+        // enumeration would be discarded by every movement consumer.
+        let mut engine = grid_world_engine();
+        let mut masked =
+            Definition::from_script("Masked", "Masked", "").expect("masked definition compiles");
+        masked.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine
+            .register_definition(masked)
+            .expect("masked definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Masked"))
+            .expect("masked object spawns");
+
+        SOLID_MASK_DEFINITION_LOOKUPS.with(|count| count.set(0));
+        engine.advance_tick().expect("stationary frame advances");
+
+        assert_eq!(
+            SOLID_MASK_DEFINITION_LOOKUPS.with(Cell::get),
+            0,
+            "grid movement must not derive a rect-overlay candidate list"
+        );
+    }
+
+    #[test]
     fn one_solid_mask_put_acquires_surface8_cow_storage_once() {
         // C4SolidMask::Put is one uninterrupted row-major Surface8 raster
         // walk (C4SolidMask.cpp:79-101). Rust may acquire its COW planes once
