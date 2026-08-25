@@ -2433,10 +2433,10 @@ fn runtime_snapshot_mismatch(
         ));
     }
 
-    // The bridge does not export C4GameMessageList or C4Player::LocalControl.
-    // Empty cpp fields against populated Rust state are comparator
-    // asymmetries, not simulation divergences. Compare the transported HUD
-    // fields only (RustEngineBridge.cpp:1343-1399).
+    // The bridge does not export C4GameMessageList, C4Player::LocalControl or
+    // C4Scoreboard. Empty cpp fields against populated Rust state are
+    // comparator asymmetries, not simulation divergences. Compare the
+    // transported HUD fields only (RustEngineBridge.cpp:1343-1399).
     {
         let mut expected_hud = expected.hud.clone();
         let mut actual_hud = actual.hud.clone();
@@ -2446,6 +2446,15 @@ fn runtime_snapshot_mismatch(
         }
         expected_hud.local_players.clear();
         actual_hud.local_players.clear();
+        // Unconditional, unlike the messages above: the C ABI has no
+        // scoreboard at all -- neither lc_engine_ffi.h nor RustEngineBridge.cpp
+        // names one, and the HUD it exports is a flat per-player struct
+        // (lc_engine_ffi.h:113-122) -- so cpp is empty by construction and a
+        // scenario that keeps a rank table could never agree.
+        expected_hud.scoreboard = crate::scoreboard::ScoreboardState::default();
+        actual_hud.scoreboard = crate::scoreboard::ScoreboardState::default();
+        expected_hud.scoreboard_presentations.clear();
+        actual_hud.scoreboard_presentations.clear();
         if expected_hud != actual_hud {
             problems.push(format!(
                 "hud mismatch (rust {expected_hud:?}, cpp {actual_hud:?})"
@@ -5392,6 +5401,68 @@ global func Step(state, frame, random)
         // What the port produces: the same crew, no derived owner list.
         let mut expected = actual.clone();
         expected.known_crew_owners.clear();
+
+        assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
+    }
+
+    /// The C ABI carries no scoreboard at all: neither `lc_engine_ffi.h` nor
+    /// `RustEngineBridge.cpp` mentions one, and the HUD it exports is a flat
+    /// per-player struct (`lc_engine_ffi.h:113-122`). C++'s side is therefore
+    /// empty by construction, so comparing it stops every scenario that keeps
+    /// a scoreboard on frame 1 -- the races, which show a rank table from the
+    /// first tick (`hud mismatch` on `Goldrace` and `Skyrace`,
+    /// clonk-org/clonk-rs#1054).
+    ///
+    /// The same reasoning already excludes `C4GameMessageList` and
+    /// `C4Player::LocalControl` a few lines below.
+    #[test]
+    fn runtime_mismatch_ignores_the_scoreboard_the_abi_never_carries() {
+        let crew_members = [11u64];
+        let hud_entries = [LcEngineHudPlayerSnapshot {
+            owner: 0,
+            crew: crew_members.as_ptr(),
+            crew_count: crew_members.len(),
+            has_focus: false,
+            focus_object: 0,
+            eliminated: false,
+            wealth: 0,
+            score: 0,
+        }];
+
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                hud_entries.as_ptr(),
+                hud_entries.len(),
+                ptr::null(),
+                0,
+            )
+        };
+        assert!(
+            actual.hud.scoreboard.is_default(),
+            "cpp side should have no scoreboard"
+        );
+
+        // The port keeps the race's rank table.
+        let mut expected = actual.clone();
+        expected
+            .hud
+            .scoreboard
+            .set_cell(1, 1, Some("Tyler".into()), 1);
 
         assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
     }
