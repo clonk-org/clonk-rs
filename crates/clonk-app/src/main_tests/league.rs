@@ -5347,6 +5347,45 @@ fn compat_profile_takes_away_the_shared_account_base_fallback() {
 }
 
 #[test]
+fn a_compatibility_session_withholds_the_content_appendto_divergences() {
+    // A content `#appendto` divergence *is* a shipped script, so the profile
+    // reverts it by not loading the file at all -- there is no config key to
+    // overlay. The install seam is the only place that can decide it: the
+    // scripts are read once at construction, before any command line has been
+    // applied, so the profile is not yet known there.
+    //
+    // Everything else in System.c4g is C4Script's standard library and must
+    // still load, or a compatibility session would have no globals at all.
+    let mut app = new_running_sandbox_app();
+    app.system_scripts = vec![
+        ("BirdFlight.c".to_string(), "/* divergence */".to_string()),
+        ("GatherTask.c".to_string(), "/* divergence */".to_string()),
+        ("C4.c".to_string(), "/* shipped */".to_string()),
+        ("Helpers.c".to_string(), "/* shipped */".to_string()),
+    ];
+
+    app.compat_profile = crate::settings::CompatProfile::Normal;
+    let normal = app.global_scripts_for_session();
+    main_assert_eq!(
+        normal.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>()
+            => vec!["BirdFlight.c", "GatherTask.c", "C4.c", "Helpers.c"],
+        "normal Rust-only play loads every shipped script, in order"
+    );
+
+    app.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    let compat = app.global_scripts_for_session();
+    main_assert_eq!(
+        compat.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>()
+            => vec!["C4.c", "Helpers.c"],
+        "the profile withholds the divergences and keeps the standard library"
+    );
+
+    // The loaded table is never rewritten: what the player installed is still
+    // what is on disk, so leaving the profile restores the divergences.
+    main_assert_eq!(app.system_scripts.len() => 4);
+}
+
+#[test]
 fn compat_profile_overlays_the_cpp_control_mode_without_touching_the_saved_key() {
     use crate::settings::{session_control_mode, CompatProfile, CPP_CONTROL_MODE_DECENTRAL};
     use clonk_core::std_config::Config;

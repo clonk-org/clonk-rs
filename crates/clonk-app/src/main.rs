@@ -3532,13 +3532,38 @@ impl GameApp {
         self.install_global_scripts_to(engine);
     }
 
+    /// The System.c4g global scripts this session actually loads.
+    ///
+    /// A content `#appendto` divergence *is* a shipped script, so the
+    /// compatibility profile reverts it by not loading the file -- there is no
+    /// configuration key to overlay. `compat/profile.json` names each one, and
+    /// `compat_readiness::reverted_content_scripts` derives the set, so the
+    /// contract stays the single source of truth.
+    ///
+    /// This is the only seam that can decide it: the scripts are read once
+    /// during construction, before any command line has been applied, so the
+    /// requested profile is not yet known there. Nothing is rewritten -- the
+    /// loaded table keeps every file, so leaving the profile restores them.
+    fn global_scripts_for_session(&self) -> Vec<(String, String)> {
+        if self.compat_profile == crate::settings::CompatProfile::Normal {
+            return self.system_scripts.clone();
+        }
+        let withheld = crate::compat_readiness::reverted_content_scripts();
+        self.system_scripts
+            .iter()
+            .filter(|(name, _)| !withheld.contains(name.as_str()))
+            .cloned()
+            .collect()
+    }
+
     /// Installs the System.c4g global scripts (the C++ `Game.ScriptEngine`
     /// scripts) into a fresh game engine.
     fn install_global_scripts_to(&self, engine: &mut Engine) {
         if self.system_scripts.is_empty() {
             return;
         }
-        let loaded = engine.install_global_scripts(&self.system_scripts);
+        let scripts = self.global_scripts_for_session();
+        let loaded = engine.install_global_scripts(&scripts);
         tracing::debug!(scripts = loaded, "installed System.c4g global scripts");
     }
 

@@ -13,6 +13,7 @@
 //! everyone in the session their round, not just the peer that was wrong.
 
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 /// The contract, embedded so the runtime answer and the gated manifest are the
@@ -60,6 +61,8 @@ struct Divergence {
     area: String,
     summary: String,
     profile_action: String,
+    #[serde(default)]
+    cited_in: Vec<String>,
     #[serde(default)]
     owner: Option<String>,
 }
@@ -115,6 +118,28 @@ pub fn blockers() -> Vec<CompatBlocker> {
             })
     }));
     blockers
+}
+
+/// The `planet/System.c4g` scripts the profile withholds.
+///
+/// Taken from the contract rather than a second hand-kept list: a content
+/// `#appendto` divergence exists *as* a shipped script, so reverting it means
+/// not loading that file, and every such divergence already names its file in
+/// `cited_in`. A tenth divergence therefore withholds its script with no code
+/// change, and a divergence that is retired stops withholding it.
+///
+/// Only `planet/System.c4g` paths are taken. The same field also cites Rust
+/// sources and test files, which are not content and are never withheld.
+pub fn reverted_content_scripts() -> BTreeSet<String> {
+    manifest()
+        .divergences
+        .iter()
+        .filter(|divergence| divergence.profile_action == "reverted")
+        .flat_map(|divergence| divergence.cited_in.iter())
+        .filter_map(|path| path.strip_prefix("planet/System.c4g/"))
+        .filter(|name| name.ends_with(".c"))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Whether the profile may be claimed at all.
@@ -202,6 +227,40 @@ fn named_blockers(blockers: &[CompatBlocker]) -> Vec<String> {
 ))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reverted_content_scripts_come_from_the_contract() {
+        // The content `#appendto` divergences are the only reason the profile
+        // withholds a shipped script, and each already names its file in
+        // `cited_in`. Deriving the set from the manifest keeps one source of
+        // truth: adding another divergence withholds its script with no code
+        // change, and removing one stops withholding it.
+        let scripts = reverted_content_scripts();
+
+        for expected in [
+            "BirdFlight.c",
+            "EkeAirbikeSteering.c",
+            "EkeGpedRemoteControl.c",
+            "EkeGuidedMissile.c",
+            "EkeSftRelease.c",
+            "FoWReveal.c",
+            "GatherMenu.c",
+            "GatherTask.c",
+            "MarsOrderCapsule.c",
+            "MenuRangeRow.c",
+        ] {
+            assert!(
+                scripts.contains(expected),
+                "{expected} is cited by a reverted content divergence"
+            );
+        }
+
+        // Shipped engine scripts are never withheld -- reverting a divergence
+        // must not take C4Script's own standard library with it.
+        for kept in ["C4.c", "Explode.c", "FindObject.c", "Helpers.c", "Magic.c"] {
+            assert!(!scripts.contains(kept), "{kept} is not a divergence");
+        }
+    }
 
     #[test]
     fn a_blocked_profile_reports_what_is_wrong_and_never_claims_it() {
