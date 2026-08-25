@@ -13474,6 +13474,10 @@ mod command_contact_regression;
 mod pending_spawn_sector_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/map_creator_discard_draws_regression.rs"]
+mod map_creator_discard_draws_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/include_local_order_regression.rs"]
 mod include_local_order_regression;
 

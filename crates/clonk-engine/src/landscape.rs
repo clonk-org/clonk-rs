@@ -7877,8 +7877,30 @@ impl crate::Engine {
         else {
             return false;
         };
+        // Report whether a creator was actually freed: native only reaches
+        // ~C4MapCreatorS2 when one exists (C4Landscape.cpp:551,556), and that
+        // destructor draws.
+        let had_creator = state.map_creator().is_some();
         state.set_map_creator(None);
-        true
+        had_creator
+    }
+
+    /// The draws `~C4MapCreatorS2` spends on the synchronized ledger.
+    ///
+    /// Freeing the creator is not just deallocation natively: the destructor
+    /// runs `Clear()`, which calls `Default()`, which re-defaults the template
+    /// map — and `C4MCMap::Default` evaluates `MapWdt` and `MapHgt`
+    /// (`C4MapCreatorS2.cpp:633-644,717-740`). Both are ordinary
+    /// `C4SVal::Evaluate` calls, so each spends one draw even when the value is
+    /// fixed. The results are discarded; only the ledger movement is
+    /// observable (clonk-org/clonk-rs#1050).
+    pub(crate) fn spend_map_creator_discard_draws(
+        &mut self,
+        map_width: crate::scenario::LegacyC4SVal,
+        map_height: crate::scenario::LegacyC4SVal,
+    ) {
+        let _ = map_width.evaluate(&mut self.rng);
+        let _ = map_height.evaluate(&mut self.rng);
     }
 }
 

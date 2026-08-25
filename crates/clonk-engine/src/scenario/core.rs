@@ -442,6 +442,10 @@ pub struct Scenario {
     pub(in crate::scenario) landscape: Option<Landscape>,
     pub(in crate::scenario) post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks,
     pub(in crate::scenario) keep_map_creator: bool,
+    /// `MapWdt`/`MapHgt` as `~C4MapCreatorS2` re-evaluates them when the
+    /// creator is discarded (clonk-org/clonk-rs#1050).
+    pub(in crate::scenario) map_width: LegacyC4SVal,
+    pub(in crate::scenario) map_height: LegacyC4SVal,
     pub(in crate::scenario) scenario_sections: Vec<ScenarioSectionSpec>,
     pub(in crate::scenario) physics: Option<PhysicsSettings>,
     /// The C4Aul string enumeration loaded from `Strings.txt`. Compiled
@@ -3651,6 +3655,8 @@ impl Scenario {
             landscape,
             post_init_map_callbacks,
             keep_map_creator: manifest.core.landscape.keep_map_creator,
+            map_width: manifest.core.landscape.map_width,
+            map_height: manifest.core.landscape.map_height,
             scenario_sections,
             physics,
             legacy_string_table,
@@ -4879,8 +4885,14 @@ impl Scenario {
                     post_init_started.elapsed(),
                 );
             }
-            if !self.keep_map_creator {
-                engine.clear_runtime_map_creator();
+            // Freeing the creator is a synchronized draw, not just
+            // deallocation: ~C4MapCreatorS2 runs Clear() -> Default() ->
+            // C4MCMap::Default, which evaluates MapWdt and MapHgt on the live
+            // ledger (C4MapCreatorS2.cpp:633-644,717-740;
+            // C4Landscape.cpp:554-556). Native reaches the destructor only
+            // when a creator exists, so the draws follow the same condition.
+            if !self.keep_map_creator && engine.clear_runtime_map_creator() {
+                engine.spend_map_creator_discard_draws(self.map_width, self.map_height);
             }
         }
         if runtime_savegame {
@@ -5249,6 +5261,8 @@ impl Scenario {
             landscape,
             post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks::default(),
             keep_map_creator: false,
+            map_width: LegacyC4SVal::default(),
+            map_height: LegacyC4SVal::default(),
             scenario_sections: Vec::new(),
             physics,
             legacy_string_table: clonk_script::new_string_registrations(),
