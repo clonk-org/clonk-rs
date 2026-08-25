@@ -3,10 +3,7 @@
     "frame": 1,
     "game_over": false,
     "physics": {
-      "gravity": 1,
-      "max_fall_speed": 12,
-      "max_rise_speed": -20,
-      "max_horizontal_speed": 12
+      "gravity": 1
     },
     "objects": [
       {
@@ -657,10 +654,7 @@
     "frame": 2,
     "game_over": false,
     "physics": {
-      "gravity": 1,
-      "max_fall_speed": 12,
-      "max_rise_speed": -20,
-      "max_horizontal_speed": 12
+      "gravity": 1
     },
     "objects": [
       {
@@ -1311,10 +1305,7 @@
     "frame": 3,
     "game_over": false,
     "physics": {
-      "gravity": 1,
-      "max_fall_speed": 12,
-      "max_rise_speed": -20,
-      "max_horizontal_speed": 12
+      "gravity": 1
     },
     "objects": [
       {
