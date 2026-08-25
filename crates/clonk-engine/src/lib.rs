@@ -13516,6 +13516,10 @@ mod pending_spawn_sector_regression;
 mod map_creator_discard_draws_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/weather_meteor_creation_lifecycle_regression.rs"]
+mod weather_meteor_creation_lifecycle_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/include_local_order_regression.rs"]
 mod include_local_order_regression;
 
