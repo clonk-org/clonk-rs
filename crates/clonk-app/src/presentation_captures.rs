@@ -111,6 +111,167 @@ pub fn pending_screens() -> Vec<&'static CaptureScreen> {
         .collect()
 }
 
+/// Which renderer produced a capture, and therefore how far it may differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureSurface {
+    /// The software renderer, which is the exact oracle.
+    Cpu,
+    /// GPU composition, which carries the documented one-byte cross-driver
+    /// tolerance (`docs/RENDERING_PARITY.md`).
+    Gpu,
+}
+
+impl CaptureSurface {
+    fn max_channel_delta(self) -> u8 {
+        match self {
+            Self::Cpu => tolerance().cpu_max_channel_delta,
+            Self::Gpu => tolerance().gpu_max_channel_delta,
+        }
+    }
+}
+
+/// Why a capture pair is not a match.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CaptureMismatch {
+    /// The manifest does not list the screen, so no terms exist to compare on.
+    UnknownScreen { screen: String },
+    /// A capture is not the geometry the manifest fixes for every screen.
+    Geometry {
+        screen: String,
+        expected: String,
+        actual: String,
+    },
+    /// A buffer is not `width * height * 4` bytes of RGBA.
+    Length {
+        screen: String,
+        expected: usize,
+        actual: usize,
+    },
+    /// The captures differ outside every approved mask.
+    Pixels {
+        screen: String,
+        /// The first differing pixel in row-major order, so a report names one
+        /// place to look rather than a count.
+        x: u32,
+        y: u32,
+        /// The largest single-channel difference anywhere outside the masks.
+        max_channel_delta: u8,
+        /// How many pixels differ, so a one-pixel slip reads differently from a
+        /// wholesale divergence.
+        differing_pixels: usize,
+    },
+}
+
+/// Whether `x,y,width,height` covers this pixel.
+///
+/// Start-inclusive and end-exclusive, so adjacent regions do not overlap. A
+/// region that does not parse covers **nothing**: the manifest test rejects a
+/// malformed one, and failing open here would let a typo silently widen a
+/// comparison into passing.
+fn region_contains(region: &str, x: u32, y: u32) -> bool {
+    let mut fields = region.split(',').map(|field| field.trim().parse::<u32>());
+    match (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) {
+        (Some(Ok(mx)), Some(Ok(my)), Some(Ok(mw)), Some(Ok(mh)), None) => {
+            x >= mx && x < mx.saturating_add(mw) && y >= my && y < my.saturating_add(mh)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a pixel falls inside a region approved for this screen.
+fn masked(screen: &str, x: u32, y: u32) -> bool {
+    masks()
+        .iter()
+        .filter(|mask| mask.screen == screen)
+        .any(|mask| region_contains(&mask.region, x, y))
+}
+
+/// Compares one C++/Rust capture pair on the manifest's terms.
+///
+/// Both buffers are RGBA8 at the geometry the manifest fixes. Alpha is compared
+/// like any other channel: a capture that differs only in alpha still differs.
+///
+/// This is deliberately given raw buffers rather than paths — decoding belongs
+/// to whatever produces the captures, and keeping it out means the terms of the
+/// comparison can be tested without any capture existing yet
+/// (clonk-org/clonk-rs#587).
+pub fn compare_capture(
+    screen: &str,
+    surface: CaptureSurface,
+    width: u32,
+    height: u32,
+    reference: &[u8],
+    actual: &[u8],
+) -> Result<(), CaptureMismatch> {
+    if !screens().iter().any(|entry| entry.id == screen) {
+        return Err(CaptureMismatch::UnknownScreen {
+            screen: screen.to_owned(),
+        });
+    }
+
+    let expected_geometry = &geometry().resolution;
+    let actual_geometry = format!("{width}x{height}");
+    if actual_geometry != *expected_geometry {
+        return Err(CaptureMismatch::Geometry {
+            screen: screen.to_owned(),
+            expected: expected_geometry.clone(),
+            actual: actual_geometry,
+        });
+    }
+
+    let expected_len = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4);
+    for buffer in [reference, actual] {
+        if buffer.len() != expected_len {
+            return Err(CaptureMismatch::Length {
+                screen: screen.to_owned(),
+                expected: expected_len,
+                actual: buffer.len(),
+            });
+        }
+    }
+
+    let limit = surface.max_channel_delta();
+    let mut first: Option<(u32, u32)> = None;
+    let mut worst = 0_u8;
+    let mut differing = 0_usize;
+    for index in 0..(width as usize * height as usize) {
+        let x = (index % width as usize) as u32;
+        let y = (index / width as usize) as u32;
+        if masked(screen, x, y) {
+            continue;
+        }
+        let offset = index * 4;
+        let delta = (0..4)
+            .map(|channel| reference[offset + channel].abs_diff(actual[offset + channel]))
+            .max()
+            .unwrap_or(0);
+        if delta > limit {
+            differing += 1;
+            worst = worst.max(delta);
+            first.get_or_insert((x, y));
+        }
+    }
+
+    match first {
+        None => Ok(()),
+        Some((x, y)) => Err(CaptureMismatch::Pixels {
+            screen: screen.to_owned(),
+            x,
+            y,
+            max_channel_delta: worst,
+            differing_pixels: differing,
+        }),
+    }
+}
+
 #[cfg(all(
     test,
     any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
@@ -235,6 +396,177 @@ mod tests {
     fn every_capture_shares_one_resolution_and_scale() {
         assert_eq!(geometry().resolution, "1280x720");
         assert_eq!(geometry().scale, 100);
+    }
+
+    /// A capture the size the manifest fixes, filled with one colour.
+    fn plane(value: u8) -> Vec<u8> {
+        let (width, height) = (1_280_usize, 720_usize);
+        vec![value; width * height * 4]
+    }
+
+    #[test]
+    fn an_identical_pair_matches_on_either_surface() {
+        for surface in [CaptureSurface::Cpu, CaptureSurface::Gpu] {
+            assert_eq!(
+                compare_capture("startup-main", surface, 1_280, 720, &plane(9), &plane(9)),
+                Ok(())
+            );
+        }
+    }
+
+    /// The software renderer is the exact oracle, so nothing is forgiven there;
+    /// GPU composition carries the documented one byte and no more.
+    #[test]
+    fn the_surface_decides_how_far_a_channel_may_drift() {
+        let reference = plane(10);
+        let mut off_by_one = plane(10);
+        off_by_one[0] = 11;
+        let mut off_by_two = plane(10);
+        off_by_two[0] = 12;
+
+        assert!(matches!(
+            compare_capture(
+                "startup-main",
+                CaptureSurface::Cpu,
+                1_280,
+                720,
+                &reference,
+                &off_by_one
+            ),
+            Err(CaptureMismatch::Pixels {
+                max_channel_delta: 1,
+                differing_pixels: 1,
+                ..
+            })
+        ));
+        assert_eq!(
+            compare_capture(
+                "startup-main",
+                CaptureSurface::Gpu,
+                1_280,
+                720,
+                &reference,
+                &off_by_one
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            compare_capture(
+                "startup-main",
+                CaptureSurface::Gpu,
+                1_280,
+                720,
+                &reference,
+                &off_by_two
+            ),
+            Err(CaptureMismatch::Pixels {
+                max_channel_delta: 2,
+                ..
+            })
+        ));
+    }
+
+    /// A report has to name one place to look, not just a count.
+    #[test]
+    fn a_mismatch_names_the_first_differing_pixel_in_row_major_order() {
+        let reference = plane(0);
+        let mut actual = plane(0);
+        // (5, 2) comes first in row-major order; (400, 1) is earlier by y.
+        let at = |x: usize, y: usize| (y * 1_280 + x) * 4;
+        actual[at(5, 2)] = 40;
+        actual[at(400, 1)] = 40;
+
+        let Err(CaptureMismatch::Pixels {
+            x,
+            y,
+            differing_pixels,
+            ..
+        }) = compare_capture(
+            "startup-main",
+            CaptureSurface::Cpu,
+            1_280,
+            720,
+            &reference,
+            &actual,
+        )
+        else {
+            panic!("differing planes do not match");
+        };
+        assert_eq!((x, y), (400, 1));
+        assert_eq!(differing_pixels, 2);
+    }
+
+    /// Geometry and buffer length are rejected before any pixel is read: a
+    /// comparison across different shapes proves nothing, and silently
+    /// comparing a prefix would look like a pass.
+    #[test]
+    fn a_capture_that_is_not_the_fixed_geometry_is_rejected() {
+        assert!(matches!(
+            compare_capture(
+                "startup-main",
+                CaptureSurface::Cpu,
+                640,
+                480,
+                &plane(0),
+                &plane(0)
+            ),
+            Err(CaptureMismatch::Geometry { .. })
+        ));
+        assert!(matches!(
+            compare_capture(
+                "startup-main",
+                CaptureSurface::Cpu,
+                1_280,
+                720,
+                &plane(0),
+                &[0; 16]
+            ),
+            Err(CaptureMismatch::Length { .. })
+        ));
+    }
+
+    /// Masking is how a comparison lies, so its bounds are worth pinning even
+    /// while the manifest approves none. Start-inclusive and end-exclusive, and
+    /// a region that does not parse covers nothing rather than everything.
+    #[test]
+    fn an_approved_region_covers_exactly_its_own_pixels() {
+        for (x, y) in [(10, 20), (10, 39), (29, 20), (29, 39)] {
+            assert!(region_contains("10,20,20,20", x, y), "({x},{y}) is inside");
+        }
+        for (x, y) in [(9, 20), (10, 19), (30, 20), (10, 40)] {
+            assert!(
+                !region_contains("10,20,20,20", x, y),
+                "({x},{y}) is outside"
+            );
+        }
+        assert!(region_contains(" 10 , 20 , 20 , 20 ", 15, 25));
+        assert!(
+            !region_contains("10,20,0,20", 10, 20),
+            "a zero-width region covers nothing"
+        );
+        for malformed in ["", "10,20,20", "10,20,20,20,20", "a,b,c,d", "-1,0,5,5"] {
+            assert!(
+                !region_contains(malformed, 0, 0),
+                "`{malformed}` must not mask anything"
+            );
+        }
+    }
+
+    /// Comparing a screen the manifest does not list would be a comparison with
+    /// no stated terms — no geometry, no tolerance, no approved masks.
+    #[test]
+    fn a_screen_outside_the_manifest_has_no_terms_to_compare_on() {
+        assert!(matches!(
+            compare_capture(
+                "not-a-screen",
+                CaptureSurface::Cpu,
+                1_280,
+                720,
+                &plane(0),
+                &plane(0)
+            ),
+            Err(CaptureMismatch::UnknownScreen { .. })
+        ));
     }
 
     /// The profile may not claim presentation while a screen is uncompared.
