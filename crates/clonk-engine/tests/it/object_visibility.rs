@@ -77,6 +77,119 @@ pub(crate) fn shipped_invisibility_spell_hides_and_restores_its_mage(
     assert!(restored.object_visible_for_player(mage, observer, false));
 }
 
+pub(crate) fn shipped_invisibility_expires_when_its_timerless_interval_elapses(
+    prepared: &PreparedInstalledScenario,
+) {
+    // Invisibility.c4d/Script.c defines no FxInvisPSpellTimer at all, so the
+    // only thing that ends it is C4Effect::Execute's else arm: an effect with
+    // a nonzero interval and no timer function is killed the moment that
+    // interval elapses ("no timer function: mark dead after time elapsed",
+    // C4Effect.cpp:342-357). Activate's single-caster branch asks for
+    // interval 1400 — the "40sec" the shipped comment claims.
+    let mut engine = prepared.instantiate();
+    assert!(
+        !engine.definition_script_has_function("MINV", "FxInvisPSpellTimer"),
+        "the shipped spell must keep relying on the timerless-kill path"
+    );
+    let owner = join_local_player(&mut engine, "Invisibility expiry owner");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let observer = join_local_player(&mut engine, "Invisibility expiry observer");
+    crate::support::TestValueExt::test_value(engine.set_hostility(owner, observer, true));
+
+    let spell = engine.spawn_test_object(SpawnConfig::new("MINV").with_owner(owner));
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64()), Value::Nil],
+    );
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+
+    let cast = crate::support::TestValueExt::test_value(
+        engine
+            .test_object_snapshot(mage)
+            .effects
+            .into_iter()
+            .find(|effect| effect.name == "InvisPSpell"),
+    );
+    assert_eq!(cast.interval, 1_400, "Activate's single-caster branch");
+    assert!(!engine
+        .snapshot()
+        .object_visible_for_player(mage, observer, false));
+
+    // The Activate tick above already advanced the effect once, so the
+    // interval elapses on the 1400th.
+    for _ in 0..1_398 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert!(
+        engine
+            .test_object_snapshot(mage)
+            .effects
+            .iter()
+            .any(|effect| effect.name == "InvisPSpell" && effect.priority != 0),
+        "the spell is still running one tick before its interval elapses"
+    );
+
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+
+    let expired = engine.snapshot();
+    let mage_snapshot = crate::support::TestValueExt::test_value(expired.object(mage));
+    assert!(
+        !mage_snapshot
+            .effects
+            .iter()
+            .any(|effect| effect.name == "InvisPSpell" && effect.priority != 0),
+        "the timerless interval kills the effect"
+    );
+    assert_eq!(
+        mage_snapshot.visibility, VIS_ALL,
+        "FxInvisPSpellStop restores the pre-cast visibility when the spell runs out"
+    );
+    assert_eq!(
+        mage_snapshot.color_modulation, 0,
+        "and its pre-cast colour modulation"
+    );
+    assert!(expired.object_visible_for_player(mage, observer, false));
+
+    // A carrier that walks into a building keeps ticking its effects:
+    // C4GameObjects::Execute walks the whole main list, and contents are in it
+    // (C4Object.cpp:1953-2012). If a contained clonk stopped ticking, the
+    // spell really would never run out.
+    let container = engine.spawn_test_object(SpawnConfig::new("MINV").with_owner(owner));
+    let spell = engine.spawn_test_object(SpawnConfig::new("MINV").with_owner(owner));
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64()), Value::Nil],
+    );
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        mage,
+        clonk_engine::ObjectUpdate::new().with_container(container),
+    ));
+    assert_eq!(
+        engine.test_object_snapshot(mage).container,
+        Some(container),
+        "the invisible mage is now contained"
+    );
+    for _ in 0..1_399 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert!(
+        !engine
+            .test_object_snapshot(mage)
+            .effects
+            .iter()
+            .any(|effect| effect.name == "InvisPSpell" && effect.priority != 0),
+        "the interval still elapses while the carrier is contained"
+    );
+    assert_eq!(
+        engine.test_object_snapshot(mage).visibility,
+        VIS_ALL,
+        "and the contained carrier's visibility is restored too"
+    );
+}
+
 pub(crate) fn shipped_invisibility_recast_carries_remaining_time_into_reset_timer(
     prepared: &PreparedInstalledScenario,
 ) {
