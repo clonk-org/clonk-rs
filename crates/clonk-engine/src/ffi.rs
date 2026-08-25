@@ -1728,7 +1728,10 @@ unsafe fn make_snapshot(
             life: entry.life,
             parameter_a: entry.parameter_a,
             parameter_b: entry.parameter_b,
-            // Not carried by the C ABI snapshot yet (task #22).
+            // LcEngineParticleSnapshot has no PXS fields, so a bridged
+            // particle carries neither the exact C4Fixed pair nor the chunk
+            // slot. Comparing PXS through this ABI needs the header extended
+            // first (parity/bridge/lc_engine_ffi.h:22-33).
             pxs_fixed: None,
             pxs_slot: None,
             layer,
