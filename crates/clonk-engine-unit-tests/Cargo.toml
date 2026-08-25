@@ -16,6 +16,7 @@ autotests = false
 # as clonk-engine's former built-in unit harness.
 default = []
 bench = []
+ffi = []
 test-graph = []
 
 [[test]]

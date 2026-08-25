@@ -20,6 +20,10 @@ test = false
 default = []
 bench = ["dep:criterion"]
 test-graph = ["dep:proptest"]
+# The C ABI the pinned oracle's USE_RUST_ENGINE_VALIDATION bridge links against
+# (clonk-org/clonk-rs#585). Off by default: it is a diagnostic surface, not part
+# of the shipped engine.
+ffi = ["dep:tracing-subscriber"]
 
 [dependencies]
 clonk-core = { path = "../clonk-core" }
@@ -36,6 +40,9 @@ serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
+# Identical feature set to the dev-dependency below, so enabling the FFI
+# surface cannot split the tracing-subscriber fingerprint across graphs.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"], optional = true }
 # Benchmark-only: keeping Criterion optional prevents `cargo test -p clonk-engine`
 # from changing the shared Serde feature graph for every downstream crate.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"], optional = true }
