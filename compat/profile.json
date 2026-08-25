@@ -212,6 +212,20 @@
       "owner": "parity/README.md (Accepted safety divergences)"
     },
     {
+      "id": "sim-team-account-shared-base",
+      "area": "simulation",
+      "summary": "With the TeamAccount rule (TACC) in play, FindBase falls back to a non-hostile player's base once the asking player owns none, so back to base and the wormhole reach an ally's base instead of failing. C4Game::FindBase matches Base == iPlayer exactly, with no team, alliance or rule test, so this widens a lookup the oracle keeps strict. Own bases keep their existing priority and master-list order; the ally is only the lower-priority fallback, and the relation is !Hostile, the one the rule's own ACNT object maintains its alliances with and the one C4Game::FindFriendlyBase already applies to buying and selling. Base lookup drives command AI, so the profile reverts it to the exact owner match.",
+      "cited_in": [
+        "crates/clonk-engine/src/compat/objects.rs",
+        "crates/clonk-app/src/settings.rs"
+      ],
+      "cpp_reference": "C4Game.cpp:3732-3745",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-08-24)"
+    },
+    {
       "id": "sim-s2-terminal-params",
       "area": "simulation",
       "summary": "S2 map-generator boundary inputs: C++ turns a negative Mandel alpha into a huge uint32 iteration budget, divides Gradient by a zero width, and takes a remainder by zero at alpha=-2. Rust bounds alpha to ten iterations, substitutes a denominator of one, and returns false from the raw algorithm. These inputs are excluded from the C++ differential runs.",

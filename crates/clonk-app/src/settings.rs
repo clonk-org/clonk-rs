@@ -150,6 +150,23 @@ pub fn session_control_mode(profile: CompatProfile, configured: i32) -> i32 {
     }
 }
 
+/// Resolve whether the TeamAccount rule may widen base lookup to allied bases.
+///
+/// A **non-persistent overlay**, like the control-mode one above. `FindBase`
+/// drives "back to base" and the wormhole, and `C4Game::FindBase` matches
+/// `Base == iPlayer` exactly with no alliance test (`C4Game.cpp:3732-3745`),
+/// so the widening is a deliberate divergence and the compatibility profile
+/// has to take it away. It is synchronized state — two peers disagreeing about
+/// which base a Clonk walks to is a desync, not a preference — so it is
+/// resolved once, at session construction, and never read from configuration
+/// mid-round.
+pub fn session_shared_account_bases(profile: CompatProfile) -> bool {
+    match profile {
+        CompatProfile::Normal => true,
+        CompatProfile::LegacyClonk => false,
+    }
+}
+
 /// C++'s `Network.MaxLoadFileSize` default (`C4Config.cpp:543`).
 pub const CPP_MAX_LOAD_FILE_SIZE: u32 = 100 * 1024 * 1024;
 

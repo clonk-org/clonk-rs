@@ -1292,6 +1292,17 @@ impl Engine {
         self.team_home_base_rule
     }
 
+    /// Whether an allied base may serve as the TeamAccount fallback
+    /// (clonk-org/clonk-rs#624). Default on; the LegacyClonk compatibility
+    /// profile clears it so base lookup is the oracle's exact owner match.
+    pub fn shared_account_bases(&self) -> bool {
+        self.shared_account_bases
+    }
+
+    pub fn set_shared_account_bases(&mut self, enabled: bool) {
+        self.shared_account_bases = enabled;
+    }
+
     pub fn set_team_home_base_rule(&mut self, enabled: bool) {
         if self.team_home_base_rule == enabled {
             return;

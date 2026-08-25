@@ -4499,6 +4499,11 @@ pub(crate) fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnFindBase/C4Game::FindBase (C4Script.cpp:1976-1979;
 /// C4Game.cpp:3732-3744): validate the player, then walk the active object
 /// master list and return the indexed object whose stored Base matches.
+/// The rule object that shares an account between allied players.
+/// `Rules.c4d/TeamAccount.c4d`; its `ACNT` companion maintains the alliances
+/// this lookup reuses.
+const TEAM_ACCOUNT_RULE: &str = "TACC";
+
 pub(crate) fn find_base(args: &[Value]) -> Result<Value, RuntimeError> {
     let player = value_to_i32(args.first().unwrap_or(&Value::Nil), "FindBase", "player")?;
     let mut index = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "FindBase", "index")?;
@@ -4506,21 +4511,59 @@ pub(crate) fn find_base(args: &[Value]) -> Result<Value, RuntimeError> {
         if context.player_state(player).is_none() || index < 0 {
             return Ok(Value::Nil);
         }
+        // One walk answers both tiers: the master order is the oracle's
+        // selection order, so collecting in it preserves ties exactly.
+        let mut allied = Vec::new();
+        let mut rule_present = false;
         for object_id in context.master_object_ids() {
             let Some(object) = context.get_world_object(object_id) else {
                 continue;
             };
-            if !object.status().is_active()
-                || object.full_state().map(|state| state.base) != Some(player)
-            {
+            if !object.status().is_active() {
                 continue;
             }
-            if index == 0 {
-                return Ok(object_reference_value(object_id));
+            rule_present |= object.definition_id() == TEAM_ACCOUNT_RULE;
+            let Some(base) = object.full_state().map(|state| state.base) else {
+                continue;
+            };
+            if base == player {
+                if index == 0 {
+                    return Ok(object_reference_value(object_id));
+                }
+                index -= 1;
+                continue;
             }
-            index -= 1;
+            // Deliberate divergence, gated on the TeamAccount rule
+            // (clonk-org/clonk-rs#624). C4Game::FindBase matches
+            // `Base == iPlayer` exactly, with no alliance test at all
+            // (C4Game.cpp:3732-3745), and that is what runs whenever the rule
+            // is absent — every scenario that does not ship `TACC`. When it is
+            // present, an allied base becomes a *lower-priority* fallback, so
+            // a player with a base of their own is unaffected. `!Hostile` is
+            // the rule's own relation (Account.c4d/Script.c:68-93) and the one
+            // C4Game::FindFriendlyBase already applies to buying and selling
+            // (C4Game.cpp:3747-3761), rather than a new one invented here.
+            let mutually_friendly = context.player_state(base).is_some_and(|base_state| {
+                context.player_state(player).is_some_and(|player_state| {
+                    base != player
+                        && !player_state.is_hostile_towards(base)
+                        && !base_state.is_hostile_towards(player)
+                })
+            });
+            if mutually_friendly {
+                allied.push(object_id);
+            }
         }
-        Ok(Value::Nil)
+        // The LegacyClonk compatibility profile clears this, restoring the
+        // oracle's exact `Base == iPlayer` match even where the rule is in play.
+        if !rule_present || !context.shared_account_bases() {
+            return Ok(Value::Nil);
+        }
+        allied
+            .get(usize::try_from(index).unwrap_or(usize::MAX))
+            .map_or(Ok(Value::Nil), |object_id| {
+                Ok(object_reference_value(*object_id))
+            })
     })
 }
 
