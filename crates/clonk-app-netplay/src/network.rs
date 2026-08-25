@@ -12719,11 +12719,14 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn client_worker_uses_the_installed_system_for_cpp_cross_build_join() {
-        // C++ cannot transfer NRT_System (src/C4Network2Res.cpp:1458-1461).
-        // The Rust app already executes its installed System group, matching
-        // Application.SystemGroup ownership after C++ bootstrap
-        // (src/C4Application.cpp:127-134; src/C4Game.cpp:2764-2793).
+    async fn client_worker_refuses_a_cpp_join_whose_system_group_differs() {
+        // C++ cannot transfer NRT_System (src/C4Network2Res.cpp:1458-1461), so
+        // a client that does not already hold an identical group is refused at
+        // AddLoad and the join dies (src/C4Network2Res.cpp:1473-1507). It owns
+        // Application.SystemGroup only once that check has passed
+        // (src/C4Application.cpp:127-134; src/C4Game.cpp:2764-2793) --
+        // installing a differing group instead joins a round whose System
+        // scripts disagree with the host's (clonk-org/clonk-rs#1053).
         let temporary = tempfile::tempdir().test_value();
         let host_root = temporary.path().join("host");
         let client_root = temporary.path().join("client");
@@ -12770,35 +12773,32 @@ Message=Server says Andr\xe9\r\n\
         let (command_tx, event_rx, local_id_rx, worker, _telemetry_rx) =
             start_test_client_worker(settings, 0, 8);
 
-        assert!(matches!(
-            local_id_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("worker reports readiness"),
-            Ok(NetworkWorkerReady { local_client_id, .. }) if local_client_id > 0
-        ));
-        let mut saw_join_data = false;
-        let mut saw_system = false;
-        while !saw_join_data || !saw_system {
-            match event_rx.recv_timeout(Duration::from_secs(2)).test_value() {
-                NetworkEvent::JoinData(_) => saw_join_data = true,
-                NetworkEvent::ResourceComplete {
-                    resource_id: 2,
-                    core,
-                    path,
-                    local,
-                } => {
-                    assert_eq!(core, publication.core);
-                    assert_eq!(path, client_system);
-                    assert!(local);
-                    saw_system = true;
-                }
-                NetworkEvent::Error(error) => panic!("client worker failed: {error}"),
-                _ => {}
-            }
-        }
+        // The refusal lands before the worker ever reports readiness, which is
+        // where C++ dies too -- the client never reaches the lobby.
+        let readiness = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker reports an outcome");
+        let refusal = readiness.expect_err("a differing System group must not join");
+        let refusal = format!("{refusal:?}");
+        assert!(
+            refusal.contains("System.c4g"),
+            "the refusal names the group: {refusal}"
+        );
+        assert!(
+            !matches!(
+                event_rx.try_recv(),
+                Ok(NetworkEvent::ResourceComplete { resource_id: 2, .. })
+            ),
+            "a differing System group must not complete as local"
+        );
 
-        command_tx.send(NetworkCommand::Shutdown).await.test_value();
-        worker.await.expect("join worker task").test_value();
+        let _ = command_tx.send(NetworkCommand::Shutdown).await;
+        // The worker exits with the same refusal rather than a clean shutdown.
+        let worker_result = worker.await.expect("join worker task");
+        assert!(
+            worker_result.is_err(),
+            "the worker must not report a successful session"
+        );
         host.shutdown().await.test_value();
     }
 
