@@ -2202,6 +2202,15 @@ fn runtime_snapshot_mismatch(
     for (&id, expected_object) in &expected_objects {
         match actual_objects.get(&id) {
             Some(actual_object) => {
+                // Name the definition alongside the Number in every field
+                // report below. A bare id is not enough to act on: object
+                // numbers move between runs on any scenario with random
+                // placement, so triaging one costs a whole
+                // `LC_RUST_ENGINE_RECORD` run just to learn what the object
+                // was. The lookup shadows `id` after the map access above, so
+                // every message picks it up without repeating the definition
+                // in each format string.
+                let id = format!("{} {}", id.as_u64(), expected_object.definition_id);
                 // Different definitions under the same Number = the
                 // late-spawn NUMBERING SKEW (creation order diverged);
                 // reporting it first stops the skew from masquerading as
@@ -5490,6 +5499,100 @@ global func Step(state, frame, random)
             .set_cell(1, 1, Some("Tyler".into()), 1);
 
         assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
+    }
+
+    /// Object numbers move between runs on any scenario with random
+    /// placement, so a report naming only the Number costs a whole
+    /// `LC_RUST_ENGINE_RECORD` run to act on — that is what triaging
+    /// `Massif` took (clonk-org/clonk-rs#1123). Every per-object field report
+    /// names the definition too.
+    #[test]
+    fn a_field_report_names_the_definition_not_just_the_number() {
+        let definition = CString::new("FISH").unwrap();
+        let action = CString::new("Swim").unwrap();
+        let live = LcEngineObjectSnapshot {
+            id: 542,
+            definition_id: definition.as_ptr(),
+            position_x: 40,
+            position_y: 90,
+            velocity_x: 0,
+            velocity_y: 0,
+            rotation: 0,
+            fixed_position_x: itofix(40).val(),
+            fixed_position_y: itofix(90).val(),
+            fixed_velocity_x: 0,
+            fixed_velocity_y: 0,
+            fixed_rotation: 0,
+            mobile: false,
+            in_liquid: true,
+            object_timer: 0,
+            rotation_velocity: C4Fixed::ZERO.val(),
+            energy: 0,
+            construction: crate::FULL_CON,
+            damage: 0,
+            magic_energy: 0,
+            magic_capacity: 0,
+            owner: -1,
+            category: crate::DEFAULT_CATEGORY,
+            crew_member: false,
+            alive: true,
+            action_name: action.as_ptr(),
+            action_phase: 0,
+            action_ticks: 0,
+            action_data: 0,
+            direction: 0,
+            command_direction: 0,
+            effects: ptr::null(),
+            effect_count: 0,
+            vertices: ptr::null(),
+            vertex_count: 0,
+            has_container: false,
+            container_id: 0,
+            contents: ptr::null(),
+            contents_len: 0,
+            has_base_graphics: false,
+            base_definition_id: ptr::null(),
+            base_graphics_name: ptr::null(),
+            base_blit_mode: 0,
+            has_draw_transform: false,
+            draw_scale_x: 1.0,
+            draw_scale_y: 1.0,
+            draw_offset_x: 0.0,
+            draw_offset_y: 0.0,
+        };
+
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                &live,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        let mut expected = actual.clone();
+        expected.objects[0].direction = crate::Direction::Right;
+
+        let detail = runtime_snapshot_mismatch(&expected, &actual).expect("the facing differs");
+        assert!(
+            detail.contains("542") && detail.contains("FISH"),
+            "the report must name both the number and the definition: {detail}"
+        );
     }
 
     #[test]
