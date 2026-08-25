@@ -368,8 +368,19 @@ cargo xtask parity record|verify                         # C++↔Rust differenti
 cargo xtask compat verify                                # compatibility-profile contract
 ```
 
-Live full-scenario C++ shadow-diff is **not wired**: no crate exposes a C-ABI
-target, so the oracle's `-DUSE_RUST_ENGINE_VALIDATION` bridge in
-`LEGACYCLONK_ORACLE_ROOT` links the Rust snapshot bundled at the pinned commit,
-not your tree (`parity/README.md`, "Phase 2"). The `LC_RUST_ENGINE_*` env
-channel *is* live here, for seed pinning.
+Live full-scenario C++ shadow-diff **runs**, but only locally and only if you
+build the oracle for it:
+
+```sh
+git -C <oracle-repo> worktree add <path> 7d43b47b7d789b533f32d005e64596e0a07019cd
+parity/bridge/build-oracle-validation.sh --oracle-root <path>
+```
+
+Without that, `-DUSE_RUST_ENGINE_VALIDATION` links the Rust snapshot bundled at
+the pinned commit rather than your tree — and as shipped it does not configure
+at all, because the pinned `CMakeLists.txt` carries a stray `0x08` byte in the
+`clonk_engine_static` target name. `parity/bridge/README.md` has the details and
+the traps; the most expensive one is that an **unarmed run compares nothing and
+still looks clean**, so always pass `LC_RUST_ENGINE_RUNTIME=1`. No gate runs
+this, so it is an investigation tool, not coverage. The rest of the
+`LC_RUST_ENGINE_*` env channel is live too, including seed pinning.

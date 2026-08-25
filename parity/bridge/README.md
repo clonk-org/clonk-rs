@@ -24,25 +24,86 @@ The crate types are emitted by that command rather than declared in
 `clonk-engine`'s manifest, as the pinned tree did it: a `crate-type` entry
 would make every ordinary build pay the staticlib archive and the cdylib link.
 
+## Running the shadow diff
+
+```sh
+git -C <oracle-repo> worktree add <path> 7d43b47b7d789b533f32d005e64596e0a07019cd
+parity/bridge/build-oracle-validation.sh --oracle-root <path>
+```
+
+That builds the pinned oracle with `-DUSE_RUST_ENGINE_VALIDATION=ON` linking
+**this** tree, rather than the Rust snapshot bundled at the oracle commit. The
+script is not a convenience wrapper — three things have to be true at once or
+the build silently uses the wrong engine, or does not configure at all:
+
+- **The pinned `CMakeLists.txt` cannot configure this option as shipped.** It
+  carries a literal backspace (`0x08`) glued to the `clonk_engine_static` target
+  name in all three places it appears, so CMake rejects the name as invalid
+  while *printing* the clean one — which reads like a missing-artifact path
+  problem and is why the option has never been usable. This is a typo in build
+  plumbing, not engine behaviour, so it cannot affect determinism.
+- **Every Rust path is hardcoded to `${CMAKE_SOURCE_DIR}/rust`** with no
+  override variable, and `add_dependencies(clonk rust_build)` runs
+  `cargo xtask ffi` *in that directory*. Pointing that entry at this checkout is
+  what makes the oracle build your tree; `RUST_INCLUDE_DIR` then needs
+  `include/lc_engine_ffi.h` to exist here, which the script creates untracked.
+- The pin vendors fmt 11 headers on the zlib/curl include path while
+  `find_package(fmt)` links a newer fmt, so they must be shadowed.
+
+### Arming it — silence does not mean agreement
+
+`EnsureInitialised` ends with `if (!g_recorder && !g_playback &&
+!g_runtime_requested) g_disabled = true;`, after which `OnFrame` returns
+immediately. **A run with no `LC_RUST_ENGINE_*` variable set produces a clean
+log and compares nothing**, which is indistinguishable from a passing diff. Arm
+it explicitly:
+
+```sh
+LC_RUST_ENGINE_RUNTIME=1 ./clonk        # live lockstep diff
+LC_RUST_ENGINE_RECORD=<path> ./clonk    # C++ snapshots as JSON, for triage
+```
+
+Divergences are reported as `Rust runtime parity mismatch: ...`.
+
 ## What is and is not wired
 
-The Rust side of the ABI is present, compiles, and exports all 32
-`lc_engine_*` symbols the header declares. The loop is **not** wired yet:
+The loop runs. On Tutorial01 with a fresh player it reports exactly one
+divergence, reproducible byte-for-byte:
 
-- Nothing rebuilds the oracle with `-DUSE_RUST_ENGINE_VALIDATION` against this
-  tree, so no gate exercises it and none of the four scenario classes #585 asks
-  for run. That rebuild is the step that actually validates the ported
-  comparison semantics.
+```
+frame 1: object 90 energy rust 55000, cpp 50000
+```
+
+That one is **not** a simulation defect — it is clonk-org/clonk-rs#1049, the
+bridge having no field for the C++ fair-crew game parameters, so the Rust
+runtime keeps its own defaults and promotes a rank-0 crew member to rank 1.
+Aligning the parameter drops the count to zero, so the port matches C++ across
+every object, effect, particle, crew and control the bridge compares, for the
+whole scenario. Any C++ game parameter absent from the header is a false
+positive of exactly this shape; check the header before blaming the port.
+
+Still open:
+
+- **No gate runs this.** It needs an oracle checkout and builds only where the
+  oracle builds, so it is a local investigation tool, not CI coverage.
+- Of the four scenario classes clonk-org/clonk-rs#585 asks for, three have been
+  swept — movement (`Goldrace`, `Skyrace`), landscape (`Greed`, `Canyon`,
+  `Massif`) and script/effect (`Tutorial03/05/07/09/10`). All ten start and each
+  reports a first divergence. **The network-record class has not been run.**
+- **A global-effect divergence is reported as the bare string `global effects
+  mismatch`**, with no indication of what differs — unlike the per-object
+  effect comparison, which prints both lists. The per-object path also
+  normalises `command_target`/`command_id` before comparing and the global path
+  does not, so some of those reports may be normalisation noise rather than
+  real divergences. Four of the ten scenarios swept stop here, so this is the
+  next thing worth sharpening.
 - The other bridges (`USE_RUST_CONFIG`, `USE_RUST_GROUP_VALIDATION`,
-  `USE_RUST_GUI_VALIDATION`, `USE_RUST_PLATFORM_PATHS`) link their own
-  `lc_*` libraries and need the `ffi` modules of the other crates, which are
-  not restored. They are off by default, so engine validation does not wait on
-  them.
+  `USE_RUST_GUI_VALIDATION`, `USE_RUST_PLATFORM_PATHS`) link their own `lc_*`
+  libraries and need the `ffi` modules of the other crates, which are not
+  restored. They are off by default, so engine validation does not wait on them.
 
-Until both exist, `parity verify` remains the primitive-section differential and
-this ABI is inert. Do not read its presence as evidence of full-scenario parity;
-`../README.md` is explicit that the historical report used the Rust snapshot
-bundled at the oracle commit, not the current tree.
+So `parity verify` remains the primitive-section differential, and a green run
+of it is still not evidence of full-scenario parity.
 
 ## Faithfulness
 
