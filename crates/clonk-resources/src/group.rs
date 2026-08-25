@@ -739,7 +739,21 @@ impl PackedGroup {
         mem_unscramble(&mut header_bytes);
         let header = parse_header(&header_bytes)?;
 
-        let mut entries: Vec<PackedEntry> = Vec::with_capacity(header.entry_count);
+        // The entry table is read sequentially, so the header's count is a
+        // claim about bytes that must already be present: each entry costs
+        // GROUP_ENTRY_SIZE. Reserve for what the image can actually hold
+        // rather than for what it asks for — the count is a raw i32 from
+        // attacker-shaped input, and a 204-byte header naming i32::MAX
+        // entries otherwise reserves hundreds of gigabytes before the first
+        // read_exact gets to reject it.
+        let table_start = reader.stream_position()?;
+        let image_end = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(table_start))?;
+        let readable_entries =
+            usize::try_from(image_end.saturating_sub(table_start) / GROUP_ENTRY_SIZE as u64)
+                .unwrap_or(usize::MAX);
+        let mut entries: Vec<PackedEntry> =
+            Vec::with_capacity(header.entry_count.min(readable_entries));
         let mut requires_rewrite = false;
         let mut next_entry_offset = 0;
         for _ in 0..header.entry_count {

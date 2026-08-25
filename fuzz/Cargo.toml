@@ -66,4 +66,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "group_archive"
+path = "fuzz_targets/group_archive.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
