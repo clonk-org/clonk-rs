@@ -3799,15 +3799,30 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
         "LGTS::Activate seeds the cast origin as its first line vertex"
     );
 
+    // LGTS::Advance appends one vertex per tick and removes the shot the tick
+    // its tip reaches solid ground, steering with RandomX(-5,5)
+    // (LightningShot.c4d/Script.c:54-64). Which tick that impact lands on is a
+    // property of the synchronized RNG stream, so pinning a fixed tick count
+    // pins a trajectory rather than the behaviour: follow the shot until it
+    // strikes and assert the line grew while it flew.
     let vertex_count = lightning.vertices.len();
+    let mut furthest = vertex_count;
     for _ in 0..3 {
         crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let Some(alive) = engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.id == lightning.id && object.status.is_active())
+            .map(|object| object.vertices.len())
+        else {
+            break;
+        };
+        furthest = furthest.max(alive);
     }
-    let advanced = engine.test_object_snapshot(lightning.id);
     assert!(
-        advanced.vertices.len() > vertex_count,
-        "LGTS::Advance extends the lightning line: before={vertex_count}, after={:?}",
-        advanced.vertices
+        furthest > vertex_count,
+        "LGTS::Advance extends the lightning line: before={vertex_count}, furthest={furthest}"
     );
     assert_eq!(
         engine
