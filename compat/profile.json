@@ -266,19 +266,6 @@
       "owner": "clonk-org/clonk-rs#1094"
     },
     {
-      "id": "sim-reloadparticle-io-failure",
-      "area": "simulation",
-      "summary": "ReloadParticle reports true when a reload passes all four C++ checks (network game, nil name, unknown name, missing Filename) and then fails on I/O; C++ reports false. The engine failure arm (clear every particle, remove the definition) runs identically on both sides.",
-      "cited_in": [
-        "crates/clonk-engine/src/compat/effects.rs:3995"
-      ],
-      "cpp_reference": "C4Game.cpp:2369-2394, C4Particles.cpp:197",
-      "disposition": "open-gap",
-      "profile_action": "blocked",
-      "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#384"
-    },
-    {
       "id": "sim-containment-cycle-spawn",
       "area": "simulation",
       "summary": "A genuine containment cycle at scenario spawn time: C++'s two-phase denumeration keeps the mutual containment; the sequential spawn model breaks one edge and places that object uncontained.",
