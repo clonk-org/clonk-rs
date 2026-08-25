@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "version": "0.4.0",
+  "engine_version": [
+    4,
+    9,
+    11,
+    0,
+    362
+  ],
+  "released_at": "2026-07-28T10:00:00Z",
+  "components": [
+    {
+      "name": "engine",
+      "targets": {
+        "aarch64-apple-darwin": {
+          "archive": "update-engine-0.4.0-aarch64-apple-darwin.zip",
+          "sha256": "cc00000000000000000000000000000000000000000000000000000000000000",
+          "size": 18000000,
+          "install": ""
+        },
+        "x86_64-pc-windows-msvc": {
+          "archive": "update-engine-0.4.0-x86_64-pc-windows-msvc.zip",
+          "sha256": "aa00000000000000000000000000000000000000000000000000000000000000",
+          "size": 24000000,
+          "install": ""
+        }
+      }
+    }
+  ]
+}

@@ -23,6 +23,7 @@ libfuzzer-sys = "0.4"
 clonk-resources = { path = "../crates/clonk-resources" }
 clonk-audio = { path = "../crates/clonk-audio" }
 clonk-script = { path = "../crates/clonk-script" }
+clonk-update = { path = "../crates/clonk-update" }
 
 [[bin]]
 name = "resource_text"
@@ -69,6 +70,13 @@ bench = false
 [[bin]]
 name = "group_archive"
 path = "fuzz_targets/group_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_manifest"
+path = "fuzz_targets/update_manifest.rs"
 test = false
 doc = false
 bench = false
