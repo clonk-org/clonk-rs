@@ -172,6 +172,18 @@ impl PreparedInstalledScenario {
 
     fn instantiate_with_system_scripts(&self, scripts: Vec<(String, String)>) -> Engine {
         let mut engine = Engine::with_seed(self.seed);
+        // Set before the scenario is applied, not after: scenario init derives
+        // crew physicals, and every expectation these fixtures carry was
+        // recorded with the fair-crew projection supplying them. The fixture
+        // players join with no crew info of their own, so without it a Clonk
+        // has no physicals at all.
+        //
+        // `C4GameParameters` compiles `UseFairCrew` false absent a scenario
+        // forcing it (C4GameParameters.cpp:560), so once the engine default
+        // matches C++ (clonk-org/clonk-rs#1071) this has to be stated rather
+        // than inherited. Stating it here keeps every real-scenario fixture
+        // behaving exactly as it did before that default moved.
+        engine.set_use_fair_crew(true);
         engine.configure_materials_from_library(&self.materials);
         engine.install_global_scripts(&scripts);
         engine.set_standard_names(self.standard_names.clone());
@@ -262,20 +274,6 @@ pub fn load_tutorial_with_local_player(
     auto_context_menu: bool,
 ) -> (Engine, i32) {
     let mut engine = load_tutorial(number, seed);
-    // Every caller joins a fixture player with no crew info of its own
-    // (`local_player_config` passes an empty crew), so the fair-crew projection
-    // is what supplies the Clonk's physicals at all. Their expectations — and
-    // the virtual players' key sequences in particular — were all recorded
-    // against that.
-    //
-    // `C4GameParameters` compiles `UseFairCrew` false absent a scenario forcing
-    // it (C4GameParameters.cpp:560), so once the engine default matches C++
-    // (clonk-org/clonk-rs#1071) this has to be stated rather than inherited.
-    // Setting it here keeps every caller behaving exactly as it did before that
-    // default moved; re-choreographing these routes for an unpromoted Clonk is
-    // separate work, and the shadow diff shows the port's crew physicals agree
-    // with C++ at frame 1 either way.
-    engine.set_use_fair_crew(true);
     let player =
         join_local_player_with_preferences(&mut engine, name, control_style, auto_context_menu);
     (engine, player)
