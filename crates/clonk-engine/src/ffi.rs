@@ -2542,6 +2542,27 @@ fn load_runtime_system_scripts(
     crate::scenario::load_system_scripts_with_components(group, &components, &["US", "DE"])
 }
 
+/// The host's fair-crew game parameters, as the shadow-diff bridge states them.
+///
+/// `C4Object::GetPhysical` picks the `Info->Physical` branch or the fair-crew
+/// projection from `Game.Parameters.UseFairCrew`, and that parameter is absent
+/// from `lc_engine_ffi.h`: the pinned `RustEngineBridge.cpp` never calls a
+/// setter for it, so adding a field would break link compatibility with the
+/// bridge the oracle actually builds. Reading it from the environment — the
+/// channel the runtime already uses for `LC_RUST_ENGINE_LOG` and
+/// `LC_RUST_ENGINE_DUMP_LANDSCAPE` — lets the harness state the host's
+/// parameters without touching the vendored header (clonk-org/clonk-rs#1049).
+fn runtime_fair_crew_overrides() -> (Option<bool>, Option<i32>) {
+    let flag = std::env::var("LC_RUST_ENGINE_FAIR_CREW")
+        .ok()
+        .as_deref()
+        .and_then(crate::parse_fair_crew_flag);
+    let strength = std::env::var("LC_RUST_ENGINE_FAIR_CREW_STRENGTH")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok());
+    (flag, strength)
+}
+
 fn load_scenario_into_runtime(
     runtime: &mut RuntimeHandle,
     path: &PathBuf,
@@ -2629,6 +2650,15 @@ fn load_scenario_into_runtime(
     runtime.engine = Engine::with_seed(seed);
     runtime.engine.set_control_host(false);
     runtime.engine.set_replay_control(true);
+    // The bridge cannot state the host's game parameters through the pinned
+    // header, so the harness states them here instead (clonk-org/clonk-rs#1049).
+    let (fair_crew, fair_crew_strength) = runtime_fair_crew_overrides();
+    if let Some(fair_crew) = fair_crew {
+        runtime.engine.set_use_fair_crew(fair_crew);
+    }
+    if let Some(strength) = fair_crew_strength {
+        runtime.engine.set_fair_crew_strength(strength);
+    }
     if let Some(startup) = replay_startup {
         runtime
             .engine
