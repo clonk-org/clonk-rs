@@ -238,6 +238,10 @@ mod lib_test_support;
 mod find_object_shape_rect_parity;
 
 #[cfg(test)]
+#[path = "lib_tests/velocity_clamp_parity.rs"]
+mod velocity_clamp_parity;
+
+#[cfg(test)]
 #[path = "lib_tests/snapshot_stability_regression.rs"]
 mod snapshot_stability_regression;
 
@@ -2660,9 +2664,14 @@ pub struct PhysicsSettings {
     /// this override exists because the runtime compiler accepts every 16.16
     /// value, including values that cannot round-trip through `GetGravity`.
     gravity_raw: Option<i32>,
-    pub max_fall_speed: i32,
-    pub max_rise_speed: i32,
-    pub max_horizontal_speed: i32,
+    /// Terminal-speed bounds for the synthetic scenario manifest. `None` --
+    /// the default, and what ordinary content gets -- imposes no bound, which
+    /// is the pinned engine's behaviour: `C4Object::DoMovement` restricts only
+    /// `Def->NoHorizontalMove` (`C4Movement.cpp:225`) and gravity accumulates
+    /// unconditionally (`C4Movement.cpp:649`).
+    pub max_fall_speed: Option<i32>,
+    pub max_rise_speed: Option<i32>,
+    pub max_horizontal_speed: Option<i32>,
 }
 
 impl PhysicsSettings {
@@ -2672,10 +2681,46 @@ impl PhysicsSettings {
         Self {
             gravity,
             gravity_raw: None,
+            max_fall_speed: Some(max_fall_speed),
+            max_rise_speed: Some(max_rise_speed),
+            max_horizontal_speed: Some(Self::DEFAULT_MAX_HORIZONTAL_SPEED),
+        }
+    }
+
+    /// Physics with no terminal-speed bound at all, as the oracle has none.
+    pub const fn unbounded(gravity: i32) -> Self {
+        Self {
+            gravity,
+            gravity_raw: None,
+            max_fall_speed: None,
+            max_rise_speed: None,
+            max_horizontal_speed: None,
+        }
+    }
+
+    /// Build from the synthetic manifest, where an unset field means unbounded.
+    pub fn from_optional(
+        gravity: i32,
+        max_fall_speed: Option<i32>,
+        max_rise_speed: Option<i32>,
+        max_horizontal_speed: Option<i32>,
+    ) -> Result<Self, &'static str> {
+        if max_rise_speed
+            .zip(max_fall_speed)
+            .is_some_and(|(rise, fall)| rise > fall)
+        {
+            return Err("max_rise_speed must be <= max_fall_speed");
+        }
+        if max_horizontal_speed.is_some_and(|speed| speed < 0) {
+            return Err("max_horizontal_speed must be >= 0");
+        }
+        Ok(Self {
+            gravity,
+            gravity_raw: None,
             max_fall_speed,
             max_rise_speed,
-            max_horizontal_speed: Self::DEFAULT_MAX_HORIZONTAL_SPEED,
-        }
+            max_horizontal_speed,
+        })
     }
 
     pub fn checked(
@@ -2697,13 +2742,9 @@ impl PhysicsSettings {
             return Err("max_horizontal_speed must be >= 0");
         }
         Ok(Self {
-            max_horizontal_speed,
+            max_horizontal_speed: Some(max_horizontal_speed),
             ..self
         })
-    }
-
-    const fn default_max_horizontal_speed() -> i32 {
-        Self::DEFAULT_MAX_HORIZONTAL_SPEED
     }
 
     pub fn gravity_as_c4fixed(&self) -> C4Fixed {
@@ -2742,12 +2783,17 @@ impl PhysicsSettings {
     }
 
     fn clamp_fixed_velocity(&self, velocity: &mut FixedVec2) {
-        let min_vertical = self.max_rise_speed.min(self.max_fall_speed);
-        let max_vertical = self.max_rise_speed.max(self.max_fall_speed);
-        velocity.y =
-            clamp_fixed_to_limit_pair(velocity.y, itofix(min_vertical), itofix(max_vertical));
-        let max_horizontal = self.max_horizontal_speed.max(0);
-        velocity.x = clamp_fixed_to_limit(velocity.x, max_horizontal);
+        if let Some((min_vertical, max_vertical)) = self
+            .max_rise_speed
+            .zip(self.max_fall_speed)
+            .map(|(rise, fall)| (rise.min(fall), rise.max(fall)))
+        {
+            velocity.y =
+                clamp_fixed_to_limit_pair(velocity.y, itofix(min_vertical), itofix(max_vertical));
+        }
+        if let Some(max_horizontal) = self.max_horizontal_speed.map(|speed| speed.max(0)) {
+            velocity.x = clamp_fixed_to_limit(velocity.x, max_horizontal);
+        }
     }
 }
 
@@ -2756,9 +2802,9 @@ impl Default for PhysicsSettings {
         Self {
             gravity: 1,
             gravity_raw: None,
-            max_fall_speed: 12,
-            max_rise_speed: -20,
-            max_horizontal_speed: Self::DEFAULT_MAX_HORIZONTAL_SPEED,
+            max_fall_speed: None,
+            max_rise_speed: None,
+            max_horizontal_speed: None,
         }
     }
 }
@@ -2773,9 +2819,12 @@ impl Serialize for PhysicsSettings {
             gravity: i32,
             #[serde(skip_serializing_if = "Option::is_none")]
             gravity_raw: Option<i32>,
-            max_fall_speed: i32,
-            max_rise_speed: i32,
-            max_horizontal_speed: i32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_fall_speed: Option<i32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_rise_speed: Option<i32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_horizontal_speed: Option<i32>,
         }
 
         Fields {
@@ -2799,10 +2848,12 @@ impl<'de> Deserialize<'de> for PhysicsSettings {
             gravity: i32,
             #[serde(default)]
             gravity_raw: Option<i32>,
-            max_fall_speed: i32,
-            max_rise_speed: i32,
-            #[serde(default = "PhysicsSettings::default_max_horizontal_speed")]
-            max_horizontal_speed: i32,
+            #[serde(default)]
+            max_fall_speed: Option<i32>,
+            #[serde(default)]
+            max_rise_speed: Option<i32>,
+            #[serde(default)]
+            max_horizontal_speed: Option<i32>,
         }
 
         let fields = Fields::deserialize(deserializer)?;
@@ -11537,11 +11588,12 @@ fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
 fn physics_to_map(settings: PhysicsSettings) -> ValueMap {
     let mut map = ValueMap::with_capacity(4);
     map.insert("gravity".into(), Value::Int(settings.gravity));
-    map.insert("max_fall_speed".into(), Value::Int(settings.max_fall_speed));
-    map.insert("max_rise_speed".into(), Value::Int(settings.max_rise_speed));
+    let bound = |speed: Option<i32>| speed.map_or(Value::Nil, Value::Int);
+    map.insert("max_fall_speed".into(), bound(settings.max_fall_speed));
+    map.insert("max_rise_speed".into(), bound(settings.max_rise_speed));
     map.insert(
         "max_horizontal_speed".into(),
-        Value::Int(settings.max_horizontal_speed),
+        bound(settings.max_horizontal_speed),
     );
     map
 }

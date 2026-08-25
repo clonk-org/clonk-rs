@@ -481,17 +481,17 @@
         let scenario = Scenario::load_from_path(dir.path()).test_value();
         let physics = scenario.physics().test_value();
         assert_eq!(physics.gravity, 2);
-        assert_eq!(physics.max_fall_speed, 8);
-        assert_eq!(physics.max_rise_speed, -10);
-        assert_eq!(physics.max_horizontal_speed, 7);
+        assert_eq!(physics.max_fall_speed, Some(8));
+        assert_eq!(physics.max_rise_speed, Some(-10));
+        assert_eq!(physics.max_horizontal_speed, Some(7));
 
         let mut engine = Engine::with_seed(0);
         apply_test_scenario(&scenario, &mut engine);
         let configured = engine.physics();
         assert_eq!(configured.gravity, 2);
-        assert_eq!(configured.max_fall_speed, 8);
-        assert_eq!(configured.max_rise_speed, -10);
-        assert_eq!(configured.max_horizontal_speed, 7);
+        assert_eq!(configured.max_fall_speed, Some(8));
+        assert_eq!(configured.max_rise_speed, Some(-10));
+        assert_eq!(configured.max_horizontal_speed, Some(7));
     }
 
     #[test]
