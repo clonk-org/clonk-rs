@@ -25,6 +25,7 @@ clonk-audio = { path = "../crates/clonk-audio" }
 clonk-script = { path = "../crates/clonk-script" }
 clonk-update = { path = "../crates/clonk-update" }
 clonk-network = { path = "../crates/clonk-network" }
+clonk-engine = { path = "../crates/clonk-engine" }
 
 [[bin]]
 name = "resource_text"
@@ -85,6 +86,13 @@ bench = false
 [[bin]]
 name = "update_manifest"
 path = "fuzz_targets/update_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scenario_components"
+path = "fuzz_targets/scenario_components.rs"
 test = false
 doc = false
 bench = false
