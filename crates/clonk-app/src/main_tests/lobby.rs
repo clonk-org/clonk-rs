@@ -7009,6 +7009,64 @@ fn only_a_host_announces_its_compatibility_profile_in_the_lobby() {
 }
 
 #[test]
+fn a_joining_client_is_told_its_own_requested_profile_is_unavailable() {
+    // clonk-org/clonk-rs#588 wants the contract explained before hosting *or*
+    // joining, and forbids a silent downgrade of the requested profile. A
+    // client still must not announce a profile as the session's -- the host
+    // decides that, which
+    // `only_a_host_announces_its_compatibility_profile_in_the_lobby` pins --
+    // so this line is explicitly about the client's own request instead, and
+    // appears only when the contract cannot back it.
+    let compat_line = |app: &GameApp, needle: &str| {
+        app.network_lobby
+            .as_ref()
+            .expect("the lobby exists")
+            .logs
+            .iter()
+            .any(|line| line.text.contains(needle))
+    };
+
+    let (mut client, _client_events) = networked_client_lobby(
+        new_menu_app(640, 480),
+        "Client",
+        NetworkLobbyState::new(7, "Client".to_string(), false),
+    );
+    client.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    client.open_network_lobby();
+
+    let blocked = !crate::compat_readiness::is_ready();
+    main_assert_eq!(
+        compat_line(&client, "cannot honour it") => blocked,
+        "a client that asked for a profile it cannot have must be told"
+    );
+    // Still never phrased as a claim about the session the host owns.
+    main_assert!(
+        !client
+            .network_lobby
+            .as_ref()
+            .test_value()
+            .logs
+            .iter()
+            .any(|line| line.text.starts_with("Compatibility profile")),
+        "the session's profile is the host's statement, not the client's"
+    );
+    // The request itself is never rewritten: a player who asked still sees it.
+    main_assert_eq!(client.compat_profile => crate::settings::CompatProfile::LegacyClonk);
+
+    // A normal-profile client says nothing at all.
+    let (mut ordinary, _ordinary_events) = networked_client_lobby(
+        new_menu_app(640, 480),
+        "Ordinary",
+        NetworkLobbyState::new(8, "Ordinary".to_string(), false),
+    );
+    ordinary.open_network_lobby();
+    main_assert!(
+        !compat_line(&ordinary, "cannot honour it"),
+        "normal Rust-only play is unaffected"
+    );
+}
+
+#[test]
 fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
     // clonk-org/clonk-rs#588: readiness is computed from the contract itself,
     // and a profile the contract cannot back must be refused *before* anyone

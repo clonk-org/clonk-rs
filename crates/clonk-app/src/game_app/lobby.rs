@@ -7060,10 +7060,25 @@ impl GameApp {
     /// would add a line to a C++-mirrored surface for no information — the
     /// default lobby stays exactly as it was.
     fn announce_compat_profile_in_lobby(&mut self) {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if self.compat_profile == crate::settings::CompatProfile::Normal {
             return;
         }
-        if self.compat_profile == crate::settings::CompatProfile::Normal {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            // A client never states the session's profile -- the host owns
+            // that. What it can answer for is its own request, and
+            // clonk-org/clonk-rs#588 forbids letting that be downgraded in
+            // silence, so a request the contract cannot back is reported here
+            // and nowhere else.
+            let report =
+                crate::compat_readiness::blocked_join_report(self.compat_profile.display_name());
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                for text in report {
+                    lobby.push_log(clonk_frontend::game_lobby::LobbyLogLine {
+                        text,
+                        color: [0xff, 0xd0, 0x60, 0xff],
+                    });
+                }
+            }
             return;
         }
         // clonk-org/clonk-rs#588: the contract's fail-closed readiness rule is
