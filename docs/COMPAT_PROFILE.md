@@ -314,7 +314,6 @@ Eight open gaps currently block it, all determinism-critical:
 | `sim-script-var-negative-slot` — `Var(n)`/`Local(n)` with a negative index: C++ clamps to slot 0 (`C4ValueList::GetItem`), the port's VM addresses a distinct key. | clonk-org/clonk-rs#523 |
 | `sim-script-nested-local-snapshot` — a call into an object whose own script is already in flight starts from the pre-call local snapshot; C++ keeps named locals on the `C4Object` and would read them live. | clonk-org/clonk-rs#523 |
 | `sim-script-unwind-args` — when a script callback errors mid-call the port unwinds with the original argument values; C++ keeps the parameter mutations made before the error. | clonk-org/clonk-rs#385 |
-| `sim-findobject-layer-bbox` — `FindObject`'s `Layer` condition is unmodeled on host objects, and shape tests use the vertices bounding box rather than the layered shape. | clonk-org/clonk-rs#384 |
 | `sim-reloadparticle-io-failure` — `ReloadParticle` reports true when a reload passes all four C++ checks and then fails on I/O; C++ reports false. | clonk-org/clonk-rs#384 |
 | `sim-containment-cycle-spawn` — a genuine containment cycle at spawn time: C++'s two-phase denumeration keeps the mutual containment, the sequential spawn model breaks one edge. | clonk-org/clonk-rs#518 |
 | `sim-reload-graphics-dangling` — after a definition-graphics reload, an object that can neither re-resolve its graphic nor fall back to its definition is left holding a dangling name; C++ `AssignRemoval`s it. | clonk-org/clonk-rs#384 |

@@ -266,19 +266,6 @@
       "owner": "clonk-org/clonk-rs#385"
     },
     {
-      "id": "sim-findobject-layer-bbox",
-      "area": "simulation",
-      "summary": "FindObject: the Layer condition is unmodeled on host objects (never matches) and shape tests use the vertices bounding box rather than the layered shape, so Layer-scoped or shape-precise queries can select a different object set.",
-      "cited_in": [
-        "crates/clonk-engine/src/compat/objects.rs:3286"
-      ],
-      "cpp_reference": "C4FindObject.h:27-50",
-      "disposition": "open-gap",
-      "profile_action": "blocked",
-      "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#384"
-    },
-    {
       "id": "sim-reloadparticle-io-failure",
       "area": "simulation",
       "summary": "ReloadParticle reports true when a reload passes all four C++ checks (network game, nil name, unknown name, missing Filename) and then fails on I/O; C++ reports false. The engine failure arm (clear every particle, remove the definition) runs identically on both sides.",

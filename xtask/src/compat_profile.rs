@@ -710,6 +710,26 @@ mod tests {
 
     /// Parse the shipped manifest, mutate it through `serde_json::Value`, and
     /// return the tampered JSON text.
+    /// The id of some `open-gap` divergence in the shipped manifest.
+    ///
+    /// These tamper cases care that the rule fires, not which entry it fires
+    /// on, and hardcoding an id makes every one of them a landmine for whoever
+    /// closes that gap: clonk-org/clonk-rs#1092 repointed two of them onto
+    /// `sim-findobject-layer-bbox` days before clonk-org/clonk-rs#1095 removed
+    /// it, and the collision only surfaced in the merge queue.
+    fn some_open_gap_id() -> String {
+        let value: serde_json::Value =
+            serde_json::from_str(&shipped_manifest()).expect("parsing the shipped manifest");
+        value["divergences"]
+            .as_array()
+            .expect("divergences is an array")
+            .iter()
+            .find(|divergence| divergence["disposition"] == "open-gap")
+            .and_then(|divergence| divergence["id"].as_str())
+            .expect("the manifest still records at least one open gap")
+            .to_string()
+    }
+
     fn tampered(mutate: impl FnOnce(&mut serde_json::Value)) -> String {
         let mut value: serde_json::Value =
             serde_json::from_str(&shipped_manifest()).expect("parsing the shipped manifest");
@@ -846,9 +866,10 @@ mod tests {
 
     #[test]
     fn an_open_gap_may_not_be_part_of_the_promise() {
+        let target = some_open_gap_id();
         let tampered = tampered(|value| {
             for divergence in value["divergences"].as_array_mut().unwrap() {
-                if divergence["id"] == "sim-findobject-layer-bbox" {
+                if divergence["id"] == target.as_str() {
                     divergence["profile_action"] = "kept".into();
                 }
             }
@@ -857,8 +878,7 @@ mod tests {
         assert!(
             issues
                 .iter()
-                .any(|issue| issue.contains("sim-findobject-layer-bbox")
-                    && issue.contains("must be `blocked`")),
+                .any(|issue| issue.contains(&target) && issue.contains("must be `blocked`")),
             "an open-gap divergence marked `kept` must fail, got: {issues:?}"
         );
     }
@@ -918,9 +938,10 @@ mod tests {
 
     #[test]
     fn owners_must_cite_issues_qualified() {
+        let target = some_open_gap_id();
         let tampered = tampered(|value| {
             for divergence in value["divergences"].as_array_mut().unwrap() {
-                if divergence["id"] == "sim-findobject-layer-bbox" {
+                if divergence["id"] == target.as_str() {
                     divergence["owner"] = "#384".into();
                 }
             }

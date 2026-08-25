@@ -3312,8 +3312,13 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 // ── C4FindObject / C4SortObject condition trees (C4FindObject.{h,cpp}) ──────
 
 /// C4FO_* constants (C4FindObject.h:27-50) as a parsed condition tree.
-/// Known divergences: `Layer` is unmodeled on host objects (never
-/// matches); shape tests use the vertices bounding box.
+///
+/// `Layer` compares the object's own layer against the requested one
+/// (`C4FindObjectLayer::Check`, C4FindObject.cpp:671-674). The shape tests
+/// resolve against the live shape rect `C4Object::UpdateShape` derives
+/// (C4Object.cpp:322-344), which is what C++'s `pObj->Shape` holds for
+/// `AtPoint`/`AtRect`/`OnLine` (C4FindObject.cpp:550-565); see
+/// `lib_tests/find_object_shape_rect_parity.rs`.
 #[derive(Debug, Clone)]
 pub(crate) enum FindCondition {
     Not(Box<FindCondition>),
