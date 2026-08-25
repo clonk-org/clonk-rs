@@ -4227,6 +4227,12 @@ pub(crate) fn parse_fair_crew_flag(value: &str) -> Option<bool> {
     }
 }
 
+/// The serde default for a **resumed** state that predates the field.
+///
+/// Deliberately not the fresh-engine default: a Rust state saved before
+/// `use_fair_crew` existed was produced by a build that used fair crew, so
+/// resuming it any other way would change that save's simulation. A fresh
+/// engine starts from C++'s parameter default instead -- see `Engine::with_seed`.
 fn default_use_fair_crew() -> bool {
     true
 }
@@ -10410,8 +10416,14 @@ impl Engine {
             random_seed: seed,
             max_players: None,
             startup_player_count: None,
-            use_fair_crew: true,
-            fair_crew_strength: 1_000,
+            // `C4GameParameters` compiles `UseFairCrew` with a false default
+            // absent a scenario forcing it (C4GameParameters.cpp:560), and the
+            // config key it is otherwise taken from -- `Config.General.FairCrew`,
+            // spelled `NoCrew` in the ini -- itself defaults to false
+            // (C4Config.cpp:384). Production overwrites this from the scenario
+            // parameters, so the default is only observable where nothing does.
+            use_fair_crew: false,
+            fair_crew_strength: default_fair_crew_strength(),
             fair_crew_forced: false,
             allow_debug: true,
             debug_mode: false,

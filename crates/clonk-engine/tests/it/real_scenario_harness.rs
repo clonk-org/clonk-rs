@@ -1982,7 +1982,11 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
         crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     let protected = engine.test_object_snapshot(mage);
-    assert_eq!(protected.energy, 45_000, "XCRS sacrifices ten energy");
+    // The mage starts from an unpromoted 50000 rather than the fair-crew
+    // rank-1 55000: `C4GameParameters` compiles `UseFairCrew` false absent a
+    // scenario forcing it (C4GameParameters.cpp:560). The ten energy this
+    // asserts is the delta either way (clonk-org/clonk-rs#1071).
+    assert_eq!(protected.energy, 40_000, "XCRS sacrifices ten energy");
     assert!(protected
         .effects
         .iter()
@@ -2173,7 +2177,10 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
         -1,
     ));
     let energy_before = engine.test_object_snapshot(patient).energy;
-    assert_eq!(energy_before, 35_000);
+    // 50000 base less the twenty dealt above; the base is unpromoted because
+    // `UseFairCrew` defaults false (C4GameParameters.cpp:560,
+    // clonk-org/clonk-rs#1071).
+    assert_eq!(energy_before, 30_000);
 
     let seeded_bag = crate::support::TestValueExt::test_value(
         engine

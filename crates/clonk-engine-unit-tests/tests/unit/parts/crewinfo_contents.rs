@@ -1676,6 +1676,11 @@ func AwardSelf(int amount) {
     engine.objects[crew_index].state.info_physical = Some(raw_physical);
     engine.objects[crew_index].state.energy = 12_000;
     engine.pending_audio.clear();
+    // The fair-crew projection below is this test's subject, so state the
+    // parameter rather than lean on the engine default: `C4GameParameters`
+    // compiles `UseFairCrew` false absent a scenario forcing it
+    // (C4GameParameters.cpp:560).
+    engine.set_use_fair_crew(true);
     unit_assert!(engine.use_fair_crew());
     let fair_physical_before = engine.object_physical(crew_index);
 
