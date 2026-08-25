@@ -50,7 +50,7 @@ impl NetworkHostPreparation {
     /// once for game identity and later for the parameter seed.
     pub fn prepare(self) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
         let start_unix_seconds = unix_seconds_now();
-        let random_seed_unix_seconds = unix_seconds_now();
+        let random_seed_unix_seconds = pinned_host_parameter_seed_seconds(unix_seconds_now());
         let mut team_assignment =
             ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template);
         prepare_host_bootstrap_with_team_assignment_oracle(
@@ -85,10 +85,75 @@ impl NetworkHostPreparation {
     }
 }
 
+/// The parameter seed a fresh host round freezes.
+///
+/// Native reads `time(nullptr)` (`C4GameParameters::Load` freezes it before
+/// `FixRandom` and `Landscape::Init`), and this mirrors that. `LC_PIN_SEED`
+/// overrides it for differential work exactly as it already does for an
+/// offline round -- without it, two runs of the same mixed-engine scenario
+/// generate different worlds and cannot be compared before/after a change
+/// (clonk-org/clonk-rs#1050).
+pub(crate) fn resolve_host_parameter_seed_seconds(now: i64, pin: Option<&str>) -> i64 {
+    match pin {
+        Some(pin) if !pin.trim().is_empty() => pin.trim().parse::<i64>().unwrap_or(now),
+        _ => now,
+    }
+}
+
+fn pinned_host_parameter_seed_seconds(now: i64) -> i64 {
+    let pin = std::env::var_os("LC_PIN_SEED");
+    let pin = pin.as_deref().map(|value| value.to_string_lossy());
+    resolve_host_parameter_seed_seconds(now, pin.as_deref())
+}
+
 fn unix_seconds_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod host_parameter_seed_tests {
+    use super::resolve_host_parameter_seed_seconds;
+
+    #[test]
+    fn a_pinned_seed_replaces_the_clock_for_a_fresh_host_round() {
+        // Unpinned, the clock stands -- native reads time(nullptr).
+        assert_eq!(
+            resolve_host_parameter_seed_seconds(1_700_000_000, None),
+            1_700_000_000
+        );
+        assert_eq!(
+            resolve_host_parameter_seed_seconds(1_700_000_000, Some("")),
+            1_700_000_000
+        );
+        assert_eq!(
+            resolve_host_parameter_seed_seconds(1_700_000_000, Some("   ")),
+            1_700_000_000
+        );
+
+        // Pinned, the round is reproducible.
+        assert_eq!(
+            resolve_host_parameter_seed_seconds(1_700_000_000, Some("1")),
+            1
+        );
+        assert_eq!(
+            resolve_host_parameter_seed_seconds(1_700_000_000, Some(" 42 ")),
+            42
+        );
+        assert_eq!(
+            resolve_host_parameter_seed_seconds(1_700_000_000, Some("-7")),
+            -7
+        );
+
+        // A value that is not a number never silently becomes zero; the clock
+        // stands, so a typo degrades to ordinary behaviour rather than pinning
+        // every run to the same wrong world.
+        assert_eq!(
+            resolve_host_parameter_seed_seconds(1_700_000_000, Some("abc")),
+            1_700_000_000
+        );
+    }
 }
