@@ -413,11 +413,38 @@ pub(in crate::scenario) fn split_outside_delimiter_limit(
 /// `I`=C4ID stored as its signed 32-bit payload, `a[size;elems]`=array with
 /// trailing nils omitted on write, and `S` indexes the scenario Strings.txt.
 /// `m[count;key=value;...]` retains arbitrary typed keys in insertion order.
+/// How deep a serialized C4Value may nest before the parser refuses it.
+///
+/// This is a deliberate Rust safety limit, not a C++ boundary: StdCompiler
+/// decodes nested arrays and maps by recursive descent with no depth guard, so
+/// it overflows its own stack on the same input rather than accepting it.
+/// Measured here, this parser overflows between 128 and 192 nested levels, and
+/// a nested level costs only five bytes of Objects.txt (`a[1;` … `]`) — so an
+/// attacker-supplied save reaches the cliff in well under a kilobyte. The limit
+/// sits far below that and far above any real save, whose locals nest in single
+/// digits (clonk-org/clonk-rs#961; mirrors `MAX_EXPRESSION_DEPTH` in
+/// `clonk-script`'s parser, added for clonk-org/clonk-rs#962).
+pub(crate) const MAX_SERIALIZED_VALUE_DEPTH: usize = 64;
+
 pub(crate) fn parse_serialized_c4value(
     encoded: &str,
     line: usize,
 ) -> Result<SerializedC4Value, ScenarioError> {
+    parse_serialized_c4value_nested(encoded, line, 0)
+}
+
+fn parse_serialized_c4value_nested(
+    encoded: &str,
+    line: usize,
+    depth: usize,
+) -> Result<SerializedC4Value, ScenarioError> {
     use clonk_script::Value;
+    if depth > MAX_SERIALIZED_VALUE_DEPTH {
+        return Err(ScenarioError::LegacyObjectsParse(format!(
+            "Objects.txt line {}: C4Value nested deeper than {} levels",
+            line, MAX_SERIALIZED_VALUE_DEPTH
+        )));
+    }
     let parse_error = |detail: String| {
         ScenarioError::LegacyObjectsParse(format!("Objects.txt line {}: {}", line, detail))
     };
@@ -465,7 +492,7 @@ pub(crate) fn parse_serialized_c4value(
                 .into_iter()
                 .take(size)
                 .map(str::trim)
-                .map(|element| parse_serialized_c4value(element, line))
+                .map(|element| parse_serialized_c4value_nested(element, line, depth + 1))
                 .collect::<Result<_, _>>()?;
             // Trailing nils are omitted on write; restore the full size.
             if elements.len() < size {
@@ -518,8 +545,9 @@ pub(crate) fn parse_serialized_c4value(
                     .flatten()
                     .next()
                     .ok_or_else(|| parse_error(format!("map entry `{entry}` missing `=`")))?;
-                let key = parse_serialized_c4value(entry[..equals].trim(), line)?;
-                let value = parse_serialized_c4value(entry[equals + 1..].trim(), line)?;
+                let key = parse_serialized_c4value_nested(entry[..equals].trim(), line, depth + 1)?;
+                let value =
+                    parse_serialized_c4value_nested(entry[equals + 1..].trim(), line, depth + 1)?;
                 entries.push((key, value));
             }
             Ok(SerializedC4Value::Map {

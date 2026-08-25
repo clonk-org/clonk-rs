@@ -1852,3 +1852,109 @@
             other => panic!("unexpected error: {other:?}"),
         }
     }
+
+    /// Bounded malformed-input coverage for the serialized C4Value decoder
+    /// (clonk-org/clonk-rs#961).
+    ///
+    /// `Locals=` and `LocalNamed=` in Objects.txt carry serialized C4Values,
+    /// and Objects.txt arrives from downloaded scenarios, saves, records and
+    /// peers. Arrays and maps decode by recursive descent, so *nesting depth*
+    /// is attacker-controlled work that is not covered by the element-count
+    /// cap the size fields already carry.
+    #[test]
+    fn a_deeply_nested_serialized_c4value_is_rejected_instead_of_overflowing() {
+        // Five bytes of input buy one level (`a[1;` plus its `]`), so the
+        // native stack is reachable in well under a kilobyte. Measured, this
+        // parser overflows between 128 and 192 levels.
+        let nested = |levels: usize| {
+            let mut encoded = String::new();
+            for _ in 0..levels {
+                encoded.push_str("a[1;");
+            }
+            encoded.push_str("i1");
+            for _ in 0..levels {
+                encoded.push(']');
+            }
+            encoded
+        };
+
+        for levels in [super::c4value::MAX_SERIALIZED_VALUE_DEPTH + 1, 192, 1_000, 50_000] {
+            let error = super::c4value::parse_serialized_c4value(&nested(levels), 7)
+                .expect_err("a value nested past the limit is refused");
+            match error {
+                crate::ScenarioError::LegacyObjectsParse(message) => assert!(
+                    message.contains("nested deeper than"),
+                    "unexpected message for {levels} levels: {message}"
+                ),
+                other => panic!("unexpected error for {levels} levels: {other:?}"),
+            }
+        }
+
+        // Everything at or below the limit still decodes, so the guard cannot
+        // be satisfied by refusing ordinary saves.
+        for levels in [0, 1, 8, super::c4value::MAX_SERIALIZED_VALUE_DEPTH] {
+            super::c4value::parse_serialized_c4value(&nested(levels), 7)
+                .unwrap_or_else(|error| panic!("{levels} levels must decode: {error:?}"));
+        }
+    }
+
+    /// Maps nest through the same recursion, by key and by value, and a map
+    /// entry is the cheaper of the two to repeat.
+    #[test]
+    fn deeply_nested_serialized_maps_are_rejected_on_both_key_and_value() {
+        let depth = super::c4value::MAX_SERIALIZED_VALUE_DEPTH + 8;
+        for (open, close) in [("m[1;a[1;", "]]"), ("m[1;i1=a[1;", "]]")] {
+            let mut encoded = String::new();
+            for _ in 0..depth {
+                encoded.push_str(open);
+            }
+            encoded.push_str("i1");
+            for _ in 0..depth {
+                encoded.push_str(close);
+            }
+            assert!(
+                super::c4value::parse_serialized_c4value(&encoded, 7).is_err(),
+                "nested maps must be refused rather than recursed"
+            );
+        }
+    }
+
+    /// Malformed payloads of every shape return typed errors rather than
+    /// panicking, including the truncations and NULs a corrupted save carries.
+    #[test]
+    fn malformed_serialized_c4values_return_typed_errors() {
+        let valid = "a[3;i1,b1,m[1;i2=i3]]";
+        let mut cases: Vec<String> = vec![
+            String::new(),
+            "\0".into(),
+            "a".into(),
+            "a[".into(),
+            "a[]".into(),
+            "a[;]".into(),
+            "a[-1;]".into(),
+            "a[1000001;]".into(),
+            "a[99999999999999999999;]".into(),
+            "m[".into(),
+            "m[1;]".into(),
+            "m[1;=i1]".into(),
+            "m[1;i1=]".into(),
+            "i".into(),
+            "i-".into(),
+            "i99999999999999999999".into(),
+            "Z1".into(),
+            "\u{feff}a[1;i1]".into(),
+        ];
+        for len in 0..valid.len() {
+            cases.push(valid[..len].to_string());
+        }
+        for index in 0..valid.len() {
+            let mut corrupted: Vec<u8> = valid.as_bytes().to_vec();
+            corrupted[index] = b'\0';
+            cases.push(String::from_utf8_lossy(&corrupted).into_owned());
+        }
+
+        for case in cases {
+            // Typed result either way — the contract is the absence of a panic.
+            let _ = super::c4value::parse_serialized_c4value(&case, 7);
+        }
+    }
