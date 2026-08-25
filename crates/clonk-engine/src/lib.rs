@@ -4208,6 +4208,25 @@ fn legacy_c_string_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+/// Reads one fair-crew setting the shadow-diff harness states for the bridge.
+///
+/// `Game.Parameters.UseFairCrew` decides which branch `C4Object::GetPhysical`
+/// takes, and it is absent from `parity/bridge/lc_engine_ffi.h` — the pinned
+/// `RustEngineBridge.cpp` never calls a setter for it, so adding a field would
+/// break link compatibility with the bridge the oracle actually builds. The
+/// runtime reads it from the environment instead (clonk-org/clonk-rs#1049).
+///
+/// Only the boolean spellings C++ accepts for a config value; anything else
+/// answers `None`, so a typo leaves the runtime's own setting alone rather than
+/// silently reconfiguring a comparison.
+pub(crate) fn parse_fair_crew_flag(value: &str) -> Option<bool> {
+    match value.trim() {
+        "0" | "false" | "off" => Some(false),
+        "1" | "true" | "on" => Some(true),
+        _ => None,
+    }
+}
+
 fn default_use_fair_crew() -> bool {
     true
 }
@@ -4365,6 +4384,31 @@ fn effect_map_denumeration_preserves_existing_and_removed_hidden_slots() {
 }
 
 #[cfg(test)]
+#[test]
+fn only_the_boolean_spellings_cpp_accepts_state_a_fair_crew_setting() {
+    // A value the harness did not state, or stated wrongly, leaves the
+    // runtime's own setting alone: a comparison quietly reconfigured by a typo
+    // is worse than one that never was.
+    for value in ["", "yes", "2", "maybe", "False!"] {
+        assert_eq!(
+            parse_fair_crew_flag(value),
+            None,
+            "`{value}` is not a fair-crew setting"
+        );
+    }
+    for (value, expected) in [
+        ("0", Some(false)),
+        ("false", Some(false)),
+        ("off", Some(false)),
+        ("1", Some(true)),
+        ("true", Some(true)),
+        ("on", Some(true)),
+        (" true ", Some(true)),
+    ] {
+        assert_eq!(parse_fair_crew_flag(value), expected, "value `{value}`");
+    }
+}
+
 #[test]
 fn object_snapshot_carries_exceptional_live_shape_and_fire_top_for_rendering() {
     let mut engine = Engine::new();
