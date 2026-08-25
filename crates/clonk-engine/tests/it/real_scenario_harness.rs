@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::object_visibility::{
+    shipped_invisibility_expires_when_its_timerless_interval_elapses,
     shipped_invisibility_pauses_while_its_target_is_inactive,
     shipped_invisibility_recast_carries_remaining_time_into_reset_timer,
     shipped_invisibility_spell_hides_and_restores_its_mage,
@@ -782,6 +783,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
         (
             "shipped_invisibility_pauses_while_its_target_is_inactive",
             shipped_invisibility_pauses_while_its_target_is_inactive,
+        ),
+        (
+            "shipped_invisibility_expires_when_its_timerless_interval_elapses",
+            shipped_invisibility_expires_when_its_timerless_interval_elapses,
         ),
     ]);
 }
