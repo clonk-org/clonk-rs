@@ -206,16 +206,40 @@ pub fn resolve_host_material_groups(
     .into_iter()
     .map(|folder| folder.material)
     .collect::<Vec<_>>();
+    let folder_roots = groups
+        .iter()
+        .map(|group| group.root().to_path_buf())
+        .collect::<Vec<_>>();
     match open_installed_group(
         HostGameResourceSourceKind::Material,
         "Material.c4g",
         install_roots,
+        &folder_roots,
     ) {
         Ok((_, installed)) => groups.push(installed),
         Err(HostGameResourceSourceError::ResourceGroup { source, .. }) => return Err(source),
         Err(_) => {}
     }
     Ok(groups)
+}
+
+/// Whether a candidate group was already contributed by the folder chain.
+fn contributed(already_contributed: &[PathBuf], candidate: &Path) -> bool {
+    already_contributed
+        .iter()
+        .any(|root| root == candidate || same_existing_path(root, candidate))
+}
+
+/// Whether two paths name the same existing directory.
+///
+/// The folder chain and the install roots reach the same group by different
+/// spellings often enough — a symlinked data directory, a relative root — that
+/// comparing the literal paths alone would let the overlay through.
+fn same_existing_path(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// Resolves the C4GameRes sources without consulting process-global app state.
@@ -246,6 +270,7 @@ pub fn resolve_host_game_resource_sources(
         "System.c4g",
         install_roots,
         executable_root,
+        &[],
     )?;
     let registered_materials = ordered_folder_material_groups(
         scenario_path,
@@ -255,12 +280,17 @@ pub fn resolve_host_game_resource_sources(
     )
     .map_err(folder_material_group_error)?
     .unwrap_or_default();
+    let published_material_roots = registered_materials
+        .iter()
+        .map(|folder| folder.material.root().to_path_buf())
+        .collect::<Vec<_>>();
     let mut materials = folder_materials(registered_materials, executable_root)?;
     materials.push(resolve_installed_group(
         HostGameResourceSourceKind::Material,
         "Material.c4g",
         install_roots,
         executable_root,
+        &published_material_roots,
     )?);
 
     Ok(HostGameResourceSources {
@@ -323,11 +353,12 @@ fn open_installed_group(
     kind: HostGameResourceSourceKind,
     normalized_name: &str,
     install_roots: &[PathBuf],
+    already_contributed: &[PathBuf],
 ) -> Result<(PathBuf, Group), HostGameResourceSourceError> {
     let path = install_roots
         .iter()
         .map(|root| root.join(normalized_name))
-        .find(|candidate| candidate.exists())
+        .find(|candidate| candidate.exists() && !contributed(already_contributed, candidate))
         .ok_or_else(|| HostGameResourceSourceError::ResourceMissing {
             kind,
             wire_name: normalized_name.to_owned(),
@@ -342,10 +373,12 @@ fn resolve_installed_group(
     logical_name: &str,
     install_roots: &[PathBuf],
     executable_root: &Path,
+    already_contributed: &[PathBuf],
 ) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
     let normalized_name = logical_name.replace('\\', "/");
     let logical_path = Path::new(&normalized_name);
-    let (path, group) = open_installed_group(kind, &normalized_name, install_roots)?;
+    let (path, group) =
+        open_installed_group(kind, &normalized_name, install_roots, already_contributed)?;
     let lookup_name = clonk_script::c4_string_bytes(&normalized_name);
     let opened_name = opened_group_name(group.root(), &lookup_name, executable_root);
     let resource = source_from_names(
@@ -750,4 +783,136 @@ fn has_extension(path: &Path, extension: &str) -> bool {
 fn matches_ascii_name(path: &Path, expected: &[u8]) -> bool {
     path.file_name()
         .is_some_and(|name| path_wire_bytes(Path::new(name)).eq_ignore_ascii_case(expected))
+}
+
+#[cfg(test)]
+mod material_chain_tests {
+    use super::*;
+    use std::fs;
+
+    /// A scenario folder that is itself an install root must not stand in for
+    /// the global material group.
+    ///
+    /// `C4GameParameters::Load` publishes every registered parent folder's
+    /// `Material.c4g` and then the global one, and `C4Game::InitMaterialTexture`
+    /// walks that chain (`C4GameParameters.cpp:214-222`; `C4Game.cpp:901-977`) —
+    /// two distinct groups, because the global comes from the installed data
+    /// root rather than from the folder chain. Resolving the same group twice
+    /// truncates the overload chain instead: a folder-local
+    /// `TexMap.txt` that declares `OverloadTextures` and names a texture only
+    /// the global group ships then loses it, and the host renders a partial map.
+    #[test]
+    fn the_installed_group_is_not_the_scenario_folders_own_overlay() {
+        let root = std::env::temp_dir().join(format!(
+            "lc-material-chain-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let folder = root.join("Scenarios.c4f");
+        let installed = root.join("content");
+        fs::create_dir_all(folder.join("Round.c4s")).unwrap();
+        fs::create_dir_all(folder.join("Material.c4g")).unwrap();
+        fs::create_dir_all(installed.join("Material.c4g")).unwrap();
+        fs::write(
+            folder.join("Material.c4g").join("TexMap.txt"),
+            b"OverloadTextures\n",
+        )
+        .unwrap();
+        fs::write(
+            installed.join("Material.c4g").join("TexMap.txt"),
+            b"# global\n",
+        )
+        .unwrap();
+
+        // The scenario's own folder is an install root, exactly as it is when a
+        // scenario folder is opened from outside the installation.
+        let install_roots = vec![folder.clone(), installed.clone()];
+        let groups =
+            resolve_host_material_groups(&folder.join("Round.c4s"), None, &install_roots, &root)
+                .expect("the material chain resolves");
+
+        let roots = groups
+            .iter()
+            .map(|group| group.root().to_path_buf())
+            .collect::<Vec<_>>();
+        assert!(
+            roots.contains(&installed.join("Material.c4g")),
+            "the global material group is missing from the chain: {roots:?}"
+        );
+        let mut unique = roots.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            roots.len(),
+            "the same material group appears twice in the chain: {roots:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same rule on the publication side.
+    ///
+    /// `resolve_host_material_groups` is only the host's pre-publication load;
+    /// what a client reloads afterwards is the published `NRT_Material` set. If
+    /// that set carries the folder overlay twice, the client rebuilds the same
+    /// truncated chain from the resources it was sent, so both have to skip a
+    /// root the folder chain already contributed.
+    #[test]
+    fn the_published_material_resources_are_distinct_groups() {
+        let root = std::env::temp_dir().join(format!(
+            "lc-material-publish-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let folder = root.join("Scenarios.c4f");
+        let installed = root.join("content");
+        fs::create_dir_all(folder.join("Round.c4s")).unwrap();
+        fs::create_dir_all(folder.join("Material.c4g")).unwrap();
+        fs::create_dir_all(installed.join("Material.c4g")).unwrap();
+        fs::create_dir_all(installed.join("System.c4g")).unwrap();
+        fs::write(
+            folder.join("Material.c4g").join("TexMap.txt"),
+            b"OverloadTextures\n",
+        )
+        .unwrap();
+        fs::write(
+            installed.join("Material.c4g").join("TexMap.txt"),
+            b"# global\n",
+        )
+        .unwrap();
+
+        let install_roots = vec![folder.clone(), installed.clone()];
+        let sources = resolve_host_game_resource_sources(
+            folder.join("Round.c4s"),
+            None,
+            &install_roots,
+            &[],
+            &root,
+        )
+        .expect("the host resource set resolves");
+
+        let names = sources
+            .materials
+            .iter()
+            .map(|resource| resource.path.clone())
+            .collect::<Vec<_>>();
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "the same material group is published twice: {names:?}"
+        );
+        assert_eq!(
+            sources.materials.len(),
+            2,
+            "the folder overlay and the global group are both published: {names:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
