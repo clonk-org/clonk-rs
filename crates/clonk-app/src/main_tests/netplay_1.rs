@@ -346,15 +346,27 @@ fn delayed_join_data_needed_after_fanout_does_not_request_a_second_capture() {
     }
 
     // SyncScheduled publishes tick 24 to A and waiting B before B's queued event.
-    main_assert!(published_runtime_dynamic_covers_request(&published_dynamic, 24, 23,));
+    main_assert!(published_runtime_dynamic_covers_request(
+        &published_dynamic,
+        24,
+        23,
+    ));
     if !published_runtime_dynamic_covers_request(&published_dynamic, 24, 23) {
         capture_count += 1;
     }
     main_assert_eq!(capture_count => 1);
 
     // A newer request and a null resource still schedule regeneration.
-    main_assert!(!published_runtime_dynamic_covers_request(&published_dynamic, 24, 25,));
-    main_assert!(!published_runtime_dynamic_covers_request(&null_dynamic, 24, 23,));
+    main_assert!(!published_runtime_dynamic_covers_request(
+        &published_dynamic,
+        24,
+        25,
+    ));
+    main_assert!(!published_runtime_dynamic_covers_request(
+        &null_dynamic,
+        24,
+        23,
+    ));
 }
 
 #[test]
@@ -458,9 +470,15 @@ fn console_input_and_open_parameters_follow_native_framing() {
     )
     .test_value();
     let mut events = receiver.into_iter();
-    main_assert!(matches!(events.next(), Some(ConsoleInputEvent::Command(command)) if command == "   "));
-    main_assert!(matches!(events.next(), Some(ConsoleInputEvent::Command(command)) if command == "/quit"));
-    main_assert!(matches!(events.next(), Some(ConsoleInputEvent::Command(command)) if command == "helloworld"));
+    main_assert!(
+        matches!(events.next(), Some(ConsoleInputEvent::Command(command)) if command == "   ")
+    );
+    main_assert!(
+        matches!(events.next(), Some(ConsoleInputEvent::Command(command)) if command == "/quit")
+    );
+    main_assert!(
+        matches!(events.next(), Some(ConsoleInputEvent::Command(command)) if command == "helloworld")
+    );
     main_assert!(matches!(events.next(), Some(ConsoleInputEvent::Eof)));
     main_assert!(events.next().is_none());
 }
@@ -592,7 +610,9 @@ fn save_description_preserves_native_definition_path_bytes() {
     let mut escaped_path = b"Defs-\xff.c4f".to_vec();
     escaped_path.extend_from_slice(&[b'\\'; 4]);
     escaped_path.extend_from_slice(b"Pack.c4d");
-    main_assert!(description.windows(escaped_path.len()).any(|window| window == escaped_path.as_slice()));
+    main_assert!(description
+        .windows(escaped_path.len())
+        .any(|window| window == escaped_path.as_slice()));
 }
 
 #[test]
@@ -659,14 +679,20 @@ fn help_regions_share_one_native_caption_slot() {
         app.engine.object_help_caption(target).as_deref(),
         "a target-bearing region uses the Help tooltip caption"
     );
-    main_assert!(app.ingame_mouse_caption.caption.is_none(), "the red object-name caption cannot coexist with the Help tooltip");
+    main_assert!(
+        app.ingame_mouse_caption.caption.is_none(),
+        "the red object-name caption cannot coexist with the Help tooltip"
+    );
 
     let help_button = viewport_button_point(&app, owner, clonk_frontend::hud::ViewportButton::Help);
     app.test_cursor(PhysicalPosition::new(
         f64::from(help_button.x),
         f64::from(help_button.y),
     ));
-    main_assert!(app.ingame_mouse_help_caption.is_none(), "a targetless region replaces the prior Help tooltip");
+    main_assert!(
+        app.ingame_mouse_help_caption.is_none(),
+        "a targetless region replaces the prior Help tooltip"
+    );
     let caption = app.ingame_mouse_caption.caption.test_ref();
     let expected = app.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
     let viewport = app.graphics.viewport_rect(owner).test_value();
@@ -685,7 +711,10 @@ fn network_control_catch_up_latches_and_releases_render_skip() {
 
     let catch_up = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
     main_assert!(catch_up.skipped_render_frames > 0);
-    main_assert!(!catch_up.skip_redraw, "the recovered final frame is rendered");
+    main_assert!(
+        !catch_up.skip_redraw,
+        "the recovered final frame is rendered"
+    );
     main_assert_eq!(app.network_control_pacing().behind => 3);
     main_assert!(!app.network_control_pacing().skip_render);
 
@@ -841,24 +870,36 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
 
     let mut missing_refresh = passing.clone();
     missing_refresh.refreshed_frames = 713;
-    main_assert!(validate_native_tick_presentation_budget(&missing_refresh).unwrap_err().contains("refreshed frames 713 below native cadence 714"));
+    main_assert!(validate_native_tick_presentation_budget(&missing_refresh)
+        .unwrap_err()
+        .contains("refreshed frames 713 below native cadence 714"));
 
     let mut missing_simulation = passing.clone();
     missing_simulation.simulation_frames = 713;
-    main_assert!(validate_native_tick_presentation_budget(&missing_simulation).unwrap_err().contains("simulation frames 713 below native cadence 714"));
+    main_assert!(
+        validate_native_tick_presentation_budget(&missing_simulation)
+            .unwrap_err()
+            .contains("simulation frames 713 below native cadence 714")
+    );
 
     let mut too_slow = passing.clone();
     too_slow.graphics_average = Duration::from_micros(28_001);
-    main_assert!(validate_native_tick_presentation_budget(&too_slow).unwrap_err().contains("exceeds the native 28ms game tick"));
+    main_assert!(validate_native_tick_presentation_budget(&too_slow)
+        .unwrap_err()
+        .contains("exceeds the native 28ms game tick"));
 
     let mut skipped = passing.clone();
     skipped.automatic_graphics_skips = 1;
-    main_assert!(validate_native_tick_presentation_budget(&skipped).unwrap_err().contains("must be zero"));
+    main_assert!(validate_native_tick_presentation_budget(&skipped)
+        .unwrap_err()
+        .contains("must be zero"));
 
     let mut cpu_fallback = passing.clone();
     cpu_fallback.retained_gpu_submissions -= 1;
     cpu_fallback.cpu_submissions = 1;
-    main_assert!(validate_native_tick_presentation_budget(&cpu_fallback).unwrap_err().contains("CPU presentation submissions must be zero"));
+    main_assert!(validate_native_tick_presentation_budget(&cpu_fallback)
+        .unwrap_err()
+        .contains("CPU presentation submissions must be zero"));
 
     let mut missing_retained = passing.clone();
     missing_retained.retained_gpu_submissions -= 1;
@@ -868,7 +909,9 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
 
     let mut not_refreshed = passing;
     not_refreshed.refreshed_frames = 0;
-    main_assert!(validate_native_tick_presentation_budget(&not_refreshed).unwrap_err().contains("no refreshed presentation"));
+    main_assert!(validate_native_tick_presentation_budget(&not_refreshed)
+        .unwrap_err()
+        .contains("no refreshed presentation"));
 }
 
 #[test]
@@ -1058,12 +1101,18 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
     };
     let mut app = new_menu_app(320, 200);
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Client);
-    main_assert!(app.host_join_snapshot.is_none(), "a real client does not pretend to own the host's mutable snapshot");
+    main_assert!(
+        app.host_join_snapshot.is_none(),
+        "a real client does not pretend to own the host's mutable snapshot"
+    );
     app.pending_network_join_data = Some(join_data.clone());
     app.pending_client_start_status = Some(status);
     app.client_combined_scenario_path = Some(scenario_dir.clone());
     app.try_prepare_client_network_scenario().test_value();
-    main_assert!(app.pending_network_join_data.is_none(), "the full pending JoinData packet is consumed after installation");
+    main_assert!(
+        app.pending_network_join_data.is_none(),
+        "the full pending JoinData packet is consumed after installation"
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     while app
         .loading_state
@@ -1071,7 +1120,10 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
         .is_some_and(|loading| !loading.finished)
     {
         app.poll_loading().test_value();
-        main_assert!(Instant::now() < deadline, "client scenario worker did not finish");
+        main_assert!(
+            Instant::now() < deadline,
+            "client scenario worker did not finish"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
     main_assert!(app.host_join_snapshot.is_none());
@@ -1100,7 +1152,10 @@ fn control_script_errors_are_non_fatal_like_cpp() {
         recovery: None,
     };
     let status = control_script_error_to_status(script_error).test_value();
-    main_assert!(status.contains("CLNK"), "status names the definition: {status}");
+    main_assert!(
+        status.contains("CLNK"),
+        "status names the definition: {status}"
+    );
 
     let fatal = EngineError::CrewSelection {
         owner: 0,
@@ -1168,7 +1223,10 @@ fn advanced_renderer_config_loads_native_device_snapshot() {
 #[test]
 fn integrity_numbers_keep_native_scalar_grammar() {
     let quoted = b"[General]\nConfigResetSafety=\"7\"\n\n[Graphics]\nResolutionX=\"0\"\n";
-    main_assert!(!startup_config_is_corrupted(quoted), "quoted strings are not native DWord values and retain typed defaults");
+    main_assert!(
+        !startup_config_is_corrupted(quoted),
+        "quoted strings are not native DWord values and retain typed defaults"
+    );
 
     let bare_hex_prefix = b"[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=0x\n";
     main_assert!(startup_config_is_corrupted(bare_hex_prefix));
@@ -1180,7 +1238,8 @@ fn integrity_numbers_keep_native_scalar_grammar() {
         "[General]\nConfigResetSafety=\"7\"\nVendor=keep\n\n[Graphics]\nResolutionX=1234junk\n",
     )
     .test_value();
-    main_assert!(!validate_or_repair_startup_config(&path, false).expect("canonicalize healthy native prefix config"));
+    main_assert!(!validate_or_repair_startup_config(&path, false)
+        .expect("canonicalize healthy native prefix config"));
     let canonical = Config::load(&path).test_value();
     main_assert_eq!(canonical.get_in(Some("General"), "ConfigResetSafety") => Some("42"));
     main_assert_eq!(canonical.get_in(Some("General"), "Vendor") => Some("keep"));
@@ -1191,7 +1250,8 @@ fn integrity_numbers_keep_native_scalar_grammar() {
         "[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=\"1234\"\n",
     )
     .test_value();
-    main_assert!(!validate_or_repair_startup_config(&path, false).expect("canonicalize quoted resolution default"));
+    main_assert!(!validate_or_repair_startup_config(&path, false)
+        .expect("canonicalize quoted resolution default"));
     main_assert_eq!(Config::load(&path).expect("reload quoted resolution config").get_in(Some("Graphics"), "ResolutionX") => Some("800"));
 }
 
@@ -1307,10 +1367,19 @@ fn assert_one_pixel_native_edge(
         }
         transition_widths.push(first_solid - start);
     }
-    main_assert!(!transition_widths.is_empty(), "captured {:?} glyph `{}` contributed no solid foreground pixels", command.role, command.text);
+    main_assert!(
+        !transition_widths.is_empty(),
+        "captured {:?} glyph `{}` contributed no solid foreground pixels",
+        command.role,
+        command.text
+    );
     transition_widths.sort_unstable();
     let median = transition_widths[transition_widths.len() / 2];
-    main_assert!(median <= 1, "native `{}` edge spans {median} intermediate physical pixels: {transition_widths:?}", command.text);
+    main_assert!(
+        median <= 1,
+        "native `{}` edge spans {median} intermediate physical pixels: {transition_widths:?}",
+        command.text
+    );
 }
 
 #[test]
@@ -1430,7 +1499,10 @@ fn scale_three_target_message_commits_through_native_viewport_projection() {
         .enumerate()
         .filter_map(|(index, (native, base))| (native != base).then_some(index))
         .collect::<Vec<_>>();
-    main_assert!(!changed.is_empty(), "native target glyphs contribute pixels");
+    main_assert!(
+        !changed.is_empty(),
+        "native target glyphs contribute pixels"
+    );
     main_assert!(changed.iter().all(|index| {
         let x = (*index % 960) as i32;
         let y = (*index / 960) as i32;
@@ -1461,7 +1533,10 @@ fn scale_three_hud_caption_uses_one_pixel_native_edge() {
         .find(|(_, command)| command.text == "H")
         .test_value();
     main_assert!(batch_index > 0, "HUD text follows the world/base batch");
-    main_assert!(plan.batches[batch_index].logical_layer.is_some(), "HUD chrome is committed immediately before its native text");
+    main_assert!(
+        plan.batches[batch_index].logical_layer.is_some(),
+        "HUD chrome is committed immediately before its native text"
+    );
     main_assert_eq!(command.role => clonk_graphics::clonk_font::ClonkFontRole::GuiText);
     assert_one_pixel_native_edge(&chrome, &rendered, 960, 600, command, 3.0);
 }
@@ -1476,7 +1551,11 @@ fn scale_one_point_five_hud_uses_fractional_native_font_bundle() {
     main_assert_eq!(fonts.main_small.raster_height() => 19);
 
     let (chrome, rendered, plan) = render_ordered_test_frame(&mut app, 1.5, 480, 300);
-    main_assert!(plan.batches.iter().flat_map(|batch| &batch.text).any(|command| command.text == "H"));
+    main_assert!(plan
+        .batches
+        .iter()
+        .flat_map(|batch| &batch.text)
+        .any(|command| command.text == "H"));
     main_assert_ne!(rendered => chrome, "fractional native HUD glyphs must draw");
 }
 
@@ -1795,14 +1874,20 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
             network_alpha[identifier]
         );
     }
-    main_assert!(network_alpha["TooFew.c4s"] > 200, "network too-few is a warning, so its row stays enabled");
+    main_assert!(
+        network_alpha["TooFew.c4s"] > 200,
+        "network too-few is a warning, so its row stays enabled"
+    );
 
     app.open_scenario_browser();
     main_assert_eq!(app.scenario_entry_enabled.get("Replay.c4s") => Some(&true), "local replay bypasses regular player-count checks");
     main_assert_eq!(app.scenario_entry_enabled.get("TooMany.c4s") => Some(&false));
     main_assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s") => Some(&false), "the same too-few row is fatal in the local selector");
     let local_alpha = render_row_alphas(&mut app);
-    main_assert!(local_alpha["TooFew.c4s"] > 0 && local_alpha["TooFew.c4s"] < 200, "local too-few uses the disabled row color");
+    main_assert!(
+        local_alpha["TooFew.c4s"] > 0 && local_alpha["TooFew.c4s"] < 200,
+        "local too-few uses the disabled row color"
+    );
     reset_cached_app_paths();
 }
 
@@ -1950,13 +2035,15 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     let dialog = &app.message_dialogs[0].state;
     main_assert_eq!(dialog.caption() => "Start Game");
     main_assert_eq!(
-                dialog.message() =>
-                "This scenario is designed for a minimum of 2 players. On start, you will have to wait for additional players to join from the network."
-            );
+        dialog.message() =>
+        "This scenario is designed for a minimum of 2 players. On start, you will have to wait for additional players to join from the network."
+    );
     main_assert_eq!(dialog.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL);
     main_assert_eq!(dialog.icon() => clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY);
     main_assert_eq!(dialog.checkbox_checked() => Some(false));
-    main_assert!(dialog.focused_button().is_some_and(|button| button == clonk_frontend::message_dialog::MessageDialogButton::Ok));
+    main_assert!(dialog
+        .focused_button()
+        .is_some_and(|button| button == clonk_frontend::message_dialog::MessageDialogButton::Ok));
 
     app.message_dialogs[0].state.handle_hotkey('D');
     app.persist_top_message_dialog_checkbox_changes();
@@ -2133,8 +2220,14 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     let controller = app.definition_selector.test_ref();
     main_assert_eq!(app.pending_definition_selection.as_ref().and_then(|pending| pending.custom_definition_root.as_deref()) => Some(definition_root.as_path()));
     main_assert_eq!(controller.root_path() => format!("{}{sep}", definition_root.display(), sep = std::path::MAIN_SEPARATOR));
-    main_assert!(controller.rows().iter().any(|row| { row.filename() == "Alpha.c4d" && row.is_fixed() && row.is_checked() }));
-    main_assert!(controller.rows().iter().any(|row| row.filename() == "Beta.C4D"));
+    main_assert!(controller
+        .rows()
+        .iter()
+        .any(|row| { row.filename() == "Alpha.c4d" && row.is_fixed() && row.is_checked() }));
+    main_assert!(controller
+        .rows()
+        .iter()
+        .any(|row| row.filename() == "Beta.C4D"));
     main_assert_eq!(controller.selected_index() => None);
 
     let mut frame = vec![0_u8; 1280 * 720 * 4];
@@ -2152,7 +2245,10 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     let controller = app.definition_selector.test_ref();
     main_assert_eq!(controller.selected_index() => None);
-    main_assert!(controller.rows().iter().all(|row| !row.is_checked()), "C4DefinitionSelDlg does not reapply even fixed checks after F5");
+    main_assert!(
+        controller.rows().iter().all(|row| !row.is_checked()),
+        "C4DefinitionSelDlg does not reapply even fixed checks after F5"
+    );
     app.test_key(VirtualKeyCode::F5, ElementState::Released);
 
     app.test_gamepad_events([
@@ -2178,10 +2274,17 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(app.definition_selector.is_none());
     main_assert!(app.pending_definition_selection.is_none());
-    main_assert!(app.definition_selector_consumed_keys.contains(&VirtualKeyCode::Escape), "close-on-key-down retains the matching physical release");
+    main_assert!(
+        app.definition_selector_consumed_keys
+            .contains(&VirtualKeyCode::Escape),
+        "close-on-key-down retains the matching physical release"
+    );
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     main_assert!(app.definition_selector_consumed_keys.is_empty());
-    main_assert!(!app.menu_state.definition_checkbox_checked, "cancel must retain the user's current checkbox toggle");
+    main_assert!(
+        !app.menu_state.definition_checkbox_checked,
+        "cancel must retain the user's current checkbox toggle"
+    );
 
     app.open_definition_selector(scenario.clone()).test_value();
     app.test_gamepad_events([
@@ -2455,7 +2558,11 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     app.test_cursor(internet_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(n1_expect(&app.startup_network_dialog, "live NetDlg").config().masterserver_signup);
+    main_assert!(
+        n1_expect(&app.startup_network_dialog, "live NetDlg")
+            .config()
+            .masterserver_signup
+    );
     let mut internet_on = vec![0_u8; 800 * 600 * 4];
     app.test_render(&mut internet_on);
     main_assert!(
@@ -2468,7 +2575,11 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     );
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(!n1_expect(&app.startup_network_dialog, "live NetDlg").config().masterserver_signup);
+    main_assert!(
+        !n1_expect(&app.startup_network_dialog, "live NetDlg")
+            .config()
+            .masterserver_signup
+    );
 
     let chat_point = GuiPoint::new(
         (net_layout.btn_chat.x + net_layout.btn_chat.w / 2) as f32,
@@ -2497,7 +2608,10 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     app.close_scenario_browser();
     let retained = app.startup_network_dialog.test_ref();
     main_assert!(retained.config().masterserver_signup);
-    main_assert!(!retained.config().record, "Record staleness is oracle-faithful");
+    main_assert!(
+        !retained.config().record,
+        "Record staleness is oracle-faithful"
+    );
     main_assert_eq!(retained.join_address() => "remembered.example:11112");
     main_assert_eq!(retained.mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
     main_assert_eq!(retained.focused_control() => clonk_frontend::startup_netdlg::NetDlgControl::ChatInput);
@@ -2688,7 +2802,9 @@ fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
     install_test_classic_host_lobby(&mut app);
 
     let mut visible = vec![0_u8; 640 * 480 * 4];
-    main_assert!(app.render(&mut visible).expect("visible lobby keeps the accepted startup GUI bundle"));
+    main_assert!(app
+        .render(&mut visible)
+        .expect("visible lobby keeps the accepted startup GUI bundle"));
 
     let error = app
         .process_classic_lobby_actions(n1_lobby_start_request(false))
@@ -2738,7 +2854,12 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
     .test_value();
     persist_config_value(&paths, "General", "LanguageEx", "DE").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
-    main_assert!(!app.startup_player_models.iter().any(|player| player.activated), "regression requires a raw participant omitted by discovery");
+    main_assert!(
+        !app.startup_player_models
+            .iter()
+            .any(|player| player.activated),
+        "regression requires a raw participant omitted by discovery"
+    );
     let make_frontend = || scenario.clone();
     let definition_load = minimal_prepared_host_definition_load;
 
@@ -2833,8 +2954,14 @@ fn runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
     main_assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
 
     app.set_classic_lobby_runtime_join(true);
-    main_assert!(commands.take_lobby_start_commands().is_empty(), "changing the future policy must not close current lobby admission");
-    main_assert!(app.classic_host_lobby.as_ref().is_some_and(|lobby| lobby.runtime_join_allowed));
+    main_assert!(
+        commands.take_lobby_start_commands().is_empty(),
+        "changing the future policy must not close current lobby admission"
+    );
+    main_assert!(app
+        .classic_host_lobby
+        .as_ref()
+        .is_some_and(|lobby| lobby.runtime_join_allowed));
     main_assert_eq!(n1_lobby_option(&app, LobbyOptionKind::RuntimeJoin).map(|row| row.value.as_str()) => Some("Runtime join allowed"));
     // C4GameOptions only updates NoRuntimeJoin in memory (C4GameOptions.cpp:169).
     main_assert_eq!(app.deferred_config.get("Network", "NoRuntimeJoin") => Some("0"));
@@ -2842,8 +2969,14 @@ fn runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
     main_assert_eq!(Config::load(paths.config_file()).expect("reload enabled runtime-join policy").get_in(Some("Network"), "NoRuntimeJoin") => Some("0"));
 
     app.set_classic_lobby_runtime_join(false);
-    main_assert!(commands.take_lobby_start_commands().is_empty(), "the prohibited policy is applied only when the lobby exits");
-    main_assert!(!app.classic_host_lobby.as_ref().is_some_and(|lobby| lobby.runtime_join_allowed));
+    main_assert!(
+        commands.take_lobby_start_commands().is_empty(),
+        "the prohibited policy is applied only when the lobby exits"
+    );
+    main_assert!(!app
+        .classic_host_lobby
+        .as_ref()
+        .is_some_and(|lobby| lobby.runtime_join_allowed));
     app.flush_deferred_config();
     main_assert_eq!(Config::load(paths.config_file()).expect("reload prohibited runtime-join policy").get_in(Some("Network"), "NoRuntimeJoin") => Some("1"));
 }
@@ -2919,7 +3052,12 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
     let warning = app.message_dialogs.last().test_value();
     main_assert_eq!(warning.state.caption() => "Player assignment");
     main_assert_eq!(warning.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Standard(12));
-    main_assert!(matches!(warning.continuation, MessageDialogContinuation::ClassicLobbyStart {countdown_seconds: 5}));
+    main_assert!(matches!(
+        warning.continuation,
+        MessageDialogContinuation::ClassicLobbyStart {
+            countdown_seconds: 5
+        }
+    ));
     main_assert_eq!(warning.state.checkbox_checked() => Some(false));
 
     app.message_dialogs
@@ -3065,6 +3203,77 @@ fn client_start_and_abort_report_the_cpp_host_only_error() {
 /// `HostSettings::prepared` is `None` for a host that did not come through the
 /// prepared-lobby flow, which is exactly when the published value used to fall
 /// back to the template instead of the live admission.
+/// clonk-org/clonk-rs#583: the profile has to reach the reference a peer reads,
+/// and clonk-org/clonk-rs#588's fail-closed rule decides *which* value that is.
+/// `compat_profile` is what the player asked for and is never rewritten;
+/// `claimed_compat_profile` is what the contract can currently back. Publishing
+/// the request would invite a peer into a session that does not behave that
+/// way, which is the desync the profile exists to prevent.
+#[test]
+fn a_running_host_advertises_only_the_profile_it_can_claim() {
+    let mut app = new_menu_app(640, 480);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 11113)),
+        player_name: "Profile Host".to_string(),
+        prepared: None,
+    }));
+    let (manager, _events, _commands) =
+        NetworkManager::test_stub_with_league_commands_for_client_id(0);
+    app.network = Some(manager);
+    let (snapshot, reference) = default_exact_host_reference();
+    main_assert_eq!(
+        reference.summary().compat_profile.clone() => None,
+        "the template names no profile, so a published one came from the host"
+    );
+    app.control_clients = ControlClientRegistry::default();
+    app.control_clients
+        .replace_snapshot(snapshot.parameters.clients.clients.clone());
+    app.host_join_snapshot = Some(snapshot);
+    app.advertised_game_reference = Some(reference);
+
+    // An ordinary session advertises nothing, so its reference stays exactly
+    // what a host that never heard of the profile publishes.
+    app.compat_profile = crate::settings::CompatProfile::Normal;
+    app.publish_running_host_reference();
+    main_assert_eq!(
+        app.advertised_game_reference
+            .test_ref()
+            .summary()
+            .compat_profile
+            .clone() => None,
+        "an ordinary host must not name a profile"
+    );
+
+    // Requesting a profile the contract cannot back publishes nothing either —
+    // and the request itself is left alone.
+    app.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    app.publish_running_host_reference();
+    let advertised = app
+        .advertised_game_reference
+        .test_ref()
+        .summary()
+        .compat_profile
+        .clone();
+    let expected = match app.claimed_compat_profile() {
+        crate::settings::CompatProfile::Normal => None,
+        profile => Some(profile.display_name().to_string()),
+    };
+    main_assert_eq!(
+        advertised => expected,
+        "the advertised profile follows what may be claimed, not what was asked"
+    );
+    main_assert_eq!(
+        app.compat_profile => crate::settings::CompatProfile::LegacyClonk,
+        "and the request is never rewritten by publishing"
+    );
+    if !crate::compat_readiness::is_ready() {
+        main_assert_eq!(
+            advertised => None,
+            "a blocked profile is not advertised at all"
+        );
+    }
+}
+
 #[test]
 fn a_running_host_advertises_its_live_runtime_join_admission() {
     let mut app = new_menu_app(640, 480);
@@ -3171,12 +3380,24 @@ fn set_password_sets_and_bare_command_clears_live_password() {
     ))
     .test_value();
     main_assert_eq!(app.scenario_game_options.values().password => "secret");
-    main_assert!(app.advertised_game_reference.as_ref().expect("password-protected reference").summary().password_needed);
+    main_assert!(
+        app.advertised_game_reference
+            .as_ref()
+            .expect("password-protected reference")
+            .summary()
+            .password_needed
+    );
 
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/set password".to_string()))
         .test_value();
     main_assert!(app.scenario_game_options.values().password.is_empty());
-    main_assert!(!app.advertised_game_reference.as_ref().expect("unprotected reference").summary().password_needed);
+    main_assert!(
+        !app.advertised_game_reference
+            .as_ref()
+            .expect("unprotected reference")
+            .summary()
+            .password_needed
+    );
     main_assert_eq!(observer.join().expect("password observer") => [b"secret".to_vec(), Vec::new()]);
 }
 
@@ -3318,7 +3539,13 @@ fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
         )],
     )
     .test_value();
-    main_assert!(app.network_start_wait.test_ref().controller.clients().iter().all(|client| client.client_id != 7));
+    main_assert!(app
+        .network_start_wait
+        .test_ref()
+        .controller
+        .clients()
+        .iter()
+        .all(|client| client.client_id != 7));
 }
 
 #[test]
@@ -3372,7 +3599,10 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     app.admission_resources.mark_progress(9, 100);
     app.sec1_timer().test_value();
     main_assert_eq!(scenario_state(&app).text => LobbyScenarioText::Message("Loading... (100%)".to_string()));
-    main_assert!(!scenario_state(&app).finished, "present percent does not make an incomplete resource terminal");
+    main_assert!(
+        !scenario_state(&app).finished,
+        "present percent does not make an incomplete resource terminal"
+    );
 
     let directory = tempdir();
     let scenario = directory.path().join("Remote.c4s");
@@ -3483,7 +3713,10 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string()]);
     main_assert!(n1_expect(&app.network_lobby, "joined lobby").local_ready());
     // OnReadyCheck publishes without a status overlay (src/C4GameLobby.cpp:329-344).
-    main_assert!(app.status_text.is_empty(), "accepted Ready must leave the exact lobby renderer usable");
+    main_assert!(
+        app.status_text.is_empty(),
+        "accepted Ready must leave the exact lobby renderer usable"
+    );
     let checks = commands.take_submitted_ready_checks();
     main_assert_eq!(checks.len() => 1, "the accepted toggle submits exactly once");
     main_assert!(checks[0].data.is_ready());
@@ -3494,7 +3727,10 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     // The cooldown sounds but rejects the toggle (src/C4GameLobby.cpp:334-338).
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "ArrowHit".to_string()]);
-    main_assert!(n1_expect(&app.network_lobby, "joined lobby").local_ready(), "the cooldown keeps the accepted value");
+    main_assert!(
+        n1_expect(&app.network_lobby, "joined lobby").local_ready(),
+        "the cooldown keeps the accepted value"
+    );
     main_assert!(commands.take_submitted_ready_checks().is_empty());
     app.test_key(VirtualKeyCode::Space, ElementState::Released);
 
@@ -3520,7 +3756,10 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         main_assert!(cycle.len() < 16, "the focus cycle terminates");
     }
     main_assert!(cycle.contains(&LobbyControl::Exit));
-    main_assert!(!cycle.contains(&LobbyControl::Ready), "the still-loading Ready checkbox is skipped");
+    main_assert!(
+        !cycle.contains(&LobbyControl::Ready),
+        "the still-loading Ready checkbox is skipped"
+    );
 
     // Pointer Ready emits one ArrowHit and one submission.
     let (mut app, mut commands) = n1_joined_client_app_with_commands();
@@ -3570,7 +3809,9 @@ fn host_client_context_mutes_locally_and_submits_activation_without_optimism() {
             AppContextMenuCommand::LobbyClientInfo(7),
         ]
     );
-    main_assert!(entries.iter().all(|entry| entry.icon == ContextMenuIcon::None));
+    main_assert!(entries
+        .iter()
+        .all(|entry| entry.icon == ContextMenuIcon::None));
     let mut labels = entries
         .iter()
         .map(|entry| entry.text.clone())
@@ -3590,7 +3831,10 @@ fn host_client_context_mutes_locally_and_submits_activation_without_optimism() {
     let update =
         clonk_engine::ClientUpdateControlData::new(clonk_engine::CLIENT_UPDATE_ACTIVATE, 7, 0, 0);
     main_assert_eq!(commands.take_submitted_client_updates() => vec![update.clone()]);
-    main_assert!(app.control_clients.is_activated(7), "the lobby waits for the synchronized client update");
+    main_assert!(
+        app.control_clients.is_activated(7),
+        "the lobby waits for the synchronized client update"
+    );
 
     app.control_clients.apply_update(&update);
     let entries = app.classic_lobby_client_context_entries(7).test_value();
@@ -3846,7 +4090,10 @@ fn scale_native_scensel_static_text_survives_backdrop_cache_hits() {
             cached_chrome[offset..offset + 4] != cached_rendered[offset..offset + 4]
         })
     });
-    main_assert!(changed_in_search_label, "cache-hit Search: command must contribute visible physical pixels");
+    main_assert!(
+        changed_in_search_label,
+        "cache-hit Search: command must contribute visible physical pixels"
+    );
 }
 
 #[test]
@@ -3985,7 +4232,9 @@ fn irc_persistence_preserves_legacy_native_config_bytes() {
 
     let updated = fs::read(paths.config_file()).test_value();
     main_assert!(updated.starts_with(b"[General]\r\nName=\"M\x81ker\"\r\n"));
-    main_assert!(updated.windows(b"[Vendor]\r\nOpaque=\"\xfe\"\r\n".len()).any(|window| window == b"[Vendor]\r\nOpaque=\"\xfe\"\r\n"));
+    main_assert!(updated
+        .windows(b"[Vendor]\r\nOpaque=\"\xfe\"\r\n".len())
+        .any(|window| window == b"[Vendor]\r\nOpaque=\"\xfe\"\r\n"));
     let native = |section, key| {
         clonk_app_netplay::configured_native_value(&updated, section, key)
             .unwrap_or_else(|| panic!("missing {section}.{key}"))
@@ -4108,7 +4357,11 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
         ..PlayerFile::default()
     });
     app.open_player_selection_dialog();
-    main_assert!(!app.startup_player_files[overflow_index].render_model.activated);
+    main_assert!(
+        !app.startup_player_files[overflow_index]
+            .render_model
+            .activated
+    );
     main_assert!(!app.startup_player_models[overflow_index].activated);
     main_assert_eq!(app.selected_player_file.as_ref().map(|player| player.name.as_str()) => Some("Alpha"));
     main_assert_eq!(app.message_dialogs.len() => 1);
@@ -4126,7 +4379,11 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
 
     app.process_player_dialog_actions(actions).test_value();
 
-    main_assert!(!app.startup_player_files[overflow_index].render_model.activated);
+    main_assert!(
+        !app.startup_player_files[overflow_index]
+            .render_model
+            .activated
+    );
     main_assert!(!app.startup_player_models[overflow_index].activated);
     let dialog = app.startup_player_dialog.test_ref();
     main_assert_eq!(dialog.is_player_activated(overflow_index) => Some(false));
@@ -4192,19 +4449,29 @@ fn graphical_debug_mode_reads_native_config_and_obeys_allow_debug() {
 
     engine.set_allow_debug(false);
     arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
-    main_assert!(!engine.debug_mode(), "Parameters.AllowDebug=false is authoritative");
+    main_assert!(
+        !engine.debug_mode(),
+        "Parameters.AllowDebug=false is authoritative"
+    );
 
     engine.set_allow_debug(true);
     fs::write(&config_file, b"[General]\nDebugMode= true\n").test_value();
     arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
-    main_assert!(!engine.debug_mode(), "native Boolean grammar does not skip whitespace after '='");
+    main_assert!(
+        !engine.debug_mode(),
+        "native Boolean grammar does not skip whitespace after '='"
+    );
 }
 
 #[test]
 fn replay_script_injection_obeys_native_config() {
     main_assert!(!configured_allow_scripting_in_replays(b"[General]\n"));
-    main_assert!(!configured_allow_scripting_in_replays(b"[General]\nAllowScriptingInReplays= true\n"));
-    main_assert!(configured_allow_scripting_in_replays(b"[General]\nAllowScriptingInReplays=true\n"));
+    main_assert!(!configured_allow_scripting_in_replays(
+        b"[General]\nAllowScriptingInReplays= true\n"
+    ));
+    main_assert!(configured_allow_scripting_in_replays(
+        b"[General]\nAllowScriptingInReplays=true\n"
+    ));
 
     let (_fixture, _guard, paths) = n1_test_paths(None);
     fs::write(
@@ -4381,9 +4648,15 @@ fn malformed_active_gui_sheet_override_fails_typed_before_pixels() {
         &registrations,
         &Group::open(&base_graphics).test_value(),
     );
-    main_assert!(resolution.overrides.is_empty(), "a corrupt override must not be applied");
+    main_assert!(
+        resolution.overrides.is_empty(),
+        "a corrupt override must not be applied"
+    );
     let failure = resolution.failures.get("GUICaption").test_value();
-    main_assert!(failure.contains("GUICaption.png"), "the failure must name the winning source: {failure}");
+    main_assert!(
+        failure.contains("GUICaption.png"),
+        "the failure must name the winning source: {failure}"
+    );
 
     let app = new_menu_app(320, 200);
     let error = app
@@ -4637,7 +4910,10 @@ fn network_join_applies_active_scenario_gui_overrides() {
     app.try_prepare_client_network_scenario().test_value();
 
     let loading = app.loading_state.test_ref();
-    main_assert!(loading.refresh_requested, "the client GO must stage a GraphicsResource refresh");
+    main_assert!(
+        loading.refresh_requested,
+        "the client GO must stage a GraphicsResource refresh"
+    );
     let staged_overrides = loading.refreshed_gui_sheet_overrides.test_ref();
     let staged_caption = staged_overrides
         .iter()
@@ -4651,7 +4927,10 @@ fn network_join_applies_active_scenario_gui_overrides() {
         staged_caption.source
     );
     main_assert_eq!(loading.refreshed_global_gui_failures.as_ref().map(HashMap::len) => Some(0));
-    main_assert!(loading.refreshed_resources.is_some(), "the client refresh reinitializes the loader fonts");
+    main_assert!(
+        loading.refreshed_resources.is_some(),
+        "the client refresh reinitializes the loader fonts"
+    );
     let pristine_ptr = app
         .assets
         .startup_dialog_images
@@ -4763,7 +5042,10 @@ fn startup_bootstrap_precedes_all_seven_roots_status_models_and_native_pixels() 
             .render(&mut frame)
             .expect_err("bootstrap must precede every root");
         assert_startup_bootstrap_boundary(&error, expected.clone());
-        main_assert!(frame.iter().all(|byte| *byte == 0xa5), "{view:?} must not touch the frame before its bootstrap boundary");
+        main_assert!(
+            frame.iter().all(|byte| *byte == 0xa5),
+            "{view:?} must not touch the frame before its bootstrap boundary"
+        );
 
         let mut native = vec![0x6d; 640 * 400 * 4];
         let error = app
@@ -4844,7 +5126,10 @@ fn startup_status_boundary_precedes_native_main_text_pixels() {
         }) if status == "native-pass diagnostic"
     ));
     main_assert_eq!(app.status_text => "native-pass diagnostic");
-    main_assert!(frame.iter().all(|byte| *byte == 0x6b), "native pass must fail before touching the physical frame");
+    main_assert!(
+        frame.iter().all(|byte| *byte == 0x6b),
+        "native pass must fail before touching the physical frame"
+    );
 }
 
 #[test]
@@ -4987,7 +5272,9 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
     main_assert_eq!(menu.items().iter().map(|item| item.caption.as_str()).collect::<Vec<_>>() => vec!["Don't attack Ada", "Attack Bot"]);
     main_assert_eq!(menu.items()[0].info_caption.as_deref() => Some("Ada is currently hostile and will not be attacked."));
     main_assert_eq!(menu.items()[1].info_caption.as_deref() => Some("Bot is currently friendly and will be attacked."));
-    main_assert!(matches!(menu.items()[1].symbol, ingame_menu::MenuSymbol::Hostility {opponent, hostile: true} if opponent == bot));
+    main_assert!(
+        matches!(menu.items()[1].symbol, ingame_menu::MenuSymbol::Hostility {opponent, hostile: true} if opponent == bot)
+    );
 
     let tick = app.local_control_submission_tick();
     let outcome = {
@@ -4996,7 +5283,9 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
         menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
             .test_value()
     };
-    main_assert!(matches!(outcome, MenuOutcome::Action {action: MenuAction::ToggleHostility(opponent), close_menu: false} if opponent == ada));
+    main_assert!(
+        matches!(outcome, MenuOutcome::Action {action: MenuAction::ToggleHostility(opponent), close_menu: false} if opponent == ada)
+    );
     app.execute_ingame_menu_outcome_for_player(owner, outcome)
         .test_value();
     let control = clonk_engine::ToggleHostilityControlData {
@@ -5005,12 +5294,20 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
         by_client: 3,
     };
     main_assert_eq!(commands.take_submitted_internal_player_scripts() => vec![(tick, clonk_engine::ControlPacket::ToggleHostility(control))]);
-    main_assert!(!app.engine.player(owner).expect("menu owner").is_hostile_towards(ada));
+    main_assert!(!app
+        .engine
+        .player(owner)
+        .expect("menu owner")
+        .is_hostile_towards(ada));
     main_assert_eq!(app.ingame_menu.get(owner).expect("permanent page").items()[0].caption => "Don't attack Ada");
 
     app.apply_ready_controls(tick, vec![NetworkControl::ToggleHostility(control)])
         .test_value();
-    main_assert!(app.engine.player(owner).expect("menu owner").is_hostile_towards(ada));
+    main_assert!(app
+        .engine
+        .player(owner)
+        .expect("menu owner")
+        .is_hostile_towards(ada));
     main_assert_eq!(
         app.ingame_menu.get(owner).expect("permanent page").items()[0].caption =>
         "Don't attack Ada",
@@ -5028,14 +5325,22 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(ada))
         .test_value();
     main_assert!(commands.take_submitted_internal_player_scripts().is_empty());
-    main_assert!(app.engine.player(owner).expect("menu owner").is_hostile_towards(ada));
+    main_assert!(app
+        .engine
+        .player(owner)
+        .expect("menu owner")
+        .is_hostile_towards(ada));
 
     teams.allow_hostility_change = true;
     app.engine.set_team_configuration(teams);
     app.network = None;
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(ada))
         .test_value();
-    main_assert!(!app.engine.player(owner).expect("menu owner").is_hostile_towards(ada));
+    main_assert!(!app
+        .engine
+        .player(owner)
+        .expect("menu owner")
+        .is_hostile_towards(ada));
     main_assert_eq!(app.ingame_menu.get(owner).expect("permanent page").items()[0].caption => "Attack Ada", "local execution also waits for the periodic refill");
     app.refresh_hostility_menus();
     main_assert_eq!(app.ingame_menu.get(owner).expect("locally refreshed page").items()[0].caption => "Don't attack Ada");
@@ -5120,8 +5425,14 @@ fn scale_native_text_keeps_logical_physical_painter_order() {
         .iter()
         .position(|layer| layer.presentation == GpuPresentation::identity(640, 400))
         .test_value();
-    main_assert!(logical < physical, "native text must follow the logical chrome batch that produced it");
-    main_assert!(frame.layers.iter().all(|layer| { layer.presentation.physical_extent == presentation.physical_extent }));
+    main_assert!(
+        logical < physical,
+        "native text must follow the logical chrome batch that produced it"
+    );
+    main_assert!(frame
+        .layers
+        .iter()
+        .all(|layer| { layer.presentation.physical_extent == presentation.physical_extent }));
 }
 
 #[test]
@@ -5233,7 +5544,10 @@ fn scale_three_host_start_wait_renders_after_native_loader_text() {
     let loader_batch = n1_loader_batch(&plan);
     let wait_batch = n1_text_batch(&plan, "Waiting for start...");
     main_assert_eq!(loader_batch => 0, "loader text owns the native base batch");
-    main_assert!(wait_batch > loader_batch && plan.batches[wait_batch].logical_layer.is_some(), "wait dialog chrome/text must be composited after loader text");
+    main_assert!(
+        wait_batch > loader_batch && plan.batches[wait_batch].logical_layer.is_some(),
+        "wait dialog chrome/text must be composited after loader text"
+    );
 }
 
 #[test]
@@ -5364,7 +5678,10 @@ fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
             output[index..index + 4] != filtered_base[index..index + 4]
         })
     });
-    main_assert!(changed_in_caption, "Start Game changed in physical button bounds");
+    main_assert!(
+        changed_in_caption,
+        "Start Game changed in physical button bounds"
+    );
     main_assert_eq!(&output[..4] => &filtered_base[..4], "background remains filtered");
 
     let with_native_text = output.clone();
@@ -5414,7 +5731,10 @@ fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
                 lower_batch > 0 && upper_batch > lower_batch,
                 "stacked dialogs must alternate chrome/text in ownership order: lower={lower_batch}, upper={upper_batch}"
             );
-    main_assert!(plan.batches[upper_batch].logical_layer.is_some(), "the upper dialog chrome is composited after lower native text");
+    main_assert!(
+        plan.batches[upper_batch].logical_layer.is_some(),
+        "the upper dialog chrome is composited after lower native text"
+    );
     assert_one_pixel_native_edge(&chrome, &rendered, 1920, 1440, upper, 3.0);
 }
 

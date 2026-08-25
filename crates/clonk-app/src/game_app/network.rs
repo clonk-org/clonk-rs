@@ -5673,6 +5673,10 @@ impl GameApp {
         // runtime toggle even for one that did.
         let join_allowed = self.runtime_join_admission_allowed();
         let control_mode = self.runtime_network_control_mode;
+        let claimed_profile = match self.claimed_compat_profile() {
+            crate::settings::CompatProfile::Normal => None,
+            profile => Some(profile.display_name().to_string()),
+        };
         let updated = match running_host_reference(
             &template,
             parameters,
@@ -5692,7 +5696,15 @@ impl GameApp {
         .and_then(|reference| match control_mode {
             Some(control_mode) => reference.replacing_control_mode(control_mode),
             None => Ok(reference),
-        }) {
+        })
+        // Advertise only what this host can honestly claim. `compat_profile`
+        // is what the player asked for; `claimed_compat_profile` is what the
+        // contract can back, and the difference was already reported in the
+        // lobby (clonk-org/clonk-rs#588). Publishing the request instead would
+        // invite a peer into a session that does not behave that way
+        // (clonk-org/clonk-rs#583).
+        .and_then(|reference| reference.replacing_compat_profile(claimed_profile))
+        {
             Ok(reference) => reference,
             Err(error) => {
                 tracing::error!(%error, "failed to rebuild running host reference");

@@ -124,6 +124,26 @@ impl HostGameReference {
         Self::new(summary, self.metadata.clone(), self.parameters.clone())
     }
 
+    /// Publish the compatibility profile this host is actually running.
+    ///
+    /// `None` clears the field, which is what an ordinary session advertises:
+    /// the reference is then byte-identical to what a host that has never
+    /// heard of the profile produces, so a stock C++ browser reads it exactly
+    /// as before (`advertise.rs`, `CompatProfile=`).
+    ///
+    /// The caller passes what it can *honestly* claim rather than what was
+    /// requested — a profile the contract cannot back must not be advertised
+    /// (clonk-org/clonk-rs#588's `fc-readiness` rule), because a peer that
+    /// believes the claim enters a session whose behaviour does not match it.
+    pub fn replacing_compat_profile(
+        &self,
+        compat_profile: Option<String>,
+    ) -> Result<Self, HostGameReferenceError> {
+        let mut summary = self.summary.clone();
+        summary.compat_profile = compat_profile.filter(|profile| !profile.is_empty());
+        Self::new(summary, self.metadata.clone(), self.parameters.clone())
+    }
+
     /// Rebuilds the socket-facing fields invalidated after the netpuncher
     /// assigns an ID. C++ owns one address container and one ID pair; update
     /// both Rust projections atomically so serialization cannot expose a
@@ -1105,6 +1125,51 @@ mod tests {
     use clonk_engine::{ControlPlayerInfoEntry, LegacyCString};
 
     use super::*;
+
+    #[test]
+    fn replacing_the_compatibility_profile_publishes_it_or_says_nothing() {
+        // clonk-org/clonk-rs#583: the profile has to reach the reference a peer
+        // reads. Clearing it must leave the reference byte-identical to one
+        // from a host that never heard of the profile, because a stock C++ host
+        // is exactly the peer that never sends the key — `StdCompilerINIRead`
+        // reads by name, so C++ neither writes it nor looks it up.
+        let reference = exact_reference();
+        assert_eq!(
+            reference.summary().compat_profile,
+            None,
+            "a host names no profile until it claims one"
+        );
+        let ordinary = crate::encode_reference_response(reference.summary());
+
+        let claimed = reference
+            .replacing_compat_profile(Some("LegacyClonk".to_string()))
+            .expect("a named profile rebuilds the reference");
+        assert_eq!(
+            claimed.summary().compat_profile.as_deref(),
+            Some("LegacyClonk")
+        );
+        assert!(
+            String::from_utf8_lossy(&crate::encode_reference_response(claimed.summary()))
+                .contains("CompatProfile=LegacyClonk\r\n")
+        );
+
+        let cleared = claimed
+            .replacing_compat_profile(None)
+            .expect("clearing rebuilds the reference");
+        assert_eq!(cleared.summary().compat_profile, None);
+        assert_eq!(
+            crate::encode_reference_response(cleared.summary()),
+            ordinary,
+            "a cleared profile leaves the reference exactly as it was"
+        );
+
+        // An empty name is silence, not a profile called "".
+        let empty = reference
+            .replacing_compat_profile(Some(String::new()))
+            .expect("an empty name rebuilds the reference");
+        assert_eq!(empty.summary().compat_profile, None);
+        assert_eq!(crate::encode_reference_response(empty.summary()), ordinary);
+    }
 
     fn exact_reference() -> HostGameReference {
         let host_config = crate::HostConfig::default();
