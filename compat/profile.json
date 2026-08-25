@@ -598,9 +598,10 @@
     {
       "id": "pres-render-inactive",
       "area": "presentation",
-      "summary": "Graphics.RenderInactive defaults to both bits (Fullscreen|Console) so an Alt-Tabbed game keeps drawing; C++ adapts Console alone. Only the default diverges: a written value is honoured verbatim and RenderInactive=2 restores C++ exactly.",
+      "summary": "Graphics.RenderInactive defaults to both bits (Fullscreen|Console) so an Alt-Tabbed game keeps drawing; C++ adapts Console alone. Only the default diverges: a written value is honoured verbatim and RenderInactive=2 restores C++ exactly. The profile reverts the default at startup, after the command line has resolved the requested profile, and still honours a written value under either profile -- overruling an explicit choice is not something any overlay in the profile does. The advanced-config editor keeps materializing the port default, because the profile never rewrites a saved key.",
       "cited_in": [
-        "crates/clonk-app/src/main_parts/resources.rs:3826"
+        "crates/clonk-app/src/main_parts/resources.rs:3826",
+        "crates/clonk-app/src/main_parts/resources.rs:3921"
       ],
       "cpp_reference": "C4Config.cpp:481",
       "disposition": "accepted",

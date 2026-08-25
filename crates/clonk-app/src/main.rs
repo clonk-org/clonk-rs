@@ -979,7 +979,8 @@ fn run() -> Result<()> {
         app.configure_native_startup_fonts(presenter.scale(), display_options.point_filtering);
         app.apply_classic_command_line(&classic)?;
         // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
-        let render_inactive_mask = load_render_inactive_mask(app.app_paths.as_ref());
+        let render_inactive_mask =
+            load_render_inactive_mask(app.app_paths.as_ref(), app.compat_profile);
         app.auto_start_sandbox = cli.sandbox;
         app.launch_classic_command_line_join()
             .context("failed to start command-line network join")?;
