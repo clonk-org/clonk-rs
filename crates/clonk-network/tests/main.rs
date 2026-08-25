@@ -19,6 +19,7 @@ mod legacy_network_fuzz;
 mod live_network_dynamic;
 mod local_resource_resolution;
 mod network_load_24;
+mod record_stream_fuzz;
 mod resource_file_store;
 mod resource_transfer_backend;
 mod startup_game_advertiser;

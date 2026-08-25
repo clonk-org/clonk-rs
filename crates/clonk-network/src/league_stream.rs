@@ -100,35 +100,84 @@ pub fn decode_classic_record_stream(
     })
 }
 
+/// The most a classic record stream may inflate to.
+///
+/// **A deliberate Rust safety limit, not C++ behaviour.**
+/// `C4Playback::StreamToRecord` starts at `size * 5` and then grows by the
+/// compressed size in a loop with no ceiling at all (C4Record.cpp:1076-1108),
+/// so a zlib bomb from a league server or a peer's recording expands until the
+/// process dies. These bytes arrive from remote sources, so the port stops.
+///
+/// A quarter of a gigabyte is far above any recording this engine can replay
+/// and far below what an amplified stream reaches, so no legitimate stream
+/// meets it. The refusal is a typed error, never a truncated replay: a record
+/// cut short mid-stream would desynchronise rather than fail.
+pub const CLASSIC_RECORD_STREAM_MAX_INFLATED: usize = 256 * 1024 * 1024;
+
+/// Grow in blocks rather than by the compressed size, as C++ does: a highly
+/// compressible stream would otherwise need one inflate call per few KiB of
+/// output all the way to the ceiling, which is the amplification measured in
+/// syscalls rather than bytes.
+const CLASSIC_RECORD_STREAM_GROWTH: usize = 1024 * 1024;
+
 fn inflate_classic_record_stream(
     compressed: &[u8],
 ) -> Result<Vec<u8>, ClassicRecordStreamDecodeError> {
-    let initial_capacity = compressed.len().saturating_mul(5);
+    inflate_classic_record_stream_bounded(compressed, CLASSIC_RECORD_STREAM_MAX_INFLATED)
+}
+
+fn inflate_classic_record_stream_bounded(
+    compressed: &[u8],
+    max_inflated: usize,
+) -> Result<Vec<u8>, ClassicRecordStreamDecodeError> {
+    let ceiling = max_inflated.max(1);
+    let initial_capacity = compressed.len().saturating_mul(5).clamp(1, ceiling);
     let mut inflated = Vec::new();
     inflated
-        .try_reserve(initial_capacity.max(1))
+        .try_reserve(initial_capacity)
         .map_err(|_| ClassicRecordStreamDecodeError::OutputTooLarge)?;
     let mut decompressor = Decompress::new(true);
 
     loop {
         if inflated.len() == inflated.capacity() {
+            // Checked here rather than after the step, so the cap is reported
+            // as the cap instead of as whatever zlib says about a full buffer.
+            if inflated.len() >= ceiling {
+                return Err(ClassicRecordStreamDecodeError::OutputTooLarge);
+            }
+            let growth = CLASSIC_RECORD_STREAM_GROWTH
+                .max(compressed.len())
+                .min(ceiling - inflated.len());
             inflated
-                .try_reserve(compressed.len().max(1))
+                .try_reserve(growth)
                 .map_err(|_| ClassicRecordStreamDecodeError::OutputTooLarge)?;
         }
         let before_in = decompressor.total_in();
         let before_out = decompressor.total_out();
         let input_offset = usize::try_from(before_in)
             .map_err(|_| ClassicRecordStreamDecodeError::OutputTooLarge)?;
+        // `None`, not `Finish`: this loop resumes one decompressor across
+        // growing buffers, and `Finish` promises zlib that the call has room
+        // for the whole remaining stream. Breaking that promise repeatedly
+        // makes zlib report a hard decode failure once it can make no further
+        // progress, which is indistinguishable from a corrupt stream.
         let status = decompressor.decompress_vec(
             &compressed[input_offset.min(compressed.len())..],
             &mut inflated,
-            FlushDecompress::Finish,
+            FlushDecompress::None,
         )?;
         match status {
             Status::StreamEnd => return Ok(inflated),
+            // C++'s "stream data incomplete, using as much data as possible"
+            // (C4Record.cpp:1099-1104). Reached only when the output buffer
+            // still had room: `BufError` against a *full* buffer means zlib
+            // has more to give and needs space, which is a different thing
+            // entirely — treating that as an exhausted stream truncates a
+            // record silently, and lets an amplified one stop early rather
+            // than meet the ceiling.
             Status::BufError
-                if usize::try_from(decompressor.total_in()).ok() == Some(compressed.len()) =>
+                if inflated.len() < inflated.capacity()
+                    && usize::try_from(decompressor.total_in()).ok() == Some(compressed.len()) =>
             {
                 return Ok(inflated);
             }
@@ -791,5 +840,44 @@ mod tests {
         assert_eq!(&encoded[..14], b"\0\x30Record.c4s\0\x82");
         assert_eq!(encoded[14], 0x01);
         assert_eq!(&encoded[15..], file);
+    }
+
+    /// A stream that inflates past the ceiling is refused, not expanded
+    /// (clonk-org/clonk-rs#966).
+    ///
+    /// The ceiling is a **deliberate Rust safety limit**: C++ grows its buffer
+    /// in an unbounded loop (C4Record.cpp:1076-1108), so a zlib bomb from a
+    /// league server or a peer's recording expands until the process dies.
+    #[test]
+    fn a_compressed_stream_never_inflates_past_the_cap() {
+        // 8 MiB of zeros compresses to a few KiB. Decoded against a small
+        // ceiling, the amplification is refused instead of expanded — the
+        // production ceiling is a quarter-gigabyte and behaves identically,
+        // it is just not worth allocating in a unit test.
+        let bomb = encode_zlib(&vec![0_u8; 8 * 1024 * 1024]);
+        assert!(
+            bomb.len() < 64 * 1024,
+            "the fixture has to amplify to test amplification, got {} bytes",
+            bomb.len()
+        );
+        assert!(matches!(
+            inflate_classic_record_stream_bounded(&bomb, 1024 * 1024),
+            Err(ClassicRecordStreamDecodeError::OutputTooLarge)
+        ));
+    }
+
+    /// The cap does not touch a stream that stays within it.
+    #[test]
+    fn a_stream_inside_the_cap_still_decodes() {
+        let mut inflated = Vec::new();
+        inflated.extend_from_slice(&[0, LEAGUE_STREAM_FILE_CHUNK_TYPE]);
+        inflated.extend_from_slice(b"Record.c4s\0");
+        let payload = incompressible_bytes(4096);
+        encode_packed_u32(payload.len() as u32, &mut inflated);
+        inflated.extend_from_slice(&payload);
+
+        let stream = decode_classic_record_stream(&encode_zlib(&inflated))
+            .expect("an ordinary stream is unaffected by the cap");
+        assert_eq!(stream.initial_group, payload);
     }
 }
