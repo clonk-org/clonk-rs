@@ -182,8 +182,9 @@ pub use league_round_results_packet::{
 pub use league_stream::{
     decode_classic_record_stream, encode_league_stream_file_chunk, ClassicRecordStream,
     ClassicRecordStreamDecodeError, ClassicRecordStreamFile, LeagueRecordStream,
-    LeagueRecordStreamError, LeagueRecordUpload, LEAGUE_STREAM_FILE_CHUNK_TYPE,
-    LEAGUE_STREAM_INTERVAL_SECONDS, LEAGUE_STREAM_MAX_BLOCK_SIZE, LEAGUE_STREAM_MIN_BLOCK_SIZE,
+    LeagueRecordStreamError, LeagueRecordUpload, CLASSIC_RECORD_STREAM_MAX_INFLATED,
+    LEAGUE_STREAM_FILE_CHUNK_TYPE, LEAGUE_STREAM_INTERVAL_SECONDS, LEAGUE_STREAM_MAX_BLOCK_SIZE,
+    LEAGUE_STREAM_MIN_BLOCK_SIZE,
 };
 pub use legacy::{
     aggregate_ready_batch, decode_control_entry_payload, decode_control_entry_prefix,

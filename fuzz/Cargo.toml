@@ -97,4 +97,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "record_stream"
+path = "fuzz_targets/record_stream.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
