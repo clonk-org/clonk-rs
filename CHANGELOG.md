@@ -4,6 +4,69 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-08-25
+
+### Bug fixes
+
+- Refuse a System group whose contents differ from the host's (#1073)
+- Trace the map-creation draws the oracle already records (#1070)
+- Resolve the installed material group past the scenario folder's own overlay (#1067)
+- Compare the synced RNG ledger on every frame and report the slip (#1065)
+- Trace the Rnd3 fill draws in the RNG differential probe (#1064)
+- Stop reporting untransported effect state as a global divergence (#1060)
+- Keep the reliable-UDP socket serving through a full send queue (#1052)
+- Name the issue an unproven evidence entry already carries (#1043)
+- Keep savegame clients activated through the load into GO (#1037)
+- Build the bundled freetype crates natively on Windows (#1038)
+- Bound record stream inflation and stop truncating a full buffer (#1023)
+- Complete synchronized runtime joins (#1033)
+- Bound serialized C4Value nesting instead of overflowing the stack (#1026)
+- Match PXS malformed-load and invalid material state (#1014)
+- Bound the packed group entry-table reservation by its image (#1022)
+- Accept truncated JPEG entropy like the libjpeg oracle (#1015)
+- Preserve object list chronology across creation callback phases (#1012)
+- Retain startup player count in runtime joins (#1011)
+- Retain mouse targets until move refill (#1010)
+
+### Features
+
+- Let the shadow diff state the host's fair-crew parameters (#1072)
+- Record the trusted local system override as a compatibility gap (#1063)
+- Declare the presentation capture screens masks and tolerances (#1062)
+- Let LC_PIN_SEED freeze a network host's parameter seed (#1058)
+- Build the pinned oracle against this tree for the shadow diff (#1057)
+- Block the compatibility profile on the System.c4g identity gap (#1056)
+- Restore the engine C ABI and build command the shadow-diff bridge needs (#1034)
+- Run a compatibility session at the C++ in-game tick (#1039)
+- Revert the inactive-draw default under the compatibility profile (#1045)
+- Withhold the content appendto divergences under the profile (#1042)
+- Tell a joining client its requested profile is unavailable (#1041)
+- Refuse a join whose advertised compatibility profile cannot be matched (#1032)
+- Share bases between allies under the team account rule (#1035)
+- Advertise the compatibility profile a host actually claims (#1031)
+- Port the C4Config version migration run after config load (#1029)
+- Report compatibility blockers before a host claims the profile (#1028)
+- Withhold the classic key-up release under the compatibility profile (#1027)
+
+### Refactoring
+
+- Restore the byte-verbatim test fragments rustfmt reflowed (#1076)
+- State the fair-crew parameter the physicals tests depend on (#1075)
+
+### Testing
+
+- Differential-check config load mutation and save semantics (#1040)
+- Pin sub-pixel crew positions through the dynamic state capture (#1036)
+- Pin the save component set and restore-info ordering (#1030)
+- Fuzz the legacy network packet and JoinData decoders (#1021)
+- Fuzz scenario save and compiled-value parsers (#1025)
+- Fuzz update manifests packages and apply paths (#1024)
+- Pin the shipped invisibility timerless interval expiry (#1020)
+- Pin the timer-less expiry path magic spells depend on (#1019)
+- Pin that invisibility holds its time while its target is inactive (#1018)
+- Pin the key that unlocks the Dragon Rock princess cage (#1017)
+- Cover the shipped Dragon Rock cage unlock control path (#1016)
+
 ## [0.19.4] - 2026-08-24
 
 ### Bug fixes
