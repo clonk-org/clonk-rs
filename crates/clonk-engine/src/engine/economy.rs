@@ -986,41 +986,46 @@ impl Engine {
                 .map(|rect| rect.y)
                 .unwrap_or(0);
             let mouth_y = position.y + shape_top / 2;
+            // `GBackMat` is `Pix2Mat[GetPix]`, and `GetPix` answers MCVehic past a
+            // closed border (C4Landscape.h:144-161), which is exactly what makes
+            // native's "forcefields are breathable" arm fire for an object off the
+            // edge of the map. `material_at` has no border rule and answers None
+            // there, so the arm missed and the object suffocated against a border
+            // the semi-solid arm *does* see (clonk-org/clonk-rs#1100).
             let vehicle_at_mouth = self.materials.id_of("Vehicle").is_some_and(|vehicle| {
                 self.landscape
                     .as_ref()
-                    .and_then(|landscape| landscape.material_at(position.x, mouth_y))
+                    .and_then(|landscape| landscape.border_material_at(position.x, mouth_y))
                     == Some(vehicle)
             });
-            let mut breathe = if vehicle_at_mouth {
-                true
-            } else if self.object_physical(idx).breathe_water != 0 {
-                // GetFairCrewPhysical runs before this material read. Use the
-                // live position it may have changed, as native does (:891-893).
-                let position = self.objects[idx].state.position;
-                let water = self.materials.id_of("Water");
-                water.is_some()
-                    && self
+            let mut breathe =
+                if vehicle_at_mouth {
+                    true
+                } else if self.object_physical(idx).breathe_water != 0 {
+                    // GetFairCrewPhysical runs before this material read. Use the
+                    // live position it may have changed, as native does (:891-893).
+                    let position = self.objects[idx].state.position;
+                    let water = self.materials.id_of("Water");
+                    water.is_some()
+                        && self.landscape.as_ref().and_then(|landscape| {
+                            landscape.border_material_at(position.x, position.y)
+                        }) == water
+                } else {
+                    let position = self.objects[idx].state.position;
+                    let shape_top = self.objects[idx]
+                        .current_shape_rect()
+                        .map(|rect| rect.y)
+                        .unwrap_or(0);
+                    let mouth_y = position.y + shape_top / 2;
+                    !self
                         .landscape
                         .as_ref()
-                        .and_then(|landscape| landscape.material_at(position.x, position.y))
-                        == water
-            } else {
-                let position = self.objects[idx].state.position;
-                let shape_top = self.objects[idx]
-                    .current_shape_rect()
-                    .map(|rect| rect.y)
-                    .unwrap_or(0);
-                let mouth_y = position.y + shape_top / 2;
-                !self
-                    .landscape
-                    .as_ref()
-                    .map(|landscape| {
-                        landscape.is_solid_at(position.x, mouth_y)
-                            || landscape.is_liquid_at(position.x, mouth_y)
-                    })
-                    .unwrap_or(false)
-            };
+                        .map(|landscape| {
+                            landscape.is_solid_at(position.x, mouth_y)
+                                || landscape.is_liquid_at(position.x, mouth_y)
+                        })
+                        .unwrap_or(false)
+                };
             // Native checks containment after the complete vehicle /
             // BreatheWater / semisolid chain (C4Object.cpp:899).
             if self.objects[idx].state.container.is_some() {
