@@ -5475,6 +5475,32 @@ fn compat_profile_overlays_the_cpp_control_mode_without_touching_the_saved_key()
 }
 
 #[test]
+fn a_normal_round_publishes_the_cpp_fair_crew_strength_of_zero() {
+    use crate::settings::session_fair_crew_strength;
+
+    // `FairCrewStrength` is a **synchronized** parameter: it is compiled into
+    // Parameters (C4GameParameters.cpp:562) with a default of 0, and C++ fills
+    // it from the configured value only when fair crew is actually on --
+    //
+    //   if (!FairCrewStrength && UseFairCrew)
+    //       FairCrewStrength = Config.General.FairCrewStrength;
+    //
+    // (C4GameParameters.cpp:439-440). Filling it unconditionally publishes
+    // 1000 where stock C++ publishes 0 for every ordinary round, which is a
+    // parameter mismatch on the wire rather than a local preference.
+    const CONFIGURED: i32 = 1_000;
+
+    // Fair crew off -- the default -- leaves the parameter at C++'s zero.
+    main_assert_eq!(session_fair_crew_strength(false, CONFIGURED) => 0);
+    // ...whatever the player configured, because C++ never reads it here.
+    main_assert_eq!(session_fair_crew_strength(false, 20_000) => 0);
+
+    // Fair crew on takes the configured strength, as C++'s fill-in does.
+    main_assert_eq!(session_fair_crew_strength(true, CONFIGURED) => CONFIGURED);
+    main_assert_eq!(session_fair_crew_strength(true, 20_000) => 20_000);
+}
+
+#[test]
 fn update_request_combined_with_a_direct_launch_keeps_the_launch() {
     // `ParseCommandLine` ends with
     //

@@ -4381,7 +4381,14 @@ pub(crate) fn build_network_host_preparation(
             control_rate: integer("Network", "ControlRate", 2),
             async_max_wait: integer("Network", "AsyncMaxWait", 2),
             fair_crew: app.startup_view_flags.fair_crew,
-            fair_crew_strength: integer("General", "DefCrewStrength", 1_000),
+            // C++ substitutes the configured strength only when fair crew is
+            // on; the parameter is synchronized, so an unconditional fill
+            // publishes a value stock C++ never sends
+            // (`crate::settings::session_fair_crew_strength`).
+            fair_crew_strength: crate::settings::session_fair_crew_strength(
+                app.startup_view_flags.fair_crew,
+                integer("General", "DefCrewStrength", 1_000),
+            ),
             auto_frame_skip: boolean("Graphics", "AutoFrameSkip", true),
             max_load_file_size,
             no_runtime_join: app
