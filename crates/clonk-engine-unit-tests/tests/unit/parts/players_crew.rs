@@ -1449,6 +1449,46 @@ fn restored_player_final_init_establishes_initial_value_only_for_non_savegames(
 }
 
 #[test]
+fn com_turnaround_while_standing_still_runs_the_turn_action() -> Result<(), EngineError> {
+    // ObjectComMovement's direct turnaround calls `cObj->SetDir(...)`
+    // (C4ObjectCom.cpp:226-235), and SetDir runs the current action's
+    // TurnAction through SetActionByName before assigning the facing
+    // (C4Object.cpp:4243-4248). Writing the facing without that skips the
+    // action change, which is simulation state on a control path.
+    let mut engine = Engine::with_seed(0);
+    let mut definition = test_crew_definition(simple_definition("TURN"));
+    set_actions!(
+        &mut definition, Some("Walk");
+        "Idle" => ActionSpec::default(),
+        "Walk" => action_spec!(default, with_procedure: "WALK", with_directions: 2, with_turn_action: "Turn"),
+        "Turn" => action_spec!(default, with_directions: 2),
+    );
+    engine.register_test_definition(definition);
+    engine.register_test_player(PlayerConfig::new(1, "Turner"));
+    let crew = engine.spawn_test_object(
+        test_crew_config("TURN", 1)
+            .with_action(ActionState::new("Walk"))
+            .with_direction(Direction::Left),
+    );
+    engine.select_crew(1, [crew])?;
+    engine.set_crew_cursor(1, Some(crew))?;
+
+    let index = engine.test_object_index(crew);
+    unit_assert_eq!(engine.objects[index].state.direction => Direction::Left);
+    unit_assert_eq!(engine.objects[index].fixed_velocity.x => C4Fixed::ZERO);
+
+    engine.player_in_com(1, COM_RIGHT, 0)?;
+
+    let index = engine.test_object_index(crew);
+    unit_assert_eq!(engine.objects[index].state.direction => Direction::Right);
+    unit_assert_eq!(
+        engine.objects[index].state.action.name.as_str() => "Turn",
+        "SetDir runs the TurnAction on a facing change"
+    );
+    Ok(())
+}
+
+#[test]
 fn player_lifecycle_startup_hint_clears_through_object_com_and_object_command(
 ) -> Result<(), EngineError> {
     // ObjectCom and ObjectCommand clear ShowStartup after the eliminated

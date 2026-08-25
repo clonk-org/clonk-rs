@@ -6027,16 +6027,24 @@ impl Engine {
         if self.objects[index].fixed_velocity.x.val() == 0
             && matches!(procedure, ActionProcedure::Walk | ActionProcedure::Hang)
         {
-            match com_dir {
+            // Native calls `cObj->SetDir(...)` here, not a bare assignment:
+            // SetDir runs the current action's TurnAction through
+            // SetActionByName before writing the facing, and rejects idle or
+            // out-of-range directions first (C4Object.cpp:4237-4253). Going
+            // through the trailing assignment alone left the object in its old
+            // action (clonk-org/clonk-rs#1124).
+            let turn = match com_dir {
                 CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => {
-                    self.write_object_direction(index, Direction::Left);
+                    Some(Direction::Left)
                 }
                 CommandDirection::Right
                 | CommandDirection::UpRight
-                | CommandDirection::DownRight => {
-                    self.write_object_direction(index, Direction::Right);
-                }
-                _ => {}
+                | CommandDirection::DownRight => Some(Direction::Right),
+                _ => None,
+            };
+            if let Some(direction) = turn {
+                let definition_id = self.objects[index].definition_id.clone();
+                self.set_exec_action_direction(index, &definition_id, direction)?;
             }
         }
         Ok(())
