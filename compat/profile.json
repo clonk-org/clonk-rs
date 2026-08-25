@@ -240,19 +240,6 @@
       "owner": "parity/README.md (Accepted safety divergences)"
     },
     {
-      "id": "sim-script-var-negative-slot",
-      "area": "simulation",
-      "summary": "Var(n)/Local(n) with a negative index: C++ clamps the index to slot 0 (C4ValueList::GetItem), the port's VM addresses a distinct __var_-1 key, so a negative-index read/writes differ.",
-      "cited_in": [
-        "crates/clonk-script/tests/it/test_var_local_slots.rs:14"
-      ],
-      "cpp_reference": "C4ValueList.cpp:50",
-      "disposition": "open-gap",
-      "profile_action": "blocked",
-      "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#523"
-    },
-    {
       "id": "sim-script-nested-local-snapshot",
       "area": "simulation",
       "summary": "A call into an object whose own script is already in flight starts from the pre-call local snapshot; C++ keeps named locals on the C4Object and the nested call would read them live. The overlay_foreign_cells pass replays earlier cross-object LocalN writes onto the snapshot and narrows, but does not close, the gap.",
