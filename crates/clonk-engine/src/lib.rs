@@ -238,6 +238,10 @@ mod lib_test_support;
 mod find_object_shape_rect_parity;
 
 #[cfg(test)]
+#[path = "lib_tests/nested_local_liveness_parity.rs"]
+mod nested_local_liveness_parity;
+
+#[cfg(test)]
 #[path = "lib_tests/velocity_clamp_parity.rs"]
 mod velocity_clamp_parity;
 
