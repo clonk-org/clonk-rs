@@ -5554,12 +5554,9 @@ mod tests {
         front_assert_eq! {split.active_gamma_control_points => single.active_gamma_control_points};
     }
 
-    /// A GPU scene-capture frame records commands instead of rasterizing, so
-    /// the per-viewport content surface `render_viewport` allocates every frame
-    /// is never read or written. Deferring the pixel plane must therefore cost
-    /// a steady-state frame zero materializations; each avoided 640x480 plane
-    /// is 1.23 MB of allocate-and-zero, roughly 0.5 ms of Raspberry Pi 4
-    /// memory bandwidth.
+    /// A GPU scene-capture frame records commands instead of rasterizing. Its
+    /// viewport target therefore needs neither a pixel allocation nor a fresh
+    /// deferred `Surface` after the recorder/capacity pool has warmed.
     #[test]
     fn gpu_capture_frames_materialize_no_viewport_pixel_planes() {
         const WIDTH: u32 = 640;
@@ -5586,6 +5583,7 @@ mod tests {
         front_assert! {capture_frame(&mut graphics).is_some()};
 
         let before = clonk_graphics::pixel_plane_stats();
+        let scratch_creations = graphics.viewport_scratch_surface_creations();
         let start = std::time::Instant::now();
         for _ in 0..FRAMES {
             capture_frame(&mut graphics);
@@ -5616,10 +5614,110 @@ mod tests {
             eager_plane.as_secs_f64() * 1000.0 / FRAMES as f64,
         );
         front_assert_eq! {materialized => 0, "a scene-capture frame rasterized into a deferred pixel plane"};
+        front_assert_eq! {deferred_bytes => 0, "a warmed capture frame constructed a new deferred viewport plane"};
+        front_assert_eq! {
+            graphics.viewport_scratch_surface_creations() => scratch_creations,
+            "a warmed capture frame constructed a new viewport scratch surface"
+        };
+    }
+
+    #[test]
+    fn gpu_fogged_scroll_border_drains_through_rearmed_scratch_targets() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(10, 10);
+        snapshot.objects[0].plr_view_range = 12;
+        snapshot.players = vec![PlayerState {
+            id: 0,
+            fog_of_war: true,
+            ..PlayerState::default()
+        }];
+        snapshot.environment.fow_resolution = 8;
+        snapshot.environment.fow_color = 0x0000_ff00;
+        snapshot.fow_players.insert(
+            0,
+            FogOfWarPlayerFrame {
+                view_objects: vec![snapshot.objects[0].id],
+                view_target: None,
+            },
+        );
+        let viewport =
+            ViewportInput::new(0, snapshot.objects[0].position, 2.0, &snapshot.objects[0]);
+        let gamma = clonk_graphics::GammaRamp::identity();
+        let mut graphics = test_graphics((200, 120, 120), "retained fog border transfer");
+
+        graphics.begin_gpu_scene_capture();
+        graphics.render_frame_without_atlas(&snapshot, &[viewport]);
+        let scene = graphics
+            .finish_gpu_scene_capture(&gamma)
+            .expect("viewport capture remains active");
+
+        front_assert! {graphics.active_viewports[0].content_rect.x > 0};
+        front_assert_eq! {
+            graphics.materialized_viewport_scratch_surfaces() => 0,
+            "a pooled retained viewport target acquired a pixel plane"
+        };
+        front_assert! {!scene.commands.is_empty()};
         front_assert! {
-            deferred_bytes / FRAMES >= u64::from(WIDTH * HEIGHT * 4),
-            "expected at least one full viewport plane deferred per frame, got {} bytes",
-            deferred_bytes / FRAMES
+            scene.textures.iter().all(|texture| texture.extent != [200, 120]),
+            "a drained viewport scratch target was uploaded as a fallback texture"
+        };
+    }
+
+    #[test]
+    fn gpu_fogged_scroll_border_preserves_its_black_underlay() {
+        // C4Viewport::Draw redraws the viewport background before the
+        // translucent FoW reset, including the scroll-border-only area
+        // (src/C4Viewport.cpp:1030-1041).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(10, 10);
+        snapshot.objects[0].plr_view_range = 12;
+        snapshot.players = vec![PlayerState {
+            id: 0,
+            fog_of_war: true,
+            ..PlayerState::default()
+        }];
+        snapshot.environment.fow_resolution = 8;
+        snapshot.environment.fow_color = 0x0000_ff00;
+        snapshot.fow_players.insert(
+            0,
+            FogOfWarPlayerFrame {
+                view_objects: vec![snapshot.objects[0].id],
+                view_target: None,
+            },
+        );
+        let viewport =
+            ViewportInput::new(0, snapshot.objects[0].position, 2.0, &snapshot.objects[0]);
+        let mut graphics = test_graphics((200, 120, 120), "retained fog border underlay");
+
+        graphics.begin_gpu_scene_capture();
+        graphics.render_frame_without_atlas(&snapshot, &[viewport]);
+        let scene = graphics
+            .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::identity())
+            .expect("viewport capture remains active");
+        let viewport = &graphics.active_viewports[0];
+        front_assert! {viewport.content_rect.x > viewport.rect.x};
+        let border = (viewport.rect.x, viewport.rect.y);
+        let black_underlay_covers_border = scene.commands.iter().any(|command| {
+            let GpuCommand::Solid { vertices, clip, .. } = command else {
+                return false;
+            };
+            let Some(clip) = clip else {
+                return false;
+            };
+            let clip_right = clip.x.saturating_add(clip.width as i32);
+            let clip_bottom = clip.y.saturating_add(clip.height as i32);
+            clip.x <= border.0
+                && clip.y <= border.1
+                && border.0 < clip_right
+                && border.1 < clip_bottom
+                && vertices
+                    .iter()
+                    .any(|vertex| vertex.color == [0.0, 0.0, 0.0, 1.0])
+        });
+
+        front_assert! {
+            black_underlay_covers_border,
+            "draining the underlay into the smaller content target must not expose the frame clear in the scroll border"
         };
     }
 
@@ -5852,7 +5950,7 @@ mod tests {
     #[test]
     fn borderless_viewport_direct_presentation_matches_scratch_composition() {
         let rect = SurfaceRect::new(2, 1, 3, 2);
-        let content = Surface::from_bytes(
+        let mut content = Surface::from_bytes(
             rect.width,
             rect.height,
             PixelFormat::Rgba8888,
@@ -5879,12 +5977,12 @@ mod tests {
         present_viewport_content(
             &mut scratch_path,
             Some(&mut viewport_underlay),
-            &content,
+            &mut content,
             rect,
             0,
             0,
         );
-        present_viewport_content(&mut direct_path, None, &content, rect, 0, 0);
+        present_viewport_content(&mut direct_path, None, &mut content, rect, 0, 0);
 
         front_assert_eq! {direct_path.pixels() => scratch_path.pixels()};
     }
@@ -16750,6 +16848,37 @@ mod tests {
     }
 
     #[test]
+    fn viewport_examines_the_particle_slice_once_across_object_phases() {
+        const PARTICLES: usize = 200;
+
+        let mut snapshot = make_snapshot();
+        snapshot.particles = (0..PARTICLES)
+            .map(|index| ParticleSnapshot {
+                life: 10,
+                parameter_a: 2.0,
+                ..particle_fixture(
+                    "Smoke",
+                    FloatVector2::new(index as f32, 4.0),
+                    ParticleLayer::Global,
+                )
+            })
+            .collect();
+        let mut graphics =
+            test_graphics_with_sprites((160, 120, 120), "viewport particle index", empty_sprites());
+
+        reset_particle_layer_scans();
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::ownerless(Vector2::new(80, 60), 1.0)],
+        );
+
+        front_assert_eq! {
+            particle_layer_scans() => PARTICLES,
+            "one viewport rebuilt the same particle-layer index for multiple object phases"
+        };
+    }
+
+    #[test]
     fn normal_object_visibility_is_evaluated_only_in_the_normal_pass() {
         const OBJECTS: usize = 1_000;
 
@@ -16825,6 +16954,57 @@ mod tests {
 
         front_assert_eq! {object_render_plan_evaluations() => snapshot.objects.len()};
         front_assert_eq! {object_visibility_evaluations() => snapshot.objects.len()};
+    }
+
+    #[test]
+    fn same_owner_viewports_reuse_the_frame_local_object_plan() {
+        let mut snapshot = make_snapshot();
+        let template = snapshot.objects.remove(0);
+        snapshot.objects = (0..200)
+            .map(|index| {
+                let mut object = template.clone();
+                object.id = ObjectId::new(index + 1);
+                object
+            })
+            .collect();
+        snapshot.render_order = snapshot.objects.iter().map(|object| object.id).collect();
+        let mut graphics = test_graphics((320, 120, 120), "shared viewport object plan");
+        let viewports = [
+            ViewportInput::ownerless(Vector2::new(80, 60), 1.0),
+            ViewportInput::ownerless(Vector2::new(80, 60), 1.0),
+        ];
+
+        reset_object_render_plan_evaluations();
+        reset_object_visibility_evaluations();
+        graphics.render_frame(&snapshot, &viewports);
+
+        front_assert_eq! {object_render_plan_evaluations() => snapshot.objects.len()};
+        front_assert_eq! {object_visibility_evaluations() => snapshot.objects.len()};
+    }
+
+    #[test]
+    fn gpu_viewport_scratch_surfaces_are_reused_across_frames() {
+        let snapshot = make_snapshot();
+        let viewports = [ViewportInput::ownerless(Vector2::new(80, 60), 1.0)];
+        let gamma = clonk_graphics::GammaRamp::identity();
+        let mut graphics = test_graphics((160, 120, 120), "viewport scratch reuse");
+        let render = |graphics: &mut GraphicsSystem| {
+            graphics.begin_gpu_scene_capture();
+            graphics.render_frame_without_atlas(&snapshot, &viewports);
+            let _ = graphics
+                .finish_gpu_scene_capture(&gamma)
+                .expect("viewport capture remains active");
+        };
+
+        render(&mut graphics);
+        let warmed = graphics.viewport_scratch_surface_creations();
+        front_assert! {warmed > 0};
+
+        render(&mut graphics);
+        front_assert_eq! {
+            graphics.viewport_scratch_surface_creations() => warmed,
+            "the second same-sized frame allocated a new viewport scratch surface"
+        };
     }
 
     #[test]

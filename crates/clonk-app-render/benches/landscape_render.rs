@@ -347,6 +347,7 @@ fn benchmark_devices() -> BenchmarkDevices {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 })
                 .await;
             if primary.is_ok() {
@@ -357,6 +358,7 @@ fn benchmark_devices() -> BenchmarkDevices {
                         power_preference: wgpu::PowerPreference::LowPower,
                         compatible_surface: None,
                         force_fallback_adapter: true,
+                        apply_limit_buckets: false,
                     })
                     .await
             }

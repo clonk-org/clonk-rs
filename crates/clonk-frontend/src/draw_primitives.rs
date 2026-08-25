@@ -18,20 +18,20 @@ pub(crate) fn draw_viewport_underlay(
 pub(crate) fn present_viewport_content(
     destination: &mut Surface,
     viewport_underlay: Option<&mut Surface>,
-    content: &Surface,
+    content: &mut Surface,
     rect: SurfaceRect,
     offset_x: i32,
     offset_y: i32,
 ) {
     if let Some(viewport_underlay) = viewport_underlay {
-        blit_surface(viewport_underlay, content, offset_x, offset_y);
-        blit_surface(destination, viewport_underlay, rect.x, rect.y);
+        blit_surface_from(viewport_underlay, content, offset_x, offset_y);
+        blit_surface_from(destination, viewport_underlay, rect.x, rect.y);
     } else {
         debug_assert_eq!(offset_x, 0);
         debug_assert_eq!(offset_y, 0);
         debug_assert_eq!(content.width(), rect.width);
         debug_assert_eq!(content.height(), rect.height);
-        blit_surface(destination, content, rect.x, rect.y);
+        blit_surface_from(destination, content, rect.x, rect.y);
     }
 }
 
@@ -241,6 +241,25 @@ pub(crate) fn blit_surface(dst: &mut Surface, src: &Surface, offset_x: i32, offs
         dst_pixels[dst_offset..dst_offset + len]
             .copy_from_slice(&src_pixels[src_offset..src_offset + len]);
     }
+}
+
+/// Present a scratch surface that the caller no longer needs. Retained GPU
+/// captures can transfer their recorder directly; CPU-backed or mixed paths
+/// retain the ordinary read-only blit semantics.
+pub(crate) fn blit_surface_from(
+    dst: &mut Surface,
+    src: &mut Surface,
+    offset_x: i32,
+    offset_y: i32,
+) {
+    if src.width() == 0 || src.height() == 0 || dst.format() != src.format() {
+        return;
+    }
+    if dst.is_gpu_scene_capture_active() && src.is_gpu_scene_capture_active() {
+        let _ = dst.append_gpu_scene_from_mut(src, SurfacePoint::new(offset_x, offset_y));
+        return;
+    }
+    blit_surface(dst, src, offset_x, offset_y);
 }
 
 pub(crate) fn object_color(object: &ObjectSnapshot) -> Color {
