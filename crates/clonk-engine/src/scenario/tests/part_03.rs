@@ -389,11 +389,14 @@
     }
 
     #[test]
-    fn container_cycles_degrade_to_partial_containment() {
-        // C++ resolves Contained by two-phase denumeration, so mutual
-        // containment loads without error. The sequential spawn model
-        // breaks ONE edge (documented divergence) — both objects must
-        // exist, with one containment intact.
+    fn container_cycles_survive_the_spawn_like_denumeration() {
+        // C++ creates every object first and resolves `Contained` from a
+        // number afterwards, so mutual containment loads intact: both edges
+        // are just resolved pointers, and `C4GameObjects::Load`'s consistency
+        // walk only repairs the Contents lists
+        // (C4GameObjects.cpp:597-631). The sequential spawn model used to
+        // break one edge and place that object uncontained
+        // (clonk-org/clonk-rs#1094, `sim-containment-cycle-spawn`).
         let dir = test_tempdir();
         let manifest = r#"
         {
@@ -417,12 +420,24 @@
         let mut engine = Engine::with_seed(0);
         let created = apply_test_scenario(&scenario, &mut engine);
         assert_eq!(created.len(), 2, "both cycle members spawn");
-        let contained_count = created
+
+        let snapshot = engine.snapshot();
+        let crate_object = snapshot
+            .objects
             .iter()
-            .filter_map(|id| engine.object_snapshot(*id))
-            .filter(|snapshot| snapshot.container.is_some())
-            .count();
-        assert_eq!(contained_count, 1, "one containment edge survives");
+            .find(|object| object.definition_id == "Crate").test_value();
+        let barrel = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "Barrel").test_value();
+
+        assert_eq!(crate_object.container, Some(barrel.id), "both edges resolve");
+        assert_eq!(barrel.container, Some(crate_object.id));
+        assert!(
+            barrel.contents.contains(&crate_object.id),
+            "the Contents lists are repaired to match"
+        );
+        assert!(crate_object.contents.contains(&barrel.id));
     }
 
     #[test]
