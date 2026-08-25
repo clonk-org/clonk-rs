@@ -262,6 +262,20 @@ pub fn load_tutorial_with_local_player(
     auto_context_menu: bool,
 ) -> (Engine, i32) {
     let mut engine = load_tutorial(number, seed);
+    // Every caller joins a fixture player with no crew info of its own
+    // (`local_player_config` passes an empty crew), so the fair-crew projection
+    // is what supplies the Clonk's physicals at all. Their expectations — and
+    // the virtual players' key sequences in particular — were all recorded
+    // against that.
+    //
+    // `C4GameParameters` compiles `UseFairCrew` false absent a scenario forcing
+    // it (C4GameParameters.cpp:560), so once the engine default matches C++
+    // (clonk-org/clonk-rs#1071) this has to be stated rather than inherited.
+    // Setting it here keeps every caller behaving exactly as it did before that
+    // default moved; re-choreographing these routes for an unpromoted Clonk is
+    // separate work, and the shadow diff shows the port's crew physicals agree
+    // with C++ at frame 1 either way.
+    engine.set_use_fair_crew(true);
     let player =
         join_local_player_with_preferences(&mut engine, name, control_style, auto_context_menu);
     (engine, player)

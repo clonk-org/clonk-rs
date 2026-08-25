@@ -1,8 +1,8 @@
 use std::error::Error;
 
 use crate::support::real_scenario::{
-    clonk_carries, clonk_contents_count, join_local_player_with_preferences, load_tutorial,
-    object_contents_count, object_with_definition, tutorial_message_contains,
+    clonk_carries, clonk_contents_count, load_tutorial_with_local_player, object_contents_count,
+    object_with_definition, tutorial_message_contains,
 };
 use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::{
@@ -11,20 +11,7 @@ use clonk_engine::{
 };
 
 fn load_tutorial07() -> (Engine, i32) {
-    let mut engine = load_tutorial(7, 0);
-    // This playthrough's key sequence was choreographed against a crew carrying
-    // the fair-crew projection, and the fixture player joins with no crew info
-    // of its own (`local_player_config`), so the projection is what supplies
-    // the Clonk's physicals. `C4GameParameters` compiles `UseFairCrew` false
-    // absent a scenario forcing it (C4GameParameters.cpp:560), so the parameter
-    // has to be stated here now that the engine default matches C++
-    // (clonk-org/clonk-rs#1071). Re-choreographing the route for an unpromoted
-    // Clonk is separate work: the shadow diff shows the port's crew physicals
-    // already agree with C++ at frame 1 either way.
-    engine.set_use_fair_crew(true);
-    let owner =
-        join_local_player_with_preferences(&mut engine, "Tutorial 7 virtual player", true, true);
-    (engine, owner)
+    load_tutorial_with_local_player(7, 0, "Tutorial 7 virtual player", true, true)
 }
 
 #[test]
