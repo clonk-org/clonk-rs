@@ -2275,8 +2275,8 @@ pub struct HostWorldContext {
     /// them at the same tail positions.
     next_storage_index: usize,
     team_home_base_rule: bool,
-    /// Whether the TeamAccount rule may widen base lookup to allied bases
-    /// (clonk-org/clonk-rs#624). Cleared by the LegacyClonk compatibility
+    /// Whether the Shared Bases rule may widen base lookup to allied bases
+    /// (clonk-org/clonk-rs#1132). Cleared by the LegacyClonk compatibility
     /// profile, which restores C++'s exact `Base == iPlayer` match.
     shared_bases: bool,
     pub(crate) needed_material_strings: Rc<crate::NeededMaterialStrings>,

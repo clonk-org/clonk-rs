@@ -825,30 +825,28 @@ public func SeedFull()
         );
     }
 
-    /// With the TeamAccount rule in play, a player without a base of their own
-    /// finds an allied one (clonk-org/clonk-rs#624).
+    /// Shared Bases, rather than TeamAccount, lets a player without a base of
+    /// their own find an allied one (clonk-org/clonk-rs#1132).
     ///
     /// **A deliberate divergence from the oracle, not a port fix.**
     /// `C4Game::FindBase` matches `Base == iPlayer` exactly, with no team,
     /// alliance or rule test (C4Game.cpp:3732-3745), and this port matches it
-    /// bit-for-bit whenever the rule is absent — which is every scenario that
-    /// does not ship `TACC`. The relation used when it *is* present is not
-    /// invented either: it is `!Hostile`, the same relation the rule's own
-    /// account object maintains its alliances with
-    /// (Rules.c4d/TeamAccount.c4d/Account.c4d/Script.c:68-93) and the same one
-    /// C++ already applies in `C4Game::FindFriendlyBase` for buying and
-    /// selling (C4Game.cpp:3747-3761).
+    /// bit-for-bit whenever the rule is absent. The relation used when it *is*
+    /// present is not invented either: it is `!Hostile`, the same one C++
+    /// already applies in `C4Game::FindFriendlyBase` for buying and selling
+    /// (C4Game.cpp:3747-3761).
     ///
     /// Own bases still come first, so a player who has one is unaffected; the
     /// issue asks for the ally only as the lower-priority fallback.
     #[test]
-    fn the_team_account_rule_falls_back_to_an_allied_base() {
+    fn shared_bases_is_independent_of_team_account() {
         let mut engine = crate::Engine::with_seed(0);
         engine.register_test_player(crate::PlayerConfig::new(0, "Owner"));
         engine.register_test_player(crate::PlayerConfig::new(1, "Ally"));
         engine.register_test_player(crate::PlayerConfig::new(2, "Enemy"));
         engine.register_test_definition(test_definition("HUT2", "Hut", "#strict\n"));
         engine.register_test_definition(test_definition("TACC", "Team account", "#strict\n"));
+        engine.register_test_definition(test_definition("SHBS", "Shared bases", "#strict\n"));
         crate::TestValueExt::test_value(engine.set_hostility(0, 2, true));
 
         let ally_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT2"));
@@ -872,11 +870,20 @@ public func SeedFull()
             "the default lookup stays an exact Base == iPlayer match"
         );
 
-        engine.spawn_test_object(crate::SpawnConfig::new("TACC"));
+        let team_account = engine.spawn_test_object(crate::SpawnConfig::new("TACC"));
+        assert_eq!(
+            call(&engine, vec![INT_0]),
+            NIL,
+            "TeamAccount shares wealth only and must not admit an allied base"
+        );
+
+        let team_account_index = engine.find_object_index(team_account).test_value();
+        engine.objects[team_account_index].state.status = ObjectStatus::Inactive;
+        engine.spawn_test_object(crate::SpawnConfig::new("SHBS"));
         assert_eq!(
             object_id_from_value(&call(&engine, vec![INT_0])),
             Some(ally_base),
-            "the rule admits a non-hostile player's base as the fallback"
+            "Shared Bases admits a non-hostile player's base as the fallback"
         );
         assert_eq!(
             call(&engine, vec![INT_0, INT_1]),

@@ -5314,9 +5314,9 @@ fn compat_profile_launch_override_is_parsed_but_never_persisted() {
     main_assert_eq!(app.compat_profile => CompatProfile::LegacyClonk);
 }
 
-/// The compatibility profile takes the shared-account base fallback away, and
+/// The compatibility profile takes the Shared Bases fallback away, and
 /// applying a launch override actually reaches the engine
-/// (clonk-org/clonk-rs#624).
+/// (clonk-org/clonk-rs#1132).
 ///
 /// The widening is a deliberate divergence: `C4Game::FindBase` matches
 /// `Base == iPlayer` exactly (C4Game.cpp:3732-3745). It drives "back to base"

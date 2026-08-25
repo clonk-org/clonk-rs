@@ -1292,8 +1292,8 @@ impl Engine {
         self.team_home_base_rule
     }
 
-    /// Whether an allied base may serve as the TeamAccount fallback
-    /// (clonk-org/clonk-rs#624). Default on; the LegacyClonk compatibility
+    /// Whether the Shared Bases rule may admit an allied-base fallback
+    /// (clonk-org/clonk-rs#1132). Default on; the LegacyClonk compatibility
     /// profile clears it so base lookup is the oracle's exact owner match.
     pub fn shared_bases(&self) -> bool {
         self.shared_bases

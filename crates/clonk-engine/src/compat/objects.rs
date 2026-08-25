@@ -4504,10 +4504,9 @@ pub(crate) fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnFindBase/C4Game::FindBase (C4Script.cpp:1976-1979;
 /// C4Game.cpp:3732-3744): validate the player, then walk the active object
 /// master list and return the indexed object whose stored Base matches.
-/// The rule object that shares an account between allied players.
-/// `Rules.c4d/TeamAccount.c4d`; its `ACNT` companion maintains the alliances
-/// this lookup reuses.
-const TEAM_ACCOUNT_RULE: &str = "TACC";
+/// The rule object that gives allied players lower-priority access to one
+/// another's bases (`Rules.c4d/SharedBases.c4d`).
+const SHARED_BASES_RULE: &str = "SHBS";
 
 pub(crate) fn find_base(args: &[Value]) -> Result<Value, RuntimeError> {
     let player = value_to_i32(args.first().unwrap_or(&Value::Nil), "FindBase", "player")?;
@@ -4527,7 +4526,7 @@ pub(crate) fn find_base(args: &[Value]) -> Result<Value, RuntimeError> {
             if !object.status().is_active() {
                 continue;
             }
-            rule_present |= object.definition_id() == TEAM_ACCOUNT_RULE;
+            rule_present |= object.definition_id() == SHARED_BASES_RULE;
             let Some(base) = object.full_state().map(|state| state.base) else {
                 continue;
             };
@@ -4538,16 +4537,16 @@ pub(crate) fn find_base(args: &[Value]) -> Result<Value, RuntimeError> {
                 index -= 1;
                 continue;
             }
-            // Deliberate divergence, gated on the TeamAccount rule
-            // (clonk-org/clonk-rs#624). C4Game::FindBase matches
+            // Deliberate divergence, gated on the Shared Bases rule
+            // (clonk-org/clonk-rs#1132). C4Game::FindBase matches
             // `Base == iPlayer` exactly, with no alliance test at all
             // (C4Game.cpp:3732-3745), and that is what runs whenever the rule
-            // is absent — every scenario that does not ship `TACC`. When it is
+            // is absent — every scenario that does not ship `SHBS`. When it is
             // present, an allied base becomes a *lower-priority* fallback, so
             // a player with a base of their own is unaffected. `!Hostile` is
-            // the rule's own relation (Account.c4d/Script.c:68-93) and the one
-            // C4Game::FindFriendlyBase already applies to buying and selling
-            // (C4Game.cpp:3747-3761), rather than a new one invented here.
+            // the relation C4Game::FindFriendlyBase already applies to buying
+            // and selling (C4Game.cpp:3747-3761), rather than a new one
+            // invented here.
             let mutually_friendly = context.player_state(base).is_some_and(|base_state| {
                 context.player_state(player).is_some_and(|player_state| {
                     base != player

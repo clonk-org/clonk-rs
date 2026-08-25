@@ -2988,7 +2988,7 @@ impl GameApp {
             classic.compat_profile,
         );
         // Synchronized, so it is resolved once here rather than read from
-        // configuration mid-round (clonk-org/clonk-rs#624).
+        // configuration mid-round (clonk-org/clonk-rs#1132).
         self.engine
             .set_shared_bases(crate::settings::session_shared_bases(self.compat_profile));
 
