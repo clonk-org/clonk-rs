@@ -173,7 +173,7 @@ pub fn session_fair_crew_strength(fair_crew: bool, configured: i32) -> i32 {
     }
 }
 
-/// Resolve whether the TeamAccount rule may widen base lookup to allied bases.
+/// Resolve whether the Shared Bases rule may widen base lookup to allied bases.
 ///
 /// A **non-persistent overlay**, like the control-mode one above. `FindBase`
 /// drives "back to base" and the wormhole, and `C4Game::FindBase` matches
@@ -183,7 +183,7 @@ pub fn session_fair_crew_strength(fair_crew: bool, configured: i32) -> i32 {
 /// which base a Clonk walks to is a desync, not a preference — so it is
 /// resolved once, at session construction, and never read from configuration
 /// mid-round.
-pub fn session_shared_account_bases(profile: CompatProfile) -> bool {
+pub fn session_shared_bases(profile: CompatProfile) -> bool {
     match profile {
         CompatProfile::Normal => true,
         CompatProfile::LegacyClonk => false,

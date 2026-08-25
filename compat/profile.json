@@ -17,7 +17,7 @@
       "text": "4.9.11.0 [362]"
     },
     "oracle_commit": "7d43b47b7d789b533f32d005e64596e0a07019cd",
-    "content_commit": "530d6c15005229883950bf197d7bfeb17b46537a"
+    "content_commit": "3967fa24a9a2259a35807df8534921d2ba9e12ef"
   },
   "promise": {
     "simulation": {
@@ -213,9 +213,9 @@
       "owner": "parity/README.md (Accepted safety divergences)"
     },
     {
-      "id": "sim-team-account-shared-base",
+      "id": "sim-shared-bases",
       "area": "simulation",
-      "summary": "With the TeamAccount rule (TACC) in play, FindBase falls back to a non-hostile player's base once the asking player owns none, so back to base and the wormhole reach an ally's base instead of failing. C4Game::FindBase matches Base == iPlayer exactly, with no team, alliance or rule test, so this widens a lookup the oracle keeps strict. Own bases keep their existing priority and master-list order; the ally is only the lower-priority fallback, and the relation is !Hostile, the one the rule's own ACNT object maintains its alliances with and the one C4Game::FindFriendlyBase already applies to buying and selling. Base lookup drives command AI, so the profile reverts it to the exact owner match.",
+      "summary": "With the Shared Bases rule (SHBS) in play, FindBase falls back to a non-hostile player's base after the asking player's own bases, so back to base and the wormhole reach an ally's base instead of failing when no own base remains. TeamAccount (TACC) continues to share wealth only. C4Game::FindBase matches Base == iPlayer exactly, with no team, alliance or rule test, so this widens a lookup the oracle keeps strict. Own bases keep their existing priority and master-list order; allied bases follow in master-list order, and the relation is mutual !Hostile, matching the friendly relation C4Game::FindFriendlyBase applies to buying. Base lookup drives command AI, so the profile reverts it to the exact owner match.",
       "cited_in": [
         "crates/clonk-engine/src/compat/objects.rs",
         "crates/clonk-app/src/settings.rs"
@@ -224,7 +224,7 @@
       "disposition": "accepted",
       "profile_action": "reverted",
       "determinism_critical": true,
-      "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-08-24)"
+      "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-08-25)"
     },
     {
       "id": "sim-s2-terminal-params",

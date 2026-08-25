@@ -2275,10 +2275,10 @@ pub struct HostWorldContext {
     /// them at the same tail positions.
     next_storage_index: usize,
     team_home_base_rule: bool,
-    /// Whether the TeamAccount rule may widen base lookup to allied bases
-    /// (clonk-org/clonk-rs#624). Cleared by the LegacyClonk compatibility
+    /// Whether the Shared Bases rule may widen base lookup to allied bases
+    /// (clonk-org/clonk-rs#1132). Cleared by the LegacyClonk compatibility
     /// profile, which restores C++'s exact `Base == iPlayer` match.
-    shared_account_bases: bool,
+    shared_bases: bool,
     pub(crate) needed_material_strings: Rc<crate::NeededMaterialStrings>,
     /// Process-local ConstructionCheck feedback templates
     /// (C4Landscape.cpp:2131-2163).
@@ -2545,7 +2545,7 @@ impl Default for HostWorldContext {
             definition_crew_names: Rc::new(HashMap::new()),
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             team_home_base_rule: false,
-            shared_account_bases: true,
+            shared_bases: true,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
             construction_check_strings: Rc::new(crate::ConstructionCheckStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
@@ -2974,7 +2974,7 @@ impl HostWorldContext {
             next_object_id,
             next_storage_index: order.len(),
             team_home_base_rule,
-            shared_account_bases: true,
+            shared_bases: true,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
             construction_check_strings: Rc::new(crate::ConstructionCheckStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
@@ -4982,12 +4982,12 @@ impl HostWorldContext {
         self.team_home_base_rule
     }
 
-    pub(crate) fn shared_account_bases(&self) -> bool {
-        self.shared_account_bases
+    pub(crate) fn shared_bases(&self) -> bool {
+        self.shared_bases
     }
 
-    pub(crate) fn with_shared_account_bases(mut self, enabled: bool) -> Self {
-        self.shared_account_bases = enabled;
+    pub(crate) fn with_shared_bases(mut self, enabled: bool) -> Self {
+        self.shared_bases = enabled;
         self
     }
 

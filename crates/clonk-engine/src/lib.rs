@@ -8385,9 +8385,9 @@ pub struct Engine {
     /// pointer identity so it follows an info reattached to another object.
     crew_info_control_counts: HashMap<CrewInfoLink, i32>,
     team_home_base_rule: bool,
-    /// Whether the TeamAccount rule may widen base lookup to allied bases
-    /// (clonk-org/clonk-rs#624); the LegacyClonk profile clears it.
-    shared_account_bases: bool,
+    /// Whether the Shared Bases rule may widen base lookup to allied bases
+    /// (clonk-org/clonk-rs#1132); the LegacyClonk profile clears it.
+    shared_bases: bool,
     needed_material_strings: Rc<NeededMaterialStrings>,
     /// Process-local `IDS_OBJ_NODIG` template from Application.ResStrTable.
     /// The app refreshes it with the active language and reinstalls it on
@@ -10589,7 +10589,7 @@ impl Engine {
             pending_legacy_object_infos: HashMap::new(),
             crew_info_control_counts: HashMap::new(),
             team_home_base_rule: false,
-            shared_account_bases: true,
+            shared_bases: true,
             needed_material_strings: Rc::new(NeededMaterialStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             construction_check_strings: Rc::new(ConstructionCheckStrings::default()),

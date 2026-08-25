@@ -5314,9 +5314,9 @@ fn compat_profile_launch_override_is_parsed_but_never_persisted() {
     main_assert_eq!(app.compat_profile => CompatProfile::LegacyClonk);
 }
 
-/// The compatibility profile takes the shared-account base fallback away, and
+/// The compatibility profile takes the Shared Bases fallback away, and
 /// applying a launch override actually reaches the engine
-/// (clonk-org/clonk-rs#624).
+/// (clonk-org/clonk-rs#1132).
 ///
 /// The widening is a deliberate divergence: `C4Game::FindBase` matches
 /// `Base == iPlayer` exactly (C4Game.cpp:3732-3745). It drives "back to base"
@@ -5324,16 +5324,16 @@ fn compat_profile_launch_override_is_parsed_but_never_persisted() {
 /// profile that advertised compatibility while still widening it would desync
 /// against a C++ peer rather than merely differ.
 #[test]
-fn compat_profile_takes_away_the_shared_account_base_fallback() {
-    use crate::settings::{session_shared_account_bases, CompatProfile};
+fn compat_profile_takes_away_the_shared_base_fallback() {
+    use crate::settings::{session_shared_bases, CompatProfile};
 
-    assert!(session_shared_account_bases(CompatProfile::Normal));
-    assert!(!session_shared_account_bases(CompatProfile::LegacyClonk));
+    assert!(session_shared_bases(CompatProfile::Normal));
+    assert!(!session_shared_bases(CompatProfile::LegacyClonk));
 
     // The engine's own default is the port behaviour, so a session that never
     // resolves a profile still gets it.
     let plain = clonk_engine::Engine::with_seed(0);
-    assert!(plain.shared_account_bases());
+    assert!(plain.shared_bases());
 
     // And the launch override reaches the engine rather than only the field.
     let parsed = parse_classic_command_line(&[OsString::from("/compatprofile:legacy-clonk")]);
@@ -5341,7 +5341,7 @@ fn compat_profile_takes_away_the_shared_account_base_fallback() {
     app.apply_classic_command_line(&parsed).test_value();
     main_assert_eq!(app.compat_profile => CompatProfile::LegacyClonk);
     assert!(
-        !app.engine.shared_account_bases(),
+        !app.engine.shared_bases(),
         "the resolved profile must reach the engine, not just the app field"
     );
 }
