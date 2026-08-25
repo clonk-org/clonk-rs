@@ -558,8 +558,193 @@ fn is_cpp_escaped_config_field(section: Option<&str>, key: &str) -> bool {
     }
 }
 
+/// `C4XVERBUILD` (C4Version.h:32) — the build every loaded config is stamped
+/// with once `AdaptToCurrentVersion` has run.
+pub const CONFIG_VERSION_BUILD: i32 = 362;
+
+/// `C4CFG_LeagueServer` / `C4CFG_FallbackServer` (C4Config.h:35-37).
+pub const CONFIG_LEAGUE_SERVER: &str = "https://league.clonkspot.org";
+/// `C4CFG_UpdateServer` (C4Config.h:39).
+pub const CONFIG_UPDATE_SERVER: &str = "https://update.clonkspot.org/lc/update";
+/// `C4ConfigNetwork::DefaultPuncherServer` (C4Config.h:227).
+pub const CONFIG_PUNCHER_SERVER: &str = "netpuncher.openclonk.org:11115";
+/// `C4AudioSystem::MaxChannels` (C4AudioSystem.h:103).
+pub const CONFIG_MAX_SOUND_CHANNELS: i32 = 1024;
+
+/// `C4Config::AdaptToCurrentVersion` (C4Config.cpp:1631-1676), the config
+/// post-init migration `C4Config::Load` runs right after `DeterminePaths`
+/// (C4Config.cpp:1110-1112).
+///
+/// Every arm keys off the *stored* `General.Version`, so a config written by an
+/// older build is repaired on the next load and then stamped with the current
+/// build — which makes the whole function idempotent: a second run sees
+/// `C4XVERBUILD` and takes only the `default:` arm.
+///
+/// The address rewrites are `SEqual` comparisons, not substring or prefix
+/// matches: a user who has deliberately pointed the client somewhere else keeps
+/// their value. Only the exact retired defaults are replaced.
+pub fn adapt_to_current_version(config: &mut Config) {
+    // A missing or unparsable Version reads as 0 in C++: StdCompiler leaves
+    // the int at its default when the entry is absent, and the switch then
+    // falls to `default:` while the `<= 359` block still applies.
+    let version = config
+        .get_in(Some("General"), "Version")
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(0);
+
+    match version {
+        // Mac only: Preloading is crash-prone there, and this arm `break`s —
+        // it deliberately does NOT fall through to the 347/346 repairs.
+        349 if cfg!(target_os = "macos") => {
+            config.set_in(Some("General"), "Preloading", "0");
+        }
+        347 => {
+            // reset max channels, then fall through to 346's music repair
+            config.set_in(
+                Some("Sound"),
+                "MaxChannels",
+                CONFIG_MAX_SOUND_CHANNELS.to_string(),
+            );
+            config.set_in(Some("Sound"), "RXMusic", "1");
+        }
+        346 => {
+            config.set_in(Some("Sound"), "RXMusic", "1");
+        }
+        _ => {}
+    }
+
+    if version <= 359 {
+        let migrate = |config: &mut Config, key: &str, retired: &str, current: &str| {
+            if config.get_in(Some("Network"), key) == Some(retired) {
+                config.set_in(Some("Network"), key, current);
+            }
+        };
+        migrate(
+            config,
+            "ServerAddress",
+            "league.clonkspot.org:80",
+            CONFIG_LEAGUE_SERVER,
+        );
+        migrate(
+            config,
+            "AlternateServerAddress",
+            "league.clonkspot.org:80",
+            CONFIG_LEAGUE_SERVER,
+        );
+        migrate(
+            config,
+            "UpdateServerAddress",
+            "update.clonkspot.org/lc/update",
+            CONFIG_UPDATE_SERVER,
+        );
+        migrate(
+            config,
+            "PuncherAddress",
+            "clonk.de:11115",
+            CONFIG_PUNCHER_SERVER,
+        );
+
+        // enable shaders
+        config.set_in(Some("Graphics"), "Shader", "1");
+        // reenable gamma
+        config.set_in(Some("Graphics"), "DisableGamma", "0");
+    }
+
+    config.set_in(Some("General"), "Version", CONFIG_VERSION_BUILD.to_string());
+}
+
 #[cfg(test)]
 mod tests {
+
+    fn migrated(version: &str) -> Config {
+        let mut config = Config::new();
+        config.set_in(Some("General"), "Version", version);
+        config.set_in(Some("General"), "Preloading", "1");
+        config.set_in(Some("Sound"), "RXMusic", "0");
+        config.set_in(Some("Sound"), "MaxChannels", "7");
+        adapt_to_current_version(&mut config);
+        config
+    }
+
+    /// The one arm the parity golden cannot carry: `case 349` is
+    /// `#ifdef __APPLE__` (C4Config.cpp:1635-1641), so a recorded value would
+    /// depend on whichever host ran the generator. It is asserted here against
+    /// the same `cfg!` the implementation uses, which makes the expectation
+    /// correct on both platforms rather than only the one that wrote it.
+    ///
+    /// The arm `break`s: it deliberately does NOT fall through into the 347
+    /// and 346 repairs, so on macOS a 349 config keeps its music setting.
+    #[test]
+    fn version_349_disables_preloading_only_on_macos_and_does_not_fall_through() {
+        let config = migrated("349");
+        let expected_preloading = if cfg!(target_os = "macos") { "0" } else { "1" };
+        assert_eq!(
+            config.get_in(Some("General"), "Preloading"),
+            Some(expected_preloading),
+            "Preloading is cleared only where the __APPLE__ arm exists"
+        );
+        assert_eq!(
+            config.get_in(Some("Sound"), "RXMusic"),
+            Some("0"),
+            "the 349 arm breaks instead of falling through to 346"
+        );
+        assert_eq!(
+            config.get_in(Some("Sound"), "MaxChannels"),
+            Some("7"),
+            "and likewise does not reach 347's channel reset"
+        );
+    }
+
+    /// Running the migration twice must be a no-op the second time: the first
+    /// run stamps `C4XVERBUILD`, which lands in the switch's `default:` arm and
+    /// past the `<= 359` block.
+    #[test]
+    fn the_migration_is_idempotent_because_it_stamps_the_current_build() {
+        let mut config = Config::new();
+        config.set_in(Some("General"), "Version", "346");
+        config.set_in(Some("Sound"), "RXMusic", "0");
+        config.set_in(Some("Graphics"), "Shader", "0");
+        config.set_in(Some("Network"), "PuncherAddress", "clonk.de:11115");
+
+        adapt_to_current_version(&mut config);
+        let once = config.to_string().expect("serialize");
+
+        adapt_to_current_version(&mut config);
+        assert_eq!(
+            once,
+            config.to_string().expect("serialize"),
+            "second run changes nothing"
+        );
+        assert_eq!(
+            config.get_in(Some("General"), "Version"),
+            Some(CONFIG_VERSION_BUILD.to_string().as_str())
+        );
+    }
+
+    /// The address rewrites are `SEqual` comparisons against the retired
+    /// defaults (C4Config.cpp:1657-1669), not prefix or substring matches, so a
+    /// deliberately customized server survives the migration.
+    #[test]
+    fn a_customized_server_address_is_not_rewritten() {
+        let mut config = Config::new();
+        config.set_in(Some("General"), "Version", "300");
+        config.set_in(
+            Some("Network"),
+            "ServerAddress",
+            "league.example.invalid:80",
+        );
+        config.set_in(Some("Network"), "PuncherAddress", "clonk.de:11115x");
+        adapt_to_current_version(&mut config);
+        assert_eq!(
+            config.get_in(Some("Network"), "ServerAddress"),
+            Some("league.example.invalid:80")
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "PuncherAddress"),
+            Some("clonk.de:11115x"),
+            "a near-miss is still not the retired default"
+        );
+    }
     use super::*;
     use std::io::Cursor;
     use tempfile::tempdir;
