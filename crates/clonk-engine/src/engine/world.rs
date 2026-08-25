@@ -536,7 +536,13 @@ impl Engine {
                 )
             })
             .or_else(|| vertex_bounds_rect(position, &object.state.vertices))
-            .unwrap_or_else(|| DefinitionRect::new(position.x, position.y, 1, 1));
+            // An object with no Shape has Shape.Wdt/Hgt == 0 natively, and
+            // Left/Top/Width/Height report exactly that. Substituting a 1x1
+            // rect here instead would shrink `addtop` to 17 and start the rect
+            // one pixel low; C4LArea::Set is what turns a zero extent into 1,
+            // and it does so *after* the expansion (src/C4Object.h:340-344;
+            // src/C4Sector.cpp:249-250).
+            .unwrap_or_else(|| DefinitionRect::new(position.x, position.y, 0, 0));
         // C4Object::Top/Height and At expand short construction shapes
         // upward to an 18-pixel action area (C4Object.h:340-344;
         // C4Object.cpp:1124-1140). C4LArea::Set uses those same accessors,

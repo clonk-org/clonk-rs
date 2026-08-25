@@ -13542,6 +13542,10 @@ mod weather_meteor_creation_lifecycle_regression;
 mod reload_graphics_own_definition_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/shapeless_object_build_top_regression.rs"]
+mod shapeless_object_build_top_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/include_local_order_regression.rs"]
 mod include_local_order_regression;
 
