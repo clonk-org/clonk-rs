@@ -3106,6 +3106,10 @@ impl GameApp {
             loading_state.refreshed_gui_sheet_overrides = Some(refresh.overrides);
             loading_state.refresh_requested = true;
         }
+        // C4Game::Init re-arms the loader gate as a load *begins*
+        // (C4Game.cpp:351-352); `Finished` alone leaves it saturated at 100 and
+        // swallows the next load's 4%..93% (clonk-org/clonk-rs#1115).
+        self.taskbar_progress.begin_load();
         self.loading_state = Some(loading_state);
         if preloaded_first_part {
             // Successful client preloading makes InitGameFirstPart return
@@ -5998,6 +6002,10 @@ impl GameApp {
                 loading.refreshed_gui_sheet_overrides = Some(staged.pending_gui_sheet_overrides);
                 loading.refresh_requested = true;
             }
+            // C4Game::Init re-arms the loader gate as a load *begins*
+            // (C4Game.cpp:351-352); `Finished` alone leaves it saturated at 100 and
+            // swallows the next load's 4%..93% (clonk-org/clonk-rs#1115).
+            self.taskbar_progress.begin_load();
             self.loading_state = Some(loading);
             // InitNetworkHost returns from DoLobby at 7, immediately before
             // InitGame begins its staged work (src/C4Game.cpp:438-457).

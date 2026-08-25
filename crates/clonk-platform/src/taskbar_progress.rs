@@ -148,6 +148,18 @@ impl<S: TaskbarProgressSink> LoaderTaskbarProgress<S> {
         std::mem::replace(&mut self.sink, sink)
     }
 
+    /// `C4Game::Init`'s re-arm at the *start* of a load:
+    /// `InitProgress = 0; LastInitProgress = 0; SetInitProgress(0);`
+    /// (`C4Game.cpp:351-352`).
+    ///
+    /// Silent by construction — that `SetInitProgress(0)` forwards nothing,
+    /// because 0 is not greater than the gate it has just reset. Without it a
+    /// finished load leaves the gate at 100 and swallows the whole 4%..93%
+    /// span of the next one (clonk-org/clonk-rs#1115).
+    pub fn begin_load(&mut self) {
+        self.last_progress = 0;
+    }
+
     pub fn enter_startup(&mut self) {
         self.last_progress = 0;
         self.sink.apply(TaskbarProgressUpdate::Clear);
@@ -222,6 +234,45 @@ mod tests {
                 TaskbarProgressUpdate::Clear,
                 TaskbarProgressUpdate::Value(5),
             ]
+        );
+    }
+
+    /// `C4Game::Init` re-arms the gate at the *start* of every load —
+    /// `InitProgress = 0; LastInitProgress = 0; SetInitProgress(0);`
+    /// (`C4Game.cpp:351-352`) — not only when one finishes. Without that, a
+    /// completed load leaves the gate saturated at 100 and the next load's
+    /// 4%..93% is dropped entirely; on a real Windows 11 taskbar that measured
+    /// `forwarded=7, gated=32` on every load after the first
+    /// (clonk-org/clonk-rs#1115).
+    ///
+    /// The existing case above cannot catch this: it calls `enter_startup()`
+    /// by hand between its two sequences, so it re-arms the gate itself.
+    #[test]
+    fn a_second_load_is_not_swallowed_by_the_previous_loads_gate() {
+        let mut progress = LoaderTaskbarProgress::new(RecordingSink::default());
+        for percent in [10, 50, 100] {
+            progress.report(percent);
+        }
+        assert_eq!(
+            progress.sink().0.last(),
+            Some(&TaskbarProgressUpdate::Clear),
+            "the first load completes"
+        );
+
+        // The next load begins. `SetInitProgress(0)` itself forwards nothing,
+        // because 0 is not greater than the gate it just reset.
+        progress.begin_load();
+        assert_eq!(
+            progress.sink().0.len(),
+            3,
+            "re-arming is silent, exactly as SetInitProgress(0) is"
+        );
+
+        progress.report(5);
+        assert_eq!(
+            progress.sink().0.last(),
+            Some(&TaskbarProgressUpdate::Value(5)),
+            "the early percentages of the second load reach the shell"
         );
     }
 
