@@ -1289,8 +1289,6 @@ mod tests {
         ("General", "UseWhiteIngameChat", "0"),
         ("General", "UseWhiteLobbyChat", "0"),
         ("General", "ShowLogTimestamps", "0"),
-        ("General", "Preloading", "0"),
-        ("General", "ThreadPoolThreadCount", "8"),
         ("Developer", "AutoFileReload", "1"),
         ("Graphics", "ResolutionX", "800"),
         ("Graphics", "ResolutionY", "600"),
@@ -1323,9 +1321,6 @@ mod tests {
         ("Graphics", "Shader", "0"),
         ("Graphics", "AutoFrameSkip", "1"),
         ("Graphics", "CacheTexturesInRAM", "100"),
-        ("Graphics", "Maximized", "0"),
-        ("Graphics", "PositionX", "0"),
-        ("Graphics", "PositionY", "0"),
         ("Graphics", "ShowFolderMaps", "1"),
         ("Graphics", "UseShaderGamma", "1"),
         ("Sound", "Sound", "1"),
@@ -1389,8 +1384,18 @@ mod tests {
     ///
     /// - the `Kbd*`/`Gamepad*` key tables, whose defaults are platform- and
     ///   language-conditional `KEY(...)` macros;
-    /// - `General.UserPath`, declared once per platform — pinning any one
-    ///   value would pass on this runner and fail on another;
+    /// - the two keys C++ declares **more than once**, with a different
+    ///   default per platform: `General.UserPath` and `General.Preloading`.
+    ///   Pinning either value passes on one runner and fails on another —
+    ///   `Preloading` is `false` on one platform and `true` on another, which
+    ///   is what evicted this change from the merge queue the first time. The
+    ///   exclusion is derived by rule rather than kept as a list: a key with
+    ///   more than one declared default has no single expected value;
+    /// - keys the *port* materializes on some platforms only, where neither
+    ///   "present and equal" nor "absent" is portable: `ThreadPoolThreadCount`
+    ///   (`cfg(not(windows))`) and the window-geometry trio `Graphics.Maximized`,
+    ///   `PositionX` and `PositionY`, which this port persists on Windows alone
+    ///   while C++ declares them everywhere;
     /// - defaults that are C++ constants or enum members
     ///   (`C4CFG_LeagueServer`, `DisplayMode::Fullscreen`,
     ///   `spdlog::level::info`, `C4GFXBLIT_ALL`, `C4AudioSystem::MaxChannels`
@@ -1401,37 +1406,16 @@ mod tests {
         const REGISTERED: &[(&str, &str, &str)] =
             &[("Network", "ControlMode", "ctrl-async-default")];
 
-        // Declared by C++ but not carried here: fullscreen window geometry.
-        // C++ restores the window's position and maximized state across runs
-        // (C4Config.cpp:302-304,498-500); this port always opens at its
-        // configured resolution instead. Listed rather than skipped, and
-        // asserted to still be missing, so implementing them fails this test
-        // until the entry is removed with them.
-        const NOT_IMPLEMENTED: &[(&str, &str)] = &[
-            ("Graphics", "Maximized"),
-            ("Graphics", "PositionX"),
-            ("Graphics", "PositionY"),
-        ];
-
         let manifest = crate::compat_readiness::profile_manifest_for_tests();
         let defaults = default_config();
         let mut absent = Vec::new();
         let mut unregistered = Vec::new();
 
         for (section, key, expected) in CPP_CONFIG_DEFAULTS {
-            let known_gap = NOT_IMPLEMENTED
-                .iter()
-                .any(|(s, k)| s == section && k == key);
             let Some(actual) = defaults.get_in(Some(section), key) else {
-                if !known_gap {
-                    absent.push(format!("[{section}] {key} (C++ default {expected:?})"));
-                }
+                absent.push(format!("[{section}] {key} (C++ default {expected:?})"));
                 continue;
             };
-            assert!(
-                !known_gap,
-                "[{section}] {key} is materialized now; drop it from NOT_IMPLEMENTED"
-            );
             if actual == *expected {
                 continue;
             }
