@@ -1785,6 +1785,78 @@ fn def_timer_call_fires_on_the_def_interval_like_cpp() {
 // dispatch Sitting exactly once, without replaying the movement transition
 // against the now-current Sit action.
 #[test]
+fn a_swim_exit_into_walk_keeps_the_facing_like_cpp() -> Result<(), EngineError> {
+    // DFA_SWIM does its out-of-liquid check BEFORE the xdir/ydir bounds and
+    // before `if (xdir < 0) SetDir(DIR_Left); if (xdir > 0) SetDir(DIR_Right);`
+    // (C4Object.cpp:4966-4983). The free-fall arm is
+    // `ObjectActionWalk(this); return;`, so native leaves DFA_SWIM without
+    // ever setting a facing and the object keeps the one it had.
+    //
+    // The port derived the facing from xdir first and applied the swim->walk
+    // transition afterwards, so a fish leaving the water picked up a facing
+    // native never gives it (clonk-org/clonk-rs#1123).
+    let mut definition = test_definition("EXIT", "Swim exit", "#strict\n");
+    definition.set_contact_density(50);
+    definition.set_physical(PhysicalInfo {
+        swim: 100_000,
+        ..PhysicalInfo::default()
+    });
+    definition.configure_actions(
+        Some("Swim".to_string()),
+        HashMap::from([
+            (
+                "Swim".to_string(),
+                ActionSpec::default()
+                    .with_procedure("SWIM")
+                    .with_directions(2),
+            ),
+            (
+                "Walk".to_string(),
+                ActionSpec::default()
+                    .with_procedure("WALK")
+                    .with_directions(2),
+            ),
+        ]),
+    );
+
+    let mut engine = Engine::with_seed(7);
+    let mut landscape = vehicle_grid_landscape(24, 24);
+    landscape.set_world_height(24);
+    engine.set_landscape(landscape);
+    engine.set_physics(PhysicsSettings::new(0, 20, -20));
+    engine.register_test_definition(definition);
+
+    // Swimming, facing Left, moving right, and NOT in liquid with no liquid
+    // below: native's free-fall arm fires.
+    let swimmer = engine.spawn_test_object(
+        SpawnConfig::new("EXIT")
+            .with_category(CATEGORY_OBJECT)
+            .with_position(Vector2::new(10, 4))
+            .with_fixed_position(FixedVec2::from_ints(10, 4))
+            .with_action(ActionState::new("Swim"))
+            .with_direction(Direction::Left)
+            .with_fixed_velocity(FixedVec2::new(itofix(3), C4Fixed::ZERO))
+            .with_mobile(true)
+            .with_loaded(true),
+    );
+    let idx = engine.test_object_index(swimmer);
+    engine.objects[idx].state.in_liquid = false;
+
+    let _ = engine.apply_physics_at_index(idx)?;
+
+    let idx = engine.test_object_index(swimmer);
+    unit_assert_eq!(
+        engine.objects[idx].state.action.name.as_str() => "Walk",
+        "the free-fall arm switches to Walk"
+    );
+    unit_assert_eq!(
+        engine.objects[idx].state.direction => Direction::Left,
+        "native returns before SetDir, so the facing survives the swim exit"
+    );
+    Ok(())
+}
+
+#[test]
 fn movement_action_callbacks_run_before_timer_set_action_like_cpp() {
     let script = r#"#strict
 local iWalkStarted;
