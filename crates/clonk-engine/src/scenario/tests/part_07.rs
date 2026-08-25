@@ -12,10 +12,10 @@
         use crate::scenario::map::{legacy_map_creation_rng, legacy_map_creation_rng_traced};
 
         let traced = legacy_map_creation_rng_traced(0xC4, true);
-        assert!(traced.trace, "arming must survive construction");
+        assert_ne!(traced.trace_index, 0, "arming must survive construction");
 
         let plain = legacy_map_creation_rng_traced(0xC4, false);
-        assert!(!plain.trace);
+        assert_eq!(plain.trace_index, 0);
         assert_eq!(traced.count, plain.count);
         assert_eq!(traced.rnd3_ptr(), plain.rnd3_ptr());
 
@@ -2203,7 +2203,7 @@
 
         let mut expected = crate::rng::LcgRng::seed_from_u64(0);
         let _ = expected.random(1);
-        expected.trace = engine.rng.trace;
+        expected.trace_index = engine.rng.trace_index;
         assert_eq!(engine.rng.count, 501);
         assert_eq!(engine.rng.rnd3_ptr(), 0);
         assert_eq!(

@@ -23,8 +23,10 @@ impl Engine {
         let frame = self.frame;
         // C4GameControl::Ticks runs with the frame advance (C4Game.cpp:801)
         self.control_ticks();
-        if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
-            crate::rng::rng_trace_frame_marker(frame);
+        // Gate on *this engine's* sink, not the env var: the marker belongs in
+        // the same file as the draws it separates.
+        if self.rng.trace_index != 0 {
+            crate::rng::rng_trace_frame_marker(self.rng.trace_index, frame);
         }
         // The per-tick scenario Step (and its `random` argument DRAW) is a
         // JSON-fixture convention: C++ never calls Step on scenario
@@ -326,7 +328,7 @@ impl Engine {
         if let Some(traced) = coach_debug_id().filter(|_| (1..=300).contains(&frame)) {
             if let Some(idx) = self.find_object_index(ObjectId::new(traced)) {
                 let object = &self.objects[idx];
-                crate::rng::rng_trace_line(&format!(
+                crate::rng::rng_trace_line(self.rng.trace_index, &format!(
                     "RCOACH f{frame} x={} fix_x={} xdir={} y={} fix_y={} ydir={} mobile={} t_attach={} act={} ph={} comdir={:?} dir={:?} liq={} tgt={} tgt2={}",
                     object.state.position.x,
                     object.fixed_position.x.val(),
@@ -346,7 +348,10 @@ impl Engine {
                 ));
                 let commands = object.commands.snapshot().command_names();
                 if !commands.is_empty() {
-                    crate::rng::rng_trace_line(&format!("RCMD f{frame} {}", commands.join(",")));
+                    crate::rng::rng_trace_line(
+                        self.rng.trace_index,
+                        &format!("RCMD f{frame} {}", commands.join(",")),
+                    );
                 }
             }
         }
@@ -362,10 +367,13 @@ impl Engine {
                 for &idx in &exec_order {
                     let id = self.objects[idx].id.as_u64();
                     if requested.is_some() || (1449..=1460).contains(&id) {
-                        crate::rng::rng_trace_line(&format!(
-                            "REXEC f{frame} {id} {}",
-                            self.objects[idx].definition_id.as_str()
-                        ));
+                        crate::rng::rng_trace_line(
+                            self.rng.trace_index,
+                            &format!(
+                                "REXEC f{frame} {id} {}",
+                                self.objects[idx].definition_id.as_str()
+                            ),
+                        );
                     }
                 }
             }
@@ -827,7 +835,7 @@ impl Engine {
                 continue;
             };
 
-            dbg_stage(&self.objects[idx], "POSTCMD");
+            dbg_stage(self.rng.trace_index, &self.objects[idx], "POSTCMD");
             // ExecAction captures pAction before procedure steering. SetDir
             // may replace the live action through TurnAction, but C++ keeps
             // this entry for phase advance through the end of ExecAction.
@@ -845,7 +853,7 @@ impl Engine {
             if self.objects[idx].destroyed {
                 continue;
             }
-            dbg_stage(&self.objects[idx], "POSTACT");
+            dbg_stage(self.rng.trace_index, &self.objects[idx], "POSTACT");
 
             // Phase advance runs at the END of ExecAction
             // (C4Object.cpp:5440-5465) — AFTER the procedure steering
@@ -1037,7 +1045,7 @@ impl Engine {
                 continue;
             }
             (definition_id, action_library) = self.object_definition_context(idx)?;
-            dbg_stage(&self.objects[idx], "PREMOVE");
+            dbg_stage(self.rng.trace_index, &self.objects[idx], "PREMOVE");
 
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
             // objects copy the container's motion (:556-561), C4D_StaticBack
@@ -1116,7 +1124,7 @@ impl Engine {
                 }
             }
 
-            dbg_stage(&self.objects[idx], "POSTMOVE");
+            dbg_stage(self.rng.trace_index, &self.objects[idx], "POSTMOVE");
             self.update_sector_for_index(idx);
             // Script effect timers execute HERE in C++ — pEffects->Execute
             // follows ExecAction and ExecMovement inside C4Object::Execute

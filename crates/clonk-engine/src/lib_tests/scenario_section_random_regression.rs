@@ -846,7 +846,7 @@ fn section_landscape_init_refixes_the_exact_synced_rng_ledger() {
 
     let mut expected = LcgRng::seed_from_u64(seed);
     let _ = expected.random(1);
-    expected.trace = engine.rng.trace;
+    expected.trace_index = engine.rng.trace_index;
     assert_eq!(engine.rng.count, 501);
     assert_eq!(engine.rng.rnd3_ptr(), 0);
     assert_eq!(
