@@ -60,6 +60,12 @@
         },
         {
           "kind": "test",
+          "value": "crates/clonk-app/src/local_control.rs (the_compatibility_profile_withholds_the_classic_release_cpp_never_sends)",
+          "status": "held",
+          "note": "The profile declines a classic set's key-up exactly as C4Game::LocalControlKeyUp does, while an AutoStop release and every press stay untouched in both profiles."
+        },
+        {
+          "kind": "test",
           "value": "crates/clonk-app-netplay/src/network.rs (control PreSend and latency-budget tests)",
           "status": "held",
           "note": "The ACT rolling average and the 1..15 clamp stay bit-exact with C++; the divergent horizon sizing is pinned separately."
@@ -328,8 +334,9 @@
       "area": "control",
       "summary": "Classic (non-AutoStop) control sets emit a synchronized Control*Released on key-up in both control styles; C4Game::LocalControlKeyUp routes a key-up only for AutoStop players, so C++ never delivers a release in classic style. The normal-mode emission lets scripts latch steering commands; the profile reverts it to C++.",
       "cited_in": [
-        "crates/clonk-app/src/local_control.rs:221",
-        "crates/clonk-app/src/game_app/player.rs:550"
+        "crates/clonk-app/src/local_control.rs:242",
+        "crates/clonk-app/src/local_control.rs:297",
+        "crates/clonk-app/src/game_app/player.rs:567"
       ],
       "cpp_reference": "C4Game.cpp:3592-3605",
       "disposition": "accepted",

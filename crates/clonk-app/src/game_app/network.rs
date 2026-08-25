@@ -10121,7 +10121,7 @@ impl GameApp {
                 .players()
                 .map(|player| (player.id(), player.status())),
         );
-        self.local_controls = rebound_local_controls;
+        self.install_local_controls(rebound_local_controls);
         if let Some(owner) = local_players.first().copied() {
             self.local_owner = owner;
         }
@@ -10157,7 +10157,7 @@ impl GameApp {
                 self.engine.game_start_synchronize()?;
                 self.prepare_network_savegame_recreation(network_savegame)?;
                 self.stage_ordinary_network_recreated_script_files();
-                self.local_controls = LocalControlRegistry::default();
+                self.install_local_controls(LocalControlRegistry::default());
                 self.engine.set_local_players([]);
                 let local_client_id = self
                     .network
