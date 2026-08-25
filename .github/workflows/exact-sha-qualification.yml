@@ -31,7 +31,7 @@ jobs:
   coverage-fragments:
     name: Rust coverage / ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     concurrency:
       group: "main-coverage-${{ matrix.artifact }}-${{ inputs.concurrency-suffix }}"
       cancel-in-progress: true

@@ -32,7 +32,7 @@ class RustCoverageGateTests(unittest.TestCase):
         )
 
         self.assertIn("name: Rust coverage / ${{ matrix.name }}", collectors)
-        self.assertIn("timeout-minutes: 10", collectors)
+        self.assertIn("timeout-minutes: 15", collectors)
         self.assertIn("cargo llvm-cov clean --workspace", collectors)
         self.assertIn("cargo llvm-cov --no-report nextest", collectors)
         self.assertIn("--no-fail-fast", collectors)
