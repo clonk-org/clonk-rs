@@ -4561,7 +4561,7 @@ pub(crate) fn find_base(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         // The LegacyClonk compatibility profile clears this, restoring the
         // oracle's exact `Base == iPlayer` match even where the rule is in play.
-        if !rule_present || !context.shared_account_bases() {
+        if !rule_present || !context.shared_bases() {
             return Ok(Value::Nil);
         }
         allied
