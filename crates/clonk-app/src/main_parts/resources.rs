@@ -3918,7 +3918,10 @@ pub(crate) const RENDER_INACTIVE_CONSOLE: u32 = 1 << 1;
 /// *hidden* window because Win32 deactivation minimizes its fullscreen window
 /// (C4FullScreen.cpp:139-145); once the port draws while unfocused the two come
 /// apart, so `WindowEvent::Occluded` gates every mask separately.
-pub(crate) fn load_render_inactive_mask(paths: Option<&AppPaths>) -> u32 {
+pub(crate) fn load_render_inactive_mask(
+    paths: Option<&AppPaths>,
+    profile: crate::settings::CompatProfile,
+) -> u32 {
     native_config_text(
         &load_native_config_bytes(paths),
         "Graphics",
@@ -3926,8 +3929,17 @@ pub(crate) fn load_render_inactive_mask(paths: Option<&AppPaths>) -> u32 {
     )
     .as_deref()
     .and_then(|value| crate::parse_startup_config_integer(value.as_bytes()))
-    .map_or(
-        RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE,
+    .map_or_else(
+        || match profile {
+            // Only the default diverges (`pres-render-inactive` in
+            // compat/profile.json), so the profile reverts the default and
+            // leaves a written value alone -- reverting that too would
+            // overrule a choice the player made explicitly.
+            crate::settings::CompatProfile::LegacyClonk => RENDER_INACTIVE_CONSOLE,
+            crate::settings::CompatProfile::Normal => {
+                RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE
+            }
+        },
         |value| value as u32,
     )
 }

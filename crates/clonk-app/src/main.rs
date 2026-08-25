@@ -965,8 +965,6 @@ fn run() -> Result<()> {
         #[cfg(not(windows))]
         let _ = taskbar_window;
 
-        // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
-        let render_inactive_mask = load_render_inactive_mask(app.app_paths.as_ref());
         // `GameApp::new` resolves the refresh ceiling before any window exists, so
         // the panel period can only be substituted here (opt-in; see
         // `configured_smooth_presentation`).
@@ -980,6 +978,9 @@ fn run() -> Result<()> {
             .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
         app.configure_native_startup_fonts(presenter.scale(), display_options.point_filtering);
         app.apply_classic_command_line(&classic)?;
+        // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
+        let render_inactive_mask =
+            load_render_inactive_mask(app.app_paths.as_ref(), app.compat_profile);
         app.auto_start_sandbox = cli.sandbox;
         app.launch_classic_command_line_join()
             .context("failed to start command-line network join")?;

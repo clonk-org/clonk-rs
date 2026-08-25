@@ -7854,8 +7854,54 @@ fn startup_window_builder_uses_legacyclonk_product_title() {
 /// Console alone (C4Config.h:128-129; C4Config.cpp:481;
 /// C4GraphicsSystem.cpp:96-106).
 #[test]
+fn the_profile_takes_the_cpp_render_inactive_default_but_never_a_written_one() {
+    use crate::settings::CompatProfile;
+
+    // C4Config.cpp:481 defaults RenderInactive to Console alone; the port ships
+    // both bits so an Alt-Tabbed game keeps drawing (clonk-org/clonk-rs#57).
+    // Only the *default* diverges, so the profile reverts the default and
+    // leaves a written value exactly as the player wrote it -- reverting that
+    // too would overrule an explicit choice, which no other overlay in the
+    // profile does.
+    let mask = |body, profile| {
+        runtime_config_value(body, |paths| {
+            load_render_inactive_mask(Some(paths), profile)
+        })
+    };
+
+    assert_eq!(
+        mask(None, CompatProfile::Normal),
+        RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE
+    );
+    assert_eq!(
+        mask(None, CompatProfile::LegacyClonk),
+        RENDER_INACTIVE_CONSOLE
+    );
+
+    // An unparsable value still falls back to the profile's default.
+    assert_eq!(
+        mask(
+            Some("[Graphics]\nRenderInactive=always\n"),
+            CompatProfile::LegacyClonk
+        ),
+        RENDER_INACTIVE_CONSOLE
+    );
+
+    // A written value wins under either profile, including the port's own.
+    for profile in [CompatProfile::Normal, CompatProfile::LegacyClonk] {
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=1\n"), profile), 1);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=3\n"), profile), 3);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=0\n"), profile), 0);
+    }
+}
+
+#[test]
 fn render_inactive_bitmask_gates_unfocused_fullscreen_and_console_redraw() {
-    let mask = |body| runtime_config_value(body, |paths| load_render_inactive_mask(Some(paths)));
+    let mask = |body| {
+        runtime_config_value(body, |paths| {
+            load_render_inactive_mask(Some(paths), crate::settings::CompatProfile::Normal)
+        })
+    };
 
     // The shipped default survives an unparsable value or an absent key. It
     // carries both bits rather than C++'s Console alone; see
@@ -7925,7 +7971,11 @@ fn render_inactive_bitmask_gates_unfocused_fullscreen_and_console_redraw() {
 /// `engine-snapshots verify` can see it; neither presents.
 #[test]
 fn the_shipped_default_keeps_an_unfocused_game_window_drawing() {
-    let mask = |body| runtime_config_value(body, |paths| load_render_inactive_mask(Some(paths)));
+    let mask = |body| {
+        runtime_config_value(body, |paths| {
+            load_render_inactive_mask(Some(paths), crate::settings::CompatProfile::Normal)
+        })
+    };
 
     let shipped = mask(None);
     runtime_assert_eq!(shipped => RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE, "both shells draw while inactive unless the player says otherwise");
@@ -8183,7 +8233,6 @@ fn runtime_language_treats_an_empty_table_as_a_miss_not_an_empty_table() {
         table.entries.get("Probe").map(String::as_str) => Some("US after the empty ZZ");
     );
 }
-
 
 /// A player control outranks a pause chord rebound onto the same key
 /// (clonk-org/clonk-rs#577).
