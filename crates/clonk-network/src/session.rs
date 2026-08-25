@@ -1153,6 +1153,7 @@ mod tests {
 
         HostState {
             coordinator,
+            game_control_tick: config.start_tick,
             pending_complete: BTreeMap::new(),
             backlog: ControlBacklog::new(backlog_limit),
             client_performance: ClientPerformanceStats::new(backlog_limit),
@@ -13885,6 +13886,66 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn synchronized_runtime_dynamic_reaches_waiting_client_after_later_ticks_are_ready() {
+        // C4Network2::OnGameSynchronized creates and sends the runtime dynamic
+        // while C4GameControl::Execute is still executing the same ControlTick;
+        // ControlTick advances only afterward (src/C4Network2.cpp:1099-1115,
+        // 1820-1844,1945-1971; src/C4GameControl.cpp:274-330,363-366).
+        let (addr, listener) = bind_test_listener().await;
+        let directories = SessionResourceDirectories::new();
+        let mut config = host_config!(
+            initial_status: NetworkStatus::new(NETWORK_STATE_GO, 1, 0),
+            resource_directory: Some(directories.host.clone()),
+        );
+        let parameters = config
+            .initial_join_snapshot
+            .as_ref()
+            .test_value()
+            .parameters
+            .clone();
+        config.initial_join_snapshot = None;
+        let mut host = start_host(listener, config).await.test_value();
+        let mut host_events = host.take_event_receiver();
+        let mut client_task = tokio::spawn(connect_client(
+            addr,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        ));
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
+                Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before JoinData was requested"),
+            }
+        }
+        assert!(timeout(Duration::from_millis(50), &mut client_task)
+            .await
+            .is_err());
+
+        for tick in 0..=2 {
+            host.submit_local_control(legacy_packet(HOST_CLIENT_ID, tick, 0x31))
+                .await
+                .test_value();
+            wait_for_host_ready_tick(&mut host_events, tick).await;
+        }
+
+        let dynamic = host
+            .publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters)
+            .await
+            .test_value();
+        let mut client = timeout(EVENT_WAIT, client_task)
+            .await
+            .test_value()
+            .unwrap()
+            .test_value();
+        let join_data = client.take_join_data().test_value();
+        assert_eq!(join_data.dynamic, dynamic);
+        assert_eq!(join_data.start_control_tick, 0);
+
+        shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn delayed_join_data_is_followed_by_prior_lobby_chat() {
         // SendJoinData may wait for OnGameSynchronized to provide a dynamic
         // (src/C4Network2.cpp:1099-1115,1768-1784,1820-1849). The
@@ -14072,7 +14133,7 @@ mod tests {
         )
         .await
         .test_value();
-        host.execute().await.unwrap();
+        host.execute(1).await.unwrap();
         assert!(
             !host.remove_runtime_dynamic().await.unwrap(),
             "the next game execution must remove a stale runtime dynamic"
@@ -14165,6 +14226,7 @@ mod tests {
             .coordinator
             .ingest(legacy_packet(HOST_CLIENT_ID, 0, 0x44))
             .test_value();
+        state.game_control_tick = 1;
 
         assert!(
             !remove_stale_host_runtime_dynamic(&mut state),
@@ -14230,6 +14292,7 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let (outbound, _outbound_rx) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(existing_client_id, outbound);
+        state.game_started = true;
         state.config.resource_directory = Some(directories.host.clone());
         state.resource_backend = Some(
             crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directories.host.clone())
@@ -14281,6 +14344,7 @@ mod tests {
             .coordinator
             .ingest(legacy_packet(HOST_CLIENT_ID, 0, 0x45))
             .test_value();
+        state.game_control_tick = 1;
 
         let chunk_count =
             crate::ResourceRegistration::from_core(&published.core, true, false).chunk_count;

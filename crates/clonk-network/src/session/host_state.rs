@@ -91,6 +91,10 @@ fn strict_async_control_wait(
 pub(crate) struct HostState {
     pub(crate) config: HostConfig,
     pub(crate) coordinator: ControlCoordinator,
+    /// The game-thread `C4GameControl::ControlTick` phase. The coordinator
+    /// owns the next batch to collect and may already be one or more ticks
+    /// ahead while the game is still executing an emitted batch.
+    pub(crate) game_control_tick: Tick,
     /// First received C4ClientIDAll packet for each not-yet-ready tick.
     pub(crate) pending_complete: BTreeMap<Tick, ControlPacket>,
     pub(crate) backlog: ControlBacklog,
@@ -464,6 +468,7 @@ pub(crate) fn install_prepared_host_round_config(
         .pending_kinds
         .retain(|client_id, _| state.client_cores.contains_key(client_id));
     state.coordinator = prepared.coordinator;
+    state.game_control_tick = prepared.config.start_tick;
     state.pending_complete.clear();
     state.backlog = ControlBacklog::new(prepared.config.backlog_limit);
     state.client_performance = ClientPerformanceStats::new(prepared.config.backlog_limit);
@@ -1056,16 +1061,23 @@ pub(crate) struct PublishedRuntimeDynamic {
 
 pub(crate) fn publish_host_runtime_dynamic(
     dynamic: crate::LiveNetworkDynamic,
-    dynamic_tick: i32,
+    synchronized_control_tick: Tick,
     parameters: crate::JoinGameParametersEnvelope,
     state: &mut HostState,
 ) -> Result<PublishedRuntimeDynamic, String> {
-    let current_tick = i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX);
+    let dynamic_tick = i32::try_from(synchronized_control_tick)
+        .map_err(|_| "synchronized runtime dynamic tick exceeds the C++ wire field".to_string())?;
+    let current_tick = i32::try_from(state.game_control_tick).unwrap_or(i32::MAX);
     if dynamic_tick < current_tick {
         return Err(format!(
             "runtime dynamic tick {dynamic_tick} is stale at host control tick {current_tick}"
         ));
     }
+    // Publication is the C4Network2::OnGameSynchronized callback executing
+    // inside this exact ControlTick (src/C4Game.cpp:3707-3729;
+    // src/C4Network2.cpp:1099-1115,1945-1971). It is authoritative even when
+    // the async coordinator has already collected later batches.
+    state.game_control_tick = synchronized_control_tick;
     let network_directory = state
         .config
         .resource_directory
@@ -1191,7 +1203,7 @@ pub(crate) fn remove_host_runtime_dynamic(state: &mut HostState) -> Result<bool,
 }
 
 pub(crate) fn remove_stale_host_runtime_dynamic(state: &mut HostState) -> bool {
-    let current_tick = i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX);
+    let current_tick = i32::try_from(state.game_control_tick).unwrap_or(i32::MAX);
     let stale_resource_id = state.join_snapshot.as_ref().and_then(|snapshot| {
         (snapshot.dynamic.resource_type == crate::HostResourceType::Dynamic as u8
             && current_tick > snapshot.dynamic_tick)
