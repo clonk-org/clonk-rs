@@ -464,6 +464,20 @@
       "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
     },
     {
+      "id": "transport-trusted-local-system",
+      "area": "transport",
+      "summary": "A client refuses a non-loadable resource with no contents-identical local copy, matching C4Network2ResList::AddLoad, and then overrides that refusal for HostResourceType::System alone when a trusted local system path opens. The override does not check ContentsCRC, so the port joins a host whose System.c4g differs from its own where a stock client aborts the round.",
+      "cited_in": [
+        "crates/clonk-network/src/client_bootstrap.rs:375",
+        "crates/clonk-app/src/compat_readiness.rs:262"
+      ],
+      "cpp_reference": "C4Network2Res.cpp:1501-1506",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#1053"
+    },
+    {
       "id": "content-system-group-identity",
       "area": "content",
       "summary": "planet/System.c4g carries port-authored files stock LegacyClonk does not, so the group's ContentsCRC differs. Both engines publish System.c4g as a resource the host never sends, so a peer that lacks an identical group cannot obtain one and aborts the join before any script runs; disabling the appends does not close this, because the check compares the group's bytes rather than what it executes.",
