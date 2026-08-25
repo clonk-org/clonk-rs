@@ -4409,6 +4409,44 @@ fn only_the_boolean_spellings_cpp_accepts_state_a_fair_crew_setting() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn a_non_rotateable_definition_spawns_with_no_sub_degree_rotation() {
+    // `C4Object::Init` zeroes the *requested* rotation for a non-rotateable
+    // definition before deriving the fixed-point one, so `r == 0` implies
+    // `fix_r == 0` from the first frame:
+    //
+    //     if (!Def->Rotateable) { nr = 0; nrdir = 0; }
+    //     ... r = nr; ... fix_r = itofix(r);
+    //
+    // `fix_r` is the accumulator rotation integrates into and is serialized as
+    // `FixR` (C4Object.cpp:2791), so a non-zero one reaches savegames and the
+    // network join payload. Scenario init places buried materials with a
+    // random rotation (`init_create_object`), which is where a port that
+    // clamped only the integer left the two out of step.
+    let mut engine = Engine::new();
+    let mut definition = test_definition("ROCK", "Rock fixture", "");
+    definition.set_rotateable(0);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+
+    let id = engine
+        .spawn_object(SpawnConfig::new("ROCK").with_rotation(183))
+        .expect("object spawns");
+
+    let snapshot = engine.object_snapshot(id).expect("object exists");
+    assert_eq!(
+        snapshot.rotation, 0,
+        "a non-rotateable object has no rotation"
+    );
+    assert_eq!(
+        snapshot.fixed_rotation, None,
+        "the sub-degree rotation agrees with the integer one, so the snapshot \
+         carries no separate value"
+    );
+}
+
 #[test]
 fn object_snapshot_carries_exceptional_live_shape_and_fire_top_for_rendering() {
     let mut engine = Engine::new();

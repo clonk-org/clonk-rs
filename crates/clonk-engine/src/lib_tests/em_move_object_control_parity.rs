@@ -184,7 +184,11 @@ fn em_move_object_enter_exit_and_remove_use_native_object_paths() {
         .expect("exit executes"));
     let child_index = crate::TestValueExt::test_value(engine.find_object_index(child));
     assert_eq!(engine.objects[child_index].state.container, None);
-    assert_eq!(engine.objects[child_index].state.rotation, 27);
+    // The fixture definition declares no `Rotate`, and `C4Def::Rotateable`
+    // defaults to 0 (C4Def.cpp:156,376), so `C4Object::Init` drops the
+    // requested rotation before the object ever exists — Exit's `0, 0, 0`
+    // then has nothing left to clear.
+    assert_eq!(engine.objects[child_index].state.rotation, 0);
     assert_eq!(engine.objects[child_index].fixed_velocity, FixedVec2::ZERO);
     assert_eq!(engine.objects[child_index].rotation_velocity, C4Fixed::ZERO);
     assert!(engine.objects[child_index].state.mobile);
