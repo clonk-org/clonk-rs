@@ -62,6 +62,28 @@ struct Evidence {
     tracked_by: Option<String>,
 }
 
+impl Evidence {
+    /// What closes this evidence entry.
+    ///
+    /// An explicit `tracked_by` always wins. Failing that, evidence of kind
+    /// `issue` already *is* an issue reference, so naming it is strictly
+    /// better than the placeholder that used to appear beside it — a blocker
+    /// reading "no tracking issue recorded" while quoting an issue number in
+    /// the same line gives a player nothing to act on, which is exactly what
+    /// clonk-org/clonk-rs#588 requires each blocker to carry.
+    fn recovery_action(&self) -> String {
+        self.tracked_by
+            .clone()
+            .or_else(|| (self.kind == "issue").then(|| self.value.clone()))
+            .unwrap_or_else(|| {
+                format!(
+                    "run the {} check `{}` and record its result in compat/profile.json",
+                    self.kind, self.value
+                )
+            })
+    }
+}
+
 #[derive(Deserialize)]
 struct Divergence {
     id: String,
@@ -118,10 +140,7 @@ pub fn blockers() -> Vec<CompatBlocker> {
                     "the {area} promise is not proven: its {} evidence `{}` is pending",
                     evidence.kind, evidence.value
                 ),
-                recovery: evidence
-                    .tracked_by
-                    .clone()
-                    .unwrap_or_else(|| "no tracking issue recorded in the manifest".to_string()),
+                recovery: evidence.recovery_action(),
             })
     }));
     blockers
@@ -266,6 +285,29 @@ mod tests {
         // must not take C4Script's own standard library with it.
         for kept in ["C4.c", "Explode.c", "FindObject.c", "Helpers.c", "Magic.c"] {
             assert!(!scripts.contains(kept), "{kept} is not a divergence");
+        }
+    }
+
+    #[test]
+    fn every_blocker_names_a_recovery_action() {
+        // clonk-org/clonk-rs#588: a blocker is only actionable if it carries a
+        // recovery action as well as a diagnostic. Evidence of kind `issue`
+        // already names the issue in its own value, so reporting "no tracking
+        // issue recorded" beside it is a defect in the report rather than a
+        // gap in the manifest -- and a blocker whose recovery is a placeholder
+        // tells a player nothing they can act on.
+        for blocker in blockers() {
+            assert!(
+                !blocker.recovery.starts_with("no "),
+                "blocker `{}` reports no recovery action: {}",
+                blocker.id,
+                blocker.recovery
+            );
+            assert!(
+                !blocker.recovery.trim().is_empty(),
+                "blocker `{}` has an empty recovery action",
+                blocker.id
+            );
         }
     }
 
