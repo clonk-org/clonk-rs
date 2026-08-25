@@ -306,7 +306,7 @@ no. `cargo xtask compat verify` prints the count it acts on: the pending
 evidence entries and the blocked divergences. While either is non-zero the
 profile must not be presented to a player as compatible.
 
-Five open gaps currently block it, all determinism-critical:
+Four open gaps currently block it, all determinism-critical:
 
 | Id | Owner |
 | --- | --- |
@@ -314,7 +314,6 @@ Five open gaps currently block it, all determinism-critical:
 | `sim-script-nested-local-snapshot` — a call into an object whose own script is already in flight starts from the pre-call local snapshot; C++ keeps named locals on the `C4Object` and would read them live. | clonk-org/clonk-rs#523 |
 | `sim-script-unwind-args` — when a script callback errors mid-call the port unwinds with the original argument values; C++ keeps the parameter mutations made before the error. | clonk-org/clonk-rs#385 |
 | `sim-containment-cycle-spawn` — a genuine containment cycle at spawn time: C++'s two-phase denumeration keeps the mutual containment, the sequential spawn model breaks one edge. | clonk-org/clonk-rs#518 |
-| `sim-reload-graphics-dangling` — after a definition-graphics reload, an object that can neither re-resolve its graphic nor fall back to its definition is left holding a dangling name; C++ `AssignRemoval`s it. | clonk-org/clonk-rs#384 |
 
 Plus seven pending evidence entries naming six issues —
 clonk-org/clonk-rs#585 (simulation), clonk-org/clonk-rs#586 (control and

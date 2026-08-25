@@ -11138,8 +11138,10 @@ impl Engine {
     /// `AssignRemoval`s the object when both fail. So a named graphic that
     /// survives the reload keeps the object on it; one that is gone falls back
     /// to the object's own definition; and an object that can do neither is
-    /// removed rather than left holding a name nothing supplies — leaving a
-    /// dangling name is the divergence.
+    /// removed rather than left holding a name nothing supplies. C++ calls that
+    /// last arm "shouldn't happen" and still takes it, so the port does too —
+    /// an object kept alive on a graphic nothing supplies would be a live
+    /// object C++ does not have.
     fn reassign_graphics_after_reload(&mut self, id: &str) {
         let Some(definition) = self.definitions.get(id) else {
             return;
