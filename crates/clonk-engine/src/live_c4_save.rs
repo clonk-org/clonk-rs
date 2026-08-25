@@ -6016,4 +6016,59 @@ mod tests {
             Some(Vec::new())
         );
     }
+
+    /// A crew member's sub-pixel X survives the state capture a network
+    /// dynamic is built from (clonk-org/clonk-rs#985).
+    ///
+    /// `AllCrewPosX` is the only field of `C4ControlSyncCheck` with sub-pixel
+    /// resolution — it sums `fixtoi(fix_x, 100)` in centipixels
+    /// (C4Control.cpp:460-467). Every other field is whole pixels, counts or
+    /// hashes, so a capture that rounded a crew position to a whole pixel
+    /// would diverge in that field *alone*, leaving object count, enumeration
+    /// index and sector sums identical — which is the exact shape of the
+    /// digest pair reported on a savegame-hosted round.
+    ///
+    /// `serialize_live_c4_save_with_policy` builds every runtime save from
+    /// `capture_state`, so this pins the sub-pixel half of that path without
+    /// requiring the full landscape an exact save also writes.
+    #[test]
+    fn a_crew_sub_pixel_x_survives_the_state_capture_a_dynamic_is_built_from() {
+        let (mut engine, user_crew, _script_crew) = user_and_script_crew_fixture();
+        let index = object_index(&engine, user_crew);
+
+        // The same crew on a whole pixel, for contrast.
+        engine.objects[index].fixed_position.x = crate::math::itofix(42);
+        engine.objects[index].state.position = engine.objects[index].position_pixels();
+        let whole_pixel_sum = engine.sync_check(0).crew_positions_sum;
+
+        // And now emphatically off one. The offset has to exceed a centipixel
+        // to be visible in the digest at all: C4Fixed carries 1<<16 per pixel,
+        // so one centipixel is 655 raw units and a smaller offset would make
+        // this test pass without proving anything.
+        let fractional = crate::math::C4Fixed::from_raw(crate::math::itofix(42).val() + 6553);
+        engine.objects[index].fixed_position.x = fractional;
+        engine.objects[index].state.position = engine.objects[index].position_pixels();
+        let live = engine.sync_check(0);
+        assert_ne!(
+            live.crew_positions_sum, whole_pixel_sum,
+            "the fixture must carry a visible fraction for the round trip to prove anything"
+        );
+
+        let state = engine.capture_state();
+        let mut restored = test_engine("CLNK", "Crew");
+        restored.restore_state(&state).expect("state restores");
+
+        assert_eq!(
+            restored.objects[object_index(&restored, user_crew)]
+                .fixed_position
+                .x,
+            fractional,
+            "the raw C4Fixed word must round trip, not the rounded pixel"
+        );
+        assert_eq!(
+            restored.sync_check(0).crew_positions_sum,
+            live.crew_positions_sum,
+            "a restored peer must agree on AllCrewPosX to the centipixel"
+        );
+    }
 }
