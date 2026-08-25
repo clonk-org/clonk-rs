@@ -2086,10 +2086,33 @@ fn set_error(error_out: *mut *mut c_char, message: String) {
     }
 }
 
+/// Objects the bridge would have collected.
+///
+/// `RustEngineBridge` skips a deleted object while building its snapshot
+/// (`if (!object || !object->Status) continue;`, with `C4OS_DELETED == 0`,
+/// `C4Object.h:39`), so C++ never reports one. The port keeps the entry until
+/// it is collected, and comparing that against a list it was filtered out of
+/// counts a removed object as an extra.
+fn comparable_objects(objects: &[ObjectSnapshot]) -> Vec<ObjectSnapshot> {
+    objects
+        .iter()
+        .filter(|object| object.status != crate::ObjectStatus::Deleted)
+        .cloned()
+        .collect()
+}
+
 fn runtime_snapshot_mismatch(
     expected: &SimulationSnapshot,
     actual: &SimulationSnapshot,
 ) -> Option<String> {
+    let expected = &SimulationSnapshot {
+        objects: comparable_objects(&expected.objects),
+        ..expected.clone()
+    };
+    let actual = &SimulationSnapshot {
+        objects: comparable_objects(&actual.objects),
+        ..actual.clone()
+    };
     if expected.frame != actual.frame {
         return Some(format!(
             "frame rust {}, cpp {}",
@@ -5140,6 +5163,105 @@ global func Step(state, frame, random)
         expected.global_effects[0].priority = 0;
         let mut actual = actual;
         actual.global_effects.clear();
+
+        assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
+    }
+
+    /// `RustEngineBridge` skips deleted objects while collecting --
+    /// `if (!object || !object->Status) continue;`, and `C4OS_DELETED` is 0
+    /// (`C4Object.h:39`). C++ therefore never reports one, while the port
+    /// keeps the entry until it is collected, so comparing the two counts a
+    /// removed object as an extra and stops the run on a phantom.
+    ///
+    /// Observed on `Tutorial07`/`Tutorial10`: every arrow-creating path in
+    /// `Arrow.c4d` removes the previous arrow first, and the port reported the
+    /// removed `_AR1` (`status=Deleted`) alongside its replacement
+    /// (clonk-org/clonk-rs#1054).
+    #[test]
+    fn runtime_mismatch_ignores_deleted_objects_the_bridge_never_reports() {
+        let definition = CString::new("_AR1").unwrap();
+        let action = CString::new("Idle").unwrap();
+        let live = LcEngineObjectSnapshot {
+            id: 7,
+            definition_id: definition.as_ptr(),
+            position_x: 604,
+            position_y: 81,
+            velocity_x: 0,
+            velocity_y: 0,
+            rotation: 0,
+            fixed_position_x: itofix(604).val(),
+            fixed_position_y: itofix(81).val(),
+            fixed_velocity_x: 0,
+            fixed_velocity_y: 0,
+            fixed_rotation: 0,
+            mobile: false,
+            in_liquid: false,
+            object_timer: 0,
+            rotation_velocity: C4Fixed::ZERO.val(),
+            energy: 0,
+            construction: crate::FULL_CON,
+            damage: 0,
+            magic_energy: 0,
+            magic_capacity: 0,
+            owner: -1,
+            category: crate::DEFAULT_CATEGORY,
+            crew_member: false,
+            alive: false,
+            action_name: action.as_ptr(),
+            action_phase: 0,
+            action_ticks: 0,
+            action_data: 0,
+            direction: 0,
+            command_direction: 0,
+            effects: ptr::null(),
+            effect_count: 0,
+            vertices: ptr::null(),
+            vertex_count: 0,
+            has_container: false,
+            container_id: 0,
+            contents: ptr::null(),
+            contents_len: 0,
+            has_base_graphics: false,
+            base_definition_id: ptr::null(),
+            base_graphics_name: ptr::null(),
+            base_blit_mode: 0,
+            has_draw_transform: false,
+            draw_scale_x: 1.0,
+            draw_scale_y: 1.0,
+            draw_offset_x: 0.0,
+            draw_offset_y: 0.0,
+        };
+
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                &live,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        // The port still holds the arrow it removed this frame.
+        let mut expected = actual.clone();
+        let mut removed = expected.objects[0].clone();
+        removed.id = crate::ObjectId::new(8);
+        removed.status = crate::ObjectStatus::Deleted;
+        expected.objects.push(removed);
 
         assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
     }
