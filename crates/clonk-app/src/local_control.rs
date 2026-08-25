@@ -41,7 +41,7 @@ impl LocalControlAssignment {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct LocalControlRegistry {
     assignments: Vec<LocalControlAssignment>,
     /// Process-global `C4MouseControl::Player`. This is intentionally
@@ -49,6 +49,27 @@ pub(crate) struct LocalControlRegistry {
     /// may leave several local players flagged while `FinalInit` repeatedly
     /// reinitializes the one process-global mouse controller.
     active_mouse_owner: Option<i32>,
+    /// Whether a classic (non-AutoStop) set may deliver the synchronized
+    /// `Control*Released` the port adds over C++.
+    ///
+    /// Resolved once at session construction from the compatibility profile
+    /// and never re-read, because the answer is synchronized in effect: two
+    /// peers disagreeing about whether a release exists at all is a desync,
+    /// not a preference, so a mid-round configuration edit must not move it.
+    /// `ctrl-keyup-release` in `compat/profile.json`.
+    classic_release_enabled: bool,
+}
+
+impl Default for LocalControlRegistry {
+    fn default() -> Self {
+        Self {
+            assignments: Vec::new(),
+            active_mouse_owner: None,
+            // The port's own behaviour is the normal-profile default; the
+            // compatibility profile opts out at session construction.
+            classic_release_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,12 +290,25 @@ impl LocalControlRegistry {
             }
         }
 
-        classic_release.map_or(KeyboardRoutingOutcome::Unhandled, |(owner, event)| {
-            KeyboardRoutingOutcome::Consumed {
-                owner: Some(owner),
-                event: Some(event),
-            }
-        })
+        // Under the compatibility profile there is no classic release to fall
+        // back to: C++ declined the key-up for this player, so the next
+        // same-key callback must see it undelivered.
+        classic_release
+            .filter(|_| self.classic_release_enabled)
+            .map_or(KeyboardRoutingOutcome::Unhandled, |(owner, event)| {
+                KeyboardRoutingOutcome::Consumed {
+                    owner: Some(owner),
+                    event: Some(event),
+                }
+            })
+    }
+
+    /// Apply the compatibility profile's `ctrl-keyup-release` disposition.
+    ///
+    /// Called at session construction only; see the field's own note on why
+    /// this must not move under a running session.
+    pub(crate) fn set_classic_release_enabled(&mut self, enabled: bool) {
+        self.classic_release_enabled = enabled;
     }
 
     pub(crate) fn mouse_owner(&self) -> Option<i32> {
@@ -343,6 +377,81 @@ mod tests {
             }),
             KeyboardRoutingOutcome::Unhandled,
             "an eventless classic candidate must not swallow the key"
+        );
+    }
+
+    #[test]
+    fn the_compatibility_profile_withholds_the_classic_release_cpp_never_sends() {
+        // `ctrl-keyup-release` in compat/profile.json is a determinism-critical
+        // divergence marked `reverted`: C4Game::LocalControlKeyUp routes a
+        // key-up only for AutoStop players (7d43b47b src/C4Game.cpp:3592-3605),
+        // so under the LegacyClonk profile a classic set must not synchronize
+        // the release the port otherwise adds. An AutoStop set is untouched in
+        // both profiles, because C++ sends that one.
+        let release = ControlEvent::Release(ControlButton::Left);
+        let init = |owner, preferred_set| LocalControlInit {
+            owner,
+            preferred_set,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        };
+
+        let mut normal = LocalControlRegistry::default();
+        normal.initialize(init(70, 0));
+        assert_eq!(
+            normal.route_keyboard_candidates(
+                [(0, Some(release))],
+                ElementState::Released,
+                false,
+                |_| Some(false),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(70),
+                event: Some(release),
+            },
+            "the normal profile keeps the port's classic release"
+        );
+
+        let mut compat = LocalControlRegistry::default();
+        compat.set_classic_release_enabled(false);
+        compat.initialize(init(70, 0));
+        assert_eq!(
+            compat.route_keyboard_candidates(
+                [(0, Some(release))],
+                ElementState::Released,
+                false,
+                |_| Some(false),
+            ),
+            KeyboardRoutingOutcome::Unhandled,
+            "the compatibility profile declines it exactly as C++ does"
+        );
+        assert_eq!(
+            compat.route_keyboard_candidates(
+                [(0, Some(release))],
+                ElementState::Released,
+                false,
+                |_| Some(true),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(70),
+                event: Some(release),
+            },
+            "an AutoStop release is C++ behaviour and survives the profile"
+        );
+        assert_eq!(
+            compat.route_keyboard_candidates(
+                [(0, Some(ControlEvent::Press(ControlButton::Left)))],
+                ElementState::Pressed,
+                false,
+                |_| Some(false),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(70),
+                event: Some(ControlEvent::Press(ControlButton::Left)),
+            },
+            "presses are unaffected; only the key-up differs"
         );
     }
 

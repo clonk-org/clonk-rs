@@ -497,6 +497,23 @@ impl GameApp {
         }
     }
 
+    /// Install a local-control registry for a session, applying the
+    /// compatibility profile's synchronized-control dispositions.
+    ///
+    /// Every path that replaces the registry goes through here — round start,
+    /// section change, savegame restore and network rebind all reset it — so
+    /// the profile cannot be lost by a later reset. The value is resolved from
+    /// `self.compat_profile`, which is itself fixed before the session starts.
+    pub(crate) fn install_local_controls(&mut self, mut controls: LocalControlRegistry) {
+        // `ctrl-keyup-release` (compat/profile.json): C++ routes a key-up only
+        // for AutoStop players, so the compatibility profile withholds the
+        // classic release the port otherwise synchronizes.
+        controls.set_classic_release_enabled(
+            self.compat_profile == crate::settings::CompatProfile::Normal,
+        );
+        self.local_controls = controls;
+    }
+
     pub(crate) fn dispatch_control_event_for_local_player(
         &mut self,
         owner: i32,

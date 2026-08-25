@@ -8703,7 +8703,7 @@ impl GameApp {
                 .players()
                 .map(|player| (player.id(), player.status())),
         );
-        self.local_controls = rebound_local_controls;
+        self.install_local_controls(rebound_local_controls);
         if let Some(owner) = restored_primary_owner.or_else(|| local_players.first().copied()) {
             self.local_owner = owner;
         }

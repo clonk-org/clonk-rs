@@ -2038,7 +2038,7 @@ impl GameApp {
         // before `InitGameFinal` makes any script call (C4Game.cpp:479,484),
         // so a constructor calling `GetPlayerByName` finds them.
         if offline_savegame.is_some() {
-            self.local_controls = LocalControlRegistry::default();
+            self.install_local_controls(LocalControlRegistry::default());
             self.mouse_control_allowed = !scenario_data.disables_mouse();
         }
         if let Some(savegame) = offline_savegame.as_ref() {
@@ -2255,7 +2255,7 @@ impl GameApp {
         self.physical_viewports_authoritative = false;
         self.input = InputDispatcher::new();
         if offline_savegame.is_none() {
-            self.local_controls = LocalControlRegistry::default();
+            self.install_local_controls(LocalControlRegistry::default());
         }
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
@@ -2274,7 +2274,8 @@ impl GameApp {
         self.mouse_control = self.mouse_control_allowed;
         if replay {
             if let Some(startup) = replay_player_startup.as_mut() {
-                self.local_controls = std::mem::take(&mut startup.local_controls);
+                let restored = std::mem::take(&mut startup.local_controls);
+                self.install_local_controls(restored);
                 if let Some(owner) = startup.local_players.first().copied() {
                     self.local_owner = owner;
                 }
@@ -2691,7 +2692,7 @@ impl GameApp {
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         self.apply_material_library();
         self.input = InputDispatcher::new();
-        self.local_controls = LocalControlRegistry::default();
+        self.install_local_controls(LocalControlRegistry::default());
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
