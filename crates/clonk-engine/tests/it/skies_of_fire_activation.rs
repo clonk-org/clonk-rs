@@ -15,9 +15,34 @@ fn extend_fnv1a64(hash: u64, bytes: &[u8]) -> u64 {
     })
 }
 
-fn fnv1a64<T: AsRef<[u8]>>(chunks: impl IntoIterator<Item = T>) -> u64 {
-    chunks.into_iter().fold(FNV_OFFSET, |hash, bytes| {
-        extend_fnv1a64(hash, bytes.as_ref())
+/// A plane digest that does not depend on material slot order.
+///
+/// The plane stores texmap indices in the low seven bits with IFT in `0x80`
+/// (`C4Landscape.h:29-32`), and an unpacked `content/` assigns those slots in
+/// directory-read order — so hashing the raw bytes is host-dependent, which is
+/// how a re-recorded constant here passed on macOS and failed the Linux job
+/// (clonk-org/clonk-rs#1082). Hashing the *name* each byte resolves to removes
+/// the dependence: the same world digests identically wherever the slots
+/// landed.
+///
+/// The per-slot digests are precomputed, so this stays one table lookup per
+/// pixel rather than a string hash per pixel.
+fn material_name_digest(grid: &clonk_engine::landscape::PixelGrid) -> u64 {
+    let names = grid.material_names();
+    let slot_digest: Vec<u64> = (0_u16..256)
+        .map(|byte| {
+            let slot = usize::from(byte as u8 & 0x7f);
+            let ift = byte as u8 & 0x80;
+            let name = names.get(slot).and_then(Option::as_deref).unwrap_or("");
+            extend_fnv1a64(extend_fnv1a64(FNV_OFFSET, name.as_bytes()), &[ift])
+        })
+        .collect();
+    grid.bytes().iter().fold(FNV_OFFSET, |hash, byte| {
+        let entry = slot_digest[usize::from(*byte)];
+        entry
+            .to_le_bytes()
+            .iter()
+            .fold(hash, |hash, part| extend_fnv1a64(hash, &[*part]))
     })
 }
 
@@ -38,38 +63,25 @@ fn full_skies_of_fire_activation_preserves_map_rng_objects_and_initialize_callba
         .pixel_grid()
         .expect("Skies of Fire creates a Surface8 plane");
     assert_eq!((grid.width(), grid.height()), (2_250, 2_250));
-    // The recorded constant this used to carry is gone, and deliberately not
-    // replaced with a re-recorded one.
-    //
-    // Non-rotateable objects stopped being spawned rotated (`C4Object::Init`
-    // zeroes the requested rotation before deriving `fix_r`, and
-    // `C4Def::Rotateable` defaults to 0 — C4Def.cpp:156,376), so their upright
-    // shapes settle their SolidMasks into different pixels and the plane
-    // legitimately changed. The value it changed *to* is host-dependent:
-    // macOS produces 0xc032671534fff7d0 where Linux produces
-    // 0xe99c9252eb27671e, because the plane stores texmap indices and an
-    // unpacked `content/` assigns material slots in directory-read order.
-    // Pinning either one is the platform-conditional expectation that passes
-    // locally and fails the Linux job.
-    //
-    // What this scenario can still assert host-independently is that the plane
-    // is deterministic: the same scenario and seed produce the same bytes
-    // twice, which is what the constant was guarding for the script-free S2
-    // render fast path in the first place. Restoring a cross-revision guard
-    // needs a host-independent digest — clonk-org/clonk-rs#1082.
-    let second = prepare_installed_scenario(SKIES_OF_FIRE, SEED).instantiate();
-    let second_snapshot = second.snapshot();
-    let second_grid = second_snapshot
-        .landscape
-        .as_ref()
-        .expect("the second instantiation creates a landscape")
-        .pixel_grid()
-        .expect("the second instantiation creates a Surface8 plane");
-    assert_eq!(
-        fnv1a64([grid.bytes()]),
-        fnv1a64([second_grid.bytes()]),
-        "the same scenario and seed render the same plane twice"
+    // Hashed by material *name* rather than raw slot index, so the digest is
+    // the same on every host — see `material_name_digest`. The plane changed
+    // when non-rotateable objects stopped being spawned rotated
+    // (`C4Object::Init` zeroes the requested rotation before deriving
+    // `fix_r`; `C4Def::Rotateable` defaults to 0 — C4Def.cpp:156,376), so
+    // their upright shapes settle their SolidMasks into different pixels.
+    // Guard against the digest silently degenerating: with an empty name table
+    // every byte would resolve to "" and this would hash only the IFT bits --
+    // host-independent, and worthless.
+    let named = grid
+        .material_names()
+        .iter()
+        .filter(|name| name.is_some())
+        .count();
+    assert!(
+        named >= 8,
+        "the digest resolves real material names, not an empty table ({named} named slots)"
     );
+    assert_eq!(material_name_digest(grid), 0x9a1e_f024_7854_3d08);
 
     // MapSeed is drawn from the synchronized seed before map creation, while
     // C4Landscape's FixRandom bracket keeps map-parser/render draws out of the
