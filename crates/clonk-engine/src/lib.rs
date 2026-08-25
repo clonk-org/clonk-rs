@@ -13884,6 +13884,10 @@ mod audio_detach_regression;
 mod deferred_rank_extension_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/dead_global_effect_removal.rs"]
+mod dead_global_effect_removal;
+
+#[cfg(test)]
 #[path = "lib_tests/issue_62_scheduled_global_effect_callbacks.rs"]
 mod issue_62_scheduled_global_effect_callbacks;
 
