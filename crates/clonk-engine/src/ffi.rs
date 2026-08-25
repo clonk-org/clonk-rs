@@ -1260,6 +1260,41 @@ fn optional_fixed_vec(raw_x: i32, raw_y: i32, pixels: Vector2) -> Option<FixedVe
     }
 }
 
+/// Neutralises effect state the bridge ABI cannot carry.
+/// `LcEngineEffectSnapshot` transports name/priority/interval/timer only, so
+/// C++ reports everything else as a default; comparing those raw invents a
+/// divergence. Shared so the per-object and global comparisons agree on what
+/// is actually comparable.
+fn comparable_effects(effects: &[EffectState]) -> Vec<EffectState> {
+    effects
+        .iter()
+        .cloned()
+        .map(|mut effect| {
+            effect.number = 0;
+            effect.start_dispatched = false;
+            effect.vars.clear();
+            effect.command_target = None;
+            effect.command_id = None;
+            effect
+        })
+        .collect()
+}
+
+/// Renders an effect list for a divergence message. Shared so the per-object
+/// and global comparisons describe effects the same way.
+fn describe_effects(effects: &[EffectState]) -> String {
+    effects
+        .iter()
+        .map(|effect| {
+            format!(
+                "{}(prio {} int {} t {})",
+                effect.name, effect.priority, effect.interval, effect.timer
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn optional_fixed(raw: i32, pixel: i32) -> Option<C4Fixed> {
     let fixed = C4Fixed::from_raw(raw);
     if fixed == itofix(pixel) {
@@ -2213,42 +2248,14 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.command_direction, actual_object.command_direction
                     ));
                 }
-                // The ABI transports name/priority/interval/timer only
-                // (LcEngineEffectSnapshot) — normalize the untransported
-                // fields (vars, command target, Rust-internal
-                // start_dispatched) before comparing.
-                let normalize = |effects: &[EffectState]| -> Vec<EffectState> {
-                    effects
-                        .iter()
-                        .cloned()
-                        .map(|mut effect| {
-                            effect.number = 0;
-                            effect.start_dispatched = false;
-                            effect.vars.clear();
-                            effect.command_target = None;
-                            effect.command_id = None;
-                            effect
-                        })
-                        .collect()
-                };
-                if normalize(&expected_object.effects) != normalize(&actual_object.effects) {
-                    let describe = |effects: &[EffectState]| -> String {
-                        effects
-                            .iter()
-                            .map(|effect| {
-                                format!(
-                                    "{}(prio {} int {} t {})",
-                                    effect.name, effect.priority, effect.interval, effect.timer
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    };
+                if comparable_effects(&expected_object.effects)
+                    != comparable_effects(&actual_object.effects)
+                {
                     problems.push(format!(
                         "object {} effects rust [{}], cpp [{}]",
                         id,
-                        describe(&expected_object.effects),
-                        describe(&actual_object.effects)
+                        describe_effects(&expected_object.effects),
+                        describe_effects(&actual_object.effects)
                     ));
                 }
                 if expected_object.vertices != actual_object.vertices {
@@ -2268,8 +2275,12 @@ fn runtime_snapshot_mismatch(
         }
     }
 
-    if expected.global_effects != actual.global_effects {
-        problems.push("global effects mismatch".into());
+    if comparable_effects(&expected.global_effects) != comparable_effects(&actual.global_effects) {
+        problems.push(format!(
+            "global effects rust [{}], cpp [{}]",
+            describe_effects(&expected.global_effects),
+            describe_effects(&actual.global_effects)
+        ));
     }
 
     // Particles are NOT C++ sync state (C4ControlSyncCheck hashes frame/
@@ -4872,6 +4883,125 @@ global func Step(state, frame, random)
         }
     }
 
+    /// A bare "global effects mismatch" gives a reader nothing to act on —
+    /// the per-object comparison prints both lists, and this one has to as
+    /// well, or a divergence here cannot be triaged without a debugger.
+    #[test]
+    fn runtime_mismatch_names_the_global_effects_that_differ() {
+        let effect_name = CString::new("FxWeather").unwrap();
+        let effect = LcEngineEffectSnapshot {
+            name: effect_name.as_ptr(),
+            priority: 100,
+            interval: 2,
+            timer: 7,
+        };
+
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+        let expected = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                &effect,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        let detail = runtime_snapshot_mismatch(&expected, &actual)
+            .expect("a global effect only the port carries is a mismatch");
+        assert!(
+            detail.contains("FxWeather"),
+            "the message must name the differing effect: {detail}"
+        );
+        assert!(
+            detail.contains("cpp []"),
+            "the message must show the C++ side was empty: {detail}"
+        );
+    }
+
+    /// `LcEngineEffectSnapshot` carries only name/priority/interval/timer, so
+    /// C++ reports every other field as a default and comparing them raw makes
+    /// a divergence out of nothing. The per-object comparison already
+    /// neutralises them; the global one has to agree, or every scenario that
+    /// runs a global effect reports a false positive.
+    #[test]
+    fn runtime_mismatch_ignores_global_effect_state_the_abi_cannot_carry() {
+        let effect_name = CString::new("IntSchedule").unwrap();
+        let effect = LcEngineEffectSnapshot {
+            name: effect_name.as_ptr(),
+            priority: 1,
+            interval: 100,
+            timer: 1,
+        };
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                &effect,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        let mut expected = actual.clone();
+        let carried = &mut expected.global_effects[0];
+        carried.number = 1;
+        carried.start_dispatched = true;
+        carried.command_target = Some(7);
+
+        assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
+    }
+
     #[test]
     fn runtime_mismatch_reports_hud_difference() {
         let crew_members = [11u64];
@@ -7038,6 +7168,7 @@ ByClient=0
                         equal_item_height: false,
                         permanent: false,
                         location: None,
+                        location_reset_generation: 0,
                         runtime_id: 0,
                         extra: crate::ObjectMenuExtra::default(),
                         extra_data: 0,
