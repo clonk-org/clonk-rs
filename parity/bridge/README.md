@@ -65,6 +65,46 @@ LC_RUST_ENGINE_RECORD=<path> ./clonk    # C++ snapshots as JSON, for triage
 
 Divergences are reported as `Rust runtime parity mismatch: ...`.
 
+### Counting events across a run — the two engines do not run equally long
+
+The harness **stops stepping the Rust engine at its first divergence**; C++ is
+the host and carries on to the end of the run. So any statistic gathered by
+instrumenting both sides and counting events over a whole run measures *how long
+each engine ran*, not how often it did something.
+
+Measured on `Massif` with a per-frame probe on each side:
+
+```
+CPPCOM   distinct frames=60   last frame=60   events=360
+RUSTCOM  distinct frames=1    last frame=1    events=6
+```
+
+That run diverged at frame 1, so the Rust engine executed one frame against
+C++'s sixty. A 60:1 ratio in the raw counts is the harness, not the engine.
+This produced a published-then-retracted "the port turns animals 5-10x less
+often" finding (clonk-org/clonk-rs#1123) — the shape of the error is a ratio
+extreme enough that it should prompt a check of the frame spans first.
+
+To count anything across a run, either:
+
+- use a scenario that reports **no** divergence, so both engines execute the
+  same frames — the tutorials qualify; or
+- log each side's frame number and truncate the C++ series to the Rust
+  engine's last stepped frame before comparing.
+
+### Probe placement — the same event logs different state on each side
+
+A probe in C++'s `C4Object::SetDir` and one in the port's
+`write_object_direction` do **not** observe the same moment: `SetDir` runs
+`SetActionByName(TurnAction)` between them (`C4Object.cpp:4243-4248`), so C++
+reports the pre-turn action and the port the post-turn one for the identical
+event. Comparing the action names side by side shows a divergence that is
+entirely instrumentation.
+
+Prefer a metric that does not depend on where the probe sits — counting only
+writes that actually *change* a value, for instance — or place both probes
+relative to the same landmark.
+
 ### Passing the scenario — both engines must load the same `System.c4g`
 
 The port resolves its install root by walking the **ancestors of the scenario
