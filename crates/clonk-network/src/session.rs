@@ -9485,13 +9485,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cpp_interop_trusts_the_explicit_local_system_across_builds() {
-        // C++ publishes System as non-loadable and normally gates it by
-        // ContentsCRC (src/C4Network2Res.cpp:441-493,1458-1461). Once admitted,
-        // however, it executes the process-local Application.SystemGroup
-        // (src/C4Application.cpp:127-134; src/C4Game.cpp:2764-2793). A Rust
-        // client therefore maps the C++ core to its explicitly trusted local
-        // System while retaining exact checks for every transferable resource.
+    async fn cpp_interop_refuses_an_explicit_local_system_that_differs() {
+        // An explicitly trusted path does not make a differing group the
+        // host's group. C++ gates admission on ContentsCRC first: AddLoad
+        // refuses the non-loadable core and the join dies with "System file
+        // System.c4g differs from that used by the host!"
+        // (src/C4Network2Res.cpp:1473-1507). It executes its process-local
+        // Application.SystemGroup only *after* that check passes
+        // (src/C4Application.cpp:127-134; src/C4Game.cpp:2764-2793), so
+        // trusting a differing local group joins a round whose System scripts
+        // disagree with the host's -- observed against the pinned oracle in
+        // clonk-org/clonk-rs#1053.
         let directories = SessionResourceDirectories::new();
         let host_system_path = directories.host.join("System.c4g");
         let client_system_path = directories.client.join("System.c4g");
@@ -9528,42 +9532,21 @@ mod tests {
         }];
 
         let (address, host) = start_test_host(host_config).await;
-        let mut client = connect_client(
+        let result = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
                 .with_resource_directory(directories.client.clone())
                 .with_trusted_local_system_path(client_system_path.clone()),
         )
-        .await
-        .test_value();
+        .await;
+        host.shutdown().await.test_value();
 
-        assert_eq!(
-            client.take_join_data().unwrap().status.state,
-            NETWORK_STATE_LOBBY
+        let error = result.expect_err("a differing System must fail before the lobby");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("System.c4g") && message.contains("non-loadable")),
+            "unexpected client bootstrap failure: {error:?}"
         );
-        let mut events = client.take_event_receiver();
-        loop {
-            match timeout(EVENT_WAIT, events.recv()).await.test_value() {
-                Some(ClientEvent::ResourceComplete {
-                    resource_id: 2,
-                    core,
-                    path,
-                    local,
-                }) => {
-                    assert_eq!(core, publication.core);
-                    assert_eq!(path, client_system_path);
-                    assert!(local);
-                    break;
-                }
-                Some(ClientEvent::Disconnected { reason }) => {
-                    panic!("trusted System join disconnected: {reason:?}")
-                }
-                Some(_) => {}
-                None => panic!("client event stream closed before System completion"),
-            }
-        }
-
-        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -389,10 +389,21 @@ impl ClientBootstrapResolver {
                 ..
             }
         ) && core.resource_type == crate::HostResourceType::System as u8;
+        // An openable group is not the host's group. C++ refuses a
+        // non-loadable resource whose contents differ and the join dies with
+        // "System file System.c4g differs from that used by the host!"
+        // (src/C4Network2Res.cpp:1473-1507); trusting a merely-readable local
+        // System would run the round against different System scripts, which
+        // is the desync the check exists to prevent.
         let trusted_path = trusted_system
             .then_some(self.trusted_local_system_path.as_ref())
             .flatten()
-            .filter(|path| clonk_resources::Group::open(path).is_ok());
+            .filter(|path| {
+                clonk_resources::Group::open(path)
+                    .ok()
+                    .and_then(|group| group.contents_crc().ok())
+                    .is_some_and(|contents_crc| contents_crc == core.contents_crc)
+            });
         trusted_path.map_or(Err(error), |path| {
             Ok(ClientBootstrapResourcePlan {
                 role,
@@ -1040,6 +1051,53 @@ mod tests {
                 filename,
             } if filename == b"System.c4g"
         ));
+    }
+
+    /// A System group that merely opens is not the host's System group. C++
+    /// refuses a non-loadable resource whose contents do not match and the
+    /// join dies with "System file System.c4g differs from that used by the
+    /// host!" (src/C4Network2Res.cpp:1473-1507); joining anyway would run a
+    /// round whose System scripts differ from the host's.
+    #[test]
+    fn trusted_local_system_with_a_differing_contents_crc_is_still_refused() {
+        let directory = TestDirectory::new();
+        // An openable group, as the shipped planet/System.c4g is -- the point
+        // is that it opens and still does not match.
+        let local_system = directory.root.join("System.c4g");
+        fs::create_dir(&local_system).unwrap();
+        fs::write(local_system.join("BirdFlight.c"), b"// port-only script").unwrap();
+        let mut system = resource_core(
+            crate::HostResourceType::System as u8,
+            2,
+            false,
+            b"System.c4g",
+            b"stock C++ host System",
+        );
+        // The value a stock oracle at 7d43b47b advertises for its System.c4g;
+        // the port ships thirteen extra files there and hashes 4273906637, so
+        // the two can never agree without a content change.
+        system.contents_crc = 4_231_557_077;
+        let resolver = ClientBootstrapResolver::new(
+            &ClientBootstrapLocalCandidates::default(),
+            &directory.standalone,
+        )
+        .with_trusted_local_system_path(local_system);
+
+        let error = resolver
+            .resolve(ClientBootstrapResourceRole::GameResource, &system)
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                    role: ClientBootstrapResourceRole::GameResource,
+                    resource_id: 2,
+                    ref filename,
+                } if filename.as_slice() == b"System.c4g"
+            ),
+            "a differing System group must not be trusted: {error:?}"
+        );
     }
 
     #[test]
