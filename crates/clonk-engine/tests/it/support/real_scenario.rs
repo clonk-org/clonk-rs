@@ -172,6 +172,18 @@ impl PreparedInstalledScenario {
 
     fn instantiate_with_system_scripts(&self, scripts: Vec<(String, String)>) -> Engine {
         let mut engine = Engine::with_seed(self.seed);
+        // Set before the scenario is applied, not after: scenario init derives
+        // crew physicals, and every expectation these fixtures carry was
+        // recorded with the fair-crew projection supplying them. The fixture
+        // players join with no crew info of their own, so without it a Clonk
+        // has no physicals at all.
+        //
+        // `C4GameParameters` compiles `UseFairCrew` false absent a scenario
+        // forcing it (C4GameParameters.cpp:560), so once the engine default
+        // matches C++ (clonk-org/clonk-rs#1071) this has to be stated rather
+        // than inherited. Stating it here keeps every real-scenario fixture
+        // behaving exactly as it did before that default moved.
+        engine.set_use_fair_crew(true);
         engine.configure_materials_from_library(&self.materials);
         engine.install_global_scripts(&scripts);
         engine.set_standard_names(self.standard_names.clone());
