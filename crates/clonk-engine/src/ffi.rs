@@ -2272,7 +2272,11 @@ fn runtime_snapshot_mismatch(
     }
 
     if expected.global_effects != actual.global_effects {
-        problems.push("global effects mismatch".into());
+        problems.push(format!(
+            "global effects rust [{}], cpp [{}]",
+            describe_effects(&expected.global_effects),
+            describe_effects(&actual.global_effects)
+        ));
     }
 
     // Particles are NOT C++ sync state (C4ControlSyncCheck hashes frame/
@@ -4873,6 +4877,78 @@ global func Step(state, frame, random)
                 .expect("rotation difference is reported");
             assert!(detail.contains(label), "missing {label} in {detail}");
         }
+    }
+
+    /// A bare "global effects mismatch" gives a reader nothing to act on —
+    /// the per-object comparison prints both lists, and this one has to as
+    /// well, or a divergence here cannot be triaged without a debugger.
+    #[test]
+    fn runtime_mismatch_names_the_global_effects_that_differ() {
+        let effect_name = CString::new("FxWeather").unwrap();
+        let effect = LcEngineEffectSnapshot {
+            name: effect_name.as_ptr(),
+            priority: 100,
+            interval: 2,
+            timer: 7,
+        };
+
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+        let expected = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                &effect,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        let detail = runtime_snapshot_mismatch(&expected, &actual)
+            .expect("a global effect only the port carries is a mismatch");
+        assert!(
+            detail.contains("FxWeather"),
+            "the message must name the differing effect: {detail}"
+        );
+        assert!(
+            detail.contains("cpp []"),
+            "the message must show the C++ side was empty: {detail}"
+        );
     }
 
     #[test]
