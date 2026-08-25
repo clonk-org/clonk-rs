@@ -149,7 +149,7 @@
           "kind": "issue",
           "value": "clonk-org/clonk-rs#587",
           "status": "pending",
-          "note": "C++/Rust presentation capture diffs for the profile."
+          "note": "C++/Rust presentation capture diffs for the profile; compat/presentation_captures.json enumerates the screens, the shared capture geometry, the comparison tolerances and the approved masks."
         }
       ]
     },

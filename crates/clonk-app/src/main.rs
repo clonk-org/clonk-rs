@@ -62,6 +62,7 @@ mod object_list_window_host;
 mod offline_savegame;
 mod offline_startup;
 mod output_folders;
+mod presentation_captures;
 mod ready_check_backend;
 mod ready_check_notification;
 use clonk_app_netplay::prepared_host_bootstrap;
