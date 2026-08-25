@@ -254,6 +254,36 @@ fn named_blockers(blockers: &[CompatBlocker]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The client keeps a System group the host says it does not have.
+    ///
+    /// `plan_resource` raises `MissingRequiredNonLoadable` for a non-loadable
+    /// resource with no contents-identical local copy, exactly as
+    /// `C4Network2ResList::AddLoad` refuses one (`C4Network2Res.cpp:1501-1506`).
+    /// The port then overrides that for `HostResourceType::System` alone when a
+    /// trusted local system path opens
+    /// (`crates/clonk-network/src/client_bootstrap.rs:375-403`). C++ has no
+    /// such override, so it is a divergence and the contract has to carry it —
+    /// a session that claims C++ behaviour cannot quietly keep it.
+    #[test]
+    fn the_contract_records_the_trusted_system_override_a_stock_client_lacks() {
+        let blocker = blockers()
+            .into_iter()
+            .find(|blocker| blocker.id == "transport-trusted-local-system")
+            .expect("the contract records the trusted-system override as a blocker");
+
+        assert_eq!(blocker.area, "transport");
+        assert!(
+            blocker.reason.contains("ContentsCRC"),
+            "the blocker says what identity is not being enforced: {}",
+            blocker.reason
+        );
+        assert!(
+            blocker.recovery.starts_with("clonk-org/clonk-rs#"),
+            "the blocker names what closes it: {}",
+            blocker.recovery
+        );
+    }
+
     /// A stock peer refuses the session before a single script runs, so the
     /// contract has to say so before anyone hosts.
     ///

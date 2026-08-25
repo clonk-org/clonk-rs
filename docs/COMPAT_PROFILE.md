@@ -306,10 +306,11 @@ no. `cargo xtask compat verify` prints the count it acts on: the pending
 evidence entries and the blocked divergences. While either is non-zero the
 profile must not be presented to a player as compatible.
 
-Eight open gaps currently block it, all determinism-critical:
+Nine open gaps currently block it, all determinism-critical:
 
 | Id | Owner |
 | --- | --- |
+| `transport-trusted-local-system` — a client refuses a non-loadable resource with no contents-identical local copy, as `C4Network2ResList::AddLoad` does, and then overrides that refusal for `System` alone when a trusted local system path opens. The override does not check `ContentsCRC`, so the port joins a host whose `System.c4g` differs from its own where a stock client aborts the round. | clonk-org/clonk-rs#1053 |
 | `content-system-group-identity` — `planet/System.c4g` carries port-authored files stock LegacyClonk does not, so the group's `ContentsCRC` differs and a stock peer aborts the join before any script runs. Disabling the appends does not close it: the check compares the group's bytes, not what it executes. | clonk-org/clonk-rs#1053 |
 | `sim-script-var-negative-slot` — `Var(n)`/`Local(n)` with a negative index: C++ clamps to slot 0 (`C4ValueList::GetItem`), the port's VM addresses a distinct key. | clonk-org/clonk-rs#523 |
 | `sim-script-nested-local-snapshot` — a call into an object whose own script is already in flight starts from the pre-call local snapshot; C++ keeps named locals on the `C4Object` and would read them live. | clonk-org/clonk-rs#523 |
