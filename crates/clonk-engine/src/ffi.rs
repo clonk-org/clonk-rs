@@ -2101,18 +2101,23 @@ fn comparable_objects(objects: &[ObjectSnapshot]) -> Vec<ObjectSnapshot> {
         .collect()
 }
 
+/// The snapshot as the bridge would have reported it.
+///
+/// Both sides go through this so they answer the same question; anything the
+/// C ABI never carries is dropped here rather than at each comparison.
+fn comparable_snapshot(snapshot: &SimulationSnapshot) -> SimulationSnapshot {
+    SimulationSnapshot {
+        objects: comparable_objects(&snapshot.objects),
+        ..snapshot.clone()
+    }
+}
+
 fn runtime_snapshot_mismatch(
     expected: &SimulationSnapshot,
     actual: &SimulationSnapshot,
 ) -> Option<String> {
-    let expected = &SimulationSnapshot {
-        objects: comparable_objects(&expected.objects),
-        ..expected.clone()
-    };
-    let actual = &SimulationSnapshot {
-        objects: comparable_objects(&actual.objects),
-        ..actual.clone()
-    };
+    let expected = &comparable_snapshot(expected);
+    let actual = &comparable_snapshot(actual);
     if expected.frame != actual.frame {
         return Some(format!(
             "frame rust {}, cpp {}",
