@@ -2277,6 +2277,55 @@
     }
 
     #[test]
+    fn get_wind_reads_the_ift_bit_on_a_real_landscape() {
+        // `GetWind()` gates on GBackIFT (C4Weather.cpp:167-171), which is the
+        // IFT bit in the pixel byte. The script binding tested
+        // `is_tunnel_at`, which consults only the synthetic tunnel-range map
+        // and never the pixel grid, so on a loaded landscape it reported the
+        // global wind where native reports zero
+        // (clonk-org/clonk-rs#1141).
+        // A real pixel grid, with the IFT bit (0x80) set at one pixel.
+        // `grid_write_byte` is a no-op without a grid, so build one.
+        let width = 32u32;
+        let height = 100u32;
+        let mut bytes = vec![0u8; (width * height) as usize];
+        bytes[(10 * width + 5) as usize] = 0x80;
+        let grid = crate::landscape::PixelGrid::new(
+            width,
+            height,
+            bytes,
+            vec![0; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+        let mut landscape = Landscape::flat(width, height as i32);
+        landscape.set_pixel_grid(grid);
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let (result, _) = with_environment_context(EnvironmentSettings::new(60), 0, || {
+            let (inner, _) = with_effect_context(None, &[], world, 1, || {
+                assert_eq!(
+                    get_wind(&[Value::Int(5), Value::Int(10)])?,
+                    Value::Int(0),
+                    "an IFT pixel reads zero wind like GBackIFT"
+                );
+                assert_eq!(
+                    get_wind(&[Value::Int(6), Value::Int(10)])?,
+                    Value::Int(60),
+                    "a non-IFT pixel still reads the global wind"
+                );
+                Ok(Value::Nil)
+            });
+            inner
+        });
+        result.test_value();
+    }
+
+    #[test]
     fn get_wind_positional_reads_tunnel_background() {
         // FnGetWind (C4Script.cpp:3001-3008): the global form returns
         // Weather.Wind; the positional form reads GBackWind — zero inside
