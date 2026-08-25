@@ -7089,6 +7089,65 @@ struct C4ConfigGeneral
 
 } // namespace config_language
 
+// C4Config::AdaptToCurrentVersion, with the smallest set of fields the real
+// out-of-line definition touches. Field types and array widths match
+// C4Config.h so the lifted strncpy/SEqual calls behave identically
+// (StdConfig.h:21 fixes CFG_MaxString at 1024).
+// The retired-default replacements are macros, so they cannot live inside the
+// namespace; lifted from C4Config.h rather than retyped.
+#include "config_server_macros.inc"
+
+namespace config_adapt
+{
+
+constexpr int CFG_MaxString = 1024;
+
+struct C4AudioSystem
+{
+	static constexpr auto MaxChannels = 1024;
+};
+
+struct C4ConfigGeneral
+{
+	uint32_t Version;
+	bool Preloading;
+};
+
+struct C4ConfigGraphics
+{
+	bool Shader;
+	bool DisableGamma;
+};
+
+struct C4ConfigSound
+{
+	bool RXMusic;
+	int32_t MaxChannels;
+};
+
+struct C4ConfigNetwork
+{
+	static constexpr auto DefaultPuncherServer = "netpuncher.openclonk.org:11115";
+	char ServerAddress[CFG_MaxString + 1];
+	char AlternateServerAddress[CFG_MaxString + 1];
+	char UpdateServerAddress[CFG_MaxString + 1];
+	char PuncherAddress[CFG_MaxString + 1];
+};
+
+struct C4Config
+{
+	C4ConfigGeneral General;
+	C4ConfigGraphics Graphics;
+	C4ConfigSound Sound;
+	C4ConfigNetwork Network;
+
+	void AdaptToCurrentVersion();
+};
+
+#include "config_adapt_version.inc"
+
+} // namespace config_adapt
+
 // C4Value::operator==, lifted whole. The scaffold supplies only what the
 // operator itself touches: the tag enum, the C4V_Data union (compared as one
 // word, and contextually convertible to bool for the `assert(!Data)` arms) and
@@ -13425,6 +13484,44 @@ int main()
             sep();
             printf("{\"pattern\":\"%s\",\"name\":\"%s\",\"match\":%d}", c.pattern, c.name,
                    wildcard::WildcardMatch(c.pattern, c.name) ? 1 : 0);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("config_adapt_version");
+    {
+        // Version 349 is deliberately absent: its arm is `#ifdef __APPLE__`, so
+        // a golden recorded on macOS would not match one recorded on Linux. The
+        // port covers that arm with a cfg-aware unit test instead.
+        const uint32_t versions[] = {0, 345, 346, 347, 348, 350, 358, 359, 360, 361, 362, 400};
+
+        for (const uint32_t version : versions)
+        {
+            config_adapt::C4Config config{};
+            config.General.Version = version;
+            config.General.Preloading = true;
+            config.Graphics.Shader = false;
+            config.Graphics.DisableGamma = true;
+            config.Sound.RXMusic = false;
+            config.Sound.MaxChannels = 7;
+            std::strcpy(config.Network.ServerAddress, "league.clonkspot.org:80");
+            std::strcpy(config.Network.AlternateServerAddress, "league.clonkspot.org:80");
+            std::strcpy(config.Network.UpdateServerAddress, "update.clonkspot.org/lc/update");
+            std::strcpy(config.Network.PuncherAddress, "clonk.de:11115");
+
+            config.AdaptToCurrentVersion();
+
+            sep();
+            printf("{\"version\":%u,\"out_version\":%u,\"preloading\":%d,\"shader\":%d,"
+                   "\"disable_gamma\":%d,\"rx_music\":%d,\"max_channels\":%d,"
+                   "\"server\":\"%s\",\"alternate_server\":\"%s\","
+                   "\"update_server\":\"%s\",\"puncher\":\"%s\"}",
+                   version, config.General.Version, config.General.Preloading ? 1 : 0,
+                   config.Graphics.Shader ? 1 : 0, config.Graphics.DisableGamma ? 1 : 0,
+                   config.Sound.RXMusic ? 1 : 0, config.Sound.MaxChannels,
+                   config.Network.ServerAddress, config.Network.AlternateServerAddress,
+                   config.Network.UpdateServerAddress, config.Network.PuncherAddress);
         }
     }
     arr_end();

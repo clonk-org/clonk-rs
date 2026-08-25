@@ -6021,6 +6021,113 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // 0u. C4Config::AdaptToCurrentVersion (C4Config.cpp:1631-1676), the config
+    //     post-init migration C4Config::Load runs right after DeterminePaths
+    //     (`:1110-1112`). It repairs a config written by an older build and
+    //     then stamps it with C4XVERBUILD, so it is also the reason a config
+    //     is migrated exactly once.
+    //
+    //     Three details are what a rewrite gets wrong, and each is pinned
+    //     below: the `case 347` arm FALLS THROUGH into 346, so 347 gets both
+    //     the channel reset and the music repair while 346 gets only the
+    //     music; the `<= 359` block runs independently of the switch, so it
+    //     also applies to a config with no Version at all; and the address
+    //     rewrites are SEqual comparisons against the retired defaults, so a
+    //     deliberately customized server survives untouched.
+    //
+    //     Version 349 is absent from the golden on purpose: its arm is
+    //     `#ifdef __APPLE__`, so a recorded value would depend on the host
+    //     that ran the generator. `std_config`'s own tests cover it.
+    for (idx, case) in golden["config_adapt_version"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let mut config = clonk_core::std_config::Config::new();
+        config.set_in(Some("General"), "Version", i(case, "version").to_string());
+        config.set_in(Some("General"), "Preloading", "1");
+        config.set_in(Some("Graphics"), "Shader", "0");
+        config.set_in(Some("Graphics"), "DisableGamma", "1");
+        config.set_in(Some("Sound"), "RXMusic", "0");
+        config.set_in(Some("Sound"), "MaxChannels", "7");
+        config.set_in(Some("Network"), "ServerAddress", "league.clonkspot.org:80");
+        config.set_in(
+            Some("Network"),
+            "AlternateServerAddress",
+            "league.clonkspot.org:80",
+        );
+        config.set_in(
+            Some("Network"),
+            "UpdateServerAddress",
+            "update.clonkspot.org/lc/update",
+        );
+        config.set_in(Some("Network"), "PuncherAddress", "clonk.de:11115");
+
+        clonk_core::std_config::adapt_to_current_version(&mut config);
+
+        let flag = |section: &str, key: &str| -> i64 {
+            i64::from(
+                config
+                    .get_in(Some(section), key)
+                    .is_some_and(|value| value == "1"),
+            )
+        };
+        let text = |section: &str, key: &str| -> String {
+            config
+                .get_in(Some(section), key)
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        expect_eq(
+            "config_adapt_version",
+            idx,
+            "out_version",
+            i(case, "out_version"),
+            config
+                .get_in(Some("General"), "Version")
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(-1),
+        );
+        for (field, section, key) in [
+            ("preloading", "General", "Preloading"),
+            ("shader", "Graphics", "Shader"),
+            ("disable_gamma", "Graphics", "DisableGamma"),
+            ("rx_music", "Sound", "RXMusic"),
+        ] {
+            expect_eq(
+                "config_adapt_version",
+                idx,
+                field,
+                i(case, field),
+                flag(section, key),
+            );
+        }
+        expect_eq(
+            "config_adapt_version",
+            idx,
+            "max_channels",
+            i(case, "max_channels"),
+            config
+                .get_in(Some("Sound"), "MaxChannels")
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(-1),
+        );
+        for (field, key) in [
+            ("server", "ServerAddress"),
+            ("alternate_server", "AlternateServerAddress"),
+            ("update_server", "UpdateServerAddress"),
+            ("puncher", "PuncherAddress"),
+        ] {
+            assert_eq!(
+                case[field].as_str().unwrap(),
+                text("Network", key),
+                "config_adapt_version[{idx}]: {field} diverges from C++"
+            );
+        }
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));

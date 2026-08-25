@@ -1495,6 +1495,31 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Config.cpp" > "$gen/config_language_sequence.inc"
 
+# 3r. Lift C4Config::AdaptToCurrentVersion, the config post-init migration
+#     C4Config::Load runs right after DeterminePaths (C4Config.cpp:1110-1112).
+#     It is taken whole rather than reimplemented because the interesting parts
+#     are its exact shape: the 347 arm FALLS THROUGH into 346, the address
+#     rewrites are SEqual comparisons against retired defaults rather than
+#     prefix matches, and the `<= 359` block runs independently of the switch.
+#     The trailing `#ifdef USE_RUST_CONFIG` SyncRust() call compiles out here,
+#     exactly as it does in an engine built without that bridge.
+#     The retired-default addresses it rewrites TO are macros in C4Config.h;
+#     lift those too, so a server move in the header cannot silently leave the
+#     golden pinning an address the engine no longer uses.
+awk '
+  /^#define C4CFG_OfficialLeagueServer/ { p = 1 }
+  p { print }
+  p && /^#define C4CFG_UpdateServer/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Config.h" > "$gen/config_server_macros.inc"
+
+awk '
+  /^void C4Config::AdaptToCurrentVersion\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Config.cpp" > "$gen/config_adapt_version.inc"
+
 # 3t. Lift C4GameSave::SaveRuntimeData, the ordered component sweep the save
 #     policy queries drive. The order is the parity fact, and two of its rules
 #     read backwards: Title is written only when the save is NOT exact, and a
