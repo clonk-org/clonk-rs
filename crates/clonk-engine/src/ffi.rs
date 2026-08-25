@@ -3303,6 +3303,32 @@ pub extern "C" fn lc_engine_runtime_path_free(buffer: *mut LcEngineRuntimePathRe
     }
 }
 
+/// Compare one prepared frame: the expected snapshot's controls, the
+/// synchronized RNG ledger, then the state itself.
+///
+/// The ledger is checked **whether or not the frame carries controls**. The
+/// frame-0 path used to nest that check inside the no-controls arm, so a
+/// draw-count slip during scenario init — the one place a gap of tens of draws
+/// can open — went unreported on any run whose frame 0 logged a control, and
+/// surfaced later as an unexplained state difference instead
+/// (clonk-org/clonk-rs#1126).
+fn compare_prepared_frame(
+    runtime: &mut RuntimeHandle,
+    frame: u64,
+    snapshot: &SimulationSnapshot,
+    rng_hold: u32,
+    rng_count: i32,
+) -> Option<String> {
+    let mut expected = runtime.engine.snapshot();
+    match runtime.control_log_strings.get(&frame) {
+        Some(entries) => expected.controls = entries.clone(),
+        None => expected.controls.clear(),
+    }
+    rng_ledger_divergence(runtime, frame, rng_hold, rng_count)
+        .or_else(|| runtime_snapshot_mismatch(&expected, snapshot))
+        .map(|detail| format!("frame {frame}: {detail}"))
+}
+
 #[no_mangle]
 pub extern "C" fn lc_engine_runtime_compare_snapshot(
     handle: *mut RuntimeHandle,
@@ -3380,18 +3406,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             );
             return false;
         }
-        let mut expected = runtime.engine.snapshot();
-        if let Some(entries) = runtime.control_log_strings.get(&frame) {
-            expected.controls = entries.clone();
-        } else {
-            expected.controls.clear();
-            if let Some(detail) = rng_ledger_divergence(runtime, frame, rng_hold, rng_count) {
-                set_error(error_out, format!("frame {frame}: {detail}"));
-                return false;
-            }
-        }
-        if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
-            let detail = format!("frame {frame}: {detail}");
+        if let Some(detail) = compare_prepared_frame(runtime, frame, &snapshot, rng_hold, rng_count)
+        {
             set_error(error_out, detail);
             return false;
         }
@@ -3418,24 +3434,11 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
         return false;
     }
 
-    let mut expected = runtime.engine.snapshot();
-    if let Some(entries) = runtime.control_log_strings.get(&frame) {
-        expected.controls = entries.clone();
-    } else {
-        expected.controls.clear();
-    }
-
     // Both engines have finished the frame here, which is the point the
     // registers are required to agree. Checking only frame 0 left the ledger
     // silent for the whole run, so a slip surfaced later as an unexplained
     // state difference instead of naming the frame it happened on.
-    if let Some(detail) = rng_ledger_divergence(runtime, frame, rng_hold, rng_count) {
-        set_error(error_out, format!("frame {frame}: {detail}"));
-        return false;
-    }
-
-    if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
-        let detail = format!("frame {frame}: {detail}");
+    if let Some(detail) = compare_prepared_frame(runtime, frame, &snapshot, rng_hold, rng_count) {
         set_error(error_out, detail);
         return false;
     }
@@ -5128,6 +5131,28 @@ global func Step(state, frame, random)
         carried.command_target = Some(7);
 
         assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
+    }
+
+    /// Frame 0 is scenario init, which is where a draw-count gap of tens of
+    /// draws opens if it opens at all. The frame-0 path used to check the
+    /// ledger only in its no-controls arm, so any run whose frame 0 logged a
+    /// control skipped the check entirely and the slip surfaced later as an
+    /// unexplained state difference (clonk-org/clonk-rs#1126).
+    #[test]
+    fn frame_zero_checks_the_ledger_even_when_the_frame_carries_controls() {
+        let mut runtime = runtime_with_simple_object();
+        runtime
+            .control_log_strings
+            .insert(0, vec!["JoinPlayer:1".to_string()]);
+        let rng = runtime.engine.debug_rng_clone();
+        let snapshot = runtime.engine.snapshot();
+
+        let detail = compare_prepared_frame(&mut runtime, 0, &snapshot, rng.hold, rng.count + 23)
+            .expect("a differing draw count at frame 0 is a divergence");
+        assert!(
+            detail.contains("RNG ledger") && detail.contains(&(rng.count + 23).to_string()),
+            "the report must name the ledger and both counts: {detail}"
+        );
     }
 
     /// The ledger slip is what explains the state differences that follow it,
