@@ -30,7 +30,7 @@ use crate::{
     Scenario, ScriptControlPolicy, SimulationSnapshot, SurfaceSnapshot, Vector2,
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::TryFrom;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -2101,18 +2101,51 @@ fn comparable_objects(objects: &[ObjectSnapshot]) -> Vec<ObjectSnapshot> {
         .collect()
 }
 
+/// The owner set `RustEngineBridge` derives from the snapshot it just built.
+///
+/// This is not engine state on either side. The bridge unions the owners of
+/// crew objects (`crew_member && owner != NO_OWNER`,
+/// `RustEngineBridge.cpp:1197-1198`), of every crew-selection, crew-role and
+/// HUD entry (`:1411`, `:1423`, `:1429`), and the eliminated owners, then
+/// sorts (`:1441-1446`). The port carries the field for save/load but never
+/// derives it, so deriving both sides is what makes them comparable -- and the
+/// inputs are each compared on their own, so nothing is hidden by doing so.
+fn derived_crew_owners(snapshot: &SimulationSnapshot) -> Vec<i32> {
+    snapshot
+        .objects
+        .iter()
+        .filter(|object| object.crew_member && object.owner != crate::OWNER_NONE)
+        .map(|object| object.owner)
+        .chain(snapshot.crew_selection.keys().copied())
+        .chain(snapshot.crew_roles.keys().copied())
+        .chain(snapshot.hud.players.iter().map(|player| player.owner))
+        .chain(snapshot.eliminated_crew_owners.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// The snapshot as the bridge would have reported it.
+///
+/// Both sides go through this so they answer the same question; anything the
+/// C ABI never carries is dropped here rather than at each comparison.
+fn comparable_snapshot(snapshot: &SimulationSnapshot) -> SimulationSnapshot {
+    let normalised = SimulationSnapshot {
+        objects: comparable_objects(&snapshot.objects),
+        ..snapshot.clone()
+    };
+    SimulationSnapshot {
+        known_crew_owners: derived_crew_owners(&normalised),
+        ..normalised
+    }
+}
+
 fn runtime_snapshot_mismatch(
     expected: &SimulationSnapshot,
     actual: &SimulationSnapshot,
 ) -> Option<String> {
-    let expected = &SimulationSnapshot {
-        objects: comparable_objects(&expected.objects),
-        ..expected.clone()
-    };
-    let actual = &SimulationSnapshot {
-        objects: comparable_objects(&actual.objects),
-        ..actual.clone()
-    };
+    let expected = &comparable_snapshot(expected);
+    let actual = &comparable_snapshot(actual);
     if expected.frame != actual.frame {
         return Some(format!(
             "frame rust {}, cpp {}",
@@ -5262,6 +5295,103 @@ global func Step(state, frame, random)
         removed.id = crate::ObjectId::new(8);
         removed.status = crate::ObjectStatus::Deleted;
         expected.objects.push(removed);
+
+        assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
+    }
+
+    /// `known_crew_owners` is not engine state on either side: the bridge
+    /// *derives* it from the snapshot it just built -- the owners of crew
+    /// objects (`crew_member && owner != NO_OWNER`), of every crew-selection,
+    /// crew-role and HUD entry, plus the eliminated owners
+    /// (`RustEngineBridge.cpp:1197-1198,1411,1423,1429,1441-1446`). The port
+    /// never derives it, so it reports an empty list against C++'s derived one
+    /// and every scenario with a crew stops on frame 1
+    /// (`known crew owners mismatch (rust [], cpp [0])`, observed on `Canyon`
+    /// and `Massif`, clonk-org/clonk-rs#1054).
+    #[test]
+    fn runtime_mismatch_derives_known_crew_owners_the_bridge_computes() {
+        let definition = CString::new("CLNK").unwrap();
+        let action = CString::new("Walk").unwrap();
+        let live = LcEngineObjectSnapshot {
+            id: 12,
+            definition_id: definition.as_ptr(),
+            position_x: 100,
+            position_y: 40,
+            velocity_x: 0,
+            velocity_y: 0,
+            rotation: 0,
+            fixed_position_x: itofix(100).val(),
+            fixed_position_y: itofix(40).val(),
+            fixed_velocity_x: 0,
+            fixed_velocity_y: 0,
+            fixed_rotation: 0,
+            mobile: false,
+            in_liquid: false,
+            object_timer: 0,
+            rotation_velocity: C4Fixed::ZERO.val(),
+            energy: 50000,
+            construction: crate::FULL_CON,
+            damage: 0,
+            magic_energy: 0,
+            magic_capacity: 0,
+            owner: 0,
+            category: crate::DEFAULT_CATEGORY,
+            crew_member: true,
+            alive: true,
+            action_name: action.as_ptr(),
+            action_phase: 0,
+            action_ticks: 0,
+            action_data: 0,
+            direction: 0,
+            command_direction: 0,
+            effects: ptr::null(),
+            effect_count: 0,
+            vertices: ptr::null(),
+            vertex_count: 0,
+            has_container: false,
+            container_id: 0,
+            contents: ptr::null(),
+            contents_len: 0,
+            has_base_graphics: false,
+            base_definition_id: ptr::null(),
+            base_graphics_name: ptr::null(),
+            base_blit_mode: 0,
+            has_draw_transform: false,
+            draw_scale_x: 1.0,
+            draw_scale_y: 1.0,
+            draw_offset_x: 0.0,
+            draw_offset_y: 0.0,
+        };
+        let known = [0i32];
+
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                &live,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                known.as_ptr(),
+                known.len(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(actual.known_crew_owners, vec![0], "baseline lost the owner");
+
+        // What the port produces: the same crew, no derived owner list.
+        let mut expected = actual.clone();
+        expected.known_crew_owners.clear();
 
         assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
     }
