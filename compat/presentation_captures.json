@@ -1,0 +1,94 @@
+{
+  "note": "The screens a compatibility session promises to render like the oracle, and the terms on which a capture pair may be compared. Owned by clonk-org/clonk-rs#587; the presentation promise in profile.json names that issue as pending evidence, and this file is the detail behind it.",
+  "capture": {
+    "resolution": "1280x720",
+    "scale": 100,
+    "note": "One resolution and scale for every screen: a comparison across different geometry proves nothing, and 1280x720 at scale 100 is what docs/RENDERING_PARITY.md's live C++ captures already use."
+  },
+  "tolerance": {
+    "cpu_max_channel_delta": 0,
+    "gpu_max_channel_delta": 1,
+    "note": "The software renderer is the exact oracle, so a CPU capture may not differ at all. GPU composition carries the one-byte cross-driver tolerance docs/RENDERING_PARITY.md already documents for readback."
+  },
+  "screens": [
+    {
+      "id": "startup-main",
+      "area": "startup",
+      "description": "Startup root menu.",
+      "status": "pending"
+    },
+    {
+      "id": "startup-scenario-selection",
+      "area": "startup",
+      "description": "Scenario selection subtree, including the folder listing and the selected-scenario panel.",
+      "status": "pending"
+    },
+    {
+      "id": "startup-network-browser",
+      "area": "startup",
+      "description": "Network game browser.",
+      "status": "pending"
+    },
+    {
+      "id": "startup-player-selection",
+      "area": "startup",
+      "description": "Player selection subtree.",
+      "status": "pending"
+    },
+    {
+      "id": "startup-options",
+      "area": "startup",
+      "description": "Options sheets.",
+      "status": "pending"
+    },
+    {
+      "id": "startup-about",
+      "area": "startup",
+      "description": "About/update subtree.",
+      "status": "pending"
+    },
+    {
+      "id": "network-lobby",
+      "area": "lobby",
+      "description": "Network start/lobby screen with its client and player lists.",
+      "status": "pending"
+    },
+    {
+      "id": "loader",
+      "area": "loader",
+      "description": "Scenario loader screen with its progress bar and process log.",
+      "status": "pending"
+    },
+    {
+      "id": "hud",
+      "area": "hud",
+      "description": "In-game upper board, message board and crew portraits.",
+      "status": "pending"
+    },
+    {
+      "id": "ingame-menu",
+      "area": "menus",
+      "description": "In-game main-menu subtree.",
+      "status": "pending"
+    },
+    {
+      "id": "object-menu",
+      "area": "menus",
+      "description": "Object-menu subtree, including the extra bar and tooltips.",
+      "status": "pending"
+    },
+    {
+      "id": "gameplay",
+      "area": "gameplay",
+      "description": "Representative gameplay frame at a pinned scenario and frame number.",
+      "status": "pending"
+    },
+    {
+      "id": "evaluation",
+      "area": "evaluation",
+      "description": "Round evaluation screen.",
+      "status": "pending"
+    }
+  ],
+  "masks": []
+}

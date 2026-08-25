@@ -157,7 +157,17 @@ Held: `docs/RENDERING_PARITY.md` and the F9 reference-capture pixel-parity
 suites in `crates/clonk-frontend`.
 
 Pending: clonk-org/clonk-rs#587, C++/Rust presentation capture diffs taken with
-the profile active.
+the profile active. `compat/presentation_captures.json` is the detail behind
+that entry: the thirteen screens a comparison has to cover, the single
+resolution and scale every capture is taken at, the tolerances a comparison may
+apply — nothing at all for the software renderer, the documented one byte for
+GPU readback — and the regions a comparison is allowed to ignore. A screen
+counts as captured only once it names a C++ and a Rust capture, and a mask has
+to say which platform artifact it covers and what approved it, so a comparison
+cannot be quietly weakened into one that passes. `crates/clonk-app` reads that
+file rather than a second copy of the list, and its tests fail if a screen is
+dropped, a mask hides pixels without a stated reason, or the software tolerance
+stops being exact.
 
 ### Save and replay
 
