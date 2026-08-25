@@ -825,6 +825,82 @@ public func SeedFull()
         );
     }
 
+    /// With the TeamAccount rule in play, a player without a base of their own
+    /// finds an allied one (clonk-org/clonk-rs#624).
+    ///
+    /// **A deliberate divergence from the oracle, not a port fix.**
+    /// `C4Game::FindBase` matches `Base == iPlayer` exactly, with no team,
+    /// alliance or rule test (C4Game.cpp:3732-3745), and this port matches it
+    /// bit-for-bit whenever the rule is absent — which is every scenario that
+    /// does not ship `TACC`. The relation used when it *is* present is not
+    /// invented either: it is `!Hostile`, the same relation the rule's own
+    /// account object maintains its alliances with
+    /// (Rules.c4d/TeamAccount.c4d/Account.c4d/Script.c:68-93) and the same one
+    /// C++ already applies in `C4Game::FindFriendlyBase` for buying and
+    /// selling (C4Game.cpp:3747-3761).
+    ///
+    /// Own bases still come first, so a player who has one is unaffected; the
+    /// issue asks for the ally only as the lower-priority fallback.
+    #[test]
+    fn the_team_account_rule_falls_back_to_an_allied_base() {
+        let mut engine = crate::Engine::with_seed(0);
+        engine.register_test_player(crate::PlayerConfig::new(0, "Owner"));
+        engine.register_test_player(crate::PlayerConfig::new(1, "Ally"));
+        engine.register_test_player(crate::PlayerConfig::new(2, "Enemy"));
+        engine.register_test_definition(test_definition("HUT2", "Hut", "#strict\n"));
+        engine.register_test_definition(test_definition("TACC", "Team account", "#strict\n"));
+        crate::TestValueExt::test_value(engine.set_hostility(0, 2, true));
+
+        let ally_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT2"));
+        let enemy_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT2"));
+        let ally_index = engine.find_object_index(ally_base).test_value();
+        let enemy_index = engine.find_object_index(enemy_base).test_value();
+        engine.objects[ally_index].state.base = 1;
+        engine.objects[enemy_index].state.base = 2;
+
+        let call = |engine: &crate::Engine, args: Vec<Value>| {
+            with_object_host_context_with_world(engine.host_world_context(), || find_base(&args))
+                .0
+                .test_value()
+        };
+
+        // Without the rule object the lookup is the oracle's: player 0 owns no
+        // base, so nothing matches however friendly player 1 is.
+        assert_eq!(
+            call(&engine, vec![INT_0]),
+            NIL,
+            "the default lookup stays an exact Base == iPlayer match"
+        );
+
+        engine.spawn_test_object(crate::SpawnConfig::new("TACC"));
+        assert_eq!(
+            object_id_from_value(&call(&engine, vec![INT_0])),
+            Some(ally_base),
+            "the rule admits a non-hostile player's base as the fallback"
+        );
+        assert_eq!(
+            call(&engine, vec![INT_0, INT_1]),
+            NIL,
+            "the hostile player's base is never a fallback"
+        );
+
+        // An own base still wins, and the ally follows it rather than
+        // replacing it.
+        let own_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT2"));
+        let own_index = engine.find_object_index(own_base).test_value();
+        engine.objects[own_index].state.base = 0;
+        assert_eq!(
+            object_id_from_value(&call(&engine, vec![INT_0])),
+            Some(own_base),
+            "own bases keep their existing priority and order"
+        );
+        assert_eq!(
+            object_id_from_value(&call(&engine, vec![INT_0, INT_1])),
+            Some(ally_base),
+            "the allied base follows every own base"
+        );
+    }
+
     #[test]
     fn get_base_reads_the_target_objects_stored_base() {
         // FnGetBase returns pObj->Base and falls back to the calling object;

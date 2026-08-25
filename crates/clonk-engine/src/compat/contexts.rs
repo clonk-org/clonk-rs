@@ -3456,6 +3456,7 @@ pub(crate) struct EffectHostContext {
     inactive_order_preview: Option<Vec<ObjectId>>,
     pub(crate) next_mission_commands: Vec<NextMissionCommand>,
     team_home_base_rule: bool,
+    shared_account_bases: bool,
     pub(crate) pending_spawns: Vec<SpawnConfig>,
     pub(crate) pending_objects: HashMap<ObjectId, HostWorldObject>,
     pending_order: Vec<ObjectId>,
@@ -3527,6 +3528,7 @@ impl EffectHostContext {
         publish_spawn_previews: bool,
     ) -> Self {
         let team_home_base_rule = world.team_home_base_rule();
+        let shared_account_bases = world.shared_account_bases();
         let scenario_script_counter = world.scenario_script_counter();
         let sky_adjustment = world.sky_adjustment();
         let teams = world.teams().to_vec();
@@ -3742,6 +3744,7 @@ impl EffectHostContext {
             inactive_order_preview: None,
             next_mission_commands: Vec::new(),
             team_home_base_rule,
+            shared_account_bases,
             pending_spawns: Vec::new(),
             pending_objects: HashMap::new(),
             pending_order: Vec::new(),
@@ -7555,6 +7558,10 @@ impl EffectHostContext {
 
     pub(crate) fn team_home_base_rule(&self) -> bool {
         self.team_home_base_rule
+    }
+
+    pub(crate) fn shared_account_bases(&self) -> bool {
+        self.shared_account_bases
     }
 
     pub(crate) fn object_context_mut(&mut self) -> Option<&mut ObjectScopeContext> {

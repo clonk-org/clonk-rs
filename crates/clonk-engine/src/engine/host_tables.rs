@@ -807,6 +807,7 @@ impl Engine {
             self.next_object_id,
             self.team_home_base_rule,
         )
+        .with_shared_account_bases(self.shared_account_bases)
         .with_player_fow_view_objects(
             self.players
                 .values()
