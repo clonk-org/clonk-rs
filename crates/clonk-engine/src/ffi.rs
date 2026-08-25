@@ -2275,7 +2275,7 @@ fn runtime_snapshot_mismatch(
         }
     }
 
-    if expected.global_effects != actual.global_effects {
+    if comparable_effects(&expected.global_effects) != comparable_effects(&actual.global_effects) {
         problems.push(format!(
             "global effects rust [{}], cpp [{}]",
             describe_effects(&expected.global_effects),
@@ -4953,6 +4953,53 @@ global func Step(state, frame, random)
             detail.contains("cpp []"),
             "the message must show the C++ side was empty: {detail}"
         );
+    }
+
+    /// `LcEngineEffectSnapshot` carries only name/priority/interval/timer, so
+    /// C++ reports every other field as a default and comparing them raw makes
+    /// a divergence out of nothing. The per-object comparison already
+    /// neutralises them; the global one has to agree, or every scenario that
+    /// runs a global effect reports a false positive.
+    #[test]
+    fn runtime_mismatch_ignores_global_effect_state_the_abi_cannot_carry() {
+        let effect_name = CString::new("IntSchedule").unwrap();
+        let effect = LcEngineEffectSnapshot {
+            name: effect_name.as_ptr(),
+            priority: 1,
+            interval: 100,
+            timer: 1,
+        };
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                &effect,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        let mut expected = actual.clone();
+        let carried = &mut expected.global_effects[0];
+        carried.number = 1;
+        carried.start_dispatched = true;
+        carried.command_target = Some(7);
+
+        assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
     }
 
     #[test]
