@@ -7038,6 +7038,7 @@ ByClient=0
                         equal_item_height: false,
                         permanent: false,
                         location: None,
+                        location_reset_generation: 0,
                         runtime_id: 0,
                         extra: crate::ObjectMenuExtra::default(),
                         extra_data: 0,
