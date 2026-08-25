@@ -4895,6 +4895,11 @@ fn quick_save_round_trips_state() {
 
         app.quick_save().test_value();
         main_assert!(app.last_save_path.as_ref().map(|path| path.ends_with(QUICK_SAVE_FILE)).unwrap_or(false), "quick save should note the save path");
+        let save_bytes = fs::read(app.last_save_path.as_ref().unwrap()).test_value();
+        main_assert!(
+            !save_bytes.contains(&b'\n'),
+            "virtual saves use compact JSON to minimize synchronous disk I/O"
+        );
         let thumbnail_path = resolve_save_directory().join("quicksave.png");
         main_assert!(thumbnail_path.exists(), "expected quick save thumbnail to be written");
 

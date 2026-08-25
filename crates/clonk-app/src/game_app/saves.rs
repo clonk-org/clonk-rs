@@ -1020,8 +1020,10 @@ impl GameApp {
                 clonk_network::encode_player_info_list_ini(&source_restore_plan.restore_infos)
                     .context("serialize saved source SavePlayerInfos.txt")?
             });
-        let source_string_table = Some(self.engine.enumerate_live_c4_string_table_for_save());
-        let engine_state = self.engine.capture_state();
+        let (engine_state, source_string_table) = self
+            .engine
+            .capture_state_and_live_c4_string_table_for_save();
+        let source_string_table = Some(source_string_table);
         let stored_label = if preserve_label {
             label.to_string()
         } else if label.trim().is_empty() {
@@ -1063,10 +1065,11 @@ impl GameApp {
             })?;
         }
 
-        let mut file = File::create(&path)
+        let file = File::create(&path)
             .with_context(|| format!("failed to create save file at {}", path.display()))?;
-        serde_json::to_writer_pretty(&mut file, &saved).context("failed to serialise save data")?;
-        file.flush().context("failed to flush save data")?;
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &saved).context("failed to serialise save data")?;
+        writer.flush().context("failed to flush save data")?;
 
         self.write_save_thumbnail(&path)?;
         self.last_save_path = Some(path.clone());
