@@ -1064,6 +1064,34 @@ mod tests {
     }
 
     #[test]
+    fn the_profile_starts_a_fresh_install_at_the_cpp_scale() {
+        // `pres-first-run-scale` (compat/profile.json): C++ starts every
+        // install at Scale=100 (src/C4Config.cpp:480). The profile reverts the
+        // density seeding, so a compatibility install opens the same 800x600
+        // device-pixel window a native one does.
+        //
+        // The effective profile here is exactly the launch override: this path
+        // runs only when the configuration file does not exist, so there is no
+        // persisted `General/CompatProfile` for `resolve_compat_profile` to
+        // read.
+        for factor in [1.0, 1.5, 2.0, 3.0] {
+            let mut compat = DisplayOptions::default();
+            compat.mark_first_run();
+            assert!(
+                !compat.apply_first_run_display_scale(factor, CompatProfile::LegacyClonk),
+                "scale factor {factor} must not be seeded under the profile"
+            );
+            assert_eq!(compat.scale_percent(), 100);
+
+            // The same install, without the profile, still follows the panel.
+            let mut normal = DisplayOptions::default();
+            normal.mark_first_run();
+            normal.apply_first_run_display_scale(factor, CompatProfile::Normal);
+            assert_eq!(normal.scale_percent(), (factor.round() as i32) * 100);
+        }
+    }
+
+    #[test]
     fn first_run_display_scale_follows_the_monitor_density_only_without_a_config() {
         // Deliberate divergence: C++ always starts at Scale=100, so a 2x
         // panel gets an 800x600 *device pixel* window with a 14px font
@@ -1073,7 +1101,7 @@ mod tests {
         // same physical area it did on a 1x display.
         let mut fresh = DisplayOptions::default();
         fresh.mark_first_run();
-        assert!(fresh.apply_first_run_display_scale(2.0));
+        assert!(fresh.apply_first_run_display_scale(2.0, CompatProfile::Normal));
         assert_eq!(fresh.scale_percent(), 200);
         assert_eq!(fresh.base_width, 800, "the logical layout is unchanged");
         assert_eq!(fresh.base_height, 600);
@@ -1081,7 +1109,7 @@ mod tests {
 
         // A configuration that exists on disk is the player's choice.
         let mut configured = DisplayOptions::default();
-        assert!(!configured.apply_first_run_display_scale(2.0));
+        assert!(!configured.apply_first_run_display_scale(2.0, CompatProfile::Normal));
         assert_eq!(configured.scale_percent(), 100);
 
         // Fractional densities round to an integer scale: a non-integer
@@ -1090,7 +1118,7 @@ mod tests {
         for (factor, percent) in [(1.0, 100), (1.25, 100), (1.5, 200), (2.0, 200), (3.0, 300)] {
             let mut options = DisplayOptions::default();
             options.mark_first_run();
-            options.apply_first_run_display_scale(factor);
+            options.apply_first_run_display_scale(factor, CompatProfile::Normal);
             assert_eq!(options.scale_percent(), percent, "scale factor {factor}");
         }
 
@@ -1098,14 +1126,14 @@ mod tests {
         // an unreachable Options-dialog value.
         let mut huge = DisplayOptions::default();
         huge.mark_first_run();
-        huge.apply_first_run_display_scale(9.0);
+        huge.apply_first_run_display_scale(9.0, CompatProfile::Normal);
         assert_eq!(huge.scale_percent(), MAX_GRAPHICS_SCALE_PERCENT);
 
         // Degenerate factors never disturb the default.
         for factor in [0.0, -2.0, f64::NAN, f64::INFINITY] {
             let mut options = DisplayOptions::default();
             options.mark_first_run();
-            assert!(!options.apply_first_run_display_scale(factor));
+            assert!(!options.apply_first_run_display_scale(factor, CompatProfile::Normal));
             assert_eq!(options.scale_percent(), 100);
         }
     }
@@ -1357,8 +1385,22 @@ impl DisplayOptions {
     /// bilinear resample of the native atlas
     /// (`requires_resampling`, crates/clonk-frontend/src/clonk_fonts.rs:102-113).
     ///
+    /// The compatibility profile reverts the seeding
+    /// (`pres-first-run-scale` in compat/profile.json) and leaves the install
+    /// at C++'s `Scale=100`. The profile passed here is the launch override
+    /// alone, which is exact rather than a shortcut: this path runs only when
+    /// the configuration file does not exist, so there is no persisted
+    /// `General/CompatProfile` for `resolve_compat_profile` to prefer.
+    ///
     /// Returns whether the scale was changed.
-    pub fn apply_first_run_display_scale(&mut self, scale_factor: f64) -> bool {
+    pub fn apply_first_run_display_scale(
+        &mut self,
+        scale_factor: f64,
+        profile: CompatProfile,
+    ) -> bool {
+        if profile == CompatProfile::LegacyClonk {
+            return false;
+        }
         if !self.first_run || !scale_factor.is_finite() || scale_factor < 1.0 {
             return false;
         }

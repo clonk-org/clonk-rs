@@ -611,7 +611,7 @@
     {
       "id": "pres-first-run-scale",
       "area": "presentation",
-      "summary": "The first-run application scale is seeded from the monitor's pixel density (rounded, integer); C++ starts every install at Scale=100, which on a 2x panel is an 800x600 device-pixel window with a 14px font.",
+      "summary": "The first-run application scale is seeded from the monitor's pixel density (rounded, integer); C++ starts every install at Scale=100, which on a 2x panel is an 800x600 device-pixel window with a 14px font. The profile reverts the seeding, so a compatibility install opens the window a native one does. The profile consulted there is the launch override alone, which is exact rather than a shortcut: the seeding runs only when no configuration file exists, so no persisted General/CompatProfile can be in play.",
       "cited_in": [
         "crates/clonk-app/src/settings.rs:1208"
       ],

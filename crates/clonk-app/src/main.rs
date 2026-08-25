@@ -781,7 +781,10 @@ fn run() -> Result<()> {
             .or_else(|| event_target.available_monitors().next())
             .map(|monitor| monitor.scale_factor())
         {
-            if display_options.apply_first_run_display_scale(scale_factor) {
+            if display_options.apply_first_run_display_scale(
+                scale_factor,
+                classic.compat_profile.unwrap_or_default(),
+            ) {
                 tracing::info!(
                     scale_factor,
                     scale_percent = display_options.scale_percent(),
