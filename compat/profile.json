@@ -253,19 +253,6 @@
       "owner": "clonk-org/clonk-rs#1094"
     },
     {
-      "id": "sim-containment-cycle-spawn",
-      "area": "simulation",
-      "summary": "A genuine containment cycle at scenario spawn time: C++'s two-phase denumeration keeps the mutual containment; the sequential spawn model breaks one edge and places that object uncontained.",
-      "cited_in": [
-        "crates/clonk-engine/src/scenario/core.rs:4753"
-      ],
-      "cpp_reference": "C4Game spawn denumeration",
-      "disposition": "open-gap",
-      "profile_action": "blocked",
-      "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#1094"
-    },
-    {
       "id": "ctrl-async-default",
       "area": "control",
       "summary": "Network.ControlMode defaults to CNM_Async (2) instead of C++'s CNM_Decentral (0), which C4Config.cpp:540 calls the standard mode and C4GameOptions.cpp:93 labels async experimental. Only the default differs -- the mechanism is a faithful port -- but the value is synchronized, so it decides whether the host bounds its wait for a straggler and drops that client's input for the tick instead of pacing every participant on the slowest peer. The profile reverts it to the C++ default as a non-persistent overlay applied at session construction; the saved key is never rewritten.",
