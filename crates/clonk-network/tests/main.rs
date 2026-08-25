@@ -15,6 +15,7 @@ mod initial_network_dynamic;
 mod initial_network_metadata;
 mod initial_network_parameters;
 mod legacy_control_cpp_diff;
+mod legacy_network_fuzz;
 mod live_network_dynamic;
 mod local_resource_resolution;
 mod network_load_24;
