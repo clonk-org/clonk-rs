@@ -4915,6 +4915,116 @@ mod tests {
     }
 
     #[test]
+    fn the_save_component_set_follows_the_specialization_c4gamesave_selects() {
+        // C4GameSave::SaveRuntimeData writes runtime components only for an
+        // exact save and explicitly deletes the exact-only ones otherwise —
+        // "No Game.txt", PlayerInfos and SavePlayerInfos
+        // (7d43b47b src/C4GameSave.cpp:251-259). Title.txt is the mirror case:
+        // saved "unexact only, because in savegames, the title will be set in
+        // core" (:223-224).
+        let names = |components: &LiveC4SaveComponents| {
+            components
+                .entries()
+                .into_iter()
+                .map(|entry| entry.name.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let (mut engine, _object, _off_list, _index) = save_pointer_fixture();
+        let scenario = engine
+            .serialize_live_c4_save_with_policy(save_spec("Scenario", "S.c4s"), SCENARIO_SAVE)
+            .expect("a scenario save succeeds without a landscape");
+        let scenario_names = names(&scenario);
+
+        assert!(
+            !scenario_names.iter().any(|name| name == "Game.txt"),
+            "a saved scenario carries no exact runtime Game.txt: {scenario_names:?}"
+        );
+        assert!(
+            scenario_names.iter().any(|name| name == "Objects.txt"),
+            "object data is still written; only the exact-only components go: {scenario_names:?}"
+        );
+        assert!(
+            !SCENARIO_SAVE.is_exact() && SCENARIO_SAVE.keeps_title_components(),
+            "the scenario specialization is the unexact one that keeps Title"
+        );
+
+        // Every entry is named once: C4Group's scenario sort is a total order
+        // over the component set, so a duplicate would make the on-disk layout
+        // depend on insertion rather than on the sort list.
+        let mut sorted = scenario_names.clone();
+        sorted.sort();
+        let mut deduped = sorted.clone();
+        deduped.dedup();
+        assert_eq!(
+            sorted, deduped,
+            "a component is named twice: {scenario_names:?}"
+        );
+
+        // The same components, asked for twice, are byte-identical: a save is
+        // compared against a peer's, so an unstable enumeration is a false
+        // mismatch.
+        assert_eq!(names(&scenario), scenario_names);
+    }
+
+    #[test]
+    fn save_player_infos_precedes_the_player_groups_it_names() {
+        // C4GameSave::SaveRuntimeData saves the restore infos *before* the
+        // player files, and says why: "PlayerInfo must be saved first, because
+        // those will generate the storage filenames to be used by C4PlayerList"
+        // (7d43b47b src/C4GameSave.cpp:229-249). The app owns both writes, so
+        // this is the insertion surface that keeps them in that order.
+        let (mut engine, _object, _off_list, _index) = save_pointer_fixture();
+        let components = engine
+            .serialize_live_c4_save_with_policy(save_spec("Scenario", "S.c4s"), SCENARIO_SAVE)
+            .expect("a scenario save succeeds without a landscape");
+
+        let player_group = LiveC4SaveEntry {
+            name: "Alice.c4p",
+            payload: b"player",
+            kind: LiveC4SaveEntryKind::ChildGroup,
+        };
+        let groups = [player_group];
+        let entries = components.entries_with_app_owned(Some(b"[PlayerInfos]"), &groups);
+        let names = entries
+            .iter()
+            .map(|entry| entry.name.to_string())
+            .collect::<Vec<_>>();
+
+        let infos = names
+            .iter()
+            .position(|name| name == "SavePlayerInfos.txt")
+            .expect("the restore infos are present");
+        let player = names
+            .iter()
+            .position(|name| name == "Alice.c4p")
+            .expect("the player group is present");
+        assert!(
+            infos < player,
+            "the infos that generate the player filenames must come first: {names:?}"
+        );
+
+        // With no infos to write, the player groups still append in order.
+        let second = LiveC4SaveEntry {
+            name: "Bob.c4p",
+            payload: b"player",
+            kind: LiveC4SaveEntryKind::ChildGroup,
+        };
+        let both = [player_group, second];
+        let without = components.entries_with_app_owned(None, &both);
+        let names = without
+            .iter()
+            .map(|entry| entry.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(!names.iter().any(|name| name == "SavePlayerInfos.txt"));
+        assert!(
+            names.iter().position(|name| name == "Alice.c4p")
+                < names.iter().position(|name| name == "Bob.c4p"),
+            "app-owned groups keep the order they were handed in: {names:?}"
+        );
+    }
+
+    #[test]
     fn root_live_save_enumerates_cache_words_before_writing_objects_txt() {
         let (mut engine, _object, _off_list, index) = save_pointer_fixture();
 
