@@ -56,7 +56,11 @@ impl LcgRng {
     /// (clonk-org/clonk-rs#1050).
     pub fn seed_from_u64_traced(seed: u64, trace: bool) -> Self {
         let mut rng = Self::new(seed as u32);
-        rng.trace = trace;
+        rng.trace = trace && {
+            let index = next_traced_engine_index();
+            let selector = std::env::var("LC_RUST_RNG_TRACE_ENGINE").ok();
+            traced_engine_selected(index, selector.as_deref())
+        };
         rng.randomize3();
         rng
     }
@@ -163,6 +167,32 @@ impl rand_core::TryRng for LcgRng {
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+/// Whether the `index`-th traced engine in this process should write draws.
+///
+/// The sink is process-global while `RandomCount` is per-engine, so a process
+/// that constructs more than one `Engine` interleaves two streams into one file
+/// with colliding counters. `LC_RUST_RNG_TRACE_ENGINE` picks one of them, which
+/// keeps the `count range value` line format byte-identical to the oracle's and
+/// therefore keeps the two files directly diffable.
+///
+/// Unset, empty or non-numeric selects every engine — today's behaviour, and
+/// the safe reading of a typo: suppressing all output would look like a broken
+/// probe (clonk-org/clonk-rs#1050).
+pub(crate) fn traced_engine_selected(index: u32, selector: Option<&str>) -> bool {
+    selector
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_none_or(|wanted| wanted == index)
+}
+
+/// Ordinal of the next tracing `LcgRng` built in this process, starting at 1.
+fn next_traced_engine_index() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Temp forensics: append draws to LC_RUST_RNG_TRACE (mirrors the C++
 /// C4Random.h probe; alignment by count/range/value).
@@ -359,6 +389,36 @@ mod tests {
             (s >> 16) % range
         };
         assert_eq!(LcgRng::seeded_random(seed, range), expected);
+    }
+
+    #[test]
+    fn the_engine_selector_picks_one_engine_out_of_a_shared_trace_file() {
+        // The trace sink is process-global while RandomCount is per-engine, so
+        // a process that builds more than one Engine interleaves two streams
+        // into one file with colliding counters -- which reads as duplicated
+        // counts and silently breaks any count-keyed diff against the oracle
+        // (clonk-org/clonk-rs#1050).
+        //
+        // Unset keeps today's behaviour: every engine traces.
+        for index in 1..=3 {
+            assert!(traced_engine_selected(index, None));
+            assert!(traced_engine_selected(index, Some("")));
+            assert!(traced_engine_selected(index, Some("  ")));
+        }
+
+        // Set, only that engine writes, so the file is directly comparable to
+        // an oracle trace with no format change.
+        assert!(traced_engine_selected(1, Some("1")));
+        assert!(!traced_engine_selected(2, Some("1")));
+        assert!(traced_engine_selected(2, Some("2")));
+        assert!(traced_engine_selected(2, Some(" 2 ")));
+        assert!(!traced_engine_selected(1, Some("2")));
+
+        // A non-numeric selector must not silently mean "engine 0" and
+        // suppress everything; fall back to tracing all of them.
+        for index in 1..=3 {
+            assert!(traced_engine_selected(index, Some("second")));
+        }
     }
 
     #[test]
