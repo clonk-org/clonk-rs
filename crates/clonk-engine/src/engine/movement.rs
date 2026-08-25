@@ -2045,7 +2045,13 @@ impl Engine {
             }
         }
 
-        if let Some(direction) = exec_set_direction {
+        // DFA_SWIM's out-of-liquid check comes BEFORE the facing assignment
+        // (C4Object.cpp:4966-4983): the free-fall arm is
+        // `ObjectActionWalk(this); return;`, so native leaves the procedure
+        // without ever reaching `if (xdir < 0) SetDir(...)`. Deriving the
+        // facing first and transitioning afterwards gave a fish leaving the
+        // water a facing native never assigns (clonk-org/clonk-rs#1123).
+        if let Some(direction) = exec_set_direction.filter(|_| !swim_walk_transition) {
             self.set_exec_action_direction(idx, &definition_id, direction)?;
         }
 
