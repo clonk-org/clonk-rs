@@ -1260,6 +1260,21 @@ fn optional_fixed_vec(raw_x: i32, raw_y: i32, pixels: Vector2) -> Option<FixedVe
     }
 }
 
+/// Renders an effect list for a divergence message. Shared so the per-object
+/// and global comparisons describe effects the same way.
+fn describe_effects(effects: &[EffectState]) -> String {
+    effects
+        .iter()
+        .map(|effect| {
+            format!(
+                "{}(prio {} int {} t {})",
+                effect.name, effect.priority, effect.interval, effect.timer
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn optional_fixed(raw: i32, pixel: i32) -> Option<C4Fixed> {
     let fixed = C4Fixed::from_raw(raw);
     if fixed == itofix(pixel) {
@@ -2232,23 +2247,11 @@ fn runtime_snapshot_mismatch(
                         .collect()
                 };
                 if normalize(&expected_object.effects) != normalize(&actual_object.effects) {
-                    let describe = |effects: &[EffectState]| -> String {
-                        effects
-                            .iter()
-                            .map(|effect| {
-                                format!(
-                                    "{}(prio {} int {} t {})",
-                                    effect.name, effect.priority, effect.interval, effect.timer
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    };
                     problems.push(format!(
                         "object {} effects rust [{}], cpp [{}]",
                         id,
-                        describe(&expected_object.effects),
-                        describe(&actual_object.effects)
+                        describe_effects(&expected_object.effects),
+                        describe_effects(&actual_object.effects)
                     ));
                 }
                 if expected_object.vertices != actual_object.vertices {
