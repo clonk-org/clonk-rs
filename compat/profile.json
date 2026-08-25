@@ -244,26 +244,26 @@
       "area": "simulation",
       "summary": "A call into an object whose own script is already in flight starts from the pre-call local snapshot; C++ keeps named locals on the C4Object and the nested call would read them live. The overlay_foreign_cells pass replays earlier cross-object LocalN writes onto the snapshot and narrows, but does not close, the gap.",
       "cited_in": [
-        "crates/clonk-engine/src/compat/contexts.rs:5964"
+        "crates/clonk-engine/src/compat/contexts.rs:6098"
       ],
       "cpp_reference": "C4AulExec.cpp:411",
       "disposition": "open-gap",
       "profile_action": "blocked",
       "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#523"
+      "owner": "clonk-org/clonk-rs#1094"
     },
     {
       "id": "sim-script-unwind-args",
       "area": "simulation",
       "summary": "When a script callback errors mid-call, the port unwinds the call with its original argument values; C++ keeps the parameter mutations made before the error, so post-error parameter reads differ.",
       "cited_in": [
-        "crates/clonk-engine/src/lib.rs:6845"
+        "crates/clonk-engine/src/lib.rs:6994"
       ],
       "cpp_reference": "C4AulExec.cpp (fail-safe exec)",
       "disposition": "open-gap",
       "profile_action": "blocked",
       "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#385"
+      "owner": "clonk-org/clonk-rs#1094"
     },
     {
       "id": "sim-reloadparticle-io-failure",
@@ -283,26 +283,26 @@
       "area": "simulation",
       "summary": "A genuine containment cycle at scenario spawn time: C++'s two-phase denumeration keeps the mutual containment; the sequential spawn model breaks one edge and places that object uncontained.",
       "cited_in": [
-        "crates/clonk-engine/src/scenario/core.rs:4668"
+        "crates/clonk-engine/src/scenario/core.rs:4753"
       ],
       "cpp_reference": "C4Game spawn denumeration",
       "disposition": "open-gap",
       "profile_action": "blocked",
       "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#518"
+      "owner": "clonk-org/clonk-rs#1094"
     },
     {
       "id": "sim-reload-graphics-dangling",
       "area": "simulation",
       "summary": "After a definition-graphics reload, a live object that can neither re-resolve its graphic by name nor fall back to its own definition is left holding a dangling name; C++ AssignRemovals the object instead.",
       "cited_in": [
-        "crates/clonk-engine/src/lib.rs:10953"
+        "crates/clonk-engine/src/lib.rs:11118"
       ],
       "cpp_reference": "C4DefGraphics.cpp:355-400",
       "disposition": "open-gap",
       "profile_action": "blocked",
       "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#384"
+      "owner": "clonk-org/clonk-rs#1094"
     },
     {
       "id": "ctrl-async-default",
