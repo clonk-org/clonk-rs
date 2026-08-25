@@ -254,6 +254,36 @@ fn named_blockers(blockers: &[CompatBlocker]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// A stock peer refuses the session before a single script runs, so the
+    /// contract has to say so before anyone hosts.
+    ///
+    /// `System.c4g` is announced as a resource the host never sends -- both
+    /// engines publish it `Loadable=false`, carrying only a `ContentsCRC` --
+    /// so a client that does not already hold an identical group cannot obtain
+    /// one and aborts (`C4Network2Res.cpp:1501-1506`). The port ships files in
+    /// `planet/System.c4g` that stock LegacyClonk does not, which changes that
+    /// CRC. Disabling the appends does not close it: the profile turns the
+    /// scripts off, and the check compares bytes.
+    #[test]
+    fn the_contract_blocks_on_the_system_group_a_stock_peer_would_refuse() {
+        let blocker = blockers()
+            .into_iter()
+            .find(|blocker| blocker.id == "content-system-group-identity")
+            .expect("the contract records the System.c4g identity gap as a blocker");
+
+        assert_eq!(blocker.area, "content");
+        assert!(
+            blocker.reason.contains("System.c4g"),
+            "the blocker names the group a peer compares: {}",
+            blocker.reason
+        );
+        assert!(
+            blocker.recovery.starts_with("clonk-org/clonk-rs#"),
+            "the blocker names what closes it: {}",
+            blocker.recovery
+        );
+    }
+
     #[test]
     fn the_reverted_content_scripts_come_from_the_contract() {
         // The content `#appendto` divergences are the only reason the profile

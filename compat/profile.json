@@ -464,6 +464,20 @@
       "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
     },
     {
+      "id": "content-system-group-identity",
+      "area": "content",
+      "summary": "planet/System.c4g carries port-authored files stock LegacyClonk does not, so the group's ContentsCRC differs. Both engines publish System.c4g as a resource the host never sends, so a peer that lacks an identical group cannot obtain one and aborts the join before any script runs; disabling the appends does not close this, because the check compares the group's bytes rather than what it executes.",
+      "cited_in": [
+        "planet/System.c4g",
+        "crates/clonk-app/src/compat_readiness.rs:262"
+      ],
+      "cpp_reference": "C4Network2Res.cpp:1501-1506",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#1053"
+    },
+    {
       "id": "content-append-bird-flight",
       "area": "content",
       "summary": "planet/System.c4g/BirdFlight.c #appendto BIRD replaces the shipped four-coin-flip-per-tick bird steering with a continuous flight controller (separation plus weak alignment).",

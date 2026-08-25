@@ -134,6 +134,9 @@ connection setup) and clonk-org/clonk-rs#586.
 Bundled content is exactly the pinned content commit, and the eight
 port-authored `planet/System.c4g` `#appendto` scripts are disabled, so
 definitions and scripts behave exactly as the shipped content specifies.
+That is a claim about behaviour and does not by itself make the group
+interchangeable with a stock one: `System.c4g` is compared as bytes by a
+joining peer, which `content-system-group-identity` blocks on.
 Definition version gating prunes content newer than the engine exactly as C++
 does.
 
@@ -293,10 +296,11 @@ no. `cargo xtask compat verify` prints the count it acts on: the pending
 evidence entries and the blocked divergences. While either is non-zero the
 profile must not be presented to a player as compatible.
 
-Seven open gaps currently block it, all determinism-critical:
+Eight open gaps currently block it, all determinism-critical:
 
 | Id | Owner |
 | --- | --- |
+| `content-system-group-identity` — `planet/System.c4g` carries port-authored files stock LegacyClonk does not, so the group's `ContentsCRC` differs and a stock peer aborts the join before any script runs. Disabling the appends does not close it: the check compares the group's bytes, not what it executes. | clonk-org/clonk-rs#1053 |
 | `sim-script-var-negative-slot` — `Var(n)`/`Local(n)` with a negative index: C++ clamps to slot 0 (`C4ValueList::GetItem`), the port's VM addresses a distinct key. | clonk-org/clonk-rs#523 |
 | `sim-script-nested-local-snapshot` — a call into an object whose own script is already in flight starts from the pre-call local snapshot; C++ keeps named locals on the `C4Object` and would read them live. | clonk-org/clonk-rs#523 |
 | `sim-script-unwind-args` — when a script callback errors mid-call the port unwinds with the original argument values; C++ keeps the parameter mutations made before the error. | clonk-org/clonk-rs#385 |
