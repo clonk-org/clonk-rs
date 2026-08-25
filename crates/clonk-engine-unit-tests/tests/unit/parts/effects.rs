@@ -4528,3 +4528,242 @@ func Probe()
              by name, and the EffectVar write survives the call that made it"
     );
 }
+
+// The Magic Invisibility spell has no FxInvisPSpellTimer at all: it adds
+// `AddEffect("InvisPSpell", pCaster, 200, 1400, 0, GetID())` and defines only
+// Start/Stop/Effect/Add (Objects.c4d/Magic.c4d/Invisibility.c4d/Script.c:31-79).
+// Its 40-second expiry is therefore entirely C4Effect::Execute's else arm —
+// "no timer function: mark dead after time elapsed" (C4Effect.cpp:342-357).
+// A killed node stays linked until the live-list walk reaches it
+// (C4Effect.cpp:327-336), so only a nonzero priority means "still running".
+#[test]
+fn a_timed_effect_whose_definition_has_no_timer_dies_when_the_interval_elapses() {
+    let spell_script = r#"#strict
+static fSpellStopped;
+
+public func Cast(object pTarget) {
+  AddEffect("Spell", pTarget, 200, 3, 0, GetID());
+  return(1);
+}
+
+func FxSpellStart(object pTarget, int iNumber) { return(1); }
+
+func FxSpellStop(object pTarget, int iNumber, int iReason, bool fTemp) {
+  if (!fTemp) fSpellStopped = 1;
+  return(1);
+}
+"#;
+    let target_script = r#"#strict
+public func ReadStopped() { return(fSpellStopped); }
+"#;
+    let mut engine = Engine::with_seed(3);
+    engine.register_test_definition(effects_c4_definition("SPEL", "Spell", spell_script));
+    engine.register_test_definition(effects_c4_definition("TRGT", "Target", target_script));
+
+    let caster = engine.spawn_test_object(effects_object_config("SPEL"));
+    let target = engine.spawn_test_object(effects_object_config("TRGT"));
+    call_effects_object(
+        &mut engine,
+        caster,
+        "Cast",
+        vec![Value::Object(target.as_u64())],
+    );
+
+    let live_effects = |engine: &Engine| {
+        engine.objects[engine.test_object_index(target)]
+            .state
+            .effects
+            .iter()
+            .filter(|effect| effect.priority != 0)
+            .count()
+    };
+    unit_assert_eq!(live_effects(&engine) => 1, "the spell is running");
+
+    effects_advance(&mut engine, 2);
+    unit_assert_eq!(
+        live_effects(&engine) => 1,
+        "iTime has not reached the interval yet"
+    );
+
+    effects_advance(&mut engine, 1);
+    unit_assert_eq!(
+        live_effects(&engine) => 0,
+        "the elapsed interval kills an effect that has no Fx*Timer"
+    );
+    unit_assert_eq!(
+        call_effects_object(&mut engine, target, "ReadStopped", Vec::new()) =>
+        Value::Int(1),
+        "Fx*Stop still runs, so the spell can restore what Fx*Start changed"
+    );
+}
+
+// A second cast of the same spell does not stack: FxInvisPSpellEffect returns
+// -2 (C4Fx_Effect_Annul), so C4Effect::Check calls Fx*Add on the live node
+// with the NEW timer (C4Effect.cpp:287-311), and the script re-times it with
+// `ChangeEffect(0, pTarget, iNumber, szNewEffect, iOldTimer + iNewTimer)`
+// where `iOldTimer = GetEffect(...,3) - GetEffect(...,6)` — interval minus
+// elapsed time (C4Script.cpp:5478,5481). A zero landing there would stop the
+// timer firing at all, and the spell would never wear off.
+#[test]
+fn a_recast_effect_that_retimes_itself_through_fx_add_still_expires() {
+    let spell_script = r#"#strict
+static fSpellStopped, iAddedTimer, iSeenInterval, iSeenTime;
+
+public func Cast(object pTarget) {
+  AddEffect("Spell", pTarget, 200, 10, 0, GetID());
+  return(1);
+}
+
+func FxSpellStart(object pTarget, int iNumber) { return(1); }
+
+func FxSpellStop(object pTarget, int iNumber, int iReason, bool fTemp) {
+  if (!fTemp) fSpellStopped = 1;
+  return(1);
+}
+
+func FxSpellEffect(string szNewEffect, object pTarget, int iNumber) {
+  if (SEqual(szNewEffect, "Spell")) return(-2);
+  return();
+}
+
+func FxSpellAdd(object pTarget, int iNumber, string szNewEffect, int iNewTimer) {
+  iSeenInterval = GetEffect(0, pTarget, iNumber, 3);
+  iSeenTime     = GetEffect(0, pTarget, iNumber, 6);
+  iAddedTimer   = iNewTimer;
+  var iOldTimer = iSeenInterval - iSeenTime;
+  ChangeEffect(0, pTarget, iNumber, szNewEffect, iOldTimer + iNewTimer);
+  return(1);
+}
+"#;
+    let target_script = r#"#strict
+public func ReadStopped()  { return(fSpellStopped); }
+public func ReadAdded()    { return(iAddedTimer); }
+public func ReadInterval() { return(iSeenInterval); }
+public func ReadTime()     { return(iSeenTime); }
+"#;
+    let mut engine = Engine::with_seed(3);
+    engine.register_test_definition(effects_c4_definition("SPEL", "Spell", spell_script));
+    engine.register_test_definition(effects_c4_definition("TRGT", "Target", target_script));
+
+    let caster = engine.spawn_test_object(effects_object_config("SPEL"));
+    let target = engine.spawn_test_object(effects_object_config("TRGT"));
+    let cast = |engine: &mut Engine| {
+        call_effects_object(
+            engine,
+            caster,
+            "Cast",
+            vec![Value::Object(target.as_u64())],
+        );
+    };
+    let live_effects = |engine: &Engine| {
+        engine.objects[engine.test_object_index(target)]
+            .state
+            .effects
+            .iter()
+            .filter(|effect| effect.priority != 0)
+            .count()
+    };
+
+    cast(&mut engine);
+    effects_advance(&mut engine, 4);
+    cast(&mut engine);
+
+    unit_assert_eq!(
+        call_effects_object(&mut engine, target, "ReadInterval", Vec::new()) =>
+        Value::Int(10),
+        "GetEffect query 3 is the timer interval"
+    );
+    unit_assert_eq!(
+        call_effects_object(&mut engine, target, "ReadTime", Vec::new()) =>
+        Value::Int(4),
+        "GetEffect query 6 is the elapsed effect time"
+    );
+    unit_assert_eq!(
+        call_effects_object(&mut engine, target, "ReadAdded", Vec::new()) =>
+        Value::Int(10),
+        "Fx*Add receives the NEW effect's timer, not zero (C4Effect.cpp:300)"
+    );
+    unit_assert_eq!(live_effects(&engine) => 1, "the recast extended one node");
+
+    // Re-timed to (10 - 4) + 10 = 16; a zero interval would never fire again.
+    effects_advance(&mut engine, 40);
+    unit_assert_eq!(
+        live_effects(&engine) => 0,
+        "the re-timed effect still expires instead of lasting forever"
+    );
+    unit_assert_eq!(
+        call_effects_object(&mut engine, target, "ReadStopped", Vec::new()) =>
+        Value::Int(1),
+        "Fx*Stop runs, so the spell restores what it changed"
+    );
+}
+
+// The spell restores what it changed entirely through EffectVars: Fx*Start
+// stashes GetVisibility/GetClrModulation in EffectVar 0 and 1 and Fx*Stop
+// reads them back (Invisibility.c4d/Script.c:36-55). Those are persistent
+// C4Values on the effect node, so they have to survive from Start through an
+// expiry many frames later, and the Stop that the expiry triggers has to be
+// able to write the affected object — otherwise the caster stays invisible.
+#[test]
+fn effect_vars_survive_until_the_expiry_stop_writes_the_target_back() {
+    let spell_script = r#"#strict
+
+public func Cast(object pTarget) {
+  AddEffect("Invis", pTarget, 200, 6, 0, GetID());
+  return(1);
+}
+
+func FxInvisStart(object pTarget, int iNumber) {
+  EffectVar(0, pTarget, iNumber) = GetVisibility(pTarget);
+  EffectVar(1, pTarget, iNumber) = GetClrModulation(pTarget);
+  SetVisibility(3, pTarget);
+  SetClrModulation(2139029247, pTarget);
+  return(1);
+}
+
+func FxInvisStop(object pTarget, int iNumber, int iReason, bool fTemp) {
+  if (fTemp) return(1);
+  SetVisibility(   EffectVar(0, pTarget, iNumber), pTarget);
+  SetClrModulation(EffectVar(1, pTarget, iNumber), pTarget);
+  return(1);
+}
+"#;
+    let target_script = r#"#strict
+public func ReadVisibility() { return(GetVisibility()); }
+public func ReadModulation() { return(GetClrModulation()); }
+"#;
+    let mut engine = Engine::with_seed(3);
+    engine.register_test_definition(effects_c4_definition("SPEL", "Spell", spell_script));
+    engine.register_test_definition(effects_c4_definition("TRGT", "Target", target_script));
+
+    let caster = engine.spawn_test_object(effects_object_config("SPEL"));
+    let target = engine.spawn_test_object(effects_object_config("TRGT"));
+    let visibility_before = call_effects_object(&mut engine, target, "ReadVisibility", Vec::new());
+    let modulation_before = call_effects_object(&mut engine, target, "ReadModulation", Vec::new());
+
+    call_effects_object(
+        &mut engine,
+        caster,
+        "Cast",
+        vec![Value::Object(target.as_u64())],
+    );
+    unit_assert_eq!(
+        call_effects_object(&mut engine, target, "ReadVisibility", Vec::new()) =>
+        Value::Int(3),
+        "Fx*Start hid the target"
+    );
+
+    effects_advance(&mut engine, 6);
+
+    unit_assert_eq!(
+        call_effects_object(&mut engine, target, "ReadVisibility", Vec::new()) =>
+        visibility_before,
+        "the expiry Stop read EffectVar 0 back and made the target visible again"
+    );
+    unit_assert_eq!(
+        call_effects_object(&mut engine, target, "ReadModulation", Vec::new()) =>
+        modulation_before,
+        "and EffectVar 1 restored the colour modulation"
+    );
+}
+
