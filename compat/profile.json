@@ -187,11 +187,12 @@
     {
       "id": "sim-game-tick-38fps",
       "area": "simulation",
-      "summary": "The default game tick is 26 ms (integer 1000/38) rather than the 28 ms application timer C4Game::OpenGame installs, so offline play and recordings advance about 7.7% faster in wall time; the state after a fixed frame/control sequence is unchanged.",
+      "summary": "The default game tick is 26 ms (integer 1000/38) rather than the 28 ms application timer C4Game::OpenGame installs, so offline play and recordings advance about 7.7% faster in wall time; the state after a fixed frame/control sequence is unchanged. The profile reverts it to C++'s defaultIngameGameTickDelay as a non-persistent overlay installed at session construction, on both the offline and network-GO seams; no saved key is read or written, and an explicit script SetGameSpeed still overrides the result exactly as it does natively.",
       "cited_in": [
-        "crates/clonk-engine/src/lib.rs:418"
+        "crates/clonk-engine/src/lib.rs:418",
+        "crates/clonk-app/src/settings.rs"
       ],
-      "cpp_reference": "C4Game.cpp:443",
+      "cpp_reference": "C4Game.cpp:63,443",
       "disposition": "accepted",
       "profile_action": "reverted",
       "determinism_critical": false,

@@ -167,6 +167,32 @@ pub fn session_shared_account_bases(profile: CompatProfile) -> bool {
     }
 }
 
+/// C++'s in-game application timer: `defaultIngameGameTickDelay`, the literal
+/// 28 ms `C4Game::OpenGame` installs once the startup graphics are freed
+/// (`C4Game.cpp:63,443`).
+pub const CPP_INGAME_GAME_TICK_DELAY_MS: u64 = 28;
+
+/// Resolve the simulation tick cadence for a session that is about to start.
+///
+/// The port ships the parameterless `SetGameSpeed` cadence — integer
+/// `1000 / 38 = 26` ms — because a 28 ms timer caps out at 35.714 updates per
+/// wall-clock second and cannot hold Hazard at 38. That is an approved
+/// divergence, and it is presentation-only: the cadence never enters savegames,
+/// synchronized controls or snapshots, so a fixed frame/control sequence still
+/// produces identical state.
+///
+/// Under the compatibility profile a session runs at C++'s 28 ms anyway, so a
+/// recording made here advances in the same wall time as one made natively.
+/// Like every other overlay in this module it is resolved at session
+/// construction and never written back, leaving an explicit `SetGameSpeed` from
+/// script free to retune the timer exactly as it does natively.
+pub fn session_game_tick_delay_ms(profile: CompatProfile) -> u64 {
+    match profile {
+        CompatProfile::LegacyClonk => CPP_INGAME_GAME_TICK_DELAY_MS,
+        CompatProfile::Normal => clonk_engine::DEFAULT_GAME_TICK_DELAY_MS,
+    }
+}
+
 /// C++'s `Network.MaxLoadFileSize` default (`C4Config.cpp:543`).
 pub const CPP_MAX_LOAD_FILE_SIZE: u32 = 100 * 1024 * 1024;
 
