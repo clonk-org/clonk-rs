@@ -13562,6 +13562,10 @@ mod reload_graphics_own_definition_regression;
 mod shapeless_object_build_top_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/breathing_border_vehicle_regression.rs"]
+mod breathing_border_vehicle_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/include_local_order_regression.rs"]
 mod include_local_order_regression;
 
