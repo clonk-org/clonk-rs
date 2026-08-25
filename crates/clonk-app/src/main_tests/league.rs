@@ -5475,6 +5475,68 @@ fn compat_profile_overlays_the_cpp_control_mode_without_touching_the_saved_key()
 }
 
 #[test]
+fn the_control_mode_is_resolved_once_so_no_late_edit_reaches_a_running_session() {
+    use std::path::Path;
+
+    // `ControlMode` is synchronized, and C++ fixes it when the session is
+    // constructed: `C4GameParameters::Init` reads it before the round starts
+    // and nothing re-reads `Config` afterwards. The port matches that by
+    // resolving `session_control_mode` exactly once, into the session's
+    // `NetworkStatus.control_mode` -- a plain `i32`, not a live view of
+    // `Config` -- so editing the saved key mid-round has no path to a session
+    // already running.
+    //
+    // The client half is guaranteed by the crate boundary rather than by this
+    // test: `session_control_mode` lives in `clonk-app`, while every
+    // client-side consumer in `clonk-network` takes `control_mode: i32` as a
+    // parameter and adopts the host's received value.
+    //
+    // What this pins is the part a refactor could quietly break: a *second*
+    // resolution point. One added on a mid-round path would let a late edit
+    // move a live session between control modes, which is a desync rather
+    // than a preference.
+    let app_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut call_sites = Vec::new();
+    let mut pending = vec![app_src.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).test_value() {
+            let path = entry.test_value().path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            // The tests in this file name the function; only production
+            // resolution points are the hazard.
+            if path.components().any(|component| {
+                component.as_os_str() == "main_tests" || component.as_os_str() == "main_tests.rs"
+            }) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).test_value();
+            for line in text.lines() {
+                if line.contains("session_control_mode(") && !line.trim_start().starts_with("//") {
+                    call_sites.push(format!("{}: {}", path.display(), line.trim()));
+                }
+            }
+        }
+    }
+
+    // One definition plus one call, and the call is session construction.
+    let calls: Vec<&String> = call_sites
+        .iter()
+        .filter(|site| !site.contains("pub fn session_control_mode"))
+        .collect();
+    main_assert_eq!(calls.len() => 1);
+    assert!(
+        calls[0].contains("resources.rs"),
+        "the single resolution point must be session construction: {calls:?}"
+    );
+}
+
+#[test]
 fn a_normal_round_publishes_the_cpp_fair_crew_strength_of_zero() {
     use crate::settings::session_fair_crew_strength;
 
