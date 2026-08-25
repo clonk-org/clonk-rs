@@ -848,7 +848,7 @@ mod tests {
     fn an_open_gap_may_not_be_part_of_the_promise() {
         let tampered = tampered(|value| {
             for divergence in value["divergences"].as_array_mut().unwrap() {
-                if divergence["id"] == "sim-script-var-negative-slot" {
+                if divergence["id"] == "sim-findobject-layer-bbox" {
                     divergence["profile_action"] = "kept".into();
                 }
             }
@@ -857,7 +857,7 @@ mod tests {
         assert!(
             issues
                 .iter()
-                .any(|issue| issue.contains("sim-script-var-negative-slot")
+                .any(|issue| issue.contains("sim-findobject-layer-bbox")
                     && issue.contains("must be `blocked`")),
             "an open-gap divergence marked `kept` must fail, got: {issues:?}"
         );
@@ -920,8 +920,8 @@ mod tests {
     fn owners_must_cite_issues_qualified() {
         let tampered = tampered(|value| {
             for divergence in value["divergences"].as_array_mut().unwrap() {
-                if divergence["id"] == "sim-script-var-negative-slot" {
-                    divergence["owner"] = "#523".into();
+                if divergence["id"] == "sim-findobject-layer-bbox" {
+                    divergence["owner"] = "#384".into();
                 }
             }
         });
