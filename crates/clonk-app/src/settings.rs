@@ -150,6 +150,29 @@ pub fn session_control_mode(profile: CompatProfile, configured: i32) -> i32 {
     }
 }
 
+/// Resolve the synchronized `FairCrewStrength` parameter for a new session.
+///
+/// The parameter's own default is 0 (`C4GameParameters.cpp:562`), and C++
+/// substitutes the configured strength only once fair crew is actually on:
+///
+/// ```text
+/// if (!FairCrewStrength && UseFairCrew)
+///     FairCrewStrength = Config.General.FairCrewStrength;
+/// ```
+///
+/// (`C4GameParameters.cpp:439-440`). It is **synchronized** — compiled into
+/// Parameters and published to every peer — so filling it unconditionally
+/// advertises a strength stock C++ never sends for an ordinary round. Unlike
+/// the control-mode overlay this is not profile-dependent: C++ behaves this
+/// way always, so the port should too.
+pub fn session_fair_crew_strength(fair_crew: bool, configured: i32) -> i32 {
+    if fair_crew {
+        configured
+    } else {
+        0
+    }
+}
+
 /// Resolve whether the TeamAccount rule may widen base lookup to allied bases.
 ///
 /// A **non-persistent overlay**, like the control-mode one above. `FindBase`
