@@ -24,6 +24,7 @@ clonk-resources = { path = "../crates/clonk-resources" }
 clonk-audio = { path = "../crates/clonk-audio" }
 clonk-script = { path = "../crates/clonk-script" }
 clonk-update = { path = "../crates/clonk-update" }
+clonk-network = { path = "../crates/clonk-network" }
 
 [[bin]]
 name = "resource_text"
@@ -70,6 +71,13 @@ bench = false
 [[bin]]
 name = "group_archive"
 path = "fuzz_targets/group_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "legacy_network"
+path = "fuzz_targets/legacy_network.rs"
 test = false
 doc = false
 bench = false
