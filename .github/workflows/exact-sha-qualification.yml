@@ -470,32 +470,10 @@ jobs:
             scope: --workspace
           - name: Windows
             runner: windows-latest
-            # `freetype-rs` is taken with `features = ["bundled"]`, which
-            # compiles vendored libpng and needs `zlib.h`. That has never built
-            # under native MSVC here — the shipped Windows binaries are
-            # cross-built with mingw — so the three crates that depend on it
-            # fail before clippy sees a single lint:
-            #
-            #   freetype-sys .. libpng\pngstruct.h: fatal error C1083:
-            #   Cannot open include file: 'zlib.h'
-            #
-            # Linting the rest is worth far more than linting nothing, which is
-            # what this row did in practice. clonk-org/clonk-rs#737 tracks
-            # making the bundled build work natively so the exclusions can go.
-            # The excluded set is the transitive closure, not just the three
-            # crates that name `freetype-rs` in their own manifest: excluding
-            # only those still built them through `clonk-app-render` and the
-            # other `clonk-app-*` crates, and the row failed again identically.
-            # Recompute with `cargo metadata` if a dependency edge moves.
-            scope: >-
-              --workspace
-              --exclude clonk-app
-              --exclude clonk-app-core
-              --exclude clonk-app-menus
-              --exclude clonk-app-netplay
-              --exclude clonk-app-render
-              --exclude clonk-frontend
-              --exclude clonk-frontend-unit-tests
+            # Everything builds natively here too, once the vendored libpng
+            # inside `freetype-rs`'s `bundled` feature is told where zlib's
+            # headers are — see the step below (clonk-org/clonk-rs#737).
+            scope: --workspace
     concurrency:
       group: "main-platform-lint-${{ matrix.name }}-${{ inputs.concurrency-suffix }}"
       cancel-in-progress: true
@@ -518,6 +496,31 @@ jobs:
         with:
           workspaces: . -> target
           shared-key: platform-lints-${{ matrix.name }}
+
+      # `freetype-rs` is taken with `features = ["bundled"]`, which compiles
+      # vendored libpng, and that libpng needs `zlib.h`. Its build passes
+      # `-I libz-sys/src/zlib` without that path being populated, so under
+      # native MSVC it fails before clippy sees a single lint:
+      #
+      #   freetype-sys .. libpng\pngstruct.h: fatal error C1083:
+      #   Cannot open include file: 'zlib.h'
+      #
+      # Hand it the headers `libz-sys` already vendors. This is the same three
+      # lines `rust.yml` uses to build the shipped `clonk-app` natively on this
+      # runner, so the shape is already proven here rather than inferred from
+      # the mingw cross-build. The path carries a registry hash and the exact
+      # `libz-sys` version, so it has to be globbed after `cargo fetch` rather
+      # than written into `.cargo/config.toml`.
+      - name: Point the vendored libpng at zlib's headers
+        if: matrix.name == 'Windows'
+        run: |
+          cargo fetch --locked
+          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
+          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
+            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
+            exit 1
+          fi
+          echo "CFLAGS_x86_64_pc_windows_msvc=-I$zlib_dir" >> "$GITHUB_ENV"
 
       # No `--tests`, and so no `content/` checkout: the `include_bytes!` sites
       # that need the submodule are all inside `#[test]` bodies, and keeping

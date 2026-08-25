@@ -1,0 +1,52 @@
+# TEMPORARY — delete before this pull request lands.
+#
+# `Platform lints / Windows` lives in `exact-sha-qualification.yml`, which
+# ordinary queue entries skip, so a change to that row cannot be exercised by
+# opening a pull request. clonk-org/clonk-rs#728 went green exactly that way
+# and the first release afterwards paid for it by being evicted.
+#
+# This runs the same command, on the same runner, with the same fix, on this
+# pull request — so clonk-org/clonk-rs#737 is verified on real Windows before
+# it is landed rather than after.
+name: Verify 737 Windows lint
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/verify-737-windows-lint.yml"
+      - ".github/workflows/exact-sha-qualification.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-lint:
+    name: Windows workspace lint
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: clippy
+
+      - name: Point the vendored libpng at zlib's headers
+        run: |
+          cargo fetch --locked
+          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
+          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
+            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
+            exit 1
+          fi
+          echo "CFLAGS_x86_64_pc_windows_msvc=-I$zlib_dir" >> "$GITHUB_ENV"
+
+      # The whole point: `--workspace` with no exclusions, which is the state
+      # clonk-org/clonk-rs#737 asks for.
+      - name: Lint this platform's own code paths
+        run: cargo clippy --workspace --lib --bins --locked -- -D warnings
