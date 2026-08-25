@@ -9,18 +9,35 @@ versioned next to the implementation instead of living only in a C++ checkout �
 
 This is Phase 2 of the parity harness, clonk-org/clonk-rs#585.
 
+## Building the artifacts
+
+```sh
+cargo xtask ffi --profile debug     # or --release
+```
+
+That emits `target/<profile>/libclonk_engine.a` and the matching dynamic
+library — the exact paths `CMakeLists.txt:97-107` imports and
+`:404-406` links for `USE_RUST_ENGINE_VALIDATION`. The oracle runs the same
+command itself (`CMakeLists.txt:138-143`).
+
+The crate types are emitted by that command rather than declared in
+`clonk-engine`'s manifest, as the pinned tree did it: a `crate-type` entry
+would make every ordinary build pay the staticlib archive and the cdylib link.
+
 ## What is and is not wired
 
-The Rust side of the ABI is present and compiles. The loop is **not** wired yet:
+The Rust side of the ABI is present, compiles, and exports all 32
+`lc_engine_*` symbols the header declares. The loop is **not** wired yet:
 
-- The oracle links `rust/target/<profile>/liblc_core.a`
-  (`CMakeLists.txt:71-76`), an aggregating `staticlib`/`cdylib` target that
-  re-exports every `ffi` module — engine, audio, config, gui, platform,
-  resources, script. That target was never committed at the pin either; it was
-  part of the "diagnostic-only bridge/ABI patch" `../README.md` credits for the
-  historical Gold Rush run. Only `clonk-engine`'s surface is restored here.
 - Nothing rebuilds the oracle with `-DUSE_RUST_ENGINE_VALIDATION` against this
-  tree, so no gate exercises it.
+  tree, so no gate exercises it and none of the four scenario classes #585 asks
+  for run. That rebuild is the step that actually validates the ported
+  comparison semantics.
+- The other bridges (`USE_RUST_CONFIG`, `USE_RUST_GROUP_VALIDATION`,
+  `USE_RUST_GUI_VALIDATION`, `USE_RUST_PLATFORM_PATHS`) link their own
+  `lc_*` libraries and need the `ffi` modules of the other crates, which are
+  not restored. They are off by default, so engine validation does not wait on
+  them.
 
 Until both exist, `parity verify` remains the primitive-section differential and
 this ABI is inert. Do not read its presence as evidence of full-scenario parity;
