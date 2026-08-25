@@ -9578,6 +9578,65 @@ fn runtime_player_refreshes_inactive_client_even_when_eliminated() {
 }
 
 #[test]
+fn a_host_still_loading_a_savegame_does_not_deactivate_its_waiting_clients() {
+    // C4Application::GameTick gates C4Game::Execute -- and with it the
+    // per-frame Network.Execute seam that runs DeactivateInactiveClients --
+    // on Game.IsRunning, which C4Game::Init assigns only after
+    // Network.FinalInit has acknowledged the GO status and
+    // C4Network2Players::OnStatusGoReached has issued the pending player
+    // joins. A savegame resumes at its stored FrameCounter, so an activated
+    // client whose iLastActivity is still 0 is already past
+    // C4NetDeactivationDelay the moment the save loads; native never scans
+    // there (src/C4Application.cpp:455; src/C4Game.cpp:462,512;
+    // src/C4Network2.cpp:690,700,2148-2159).
+    let mut app = new_running_sandbox_app();
+    for _ in 0..501 {
+        app.engine.test_tick();
+    }
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.network_control_running = false;
+    app.control_clients.register(3, true, false);
+    app.mode = AppMode::Loading;
+
+    app.test_update();
+
+    main_assert!(commands.take_submitted_client_updates().is_empty());
+    main_assert!(app.control_clients.is_activated(3));
+}
+
+#[test]
+fn reaching_go_on_a_savegame_frame_does_not_backdate_a_client_into_inactivity() {
+    // DeactivateInactiveClients ages a client by the frames since it last
+    // held a player, a heuristic that assumes FrameCounter advances with
+    // play. A savegame resumes at its stored FrameCounter, so a client
+    // activated in the lobby at frame 0 is already past
+    // C4NetDeactivationDelay before a single frame has been simulated.
+    // Native never observes that gap because a fresh scenario reaches
+    // OnStatusGoReached with FrameCounter still 0, which is why the stamp
+    // has to follow the frame the game actually starts running at
+    // (src/C4Network2.cpp:2103-2112,2148-2159;
+    // src/C4Network2Client.cpp:648-654).
+    let mut app = new_running_sandbox_app();
+    for _ in 0..600 {
+        app.engine.test_tick();
+    }
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.control_clients.register(3, true, false);
+    app.network_client_activity.mark_activated(3, 0);
+
+    app.handle_status_committed(n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 1, 600))
+        .test_value();
+    app.test_update();
+
+    main_assert!(commands.take_submitted_client_updates().is_empty());
+    main_assert!(app.control_clients.is_activated(3));
+}
+
+#[test]
 fn control_rate_two_client_executes_scheduled_activation_at_the_control_tick() {
     // PID_ExecSyncCtrl carries Game.Control.ControlTick, not
     // Game.FrameCounter. At ControlRate 2 the client must retain a sync

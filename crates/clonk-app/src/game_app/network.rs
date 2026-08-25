@@ -8079,6 +8079,18 @@ impl GameApp {
         if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
             return;
         }
+        // C4Application::GameTick reaches C4Game::Execute -- and with it the
+        // per-frame Network.Execute seam -- only while Game.IsRunning, which
+        // C4Game::Init assigns after Network.FinalInit has acknowledged the
+        // GO status. The OnSec1Timer seam has no such guard, but it ages
+        // clients against a Game.FrameCounter that a savegame has already
+        // restored to its stored value, so a client activated back in the
+        // lobby reads as C4NetDeactivationDelay frames idle before a single
+        // frame has been simulated (src/C4Application.cpp:455;
+        // src/C4Game.cpp:462,512,1945; src/C4Network2.cpp:276,674-700).
+        if self.mode != AppMode::Running {
+            return;
+        }
         let Some(local_client_id) = self
             .network
             .as_ref()

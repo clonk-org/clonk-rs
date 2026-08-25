@@ -4899,6 +4899,21 @@ impl GameApp {
         }
         if status.state == clonk_network::NETWORK_STATE_GO {
             self.host_reference_paused = false;
+            // UpdateClientActivity ages a client by the frames since it last
+            // held a player, which presumes FrameCounter advances with play.
+            // A savegame resumes at its stored FrameCounter, so a client
+            // activated back in the lobby would arrive here already past
+            // C4NetDeactivationDelay without a single frame having been
+            // simulated. Native never meets that gap because a fresh
+            // scenario reaches OnStatusGoReached with FrameCounter still 0,
+            // so the stamp follows the frame play actually begins at
+            // (src/C4Network2.cpp:2103-2112,2148-2159;
+            // src/C4Network2Client.cpp:648-654).
+            let go_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+            for client_id in self.control_clients.activated_client_ids() {
+                self.network_client_activity
+                    .mark_activated(client_id, go_frame);
+            }
             if matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
                 for client_id in self.control_clients.activated_client_ids() {
                     self.issue_unjoined_joins_for_client(client_id);
