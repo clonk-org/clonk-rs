@@ -375,14 +375,8 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
     let actor_snapshot = engine.test_object_snapshot(actor);
     unit_assert_eq!(actor_snapshot.action.name => "Walk");
     unit_assert_eq!(engine.objects[actor_idx].state.no_collect_delay => 1);
-    unit_assert!(
-        actor_snapshot.command_stack.command_names().is_empty(),
-        "truthy inside control consumes Exit after SetCommand clears the stack"
-    );
-    unit_assert!(
-        !actor_snapshot.local_vars.contains_key("own_control_calls"),
-        "native fControl=false skips the actor's own ControlCommand"
-    );
+    unit_assert!(actor_snapshot.command_stack.command_names().is_empty(), "truthy inside control consumes Exit after SetCommand clears the stack");
+    unit_assert!(!actor_snapshot.local_vars.contains_key("own_control_calls"), "native fControl=false skips the actor's own ControlCommand");
 
     let container_idx = engine.test_object_index(container);
     let container_state = &engine.objects[container_idx].state;
@@ -978,13 +972,7 @@ fn pxs_wind_drift_dies_in_tunnel_background() {
         }
         engine.set_landscape(landscape);
         engine.set_environment(EnvironmentSettings::new(80));
-        unit_assert!(engine.create_pxs(
-            dust,
-            math::itofix(2),
-            math::itofix(5),
-            math::C4Fixed::ZERO,
-            math::C4Fixed::ZERO,
-        ));
+        unit_assert!(engine.create_pxs(dust, math::itofix(2), math::itofix(5), math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
         engine
     };
 
@@ -1044,20 +1032,12 @@ fn pxs_wind_drift_uses_the_grid_ift_bit() {
         landscape.set_pixel_grid(grid);
         engine.set_landscape(landscape);
         engine.set_environment(EnvironmentSettings::new(80));
-        unit_assert!(engine.create_pxs(
-            dust,
-            math::itofix(2),
-            math::itofix(5),
-            math::C4Fixed::ZERO,
-            math::C4Fixed::ZERO,
-        ));
+        unit_assert!(engine.create_pxs(dust, math::itofix(2), math::itofix(5), math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
         engine
     };
 
     let mut ift_engine = build_engine(true);
-    unit_assert!(ift_engine
-        .landscape()
-        .is_some_and(|landscape| landscape.is_ift_at(2, 5)));
+    unit_assert!(ift_engine.landscape().is_some_and(|landscape| landscape.is_ift_at(2, 5)));
     let mut mirror = ift_engine.rng.clone();
     let r1 = mirror.random(1200);
     let _ = mirror.random(1200);
@@ -1069,9 +1049,7 @@ fn pxs_wind_drift_uses_the_grid_ift_bit() {
     unit_assert_eq!(ift_engine.rng => mirror, "jitter draws remain unconditional");
 
     let mut open_engine = build_engine(false);
-    unit_assert!(open_engine
-        .landscape()
-        .is_some_and(|landscape| !landscape.is_ift_at(2, 5)));
+    unit_assert!(open_engine.landscape().is_some_and(|landscape| !landscape.is_ift_at(2, 5)));
     open_engine.tick_pxs();
     let open_pixel: Vec<pxs::Pxs> = open_engine.pxs_system.iter().copied().collect();
     unit_assert_eq!(open_pixel.len() => 1);
@@ -1335,12 +1313,7 @@ fn fight_no_attach_credits_opponent_controller_through_fall_death() {
         .action_library()
         .clone();
 
-    unit_assert!(
-        engine
-            .exec_object_movement(fighter_idx, &actions, &definition_id, &[])
-            .expect("ledge movement succeeds")
-            .alive
-    );
+    unit_assert!(engine.exec_object_movement(fighter_idx, &actions, &definition_id, &[]).expect("ledge movement succeeds").alive);
     let fighter_idx = engine.test_object_index(fighter);
     unit_assert_eq!(engine.objects[fighter_idx].state.action.name => "Jump");
     unit_assert_eq!(engine.objects[fighter_idx].last_energy_loss_cause => 9, "NoAttachAction uses the fight target's Controller, not Owner");
@@ -1404,12 +1377,7 @@ fn push_no_attach_calls_grab_lost_before_jump_and_restores_push_to() {
         .action_library()
         .clone();
 
-    unit_assert!(
-        engine
-            .exec_object_movement(pusher_idx, &actions, &definition_id, &[])
-            .expect("ledge movement succeeds")
-            .alive
-    );
+    unit_assert!(engine.exec_object_movement(pusher_idx, &actions, &definition_id, &[]).expect("ledge movement succeeds").alive);
 
     let pusher = engine.test_object_snapshot(pusher_id);
     unit_assert_eq!(pusher.position => Vector2::new(6, 5));
@@ -1430,9 +1398,7 @@ fn push_got_hold_loss_clears_delay_and_approach_above_push_to() {
         grab_lost_push_fixture(Vector2::new(100, 5), Vector2::new(8, 5));
     let pusher_idx = engine.test_object_index(pusher_id);
 
-    unit_assert!(engine
-        .apply_physics_at_index(pusher_idx)
-        .expect("out-of-range push resolves"));
+    unit_assert!(engine.apply_physics_at_index(pusher_idx).expect("out-of-range push resolves"));
 
     let pusher = engine.test_object_snapshot(pusher_id);
     unit_assert_eq!(pusher.action.name => "Walk");
@@ -1513,13 +1479,7 @@ fn command_enter_push_target_replaces_vehicle_stack_without_controller_transfer(
     engine.tick_without_snapshot().test_value();
 
     let actor = engine.test_object_snapshot(actor_id);
-    unit_assert!(
-        !actor
-            .command_stack
-            .command_names()
-            .contains(&"Enter".to_string()),
-        "actor Enter completes"
-    );
+    unit_assert!(!actor.command_stack.command_names().contains(&"Enter".to_string()), "actor Enter completes");
     let vehicle = engine.test_object_snapshot(vehicle_id);
     let commands = vehicle.command_stack.command_views();
     unit_assert_eq!(commands.len() => 1, "SetCommand replaces the old Wait");
@@ -1737,10 +1697,7 @@ fn push_tick35_stuck_check_honors_stop_and_horizontal_fix() {
             .unwrap_or_else(|error| panic!("{label} push failed: {error}"));
         unit_assert_eq!(engine.objects[vehicle_idx].frame_t_contact => CNAT_LEFT, "{label}: skipped ContactCheck leaves t_contact untouched");
         unit_assert_eq!(engine.objects[vehicle_idx].state.local_vars.get("stuck_calls") => None, "{label}: Stuck is not called");
-        unit_assert!(
-            engine.snapshot().hud.messages.is_empty(),
-            "{label}: no stuck message"
-        );
+        unit_assert!(engine.snapshot().hud.messages.is_empty(), "{label}: no stuck message");
     }
 }
 
@@ -2141,10 +2098,7 @@ fn train_physical_requires_info_or_temporary_physicals() {
 
     let sheep_id = engine.spawn_test_object(SpawnConfig::new("Sheep"));
     let sheep_idx = engine.test_object_index(sheep_id);
-    unit_assert!(
-        !engine.train_physical(sheep_idx, "Fight", 1, C4_MAX_PHYSICAL),
-        "non-crew object without temporary physicals trains nothing"
-    );
+    unit_assert!(!engine.train_physical(sheep_idx, "Fight", 1, C4_MAX_PHYSICAL), "non-crew object without temporary physicals trains nothing");
     unit_assert_eq!(engine.objects[sheep_idx].state.info_physical => None);
     unit_assert_eq!(engine.objects[sheep_idx].state.temporary_physical => None);
 
@@ -2470,17 +2424,17 @@ fn fair_crew_projection_is_cached_per_definition_until_synchronize() {
     unit_assert_eq!(engine.rng => expected_rng, "the lazy refill invokes exactly 21 ordered Random hooks");
     unit_assert_eq!(engine.player(0).expect("cache owner remains live").wealth() => 1_234, "a mutable host call inside the definition-only hook persists");
     unit_assert_eq!(
-        engine
-            .call_object_function(first_index, "ProbeState", Vec::new())
-            .expect("definition-only hook probe state reads") =>
-        Value::Array(vec![
-            Value::Int(OWNER_NONE),
-            Value::Int(55_000),
-            Value::Array(vec![Value::C4Id("FCCH".to_string()), Value::Int(55_000)]),
-            Value::C4Id("OTHR".to_string()),
-        ]),
-        "the definition hook has no implicit object, while nested object and other-definition frames restore their own GetID/GetPhysical context"
-    );
+            engine
+                .call_object_function(first_index, "ProbeState", Vec::new())
+                .expect("definition-only hook probe state reads") =>
+            Value::Array(vec![
+                Value::Int(OWNER_NONE),
+                Value::Int(55_000),
+                Value::Array(vec![Value::C4Id("FCCH".to_string()), Value::Int(55_000)]),
+                Value::C4Id("OTHR".to_string()),
+            ]),
+            "the definition hook has no implicit object, while nested object and other-definition frames restore their own GetID/GetPhysical context"
+        );
     unit_assert_eq!(engine.object_physical(first_index) => expected);
     let rng_after_refill = engine.rng.clone();
     unit_assert_eq!(engine.object_physical(second_index) => expected);
@@ -2722,9 +2676,7 @@ fn fire_effect_executes_once_per_tick() {
     // C++ has no OnFire without the fire effect: ignition goes through
     // C4Object::Incinerate, which creates the timer-driven entry
     // (C4Object.cpp:1257-1266).
-    unit_assert!(engine
-        .incinerate_object(idx, -1, false, None)
-        .expect("incinerates"));
+    unit_assert!(engine.incinerate_object(idx, -1, false, None).expect("incinerates"));
     engine.objects[idx].state.fire_phase = 0;
     engine.tick_without_snapshot().test_value();
     unit_assert_eq!(engine.objects[idx].state.fire_phase => 1, "ExecFire once per frame");
@@ -2845,10 +2797,7 @@ fn exec_life_vehicle_material_is_breathable_like_cpp() {
     let id = spawn_fixture!(engine, "Crew", with_alive: true, with_position: Vector2::new(2, 26), with_vertices: vertices, with_energy: 50_000);
     let idx = engine.test_object_index(id);
     unit_assert_eq!(engine.landscape.as_ref().and_then(|landscape| landscape.material_at(2, 22)) => Some(vehicle));
-    unit_assert!(engine
-        .landscape
-        .as_ref()
-        .is_some_and(|landscape| landscape.is_solid_at(2, 22)));
+    unit_assert!(engine.landscape.as_ref().is_some_and(|landscape| landscape.is_solid_at(2, 22)));
     unit_assert_eq!(engine.objects[idx].current_shape_rect() => Some(DefinitionRect::new(-4, -8, 8, 16)));
     engine.objects[idx].state.breath = 10_000;
 
@@ -3430,9 +3379,7 @@ fn exec_life_periodic_birthday_updates_info_and_presents_once() -> Result<(), En
     let info_state = engine.capture_state();
     let link = info_state.crew_info_links[&crew_id];
     unit_assert_eq!(info_state.crew_info_rosters[&link.player_id][link.roster_index].age => 1);
-    unit_assert!(snapshot.hud.messages.iter().any(|message| {
-        message.target == Some(crew_id) && message.lines == ["Rookie becomes 1!", "Happy birthday!"]
-    }));
+    unit_assert!(snapshot.hud.messages.iter().any(|message| {message.target == Some(crew_id) && message.lines == ["Rookie becomes 1!", "Happy birthday!"]}));
     unit_assert_eq!(
         snapshot.audio =>
         vec![
@@ -3630,14 +3577,8 @@ fn temperature_at_height_respects_gradient() {
     let bottom = settings.temperature_at_height(0, world_height, world_height);
 
     unit_assert_eq!(middle => settings.ambient_temperature(0));
-    unit_assert!(
-        top < middle,
-        "expected top of map to be colder than mid level"
-    );
-    unit_assert!(
-        bottom > middle,
-        "expected bottom of map to be warmer than mid level"
-    );
+    unit_assert!(top < middle, "expected top of map to be colder than mid level");
+    unit_assert!(bottom > middle, "expected bottom of map to be warmer than mid level");
 }
 
 #[test]
@@ -4152,26 +4093,15 @@ fn resolved_sky_color_reflects_time_and_temperature() {
     let midday = midnight.with_time_of_day(1200);
     let midday_color = midday.resolved_sky_color(midday.ambient_temperature(0));
 
-    unit_assert!(
-        midday_color.r > midnight_color.r
-            && midday_color.g > midnight_color.g
-            && midday_color.b > midnight_color.b,
-        "daylight should brighten sky color"
-    );
+    unit_assert!(midday_color.r > midnight_color.r && midday_color.g > midnight_color.g && midday_color.b > midnight_color.b, "daylight should brighten sky color");
 
     let cold = midday.with_temperature(-40);
     let warm = midday.with_temperature(40);
     let cold_color = cold.resolved_sky_color(cold.ambient_temperature(0));
     let warm_color = warm.resolved_sky_color(warm.ambient_temperature(0));
 
-    unit_assert!(
-        warm_color.r >= cold_color.r,
-        "warmer temperatures should not reduce red channel"
-    );
-    unit_assert!(
-        warm_color.b >= cold_color.b,
-        "warmer temperatures should not reduce blue channel"
-    );
+    unit_assert!(warm_color.r >= cold_color.r, "warmer temperatures should not reduce red channel");
+    unit_assert!(warm_color.b >= cold_color.b, "warmer temperatures should not reduce blue channel");
 }
 
 #[test]
@@ -4223,12 +4153,7 @@ fn lightning_event_initializes_at_cpp_default_position_before_activate() {
     let mut engine = Engine::with_seed(7);
     engine.register_test_script_definition("FXL1", "Lightning", script);
 
-    unit_assert!(
-        engine
-            .trigger_lightning(120)
-            .expect("C++ fail-safe lightning callback keeps the trigger running"),
-        "lightning definition should spawn effect"
-    );
+    unit_assert!(engine.trigger_lightning(120).expect("C++ fail-safe lightning callback keeps the trigger running"), "lightning definition should spawn effect");
 
     let index = engine
         .objects
