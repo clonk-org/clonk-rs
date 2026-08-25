@@ -1260,6 +1260,26 @@ fn optional_fixed_vec(raw_x: i32, raw_y: i32, pixels: Vector2) -> Option<FixedVe
     }
 }
 
+/// Neutralises effect state the bridge ABI cannot carry.
+/// `LcEngineEffectSnapshot` transports name/priority/interval/timer only, so
+/// C++ reports everything else as a default; comparing those raw invents a
+/// divergence. Shared so the per-object and global comparisons agree on what
+/// is actually comparable.
+fn comparable_effects(effects: &[EffectState]) -> Vec<EffectState> {
+    effects
+        .iter()
+        .cloned()
+        .map(|mut effect| {
+            effect.number = 0;
+            effect.start_dispatched = false;
+            effect.vars.clear();
+            effect.command_target = None;
+            effect.command_id = None;
+            effect
+        })
+        .collect()
+}
+
 /// Renders an effect list for a divergence message. Shared so the per-object
 /// and global comparisons describe effects the same way.
 fn describe_effects(effects: &[EffectState]) -> String {
@@ -2228,25 +2248,9 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.command_direction, actual_object.command_direction
                     ));
                 }
-                // The ABI transports name/priority/interval/timer only
-                // (LcEngineEffectSnapshot) — normalize the untransported
-                // fields (vars, command target, Rust-internal
-                // start_dispatched) before comparing.
-                let normalize = |effects: &[EffectState]| -> Vec<EffectState> {
-                    effects
-                        .iter()
-                        .cloned()
-                        .map(|mut effect| {
-                            effect.number = 0;
-                            effect.start_dispatched = false;
-                            effect.vars.clear();
-                            effect.command_target = None;
-                            effect.command_id = None;
-                            effect
-                        })
-                        .collect()
-                };
-                if normalize(&expected_object.effects) != normalize(&actual_object.effects) {
+                if comparable_effects(&expected_object.effects)
+                    != comparable_effects(&actual_object.effects)
+                {
                     problems.push(format!(
                         "object {} effects rust [{}], cpp [{}]",
                         id,
