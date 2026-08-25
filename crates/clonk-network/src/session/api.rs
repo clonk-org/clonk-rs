@@ -822,6 +822,7 @@ pub enum HostCommand {
     /// has become stale; the completion orders that retirement before the
     /// caller proceeds into `Control.Prepare`.
     Execute {
+        current_control_tick: Tick,
         completion: oneshot::Sender<bool>,
     },
     StatusReachedCurrent,
@@ -851,7 +852,7 @@ pub enum HostCommand {
     PublishJoinSnapshot(Box<HostJoinSnapshot>),
     PublishRuntimeDynamic {
         dynamic: Box<crate::LiveNetworkDynamic>,
-        dynamic_tick: i32,
+        synchronized_control_tick: Tick,
         parameters: Box<crate::JoinGameParametersEnvelope>,
         completion: oneshot::Sender<Result<clonk_engine::NetworkResourceCore, String>>,
     },
@@ -1133,10 +1134,13 @@ impl HostHandle {
     /// `C4GameControl::Prepare`; an outdated runtime dynamic is removed on
     /// the first execution after `ControlTick` passes its `iDynamicTick`
     /// (src/C4Network2.cpp:679-696; src/C4Game.cpp:776-782).
-    pub async fn execute(&self) -> Result<bool, HostError> {
+    pub async fn execute(&self, current_control_tick: Tick) -> Result<bool, HostError> {
         let (completion, executed) = oneshot::channel();
         self.command_tx
-            .send(HostCommand::Execute { completion })
+            .send(HostCommand::Execute {
+                current_control_tick,
+                completion,
+            })
             .await
             .map_err(|_| HostError::HostLoopGone)?;
         executed.await.map_err(|_| HostError::HostLoopGone)
@@ -1210,14 +1214,14 @@ impl HostHandle {
     pub async fn publish_runtime_dynamic(
         &self,
         dynamic: crate::LiveNetworkDynamic,
-        dynamic_tick: i32,
+        synchronized_control_tick: Tick,
         parameters: crate::JoinGameParametersEnvelope,
     ) -> Result<clonk_engine::NetworkResourceCore, HostError> {
         let (completion, published) = oneshot::channel();
         self.command_tx
             .send(HostCommand::PublishRuntimeDynamic {
                 dynamic: Box::new(dynamic),
-                dynamic_tick,
+                synchronized_control_tick,
                 parameters: Box::new(parameters),
                 completion,
             })

@@ -7226,7 +7226,8 @@ impl GameApp {
         let maker = prepared.host_config().group_maker.as_bytes().to_vec();
         let group_filename = prepared.dynamic_filename_seed().to_owned();
         let scenario_defaults = prepared.scenario_defaults().clone();
-        let dynamic_tick = self.next_network_control_tick();
+        let dynamic_tick = i32::try_from(synchronized_control_tick)
+            .map_err(|_| "synchronized runtime dynamic tick exceeds the C++ wire field")?;
         let (definition_executable_path, definition_path) = prepared.definition_save_paths();
 
         let save = self
@@ -7309,7 +7310,7 @@ impl GameApp {
             .network
             .as_ref()
             .ok_or_else(|| "runtime JoinData capture has no network manager".to_string())?
-            .publish_runtime_dynamic(dynamic, dynamic_tick, parameters.clone())
+            .publish_runtime_dynamic(dynamic, synchronized_control_tick, parameters.clone())
             .map_err(|error| format!("publish synchronized runtime dynamic: {error}"))?;
 
         Ok(Some(clonk_network::HostJoinSnapshot {
@@ -8112,7 +8113,8 @@ impl GameApp {
         {
             return;
         }
-        let current_tick = self.next_network_control_tick();
+        let current_control_tick = self.expected_network_control_tick();
+        let current_tick = i32::try_from(current_control_tick).unwrap_or(i32::MAX);
         let stale = self.host_join_snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.dynamic.resource_type == clonk_network::HostResourceType::Dynamic as u8
                 && current_tick > snapshot.dynamic_tick
@@ -8123,7 +8125,7 @@ impl GameApp {
         let Some(network) = self.network.as_ref() else {
             return;
         };
-        match network.execute() {
+        match network.execute(current_control_tick) {
             Ok(_) => {
                 if let Some(snapshot) = self.host_join_snapshot.as_mut() {
                     snapshot.dynamic = clonk_engine::NetworkResourceCore::default();

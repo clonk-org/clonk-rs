@@ -3054,7 +3054,7 @@ enum NetworkCommand {
     },
     PublishRuntimeDynamic {
         dynamic: Box<clonk_network::LiveNetworkDynamic>,
-        dynamic_tick: i32,
+        synchronized_control_tick: Tick,
         parameters: Box<clonk_network::JoinGameParametersEnvelope>,
         completion: Sender<std::result::Result<clonk_engine::NetworkResourceCore, String>>,
     },
@@ -3207,6 +3207,7 @@ enum NetworkCommand {
         completion: Sender<std::result::Result<(), String>>,
     },
     Execute {
+        current_control_tick: Tick,
         completion: Sender<std::result::Result<bool, String>>,
     },
     StatusReachedCurrent,
@@ -4286,7 +4287,7 @@ impl NetworkManager {
     pub fn publish_runtime_dynamic(
         &self,
         dynamic: clonk_network::LiveNetworkDynamic,
-        dynamic_tick: i32,
+        synchronized_control_tick: Tick,
         parameters: clonk_network::JoinGameParametersEnvelope,
     ) -> Result<clonk_engine::NetworkResourceCore> {
         if self.role != NetworkRole::Host {
@@ -4298,7 +4299,7 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::PublishRuntimeDynamic {
                 dynamic: Box::new(dynamic),
-                dynamic_tick,
+                synchronized_control_tick,
                 parameters: Box::new(parameters),
                 completion,
             })
@@ -4329,7 +4330,7 @@ impl NetworkManager {
     /// preparation. The worker owns the authoritative control tick and
     /// removes a runtime dynamic only after that tick passes its dynamic tick
     /// (src/C4Network2.cpp:679-696; src/C4Game.cpp:776-782).
-    pub fn execute(&self) -> Result<bool> {
+    pub fn execute(&self, current_control_tick: Tick) -> Result<bool> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(
                 "only the network host may execute the game network seam"
@@ -4341,7 +4342,10 @@ impl NetworkManager {
         }
         let (completion, executed) = mpsc::channel();
         self.command_tx
-            .blocking_send(NetworkCommand::Execute { completion })
+            .blocking_send(NetworkCommand::Execute {
+                current_control_tick,
+                completion,
+            })
             .map_err(|_| anyhow!("network worker is not accepting game execution"))?;
         executed
             .recv()
@@ -6727,12 +6731,16 @@ async fn run_host_worker_with_voice_enabled(
                     }
                     NetworkCommand::PublishRuntimeDynamic {
                         dynamic,
-                        dynamic_tick,
+                        synchronized_control_tick,
                         parameters,
                         completion,
                     } => {
                         let result = await_host_operation_while_forwarding_events(
-                            host.publish_runtime_dynamic(*dynamic, dynamic_tick, *parameters),
+                            host.publish_runtime_dynamic(
+                                *dynamic,
+                                synchronized_control_tick,
+                                *parameters,
+                            ),
                             &mut host_events,
                             local_owner,
                             &event_tx,
@@ -6758,9 +6766,12 @@ async fn run_host_worker_with_voice_enabled(
                         .map_err(|error| error.to_string());
                         let _ = completion.send(result);
                     }
-                    NetworkCommand::Execute { completion } => {
+                    NetworkCommand::Execute {
+                        current_control_tick,
+                        completion,
+                    } => {
                         let result = await_host_operation_while_forwarding_events(
-                            host.execute(),
+                            host.execute(current_control_tick),
                             &mut host_events,
                             local_owner,
                             &event_tx,
@@ -8334,7 +8345,7 @@ async fn run_client_worker_with_voice_enabled(
                         NetworkCommand::RemoveRuntimeDynamic { completion } => {
                             let _ = completion.send(Err(unavailable));
                         }
-                        NetworkCommand::Execute { completion } => {
+                        NetworkCommand::Execute { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
                         NetworkCommand::FailPendingJoinData { completion, .. } => {
@@ -8490,7 +8501,7 @@ async fn run_client_worker_with_voice_enabled(
                             "client attempted to remove a host runtime dynamic".to_string(),
                         ));
                     }
-                    NetworkCommand::Execute { completion } => {
+                    NetworkCommand::Execute { completion, .. } => {
                         let _ = completion.send(Ok(false));
                     }
                     NetworkCommand::FailPendingJoinData { completion, .. } => {
@@ -8886,10 +8897,18 @@ async fn run_client_worker_with_voice_enabled(
                         let Some(status) = client_status
                             .acknowledge_requested_at(expected, current_control_tick)
                         else {
-                            let _ = event_tx.send(NetworkEvent::Error(
-                                "requested game status changed before client acknowledgement"
-                                    .to_string(),
-                            ));
+                            // HandleStatus and CheckStatusReached share one
+                            // C4Network2::Status in C++. Rust's worker may
+                            // receive a replacement after the app drains its
+                            // event batch but before this command arrives. Put
+                            // the worker's still-unreached value back in front
+                            // of the app so it drives and acknowledges that
+                            // barrier on the next pass instead of stopping on
+                            // an obsolete one forever
+                            // (src/C4Network2.cpp:1501-1511,2017-2060).
+                            if let Some(latest) = client_status.requested {
+                                let _ = event_tx.send(NetworkEvent::StatusRequested(latest));
+                            }
                             continue;
                         };
                         if let Err(err) = client.submit_status_ack(status).await {
@@ -10034,12 +10053,12 @@ mod tests {
             match commands.command_rx.blocking_recv() {
                 Some(NetworkCommand::PublishRuntimeDynamic {
                     dynamic,
-                    dynamic_tick,
+                    synchronized_control_tick,
                     parameters,
                     completion,
                 }) => {
                     assert_eq!(*dynamic, expected_dynamic);
-                    assert_eq!(dynamic_tick, 23);
+                    assert_eq!(synchronized_control_tick, 23);
                     assert_eq!(*parameters, expected_parameters);
                     completion.send(Ok(expected_core)).test_value();
                 }
@@ -12411,6 +12430,74 @@ Message=Server says Andr\xe9\r\n\
                 ("status-ack", delayed_status.target_tick),
                 ("activation", 41),
             ]
+        );
+
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join client worker").test_value();
+        host.shutdown().await.test_value();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_worker_reprojects_a_retarget_that_overtakes_the_app_acknowledgement() {
+        // C++ has one C4Network2::Status: if HandleStatus replaces it before
+        // CheckStatusReached, the next application pass observes that latest
+        // value instead of wedging on an acknowledgement for the old one
+        // (src/C4Network2.cpp:1501-1511,2017-2060).
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .test_value();
+        let mut host_events = host.take_event_receiver();
+        let temporary = tempfile::tempdir().test_value();
+        let mut settings = ClientSettings::new(address, "Alice");
+        settings.resource_directory = temporary.path().join("Network");
+        let (command_tx, event_rx, _local_id_rx, worker, _telemetry_rx) =
+            start_test_client_worker(settings, 0, 16);
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .test_value()
+            {
+                Some(HostEvent::ClientJoined { .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before client join"),
+            }
+        }
+
+        let first = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 23);
+        host.change_status(first).await.test_value();
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)).test_value() {
+                NetworkEvent::StatusRequested(status) if status == first => break,
+                _ => continue,
+            }
+        }
+        let latest = first.with_target_tick(24);
+        host.change_status(latest).await.test_value();
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)).test_value() {
+                NetworkEvent::StatusRequested(status) if status == latest => break,
+                _ => continue,
+            }
+        }
+
+        // Reproduce an app pass that drained `first`, then had `latest`
+        // overtake it between the event poll and the command reaching the
+        // worker. The worker must put its authoritative value back in front of
+        // the app; an Error leaves control stopped at a barrier it cannot ack.
+        command_tx
+            .send(NetworkCommand::AcknowledgeRequestedStatus {
+                status: first,
+                current_control_tick: latest.target_tick,
+                current_frame: 41,
+            })
+            .await
+            .test_value();
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(2)).test_value(),
+            NetworkEvent::StatusRequested(latest)
         );
 
         command_tx.send(NetworkCommand::Shutdown).await.test_value();

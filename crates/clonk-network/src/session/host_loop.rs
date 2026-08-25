@@ -420,6 +420,7 @@ pub(crate) async fn run_host(
     let published_player_sources = config.player_resource_sources.iter().cloned().collect();
     let mut state = HostState {
         coordinator,
+        game_control_tick: config.start_tick,
         pending_complete: BTreeMap::new(),
         backlog: ControlBacklog::new(backlog_limit),
         client_performance: ClientPerformanceStats::new(backlog_limit),
@@ -779,7 +780,11 @@ pub(crate) async fn run_host(
                             .client_performance
                             .mark_consumed(tick, consumed_at, client_ids);
                     }
-                    HostCommand::Execute { completion } => {
+                    HostCommand::Execute {
+                        current_control_tick,
+                        completion,
+                    } => {
+                        state.game_control_tick = state.game_control_tick.max(current_control_tick);
                         let removed = remove_stale_host_runtime_dynamic(&mut state);
                         let _ = completion.send(removed);
                     }
@@ -870,13 +875,13 @@ pub(crate) async fn run_host(
                     }
                     HostCommand::PublishRuntimeDynamic {
                         dynamic,
-                        dynamic_tick,
+                        synchronized_control_tick,
                         parameters,
                         completion,
                     } => {
                         match publish_host_runtime_dynamic(
                             *dynamic,
-                            dynamic_tick,
+                            synchronized_control_tick,
                             *parameters,
                             &mut state,
                         ) {
@@ -1622,7 +1627,7 @@ fn build_client_setup(
     let Some(mut snapshot) = state.join_snapshot.clone() else {
         return Ok(None);
     };
-    let current_tick = i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX);
+    let current_tick = i32::try_from(state.game_control_tick).unwrap_or(i32::MAX);
     if snapshot.dynamic.resource_type == clonk_engine::NETWORK_RESOURCE_TYPE_NULL
         || snapshot.dynamic_tick < current_tick
     {
@@ -1927,6 +1932,7 @@ impl HostState {
         target_fps: i32,
         reached_at: tokio::time::Instant,
     ) {
+        self.game_control_tick = self.game_control_tick.max(tick);
         self.client_performance.record_cadence(tick, reached_at);
         if tick != self.coordinator.current_tick() {
             return;
