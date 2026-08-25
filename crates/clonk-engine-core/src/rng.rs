@@ -43,7 +43,20 @@ impl LcgRng {
 
     /// Engine-start seeding: `FixedRandom(seed); Randomize3();`.
     pub fn seed_from_u64(seed: u64) -> Self {
+        Self::seed_from_u64_traced(seed, false)
+    }
+
+    /// Seed with tracing armed *before* the Rnd3 fill.
+    ///
+    /// `randomize3` spends 500 `Random(3)` draws, and native traces them:
+    /// `Randomize3` runs after `LcRngTraceFile` is available, so an oracle
+    /// trace opens with 500 `range=3` lines. Arming the flag afterwards
+    /// silently drops those 500 from this side, which offsets any head-aligned
+    /// diff against the oracle by exactly 500 draws
+    /// (clonk-org/clonk-rs#1050).
+    pub fn seed_from_u64_traced(seed: u64, trace: bool) -> Self {
         let mut rng = Self::new(seed as u32);
+        rng.trace = trace;
         rng.randomize3();
         rng
     }
@@ -346,6 +359,28 @@ mod tests {
             (s >> 16) % range
         };
         assert_eq!(LcgRng::seeded_random(seed, range), expected);
+    }
+
+    #[test]
+    fn seeding_arms_the_trace_before_the_rnd3_fill() {
+        // Native's Randomize3 runs with LcRngTraceFile already available, so an
+        // oracle trace opens with 500 `range=3` lines (C4Random.h:40-47,76-83).
+        // Arming this side's flag after the fill drops those 500 draws from the
+        // trace and offsets every head-aligned diff by exactly that much --
+        // which is a silent wrong answer, not a missing file
+        // (clonk-org/clonk-rs#1050).
+        let traced = LcgRng::seed_from_u64_traced(7, true);
+        assert!(traced.trace, "the flag must survive seeding");
+        assert_eq!(traced.count, RND3_SIZE as i32, "the Rnd3 fill still runs");
+
+        // Arming it changes nothing about the stream itself: same hold, same
+        // count, same buffer as the untraced constructor.
+        let plain = LcgRng::seed_from_u64(7);
+        assert!(!plain.trace);
+        assert_eq!(traced.count, plain.count);
+        assert_eq!(traced.hold, plain.hold);
+        assert_eq!(traced.rnd3_buf, plain.rnd3_buf);
+        assert_eq!(traced.rnd3_ptr, plain.rnd3_ptr);
     }
 
     #[test]
