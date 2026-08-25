@@ -150,12 +150,18 @@ pub fn blocked_profile_report(profile: &str) -> Vec<String> {
          item(s). This session runs as an ordinary one.",
         blockers.len()
     )];
-    lines.extend(
-        blockers
-            .iter()
-            .take(REPORTED_BLOCKERS)
-            .map(|blocker| format!("  [{}] {} — {}", blocker.area, blocker.id, blocker.recovery)),
-    );
+    lines.extend(named_blockers(&blockers));
+    lines
+}
+
+/// The blocker detail shared by every report: a few named by id with their
+/// recovery action, then a count of the remainder and where to read the rest.
+fn named_blockers(blockers: &[CompatBlocker]) -> Vec<String> {
+    let mut lines = blockers
+        .iter()
+        .take(REPORTED_BLOCKERS)
+        .map(|blocker| format!("  [{}] {} — {}", blocker.area, blocker.id, blocker.recovery))
+        .collect::<Vec<_>>();
     if let Some(remaining) = blockers
         .len()
         .checked_sub(REPORTED_BLOCKERS)
