@@ -143,6 +143,7 @@ shard_modules!(
 shard_modules!(
     "engine-it-shard-3",
     dragon_rock_audio,
+    dragon_rock_cage,
     effect_check_conversion,
     eke_missile_guidance,
     far_worlds_deep_airlock,
