@@ -4688,6 +4688,9 @@ impl Scenario {
                 created.push(id);
             }
         } else {
+            // Cycle edges the sequential spawn had to defer, as
+            // `(contained handle, container handle)`.
+            let mut deferred_containment: Vec<(String, String)> = Vec::new();
             while !pending.is_empty() {
                 let mut progress = false;
                 let mut idx = 0;
@@ -4750,22 +4753,35 @@ impl Scenario {
                         }
                     }
                     if !cleared {
-                        // A genuine containment cycle: C++'s two-phase
-                        // denumeration would keep the mutual containment; the
-                        // sequential spawn model breaks one edge instead
-                        // (documented divergence).
+                        // A genuine containment cycle. C++ creates every object
+                        // first and resolves `Contained` from a number
+                        // afterwards, so both edges survive; the sequential
+                        // spawn cannot place this one yet, so defer it and
+                        // reconnect it below once its container exists.
                         if let Some(spawn) = pending.first_mut() {
-                            tracing::warn!(
-                                container = spawn.container_handle.as_deref().unwrap_or_default(),
-                                "containment cycle broken by placing one object uncontained \
-                             (C++ keeps mutual containment via denumeration)"
-                            );
-                            spawn.container_handle = None;
+                            if let (Some(handle), Some(container)) =
+                                (spawn.handle.clone(), spawn.container_handle.take())
+                            {
+                                deferred_containment.push((handle, container));
+                            }
                         } else {
                             break;
                         }
                     }
                 }
+            }
+
+            // Reconnect the cycle edges now that every object exists. This is
+            // the same repair the legacy load path performs — set `Contained`
+            // from the resolved id and fix the Contents lists to match
+            // (`C4GameObjects::Load`, C4GameObjects.cpp:597-631) — which is
+            // what makes a cycle survive on native.
+            let cycle_links = deferred_containment
+                .into_iter()
+                .filter_map(|(child, parent)| Some((*handles.get(&child)?, *handles.get(&parent)?)))
+                .collect::<Vec<_>>();
+            if !cycle_links.is_empty() {
+                engine.restore_legacy_object_links(&cycle_links, &[]);
             }
         }
 
