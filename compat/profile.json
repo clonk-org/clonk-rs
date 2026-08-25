@@ -253,19 +253,6 @@
       "owner": "clonk-org/clonk-rs#1094"
     },
     {
-      "id": "sim-script-unwind-args",
-      "area": "simulation",
-      "summary": "When a script callback errors mid-call, the port unwinds the call with its original argument values; C++ keeps the parameter mutations made before the error, so post-error parameter reads differ.",
-      "cited_in": [
-        "crates/clonk-engine/src/lib.rs:6994"
-      ],
-      "cpp_reference": "C4AulExec.cpp (fail-safe exec)",
-      "disposition": "open-gap",
-      "profile_action": "blocked",
-      "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#1094"
-    },
-    {
       "id": "sim-containment-cycle-spawn",
       "area": "simulation",
       "summary": "A genuine containment cycle at scenario spawn time: C++'s two-phase denumeration keeps the mutual containment; the sequential spawn model breaks one edge and places that object uncontained.",
