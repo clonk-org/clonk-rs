@@ -5404,6 +5404,48 @@ impl GameApp {
         Ok(())
     }
 
+    /// Why this client must not join the advertised game, if it must not.
+    ///
+    /// clonk-org/clonk-rs#583: two Rust peers running different behavioural
+    /// profiles desync, and the cheapest place to catch that is before any
+    /// lobby or game state exists.
+    ///
+    /// A reference that names no profile is the **silent legacy case** and is
+    /// always joinable. That is not an oversight: `StdCompilerINIRead` reads by
+    /// name, so a stock C++ host never writes the key, and behaving like such a
+    /// host is the entire purpose of the compatibility profile — refusing a
+    /// silent reference would reject exactly the peer the profile exists to
+    /// play with.
+    ///
+    /// The comparison uses [`Self::claimed_compat_profile`] rather than the
+    /// requested one, because what decides the outcome is how this client will
+    /// actually behave: a profile the contract cannot back is not one this
+    /// client can honour, however it was configured.
+    pub(crate) fn network_reference_profile_refusal(
+        &self,
+        reference: &clonk_network::NetworkGameReference,
+    ) -> Option<String> {
+        let advertised = reference.compat_profile.as_deref()?;
+        let claimed = self.claimed_compat_profile();
+        if advertised.eq_ignore_ascii_case(claimed.display_name()) {
+            return None;
+        }
+        if self.compat_profile != claimed {
+            // The mismatch is ours: this session asked for a profile it cannot
+            // claim. Say so, rather than leave the player comparing two names
+            // that look like they already agree.
+            return Some(format!(
+                "This game runs the {advertised} compatibility profile, which this session \
+                 cannot currently claim. Joining would desync."
+            ));
+        }
+        Some(format!(
+            "This game runs the {advertised} compatibility profile and this session runs {}. \
+             Joining would desync.",
+            claimed.display_name()
+        ))
+    }
+
     pub(crate) fn activate_network_reference_join(
         &mut self,
         reference: clonk_network::NetworkGameReference,
@@ -5414,6 +5456,13 @@ impl GameApp {
         }
         if let Err(error) = self.freeze_configured_client_players_for_game() {
             self.status_text = format!("Unable to load configured players: {error}");
+            return Ok(());
+        }
+        if let Some(refusal) = self.network_reference_profile_refusal(&reference) {
+            // C++'s model is that the *browser* refuses rather than the host
+            // (src/C4StartupNetDlg.cpp:480,495), so the dialog stays up with
+            // its search intact and the player can pick another game.
+            self.status_text = refusal;
             return Ok(());
         }
         self.prepare_network_join_game_state();

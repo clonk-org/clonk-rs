@@ -3274,6 +3274,91 @@ fn a_running_host_advertises_only_the_profile_it_can_claim() {
     }
 }
 
+/// clonk-org/clonk-rs#583: mixed incompatible Rust profiles must be rejected
+/// before lobby or game state diverges, and C++'s model is that the *browser*
+/// refuses rather than the host (`src/C4StartupNetDlg.cpp:480,495`).
+///
+/// The silent case is the one worth stating: a reference that names no profile
+/// is a stock C++ host — `StdCompilerINIRead` reads by name, so C++ never
+/// writes the key — and playing with exactly that peer is the whole purpose of
+/// the compatibility profile, so it must stay joinable from either side.
+#[test]
+fn a_reference_naming_a_profile_this_client_cannot_match_is_refused() {
+    let mut app = new_menu_app(640, 480);
+    let silent = clonk_network::NetworkGameReference::default();
+    let legacy = clonk_network::NetworkGameReference {
+        compat_profile: Some("LegacyClonk".to_string()),
+        ..Default::default()
+    };
+
+    // Ordinary session: the silent legacy host is joinable, a profile-bearing
+    // one is not.
+    app.compat_profile = crate::settings::CompatProfile::Normal;
+    main_assert_eq!(
+        app.network_reference_profile_refusal(&silent) => None,
+        "a stock C++ host names no profile and must stay joinable"
+    );
+    let refusal = app.network_reference_profile_refusal(&legacy).test_value();
+    main_assert!(
+        refusal.contains("LegacyClonk") && refusal.contains("desync"),
+        "the refusal names the profile and why: {refusal}"
+    );
+
+    // Asking for the host's profile does not by itself make the join legal —
+    // what matters is whether this session can *claim* it.
+    app.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    let claimed = app.claimed_compat_profile();
+    let matched = app.network_reference_profile_refusal(&legacy);
+    if claimed == crate::settings::CompatProfile::LegacyClonk {
+        main_assert_eq!(
+            matched => None,
+            "a session that can claim the advertised profile joins"
+        );
+    } else {
+        let refusal = matched.test_value();
+        main_assert!(
+            refusal.contains("cannot currently claim"),
+            "an unclaimable profile must say the mismatch is ours: {refusal}"
+        );
+    }
+
+    // The silent host stays joinable whatever this session asked for; that is
+    // the compatibility profile's entire point.
+    main_assert_eq!(
+        app.network_reference_profile_refusal(&silent) => None,
+        "a compatibility-profile client exists in order to join a stock host"
+    );
+
+    // Case is not the discriminator: a peer spelling the profile differently
+    // names the same one. The refusal text quotes the peer's own spelling, so
+    // compare the decision rather than the message.
+    let lowercase = clonk_network::NetworkGameReference {
+        compat_profile: Some("legacyclonk".to_string()),
+        ..Default::default()
+    };
+    main_assert_eq!(
+        app.network_reference_profile_refusal(&lowercase).is_some()
+            => app.network_reference_profile_refusal(&legacy).is_some(),
+        "profile names compare case-insensitively"
+    );
+
+    // And the match itself is case-insensitive: an ordinary session joins a
+    // host that spells the ordinary profile in any case.
+    app.compat_profile = crate::settings::CompatProfile::Normal;
+    let spelled = clonk_network::NetworkGameReference {
+        compat_profile: Some(
+            crate::settings::CompatProfile::Normal
+                .display_name()
+                .to_lowercase(),
+        ),
+        ..Default::default()
+    };
+    main_assert_eq!(
+        app.network_reference_profile_refusal(&spelled) => None,
+        "the same profile in another case is the same profile"
+    );
+}
+
 #[test]
 fn a_running_host_advertises_its_live_runtime_join_admission() {
     let mut app = new_menu_app(640, 480);
