@@ -1441,29 +1441,33 @@ pub(crate) fn inc_var(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(incremented)
 }
 
-pub(crate) fn random(args: &[Value]) -> Result<Value, RuntimeError> {
-    if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
-        let context = HOST_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().and_then(|context| {
-                context.object_context().map(|object| {
-                    format!(
-                        "{} {}",
-                        object.id().as_u64(),
-                        object.effective_action_name()
-                    )
-                })
+/// The calling context for one script draw, mirroring the chain the oracle
+/// logs from inside FnRandom (C4Script.cpp:3355). Alignment by draw index
+/// alone cannot name a divergent caller, which is what the frame-810
+/// divergence in clonk-org/clonk-rs#1050 needs; this shares the draw's sink so
+/// the annotation lands immediately above the line it describes.
+fn script_draw_callsite(range: i32) -> String {
+    let caller = HOST_CONTEXT.with(|cell| {
+        cell.borrow().as_ref().and_then(|context| {
+            context.object_context().map(|object| {
+                format!(
+                    "{} {}",
+                    object.id().as_u64(),
+                    object.effective_action_name()
+                )
             })
-        });
-        let frame = ENVIRONMENT_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|context| context.frame)
-                .unwrap_or(0)
-        });
-        if (19..=21).contains(&frame) {
-            tracing::warn!(?args, ?context, frame, "RNDCALL");
-        }
-    }
+        })
+    });
+    let frame = ENVIRONMENT_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.frame)
+            .unwrap_or(0)
+    });
+    format!("CALL {range} f{frame} {}", caller.as_deref().unwrap_or("-"))
+}
+
+pub(crate) fn random(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
             "Random expects at most 1 argument: upper exclusive bound",
@@ -1495,6 +1499,9 @@ pub(crate) fn random(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("Random: host context unavailable"))?
             .clone();
         let mut rng = context.rng.borrow_mut();
+        if rng.trace_index != 0 && std::env::var("LC_RUST_RNG_TRACE_CALLS").is_ok() {
+            crate::rng::rng_trace_line(rng.trace_index, &script_draw_callsite(range));
+        }
         let value = rng.random(range);
         Ok(Value::Int(value))
     })

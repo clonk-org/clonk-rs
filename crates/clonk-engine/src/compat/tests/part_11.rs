@@ -3929,3 +3929,47 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         assert!(!outcome.object.is_empty());
         assert!(outcome.global.is_empty());
     }
+
+    #[test]
+    fn a_traced_script_draw_names_its_calling_context_in_the_trace() {
+        // The oracle annotates each script draw with the calling chain inside
+        // FnRandom (C4Script.cpp:3355), which is what lets a ledger diff name
+        // the divergent *caller* rather than only the draw index. This port
+        // emitted a hardcoded frame-19..=21 `tracing::warn!` instead, so the
+        // annotation never reached the trace file and the two traces could not
+        // be aligned by caller at all -- the frame-810 divergence in
+        // clonk-org/clonk-rs#1050 is exactly the case that needs it.
+        //
+        // The annotation must share the draw's sink so it lands immediately
+        // above the `count range value` line it describes.
+        let dir = std::env::temp_dir().join(format!("clonk-rng-callsite-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("probe dir");
+        let path = dir.join("trace.txt");
+        std::env::set_var("LC_RUST_RNG_TRACE", &path);
+        std::env::set_var("LC_RUST_RNG_TRACE_CALLS", "1");
+
+        let rng = crate::rng::LcgRng::seed_from_u64_traced(0xC4, true);
+        let guard = crate::compat::contexts::enter_random_context(rng);
+        crate::compat::values::random(&[Value::Int(41)]).expect("Random(41) evaluates");
+        drop(guard);
+
+        let text = std::fs::read_to_string(&path).expect("trace file written");
+        let lines: Vec<&str> = text.lines().collect();
+        let call = lines
+            .iter()
+            .position(|line| line.starts_with("CALL "))
+            .expect("the draw's calling context is recorded");
+        // Immediately above the draw it describes: the next line is the
+        // `count range value` record for this very Random(41).
+        assert_eq!(
+            lines.get(call + 1).and_then(|line| line.split(' ').nth(1)),
+            Some("41"),
+            "the annotation belongs immediately above the draw it describes"
+        );
+        // The 500 randomize3 draws precede it, so this is genuinely the
+        // script draw and not a seeding artefact.
+        assert!(
+            call >= 500,
+            "the annotation follows seeding, at the script draw"
+        );
+    }
