@@ -5368,6 +5368,10 @@ fn drachenfels_real_scenario_subcases_batch_3() {
             dragon_rock_walk_up_enters_the_shipped_tent,
         ),
         (
+            "pushing_the_cage_with_the_key_opens_it",
+            dragon_rock_pushing_the_cage_with_the_key_opens_it,
+        ),
+        (
             "initialize_player_grants_both_plan_knowledge_sets",
             dragon_rock_initialize_player_grants_both_plan_knowledge_sets,
         ),
@@ -5779,6 +5783,70 @@ fn dragon_rock_walk_up_enters_the_shipped_tent(prepared: &PreparedInstalledScena
         engine.test_object_snapshot(knight).container,
         Some(tent.id),
         "pressing Up at an open TENT entrance enters it like C++"
+    );
+}
+
+fn dragon_rock_pushing_the_cage_with_the_key_opens_it(prepared: &PreparedInstalledScenario) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player_on_team(&mut engine, "Dragon Rock cage parity", 1);
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    let knight = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+
+    // Objects.txt:839-860 ships the cage as _CAG #1769 at (2153,484).
+    let cage = ObjectId::new(1769);
+    let cage_before = engine.test_object_snapshot(cage);
+    assert_eq!(cage_before.definition_id, "_CAG");
+
+    // The endboss's death is what normally creates the key
+    // (Drachenfels.c4s/Script.c:438-442); hand the knight one directly so
+    // this exercises only the unlock.
+    let key = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("_KEY").with_container(knight)),
+    );
+    assert_eq!(engine.test_object_snapshot(key).container, Some(knight));
+
+    // Grab the cage. The reported flow is a player pushing it; place the
+    // knight on it and install the Push action rather than re-testing the
+    // grab probe, which has its own coverage.
+    let mut push = ObjectUpdate::new()
+        .with_position(cage_before.position)
+        .with_action("Push")
+        .clear_container();
+    if let Some(action) = push.action.as_mut() {
+        action.set_target(Some(cage));
+    }
+    crate::support::TestValueExt::test_value(engine.apply_object_update(knight, push));
+    let pushing = engine.test_object_snapshot(knight);
+    assert_eq!(
+        (pushing.action.name.as_str(), pushing.action.target),
+        ("Push", Some(cage)),
+        "the knight is pushing the shipped cage"
+    );
+
+    // DFA_PUSH calls the pushed object's control first for a definition at or
+    // above 4,9,5 (Cage.c4d/DefCore.txt:3 is 4,9,8), so Throw reaches
+    // _CAG::ControlThrow, which opens on a key in the pusher's contents
+    // (C4Object.cpp:3520-3555; Cage.c4d/Script.c:7-19).
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    for _ in 0..10 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert_eq!(
+        engine.test_object_snapshot(cage).action.name,
+        "Open",
+        "pushing the cage with the key in hand unlocks it"
+    );
+    assert!(
+        cage_before.ocf & clonk_engine::ocf::GRAB != 0,
+        "Def->Grab with a non-StaticBack category keeps OCF_Grab, which is \
+         what makes the cage reachable by a Grab command at all \
+         (C4Object.cpp:556-557)"
+    );
+    assert_eq!(
+        engine.test_object_snapshot(key).container,
+        Some(knight),
+        "the shipped ControlThrow neither consumes nor moves the key"
     );
 }
 
