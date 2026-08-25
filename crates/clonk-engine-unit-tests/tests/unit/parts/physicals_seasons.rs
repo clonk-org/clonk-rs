@@ -570,8 +570,14 @@ fn attached_scaler_hangles_when_up_hits_the_ceiling_like_cpp() {
                 ActionSpec::default().with_procedure("SCALE"),
             ),
             (
+                // Two-directional, as every real Hangle entry is: SetDir
+                // refuses a direction outside `Directions - 1`
+                // (C4Object.cpp:4239-4240), and C4ActionDef::Directions
+                // defaults to 1, so a one-directional fixture would keep the
+                // facing on BOTH engines and this transition could not be
+                // observed (clonk-org/clonk-rs#1130).
                 "Hangle".to_string(),
-                ActionSpec::default().with_procedure("HANGLE"),
+                ActionSpec::default().with_procedure("HANGLE").with_directions(2),
             ),
         ]),
     );

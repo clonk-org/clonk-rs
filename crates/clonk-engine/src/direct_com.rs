@@ -9516,6 +9516,63 @@ protected func OnActionJump()
         );
     }
 
+    /// `ObjectActionTumble` sets the action and then calls
+    /// `cObj->SetDir(dir)` (C4ObjectCom.cpp:74-80), so the facing change runs
+    /// the **new** action's TurnAction through SetActionByName
+    /// (C4Object.cpp:4243-4248). Writing the facing directly skipped it — the
+    /// same mistake clonk-org/clonk-rs#1124 fixed on the com path, in four
+    /// more places (clonk-org/clonk-rs#1130).
+    #[test]
+    fn object_action_tumble_runs_the_turn_action_like_set_dir() {
+        let mut engine = Engine::new();
+        let mut definition = test_definition("TUMB", "Turning tumbler", "#strict\n");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_directions(2),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_directions(2)
+                        .with_turn_action("Turn"),
+                ),
+                ("Turn".to_string(), ActionSpec::default().with_directions(2)),
+            ]),
+        );
+        engine.register_test_definition(definition);
+        let object = engine.spawn_test_object(
+            SpawnConfig::new("TUMB")
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Left),
+        );
+
+        let index = engine.test_object_index(object);
+        let definition_id = engine.objects[index].definition_id.clone();
+        assert!(engine
+            .object_action_tumble(
+                index,
+                &definition_id,
+                Direction::Right,
+                itofix(2),
+                itofix(-1)
+            )
+            .expect("tumble applies"));
+
+        let index = engine.test_object_index(object);
+        assert_eq!(engine.objects[index].state.direction, Direction::Right);
+        assert_eq!(
+            engine.objects[index].state.action.name.as_str(),
+            "Turn",
+            "SetDir runs the new action's TurnAction on a facing change"
+        );
+    }
+
     #[test]
     fn object_action_tumble_rejects_dead_no_other_action() {
         let (mut engine, object) = no_other_action_object();

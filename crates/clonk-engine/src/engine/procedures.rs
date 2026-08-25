@@ -2229,7 +2229,10 @@ impl Engine {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
-            self.write_object_direction(idx, direction);
+            // Native calls SetDir here, which runs the new action's TurnAction
+            // (C4Object.cpp:4243-4248); the bare mirror write skipped it
+            // (clonk-org/clonk-rs#1130).
+            self.set_exec_action_direction(idx, definition_id, direction)?;
             return Ok(true);
         }
         Ok(false)
@@ -2246,7 +2249,10 @@ impl Engine {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
-            self.write_object_direction(idx, direction);
+            // Native calls SetDir here, which runs the new action's TurnAction
+            // (C4Object.cpp:4243-4248); the bare mirror write skipped it
+            // (clonk-org/clonk-rs#1130).
+            self.set_exec_action_direction(idx, definition_id, direction)?;
             return Ok(true);
         }
         Ok(false)
@@ -2263,7 +2269,10 @@ impl Engine {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
-            self.write_object_direction(idx, direction);
+            // Native calls SetDir here, which runs the new action's TurnAction
+            // (C4Object.cpp:4243-4248); the bare mirror write skipped it
+            // (clonk-org/clonk-rs#1130).
+            self.set_exec_action_direction(idx, definition_id, direction)?;
             return Ok(true);
         }
         Ok(false)
@@ -2279,7 +2288,9 @@ impl Engine {
         ydir: C4Fixed,
     ) -> Result<bool, EngineError> {
         if self.action_with_calls(idx, definition_id, "Tumble")? {
-            self.write_object_direction(idx, direction);
+            // SetDir, not the trailing assignment: the new action's TurnAction
+            // runs on a facing change (clonk-org/clonk-rs#1130).
+            self.set_exec_action_direction(idx, definition_id, direction)?;
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::new(xdir, ydir);
             object.state.velocity = object.velocity_pixels();
