@@ -3063,7 +3063,7 @@ fn parity_differential_matches_cpp_golden() {
         let water = crate::material::MaterialId::new(1).expect("poof Water material");
         let granite = crate::material::MaterialId::new(2).expect("poof Granite material");
         let mut pixel = crate::pxs::Pxs {
-            mat: water,
+            mat: water.into(),
             x: itofix(PX),
             y: itofix(PY),
             xdir: C4Fixed::ZERO,
@@ -9138,8 +9138,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         engine.rng = LcgRng::new(i(scn, "seed") as u32);
 
         let mut pixel = crate::pxs::Pxs {
-            mat: crate::material::MaterialId::new(i(scn, "mat") as usize)
-                .expect("oracle pxs material"),
+            mat: crate::pxs::PxsMaterial::from_raw(i(scn, "mat") as i32),
             x: C4Fixed::from_raw(i(scn, "x0") as i32),
             y: C4Fixed::from_raw(i(scn, "y0") as i32),
             xdir: C4Fixed::from_raw(i(scn, "xdir0") as i32),
@@ -9185,7 +9184,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
                 if deactivated {
                     -1
                 } else {
-                    pixel.mat.index() as i64
+                    pixel.mat.raw() as i64
                 },
             );
             expect_rng_state_at(&label, frame, fr, &engine.rng);
@@ -9339,7 +9338,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
                     slot,
                     "mat",
                     i(expected, "mat"),
-                    actual.map_or(-1, |pixel| pixel.mat.index() as i64),
+                    actual.map_or(-1, |pixel| pixel.mat.raw() as i64),
                 );
                 if let Some(pixel) = actual {
                     for (field, cpp, rust) in [
@@ -9568,7 +9567,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         revival_engine.set_landscape(landscape);
 
         let dead = crate::pxs::Pxs {
-            mat: water,
+            mat: water.into(),
             x: C4Fixed::from_raw(0x1122_3344),
             y: C4Fixed::from_raw(-17),
             xdir: C4Fixed::from_raw(0x5566_7788),
@@ -9582,7 +9581,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
                 0,
                 slot,
                 crate::pxs::Pxs {
-                    mat: water,
+                    mat: water.into(),
                     x: itofix(10),
                     y: itofix(2),
                     xdir: C4Fixed::ZERO,
@@ -11782,7 +11781,7 @@ protected func ContactBottom()
             0,
             "pxs_mat",
             i(case, "pxs_mat"),
-            pxs.first().map_or(-1, |pixel| pixel.mat.index() as i64),
+            pxs.first().map_or(-1, |pixel| pixel.mat.raw() as i64),
         );
         expect_eq(
             &label,
@@ -11928,7 +11927,9 @@ protected func ContactBottom()
             insertion_check: true,
         };
         let mut pixel = crate::pxs::Pxs {
-            mat: crate::material::MaterialId::new(pxs_mat as usize).expect("oracle pxs material"),
+            mat: crate::material::MaterialId::new(pxs_mat as usize)
+                .expect("oracle pxs material")
+                .into(),
             x: itofix(px),
             y: itofix(py),
             xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
@@ -11976,8 +11977,10 @@ protected func ContactBottom()
                 )
             })
             .count();
-        let inserted =
-            i64::from(material_before != Some(pixel.mat) && material_after == Some(pixel.mat));
+        let inserted = i64::from(
+            material_before.map(Into::into) != Some(pixel.mat)
+                && material_after.map(Into::into) == Some(pixel.mat),
+        );
 
         expect_eq(
             &label,
@@ -12119,8 +12122,7 @@ protected func ContactBottom()
             insertion_check: true,
         };
         let mut pixel = crate::pxs::Pxs {
-            mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
-                .expect("oracle pxs material"),
+            mat: crate::pxs::PxsMaterial::from_raw(i(case, "pxs_mat") as i32),
             x: itofix(px),
             y: itofix(py),
             xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
@@ -12325,8 +12327,7 @@ protected func ContactBottom()
             insertion_check: true,
         };
         let mut pixel = crate::pxs::Pxs {
-            mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
-                .expect("oracle pxs material"),
+            mat: crate::pxs::PxsMaterial::from_raw(i(case, "pxs_mat") as i32),
             x: itofix(px),
             y: itofix(py),
             xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
@@ -12370,7 +12371,10 @@ protected func ContactBottom()
         let landscape_changes = landscape_material_changes(&landscape_before, &engine, WDT, HGT);
         let inserted = landscape_changes
             .iter()
-            .filter(|(_, _, before, after)| *before != Some(pixel.mat) && *after == Some(pixel.mat))
+            .filter(|(_, _, before, after)| {
+                before.map(Into::into) != Some(pixel.mat)
+                    && after.map(Into::into) == Some(pixel.mat)
+            })
             .collect::<Vec<_>>();
 
         expect_eq(
@@ -12744,7 +12748,7 @@ protected func ContactBottom()
             insertion_check: false,
         };
         let mut pixel = crate::pxs::Pxs {
-            mat: pxs_mat,
+            mat: pxs_mat.into(),
             x: itofix(x0),
             y: itofix(y0),
             xdir: xdir0,
@@ -12803,7 +12807,7 @@ protected func ContactBottom()
             0,
             "pxs_created_mat",
             i(case, "pxs_created_mat"),
-            created.first().map_or(-1, |pixel| pixel.mat.index() as i64),
+            created.first().map_or(-1, |pixel| pixel.mat.raw() as i64),
         );
         // C++ assigns the target id *before* validating it, so a failed
         // conversion leaves `iPxsMat` holding an unloaded index
@@ -12817,7 +12821,7 @@ protected func ContactBottom()
                 0,
                 "pxs_mat",
                 i(case, "pxs_mat"),
-                pixel.mat.index() as i64,
+                pixel.mat.raw() as i64,
             );
         }
     }
@@ -12911,8 +12915,7 @@ protected func ContactBottom()
             insertion_check: case["insertion_check"].as_bool().unwrap_or(false),
         };
         let mut pixel = crate::pxs::Pxs {
-            mat: crate::material::MaterialId::new(i(case, "pxs_mat") as usize)
-                .expect("oracle pxs material"),
+            mat: crate::pxs::PxsMaterial::from_raw(i(case, "pxs_mat") as i32),
             x: itofix(px),
             y: itofix(py),
             xdir: C4Fixed::from_raw(i(case, "xdir0") as i32),
@@ -13068,7 +13071,7 @@ protected func ContactBottom()
                 for slot in step["slots"].as_array().unwrap() {
                     let index = i(slot, "i") as usize;
                     let live = system.peek_slot(0, index);
-                    let mat = live.map(|pxs| pxs.mat.index() as i64).unwrap_or(-1);
+                    let mat = live.map(|pxs| pxs.mat.raw() as i64).unwrap_or(-1);
                     expect_eq(label, index, "slot_mat", i(slot, "mat"), mat);
                     // Ordinary execution equality compares a dead slot by Mat
                     // only: Execute and Load gate on Mat != MNone. Its retained
@@ -13233,39 +13236,55 @@ protected func ContactBottom()
         let name = case["name"].as_str().unwrap_or("?");
         let label = format!("pxs_load[{name}]");
 
-        let tag = i(case, "tag") as i32;
-        let chunks = i(case, "chunks") as usize;
-        let extra = i(case, "extra") as usize;
-        let mut bytes = Vec::new();
-        if tag != 0 {
-            bytes.extend_from_slice(&tag.to_le_bytes());
-        }
-        let payload_start = bytes.len();
-        for _ in 0..chunks {
-            for _ in 0..crate::pxs::PXS_CHUNK_SIZE {
-                bytes.extend_from_slice(&(-1i32).to_le_bytes());
-                bytes.extend_from_slice(&[0u8; 16]);
+        let component = |chunks: usize, tag: i32, extra: usize, input: &serde_json::Value| {
+            let mut bytes = Vec::new();
+            if tag != 0 {
+                bytes.extend_from_slice(&tag.to_le_bytes());
             }
-        }
-        for live in case["input"].as_array().unwrap() {
-            let offset = payload_start
-                + (i(live, "chunk") as usize * crate::pxs::PXS_CHUNK_SIZE
-                    + i(live, "slot") as usize)
-                    * 20;
-            for (field, key) in ["mat", "x", "y", "xdir", "ydir"].iter().enumerate() {
-                let value = i(live, key) as i32;
-                bytes[offset + field * 4..offset + field * 4 + 4]
-                    .copy_from_slice(&value.to_le_bytes());
+            let payload_start = bytes.len();
+            for _ in 0..chunks {
+                for _ in 0..crate::pxs::PXS_CHUNK_SIZE {
+                    bytes.extend_from_slice(&(-1i32).to_le_bytes());
+                    bytes.extend_from_slice(&[0u8; 16]);
+                }
             }
+            for live in input.as_array().into_iter().flatten() {
+                let offset = payload_start
+                    + (i(live, "chunk") as usize * crate::pxs::PXS_CHUNK_SIZE
+                        + i(live, "slot") as usize)
+                        * 20;
+                for (field, key) in ["mat", "x", "y", "xdir", "ydir"].iter().enumerate() {
+                    let value = i(live, key) as i32;
+                    bytes[offset + field * 4..offset + field * 4 + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            bytes.extend(std::iter::repeat_n(0u8, extra));
+            bytes
+        };
+        let bytes = component(
+            i(case, "chunks") as usize,
+            i(case, "tag") as i32,
+            i(case, "extra") as usize,
+            &case["input"],
+        );
+
+        // The preload is the content standing when this Load runs. Load
+        // clears before it validates, so a refused component empties it.
+        let mut system = crate::pxs::PxsSystem::default();
+        let preload_chunks = i(case, "preload_chunks") as usize;
+        if preload_chunks > 0 {
+            system
+                .load_c4b(&component(preload_chunks, 1, 0, &case["preload"]))
+                .unwrap_or_else(|error| panic!("{label}: preload must load: {error}"));
         }
-        bytes.extend(std::iter::repeat_n(0u8, extra));
+        system.set_execute_count(i(case, "count_before") as usize);
 
         // C++ reads the entry through a C4Group and returns false when it is
-        // absent; the port is handed the bytes, so absence is the caller's
-        // concern and the case only pins the verdict.
+        // absent, before it reaches Clear; the port is handed the bytes, so
+        // absence is the caller's concern and never enters `load_c4b`.
         let present = case["present"].as_bool().unwrap_or(true);
-        let loaded = present.then(|| crate::pxs::PxsSystem::from_c4b(&bytes));
-        let ok = matches!(loaded, Some(Ok(_)));
+        let ok = present && system.load_c4b(&bytes).is_ok();
         expect_eq(
             &label,
             0,
@@ -13273,10 +13292,13 @@ protected func ContactBottom()
             i64::from(case["ok"].as_bool().unwrap_or(false)),
             i64::from(ok),
         );
-
-        let Some(Ok(system)) = loaded else {
-            continue;
-        };
+        expect_eq(
+            &label,
+            0,
+            "count_after",
+            i(case, "count_after"),
+            system.execute_count() as i64,
+        );
         for (index, count) in case["counts"].as_array().unwrap().iter().enumerate() {
             let live = (0..crate::pxs::PXS_CHUNK_SIZE)
                 .filter(|slot| system.peek_slot(index, *slot).is_some())
@@ -13295,7 +13317,7 @@ protected func ContactBottom()
             let pxs = system
                 .peek_slot(chunk, slot)
                 .unwrap_or_else(|| panic!("{label}: chunk {chunk} slot {slot} did not load"));
-            expect_eq(&label, slot, "mat", i(live, "mat"), pxs.mat.index() as i64);
+            expect_eq(&label, slot, "mat", i(live, "mat"), pxs.mat.raw() as i64);
             expect_eq(&label, slot, "x", i(live, "x"), pxs.x.val() as i64);
             expect_eq(&label, slot, "y", i(live, "y"), pxs.y.val() as i64);
             expect_eq(&label, slot, "xdir", i(live, "xdir"), pxs.xdir.val() as i64);

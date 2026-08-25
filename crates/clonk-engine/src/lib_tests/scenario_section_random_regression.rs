@@ -1319,7 +1319,7 @@ fn section_save_landscape_restores_c4b_pxs_and_consolidated_movers() {
         3,
         4,
         pxs::Pxs {
-            mat: earth,
+            mat: earth.into(),
             x: C4Fixed::from_raw(98_304),
             y: C4Fixed::from_raw(-147_456),
             xdir: C4Fixed::from_raw(8_192),
@@ -1401,7 +1401,7 @@ fn section_without_landscape_or_components_retains_pxs_and_movers() {
         0,
         6,
         pxs::Pxs {
-            mat: earth,
+            mat: earth.into(),
             x: itofix(2),
             y: itofix(3),
             xdir: C4Fixed::ZERO,

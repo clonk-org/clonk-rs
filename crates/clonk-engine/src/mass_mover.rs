@@ -1663,7 +1663,7 @@ mod tests {
             MaterialInteractionEvent::PxsPos,
         );
         let mut pixel = crate::pxs::Pxs {
-            mat: water,
+            mat: water.into(),
             x: crate::math::itofix(2),
             y: crate::math::itofix(3),
             xdir: crate::math::C4Fixed::ZERO,
@@ -2152,7 +2152,7 @@ mod tests {
             MaterialInteractionEvent::PxsMove,
         );
         let mut pixel = crate::pxs::Pxs {
-            mat: acid,
+            mat: acid.into(),
             x: crate::math::itofix(2),
             y: crate::math::itofix(1),
             xdir: crate::math::C4Fixed::ZERO,

@@ -757,13 +757,23 @@ impl Engine {
         state: &EngineState,
         reset_local_sound_instances: bool,
     ) -> Result<(), EngineError> {
-        let restored_pxs = state
-            .pxs_component
-            .as_deref()
-            .map(pxs::PxsSystem::from_c4b)
-            .transpose()
-            .map_err(|error| EngineError::InvalidPxsComponent(error.to_string()))?;
-        let restore_pxs_from_particles = restored_pxs.is_none();
+        // C4Game::InitGame runs Load against the live C4PXSSystem, which
+        // clears itself before validating the component; a malformed one
+        // therefore leaves an empty PXS behind rather than the previous
+        // contents (C4PXS.cpp:362-381). The caller treats the failure as
+        // fatal either way (C4Game.cpp:2675-2681). Default first, as a
+        // freshly constructed C4Game does, so the public Count starts at
+        // zero regardless of what this engine was running before.
+        self.pxs_system.reset_to_default();
+        let restore_pxs_from_particles = match state.pxs_component.as_deref() {
+            Some(component) => {
+                self.pxs_system
+                    .load_c4b(component)
+                    .map_err(|error| EngineError::InvalidPxsComponent(error.to_string()))?;
+                false
+            }
+            None => true,
+        };
         // C4Def::pFairCrewPhysical is derived runtime state. A restored game
         // must lazily rebuild it from the restored parameters and RNG epoch.
         self.clear_fair_crew_physicals();
@@ -989,7 +999,11 @@ impl Engine {
         );
         self.global_effects = state.global_effects.clone();
         self.particles.clear();
-        self.pxs_system = restored_pxs.unwrap_or_default();
+        // The component already loaded in place above; without one the
+        // particle snapshots below rebuild the system from scratch.
+        if restore_pxs_from_particles {
+            self.pxs_system.reset_to_default();
+        }
         self.particle_system.clear_particles();
         for snapshot in &state.particles {
             if snapshot.definition_id.starts_with("material/pxs/") && snapshot.parameter_b >= 0 {
@@ -1006,7 +1020,7 @@ impl Engine {
                         math::ftofix(snapshot.velocity.y).val(),
                     ]);
                     let pixel = pxs::Pxs {
-                        mat: material,
+                        mat: material.into(),
                         x: C4Fixed::from_raw(x),
                         y: C4Fixed::from_raw(y),
                         xdir: C4Fixed::from_raw(xdir),
@@ -3622,7 +3636,7 @@ impl Engine {
                 pxs.set_execute_count(departing_pxs.execute_count());
                 self.pxs_system = pxs;
             }
-            None if landscape_loaded => self.pxs_system.clear(),
+            None if landscape_loaded => self.pxs_system.reset_to_default(),
             None => self.pxs_system = departing_pxs,
         }
         match target_landscape_systems.mass_movers {

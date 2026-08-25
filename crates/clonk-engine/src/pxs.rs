@@ -43,19 +43,57 @@ pub(crate) enum PxsComponentError {
     InvalidNumberFormat(i32),
     #[error("PXS.c4b contains {0} chunks; maximum is {PXS_MAX_CHUNK}")]
     TooManyChunks(usize),
-    #[error("PXS.c4b contains unrepresentable material index {0}")]
-    InvalidMaterial(i32),
 }
 
 fn read_component_i32(bytes: &[u8]) -> i32 {
     i32::from_le_bytes(bytes.try_into().expect("four-byte component field"))
 }
 
+/// `C4PXS::Mat` (C4PXS.h:33): a raw material index, not a validated handle.
+///
+/// `C4PXSSystem::Load` stores whatever the file held and `mrfScript` writes
+/// back whatever the reaction returned, both without checking the range
+/// (C4PXS.cpp:362-404; C4Material.cpp:822). Only `C4PXS::Execute`'s
+/// `MatValid` guard rejects an out-of-range value, one tick later
+/// (C4PXS.cpp:46-50; C4Wrappers.h:100-103) — and until it does, the slot
+/// stays occupied, which is what `New` allocates around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PxsMaterial(i32);
+
+impl PxsMaterial {
+    pub fn from_raw(raw: i32) -> Self {
+        Self(raw)
+    }
+
+    pub fn raw(self) -> i32 {
+        self.0
+    }
+
+    /// The engine-side handle, when the raw index can carry one at all. A
+    /// `Some` here is still only a representable index — `MatValid`'s upper
+    /// bound is the live map's size, so callers filter through `MaterialSet`.
+    pub fn id(self) -> Option<MaterialId> {
+        usize::try_from(self.0).ok().and_then(MaterialId::new)
+    }
+}
+
+impl From<MaterialId> for PxsMaterial {
+    fn from(id: MaterialId) -> Self {
+        Self(id.index() as i32)
+    }
+}
+
+impl PartialEq<MaterialId> for PxsMaterial {
+    fn eq(&self, other: &MaterialId) -> bool {
+        self.0 == other.index() as i32
+    }
+}
+
 /// One pixel sprite (C4PXS.h:25-38). `Mat == MNone` (a free slot) is modeled
 /// as `None` in the chunk arrays instead of a sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pxs {
-    pub mat: MaterialId,
+    pub mat: PxsMaterial,
     pub x: C4Fixed,
     pub y: C4Fixed,
     pub xdir: C4Fixed,
@@ -251,7 +289,7 @@ impl PxsSystem {
             if self.chunk_counts[chunk_index] < PXS_CHUNK_SIZE {
                 if let Some(slot) = self.occupancy.first_free_in_chunk(chunk_index) {
                     let pxs = Pxs {
-                        mat,
+                        mat: mat.into(),
                         x,
                         y,
                         xdir,
@@ -621,10 +659,6 @@ impl PxsSystem {
                 if raw_material == M_NONE {
                     continue;
                 }
-                let material = usize::try_from(raw_material)
-                    .ok()
-                    .and_then(MaterialId::new)
-                    .ok_or(PxsComponentError::InvalidMaterial(raw_material))?;
                 let fixed = |field: usize| {
                     let raw = read_component_i32(&record[field * 4..field * 4 + 4]);
                     if number_format == 2 {
@@ -636,7 +670,7 @@ impl PxsSystem {
                 system.chunks[chunk_index]
                     .as_mut()
                     .expect("chunk allocated above")[slot] = Some(Pxs {
-                    mat: material,
+                    mat: PxsMaterial::from_raw(raw_material),
                     x: fixed(1),
                     y: fixed(2),
                     xdir: fixed(3),
@@ -670,7 +704,7 @@ impl PxsSystem {
             for (slot_index, slot) in chunk.iter().enumerate() {
                 match slot {
                     Some(pxs) => {
-                        bytes.extend_from_slice(&(pxs.mat.index() as i32).to_le_bytes());
+                        bytes.extend_from_slice(&pxs.mat.raw().to_le_bytes());
                         for value in [pxs.x, pxs.y, pxs.xdir, pxs.ydir] {
                             bytes.extend_from_slice(&value.val().to_le_bytes());
                         }
@@ -688,13 +722,36 @@ impl PxsSystem {
         Some(bytes)
     }
 
+    /// `C4PXSSystem::Load` (C4PXS.cpp:362-404), in place on the live system.
+    ///
+    /// C++ clears the existing chunks before it validates the number format
+    /// and the chunk count, so a malformed component leaves the system empty
+    /// rather than untouched — and `Clear` keeps the public `Count`, which is
+    /// what the sync check transmits.
+    pub(crate) fn load_c4b(&mut self, bytes: &[u8]) -> Result<(), PxsComponentError> {
+        self.clear();
+        let count = self.execute_count;
+        *self = Self::from_c4b(bytes)?;
+        self.execute_count = count;
+        Ok(())
+    }
+
+    /// `C4PXSSystem::Clear` (C4PXS.cpp:171-179): free every chunk and zero
+    /// the per-chunk counters. The public `Count` ledger is deliberately
+    /// untouched — only `Default` resets it.
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.dead_payload_chunks.clear();
         self.chunk_counts.clear();
         self.occupancy = SlotOccupancy::default();
-        self.execute_count = 0;
         self.inspected_slots = 0;
+    }
+
+    /// The `Clear(); Default();` pair C++ runs when a loaded landscape
+    /// carries no PXS component (C4PXS.cpp:161-179; C4Game.cpp:2683-2686).
+    pub(crate) fn reset_to_default(&mut self) {
+        self.clear();
+        self.execute_count = 0;
     }
 }
 
@@ -779,7 +836,7 @@ mod tests {
             0,
             0,
             Pxs {
-                mat: mat(0),
+                mat: mat(0).into(),
                 x: fixed(1),
                 y: fixed(0),
                 xdir: fixed(0),
@@ -790,7 +847,7 @@ mod tests {
             1,
             4,
             Pxs {
-                mat: mat(0),
+                mat: mat(0).into(),
                 x: fixed(11),
                 y: fixed(0),
                 xdir: fixed(0),
@@ -801,7 +858,7 @@ mod tests {
             3,
             2,
             Pxs {
-                mat: mat(0),
+                mat: mat(0).into(),
                 x: fixed(33),
                 y: fixed(0),
                 xdir: fixed(0),
@@ -829,7 +886,7 @@ mod tests {
         // and New reuses the lowest Mat==MNone slot (C4PXS.cpp:181-205).
         let mut system = PxsSystem::default();
         let live = Pxs {
-            mat: mat(0),
+            mat: mat(0).into(),
             x: C4Fixed::from_raw(1),
             y: C4Fixed::from_raw(2),
             xdir: C4Fixed::from_raw(3),
@@ -862,7 +919,10 @@ mod tests {
             ..live
         };
         assert!(system.create_unchecked(
-            replacement.mat,
+            replacement
+                .mat
+                .id()
+                .expect("fixture material is representable"),
             replacement.x,
             replacement.y,
             replacement.xdir,
@@ -938,7 +998,7 @@ mod tests {
             0,
             0,
             Pxs {
-                mat: mat(2),
+                mat: mat(2).into(),
                 x: C4Fixed::from_raw(dead_values[0]),
                 y: C4Fixed::from_raw(dead_values[1]),
                 xdir: C4Fixed::from_raw(dead_values[2]),
@@ -949,7 +1009,7 @@ mod tests {
             0,
             1,
             Pxs {
-                mat: mat(4),
+                mat: mat(4).into(),
                 x: fixed(1),
                 y: fixed(2),
                 xdir: fixed(3),
@@ -975,14 +1035,14 @@ mod tests {
         // complete chunk records verbatim (C4PXS.cpp:383-397).
         let mut engine = crate::Engine::new();
         let dead = Pxs {
-            mat: mat(2),
+            mat: mat(2).into(),
             x: C4Fixed::from_raw(17),
             y: C4Fixed::from_raw(-23),
             xdir: C4Fixed::from_raw(0x1234_5678),
             ydir: C4Fixed::from_raw(i32::MIN + 9),
         };
         let live = Pxs {
-            mat: mat(4),
+            mat: mat(4).into(),
             x: fixed(1),
             y: fixed(2),
             xdir: fixed(3),
@@ -1056,8 +1116,14 @@ mod tests {
             let system = PxsSystem::from_c4b(fixture).expect("C++ PXS component loads");
             let slots = system.iter_slots().collect::<Vec<_>>();
             assert_eq!(slots.len(), 2);
-            assert_eq!((slots[0].0, slots[0].1, slots[0].2.mat), (0, 7, mat(2)));
-            assert_eq!((slots[1].0, slots[1].1, slots[1].2.mat), (2, 499, mat(4)));
+            assert_eq!(
+                (slots[0].0, slots[0].1, slots[0].2.mat),
+                (0, 7, mat(2).into())
+            );
+            assert_eq!(
+                (slots[1].0, slots[1].1, slots[1].2.mat),
+                (2, 499, mat(4).into())
+            );
             assert!(
                 system.chunk_allocated(1),
                 "serialized empty chunks stay allocated"
@@ -1086,7 +1152,10 @@ mod tests {
         }
         let untagged = PxsSystem::from_c4b(&CPP_PXS_FORM1[4..])
             .expect("legacy untagged fixed-point component loads");
-        assert_eq!(untagged.peek_slot(2, 499).map(|pxs| pxs.mat), Some(mat(4)));
+        assert_eq!(
+            untagged.peek_slot(2, 499).map(|pxs| pxs.mat),
+            Some(mat(4).into())
+        );
     }
 
     #[test]
@@ -1124,7 +1193,7 @@ mod scan_baseline_tests {
         );
 
         let pixel = Pxs {
-            mat: crate::TestValueExt::test_value(MaterialId::new(1)),
+            mat: crate::TestValueExt::test_value(MaterialId::new(1)).into(),
             x: C4Fixed::from_raw(0),
             y: C4Fixed::from_raw(0),
             xdir: C4Fixed::from_raw(0),
@@ -1169,7 +1238,7 @@ mod scan_baseline_tests {
                         chunk,
                         slot,
                         Pxs {
-                            mat: material,
+                            mat: material.into(),
                             x: C4Fixed::from_raw(step as i32),
                             y: C4Fixed::ZERO,
                             xdir: C4Fixed::ZERO,
@@ -1223,7 +1292,7 @@ mod scan_baseline_tests {
     #[test]
     fn rebuilding_paths_leave_the_index_agreeing_with_the_array() {
         let pixel = Pxs {
-            mat: crate::TestValueExt::test_value(MaterialId::new(1)),
+            mat: crate::TestValueExt::test_value(MaterialId::new(1)).into(),
             x: C4Fixed::from_raw(7),
             y: C4Fixed::from_raw(9),
             xdir: C4Fixed::ZERO,
@@ -1253,5 +1322,116 @@ mod scan_baseline_tests {
         cleared.clear();
         assert!(cleared.occupancy_matches_slots(), "clear");
         assert_eq!(cleared.next_live_slot(0), None);
+    }
+
+    fn mat(index: usize) -> MaterialId {
+        MaterialId::new(index).expect("valid material id")
+    }
+
+    /// One `PXS.c4b` chunk whose slot 0 carries `raw_material` and whose
+    /// remaining slots are free.
+    fn chunk_with_raw_material(raw_material: i32) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(4 + PXS_CHUNK_BYTES);
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        for slot in 0..PXS_CHUNK_SIZE {
+            let material = if slot == 0 { raw_material } else { M_NONE };
+            bytes.extend_from_slice(&material.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 16]);
+        }
+        bytes
+    }
+
+    /// `C4PXSSystem::Clear` frees the chunks and zeroes the per-chunk
+    /// counters but leaves the public `Count` alone; only `Default` resets
+    /// that ledger (oracle-src-pinned src/C4PXS.cpp:161-179). `Count` is what
+    /// `C4ControlSyncCheck::Set` transmits (src/C4Control.cpp:453), so
+    /// zeroing it early desyncs the check rather than the pixels.
+    #[test]
+    fn clear_frees_the_chunks_but_keeps_the_public_count() {
+        let mut system = PxsSystem::default();
+        assert!(system.create_unchecked(
+            mat(1),
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO
+        ));
+        system.begin_execute();
+        system.note_executed();
+        assert_eq!(system.execute_count(), 1);
+
+        system.clear();
+        assert_eq!(system.count(), 0, "Clear frees every chunk");
+        assert_eq!(
+            system.execute_count(),
+            1,
+            "Clear does not touch the public Count ledger"
+        );
+
+        system.reset_to_default();
+        assert_eq!(
+            system.execute_count(),
+            0,
+            "Default is what resets the public Count"
+        );
+    }
+
+    /// `C4PXSSystem::Load` clears the existing chunks *before* it validates
+    /// the number format and the chunk count, so a malformed component
+    /// leaves the system empty rather than untouched — and the cleared
+    /// system keeps its public `Count` (src/C4PXS.cpp:362-381).
+    #[test]
+    fn a_malformed_component_leaves_the_system_cleared() {
+        let mut system = PxsSystem::default();
+        assert!(system.create_unchecked(
+            mat(1),
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO,
+            C4Fixed::ZERO
+        ));
+        system.begin_execute();
+        system.note_executed();
+
+        let mut malformed = chunk_with_raw_material(1);
+        malformed[..4].copy_from_slice(&7i32.to_le_bytes());
+        assert_eq!(
+            system.load_c4b(&malformed),
+            Err(PxsComponentError::InvalidNumberFormat(7))
+        );
+        assert_eq!(
+            system.count(),
+            0,
+            "Load clears before it validates, so the failure leaves nothing"
+        );
+        assert_eq!(
+            system.execute_count(),
+            1,
+            "the cleared system keeps the Count the sync check transmits"
+        );
+    }
+
+    /// `C4PXSSystem::Load` accepts every record whose raw `Mat` differs from
+    /// `MNone` and counts its slot; nothing there validates the index. Only
+    /// `C4PXS::Execute`'s `MatValid` guard rejects an out-of-range one
+    /// (oracle-src-pinned src/C4PXS.cpp:362-404 and :46-50;
+    /// src/C4Wrappers.h:100-103). Refusing the record at load instead frees
+    /// its slot a tick early, so the next `New` picks a different slot.
+    #[test]
+    fn load_keeps_a_raw_invalid_material_occupying_its_slot() {
+        for raw_material in [-5, i32::MIN, 70_000, i32::MAX] {
+            let system = PxsSystem::from_c4b(&chunk_with_raw_material(raw_material))
+                .unwrap_or_else(|error| panic!("C++ Load accepts raw Mat {raw_material}: {error}"));
+            assert_eq!(
+                system.count(),
+                1,
+                "raw Mat {raw_material} must hold its slot until the Execute guard"
+            );
+            assert_eq!(
+                system.peek_slot(0, 0).map(|pixel| pixel.mat.raw()),
+                Some(raw_material),
+                "the slot must retain the exact raw index C++ stored"
+            );
+        }
     }
 }
