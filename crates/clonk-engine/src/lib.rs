@@ -11129,29 +11129,47 @@ impl Engine {
             return;
         };
         let surviving = definition.sprite_variant_keys();
+        let mut rebound = Vec::new();
         let mut orphaned = Vec::new();
-        for object in self.objects.iter_mut() {
-            let Some(graphics) = object.state.base_graphics.as_mut() else {
+        for object in self.objects.iter() {
+            let Some(graphics) = object.state.base_graphics.as_ref() else {
                 continue;
             };
             if graphics.definition.as_str() != id {
                 continue;
             }
-            let Some(name) = graphics.graphics_name.clone() else {
+            let Some(name) = graphics.graphics_name.as_ref() else {
                 // The definition's default graphic, which the rebuild replaced
                 // in place: nothing to re-resolve.
                 continue;
             };
-            if surviving.iter().any(|key| key == &name) {
+            if surviving.iter().any(|key| key == name) {
                 continue;
             }
-            // `SetGraphics(Name, pObj->Def)` — fall back to the object's own
-            // definition, which is the reloaded one here.
-            if object.definition_id.as_str() == id {
-                graphics.graphics_name = None;
-                continue;
+            // `SetGraphics(Name, pObj->Def)` — the object's OWN definition,
+            // which is a different one whenever the object merely borrowed
+            // this graphic. When it *is* the reloaded definition this checks
+            // the same set again and fails, exactly as the second native call
+            // does, so the object falls through to removal rather than
+            // silently keeping a graphic nothing supplies.
+            let own_supplies = self
+                .definitions
+                .get(object.definition_id.as_str())
+                .is_some_and(|own| own.sprite_variant_keys().iter().any(|key| key == name));
+            if own_supplies {
+                rebound.push(object.id);
+            } else {
+                orphaned.push(object.id);
             }
-            orphaned.push(object.id);
+        }
+        for object in rebound {
+            let Some(index) = self.find_object_index(object) else {
+                continue;
+            };
+            let own = self.objects[index].definition_id.clone();
+            if let Some(graphics) = self.objects[index].state.base_graphics.as_mut() {
+                graphics.definition = own;
+            }
         }
         for object in orphaned {
             if let Err(error) = self.assign_object_removal(object) {
@@ -13518,6 +13536,10 @@ mod map_creator_discard_draws_regression;
 #[cfg(test)]
 #[path = "lib_tests/weather_meteor_creation_lifecycle_regression.rs"]
 mod weather_meteor_creation_lifecycle_regression;
+
+#[cfg(test)]
+#[path = "lib_tests/reload_graphics_own_definition_regression.rs"]
+mod reload_graphics_own_definition_regression;
 
 #[cfg(test)]
 #[path = "lib_tests/include_local_order_regression.rs"]
