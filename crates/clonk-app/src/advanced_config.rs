@@ -1256,4 +1256,195 @@ mod tests {
         );
         assert_eq!(config.get_in(Some("Network"), "LocalName"), Some("Alice"));
     }
+
+    /// `C4Config.cpp`'s literal declared defaults at the pinned oracle
+    /// commit, extracted mechanically. See the test below.
+    #[rustfmt::skip]
+    const CPP_CONFIG_DEFAULTS: &[(&str, &str, &str)] = &[
+        ("General", "Version", "347"),
+        ("General", "Name", ""),
+        ("General", "Language", ""),
+        ("General", "LanguageEx", ""),
+        ("General", "LanguageCharset", ""),
+        ("General", "Definitions", ""),
+        ("General", "Participants", ""),
+        ("General", "LogPath", ""),
+        ("General", "PlayerPath", ""),
+        ("General", "DefinitionPath", ""),
+        ("General", "SaveGameFolder", "Savegames.c4f"),
+        ("General", "SaveDemoFolder", "Records.c4f"),
+        ("General", "MissionAccess", ""),
+        ("General", "FPS", "0"),
+        ("General", "Record", "0"),
+        ("General", "ScreenshotFolder", "Screenshots"),
+        ("General", "NoCrew", "0"),
+        ("General", "DefCrewStrength", "1000"),
+        ("General", "ScrollSmooth", "4"),
+        ("General", "DebugMode", "0"),
+        ("General", "AllowScriptingInReplays", "0"),
+        ("General", "FontName", "Endeavour"),
+        ("General", "FontSize", "14"),
+        ("General", "FirstStart", "1"),
+        ("General", "UserPortraitsWritten", "0"),
+        ("General", "UseWhiteIngameChat", "0"),
+        ("General", "UseWhiteLobbyChat", "0"),
+        ("General", "ShowLogTimestamps", "0"),
+        ("Developer", "AutoFileReload", "1"),
+        ("Graphics", "ResolutionX", "800"),
+        ("Graphics", "ResolutionY", "600"),
+        ("Graphics", "Scale", "100"),
+        ("Graphics", "SplitscreenDividers", "1"),
+        ("Graphics", "ShowPlayerHUDAlways", "1"),
+        ("Graphics", "ShowPortraits", "1"),
+        ("Graphics", "AddNewCrewPortraits", "1"),
+        ("Graphics", "SaveDefaultPortraits", "1"),
+        ("Graphics", "ShowCommands", "1"),
+        ("Graphics", "ShowCommandKeys", "1"),
+        ("Graphics", "ColorAnimation", "0"),
+        ("Graphics", "SmokeLevel", "200"),
+        ("Graphics", "VerboseObjectLoading", "0"),
+        ("Graphics", "ShowClock", "0"),
+        ("Graphics", "ShowCrewNames", "1"),
+        ("Graphics", "ShowCrewCNames", "1"),
+        ("Graphics", "MsgBoard", "1"),
+        ("Graphics", "PXSGfx", "1"),
+        ("Graphics", "NoAlphaAdd", "0"),
+        ("Graphics", "PointFiltering", "0"),
+        ("Graphics", "NoBoxFades", "0"),
+        ("Graphics", "NoAcceleration", "0"),
+        ("Graphics", "TexIndent", "0"),
+        ("Graphics", "BlitOffset", "0"),
+        ("Graphics", "Gamma1", "0"),
+        ("Graphics", "DisableGamma", "0"),
+        ("Graphics", "FireParticles", "1"),
+        ("Graphics", "MaxRefreshDelay", "30"),
+        ("Graphics", "Shader", "0"),
+        ("Graphics", "AutoFrameSkip", "1"),
+        ("Graphics", "CacheTexturesInRAM", "100"),
+        ("Graphics", "ShowFolderMaps", "1"),
+        ("Graphics", "UseShaderGamma", "1"),
+        ("Sound", "Sound", "1"),
+        ("Sound", "Music", "1"),
+        ("Sound", "MenuMusic", "1"),
+        ("Sound", "MenuSound", "1"),
+        ("Sound", "MusicVolume", "100"),
+        ("Sound", "SoundVolume", "100"),
+        ("Sound", "PreferLinearResampling", "0"),
+        ("Sound", "MuteSoundCommand", "0"),
+        ("Network", "ControlRate", "2"),
+        ("Network", "WorkPath", "Network"),
+        ("Network", "NoRuntimeJoin", "1"),
+        ("Network", "MaxResSearchRecursion", "1"),
+        ("Network", "Comment", ""),
+        ("Network", "ControlMode", "0"),
+        ("Network", "LocalName", "Unknown"),
+        ("Network", "Nick", ""),
+        ("Network", "MasterServerSignUp", "1"),
+        ("Network", "MasterReferencePeriod", "120"),
+        ("Network", "LeagueServerSignUp", "0"),
+        ("Network", "UseAlternateServer", "0"),
+        ("Network", "LastPassword", "Wipf"),
+        ("Network", "EnableAutomaticUpdate", "1"),
+        ("Network", "LastUpdateTime", "0"),
+        ("Network", "AsyncMaxWait", "2"),
+        ("Network", "LeagueNick", ""),
+        ("Network", "LeagueAutoLogin", "1"),
+        ("Network", "UseCurl", "1"),
+        ("Network", "EnableUPnP", "1"),
+        ("Lobby", "AllowPlayerSave", "0"),
+        ("Lobby", "CountdownTime", "5"),
+        ("IRC", "Server2", "irc.euirc.net"),
+        ("IRC", "Nick", ""),
+        ("IRC", "RealName", ""),
+        ("IRC", "Channel", "#clonken,#legacyclonk"),
+        ("Controls", "MouseAutoScroll", "0"),
+    ];
+
+    /// Every literal default `C4Config.cpp` declares is either materialized
+    /// identically by this port, or is a divergence the compatibility manifest
+    /// already registers (clonk-org/clonk-rs#530).
+    ///
+    /// C++ has no separate validation or clamping pass: `C4Config::Default`
+    /// runs `StdCompilerNull` over the `CompileFunc` declarations
+    /// (C4Config.cpp:734-741), so every default lives in the third argument of
+    /// an `mkNamingAdapt` and nowhere else. A differential here is therefore a
+    /// comparison of those declarations against what `default_config` writes.
+    ///
+    /// The table is extracted mechanically from the pinned oracle
+    /// (`7d43b47b7d789b533f32d005e64596e0a07019cd`, `src/C4Config.cpp`), so it
+    /// is the oracle's own set rather than a hand-copied one.
+    ///
+    /// The escape hatch is deliberately **not** a skip list: a default that
+    /// differs has to name a divergence id that exists in
+    /// `compat/profile.json`, so the only way to add one is to register it
+    /// where the compatibility promise can see it.
+    ///
+    /// Excluded from the table, because they have no single serialized form to
+    /// compare against:
+    ///
+    /// - the `Kbd*`/`Gamepad*` key tables, whose defaults are platform- and
+    ///   language-conditional `KEY(...)` macros;
+    /// - the two keys C++ declares **more than once**, with a different
+    ///   default per platform: `General.UserPath` and `General.Preloading`.
+    ///   Pinning either value passes on one runner and fails on another —
+    ///   `Preloading` is `false` on one platform and `true` on another, which
+    ///   is what evicted this change from the merge queue the first time. The
+    ///   exclusion is derived by rule rather than kept as a list: a key with
+    ///   more than one declared default has no single expected value;
+    /// - keys the *port* materializes on some platforms only, where neither
+    ///   "present and equal" nor "absent" is portable: `ThreadPoolThreadCount`
+    ///   (`cfg(not(windows))`) and the window-geometry trio `Graphics.Maximized`,
+    ///   `PositionX` and `PositionY`, which this port persists on Windows alone
+    ///   while C++ declares them everywhere;
+    /// - defaults that are C++ constants or enum members
+    ///   (`C4CFG_LeagueServer`, `DisplayMode::Fullscreen`,
+    ///   `spdlog::level::info`, `C4GFXBLIT_ALL`, `C4AudioSystem::MaxChannels`
+    ///   and the rest).
+    #[test]
+    fn the_port_materializes_the_cpp_declared_defaults() {
+        // Each entry: the key that differs, and the divergence that owns it.
+        const REGISTERED: &[(&str, &str, &str)] =
+            &[("Network", "ControlMode", "ctrl-async-default")];
+
+        let manifest = crate::compat_readiness::profile_manifest_for_tests();
+        let defaults = default_config();
+        let mut absent = Vec::new();
+        let mut unregistered = Vec::new();
+
+        for (section, key, expected) in CPP_CONFIG_DEFAULTS {
+            let Some(actual) = defaults.get_in(Some(section), key) else {
+                absent.push(format!("[{section}] {key} (C++ default {expected:?})"));
+                continue;
+            };
+            if actual == *expected {
+                continue;
+            }
+            let registered = REGISTERED
+                .iter()
+                .find(|(s, k, _)| s == section && k == key)
+                .map(|(_, _, id)| *id);
+            match registered {
+                Some(id) if manifest.contains(id) => {}
+                Some(id) => unregistered.push(format!(
+                    "[{section}] {key} names divergence `{id}`, which compat/profile.json does not contain"
+                )),
+                None => unregistered.push(format!(
+                    "[{section}] {key}: C++ {expected:?}, port {actual:?} — register it in compat/profile.json and name it here"
+                )),
+            }
+        }
+
+        assert!(
+            unregistered.is_empty(),
+            "{} default(s) deviate from the oracle without a registered divergence:\n  {}",
+            unregistered.len(),
+            unregistered.join("\n  ")
+        );
+        assert!(
+            absent.is_empty(),
+            "{} key(s) the oracle declares are not materialized by the port:\n  {}",
+            absent.len(),
+            absent.join("\n  ")
+        );
+    }
 }

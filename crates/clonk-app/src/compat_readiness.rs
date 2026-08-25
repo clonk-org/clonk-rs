@@ -20,6 +20,13 @@ use std::sync::OnceLock;
 /// same artifact.
 const PROFILE_MANIFEST: &str = include_str!("../../../compat/profile.json");
 
+/// The manifest text, for tests that check a claim against what the profile
+/// actually registers rather than against a second copy of the same list.
+#[cfg(test)]
+pub(crate) fn profile_manifest_for_tests() -> &'static str {
+    PROFILE_MANIFEST
+}
+
 /// Why the profile cannot be claimed, and what would close it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompatBlocker {
