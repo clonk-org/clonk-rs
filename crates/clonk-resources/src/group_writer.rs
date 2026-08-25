@@ -1,5 +1,6 @@
 //! Mutable, C++-faithful foundation for writing stock C4Group files.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -919,8 +920,8 @@ pub(crate) fn compress_c4group_for_test(image: &[u8]) -> Result<Vec<u8>, Mutable
     compress_c4group_image(image)
 }
 
-struct PackedEntry {
-    data: Vec<u8>,
+struct PackedEntry<'a> {
+    data: Cow<'a, [u8]>,
     size: i32,
     child: bool,
 }
@@ -931,13 +932,17 @@ struct EntryCoreCrc {
     value: u32,
 }
 
-impl PackedEntry {
-    fn from_entry(entry: &MutableGroupEntry) -> Result<Self, MutableGroupError> {
+impl<'a> PackedEntry<'a> {
+    fn from_entry(entry: &'a MutableGroupEntry) -> Result<Self, MutableGroupError> {
         let (data, child) = match &entry.data {
-            MutableGroupEntryData::File(data) => (data.clone(), false),
-            MutableGroupEntryData::ExistingFile { data, .. } => (data.clone(), false),
-            MutableGroupEntryData::Child(child) => (child.pack_raw()?, true),
-            MutableGroupEntryData::PackedChild { data, .. } => (data.clone(), true),
+            MutableGroupEntryData::File(data) => (Cow::Borrowed(data.as_slice()), false),
+            MutableGroupEntryData::ExistingFile { data, .. } => {
+                (Cow::Borrowed(data.as_slice()), false)
+            }
+            MutableGroupEntryData::Child(child) => (Cow::Owned(child.pack_raw()?), true),
+            MutableGroupEntryData::PackedChild { data, .. } => {
+                (Cow::Borrowed(data.as_slice()), true)
+            }
         };
         let size = i32::try_from(data.len())
             .map_err(|_| MutableGroupError::EntryDataTooLarge(data.len()))?;
@@ -968,7 +973,7 @@ fn encode_header(
 
 fn encode_entry_core(
     entry: &MutableGroupEntry,
-    packed: &PackedEntry,
+    packed: &PackedEntry<'_>,
     crc: EntryCoreCrc,
     offset: i32,
 ) -> Result<[u8; GROUP_ENTRY_SIZE], MutableGroupError> {
@@ -1234,5 +1239,29 @@ fn entry_time_or_now(time: u32) -> u32 {
         unix_time_now()
     } else {
         time
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_entry_borrows_unchanged_payload_until_final_image_copy() {
+        let entry = MutableGroupEntry {
+            name: "marker.txt".to_owned(),
+            name_bytes: b"marker.txt".to_vec(),
+            data: MutableGroupEntryData::File(b"unchanged payload".to_vec()),
+            time: 0,
+            executable: false,
+        };
+        let source = match &entry.data {
+            MutableGroupEntryData::File(data) => data.as_ptr(),
+            _ => unreachable!(),
+        };
+
+        let packed = PackedEntry::from_entry(&entry).unwrap();
+
+        assert_eq!(packed.data.as_ptr(), source);
     }
 }

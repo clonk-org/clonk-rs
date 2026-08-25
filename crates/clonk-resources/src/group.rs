@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,6 +18,9 @@ use crate::group_writer::{
 const GROUP_HEADER_SIZE: usize = 204;
 const GROUP_ENTRY_SIZE: usize = 316;
 const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
+/// A child view may keep a modest parent allocation alive to avoid copying,
+/// but a small child must not pin an arbitrarily large decompressed archive.
+const MAX_SHARED_PACKED_PARENT_EXCESS_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum GroupError {
@@ -64,7 +69,39 @@ struct DirectoryIndex {
 #[derive(Debug, Clone)]
 enum PackedSource {
     File(PathBuf),
-    Memory(Arc<Vec<u8>>),
+    Memory {
+        data: Arc<Vec<u8>>,
+        range: Range<usize>,
+    },
+}
+
+impl PackedSource {
+    fn from_memory(data: Vec<u8>) -> Self {
+        let len = data.len();
+        Self::Memory {
+            data: Arc::new(data),
+            range: 0..len,
+        }
+    }
+
+    fn memory_slice(&self) -> Option<&[u8]> {
+        match self {
+            Self::File(_) => None,
+            Self::Memory { data, range } => data.get(range.clone()),
+        }
+    }
+
+    fn from_memory_range(data: &Arc<Vec<u8>>, range: Range<usize>) -> Option<Self> {
+        let bytes = data.get(range.clone())?;
+        if data.capacity().saturating_sub(bytes.len()) > MAX_SHARED_PACKED_PARENT_EXCESS_BYTES {
+            Some(Self::from_memory(bytes.to_vec()))
+        } else {
+            Some(Self::Memory {
+                data: Arc::clone(data),
+                range,
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -225,14 +262,21 @@ impl Group {
     }
 
     pub fn read_file<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
+        self.read_file_cow(relative).map(Cow::into_owned)
+    }
+
+    /// Reads an entry while borrowing directly from an in-memory packed group
+    /// whenever possible. Directory and raw-file groups retain the owned-read
+    /// behavior required by their backing storage.
+    pub fn read_file_cow<P: AsRef<Path>>(&self, relative: P) -> Result<Cow<'_, [u8]>, GroupError> {
         match &self.kind {
             GroupKind::Directory(directory) => {
                 let full_path = directory.resolve_entry(relative.as_ref())?;
-                Ok(fs::read(full_path)?)
+                Ok(Cow::Owned(fs::read(full_path)?))
             }
             GroupKind::Packed(packed) => {
                 let relative = normalize_path(relative.as_ref());
-                packed.read_file(&relative)
+                packed.read_file_cow(&relative)
             }
         }
     }
@@ -255,6 +299,15 @@ impl Group {
     /// for child entries. C4Group rewrites copy unchanged child payloads
     /// byte-for-byte when another entry is deleted from the parent.
     pub fn read_entry_bytes<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
+        self.read_entry_bytes_cow(relative).map(Cow::into_owned)
+    }
+
+    /// Reads a physical entry payload without copying memory-backed packed
+    /// data. Child-group payloads remain in their raw, uncompressed form.
+    pub fn read_entry_bytes_cow<P: AsRef<Path>>(
+        &self,
+        relative: P,
+    ) -> Result<Cow<'_, [u8]>, GroupError> {
         match &self.kind {
             GroupKind::Directory(directory) => {
                 let full_path = directory.resolve_entry(relative.as_ref())?;
@@ -264,11 +317,11 @@ impl Group {
                         relative.as_ref().display()
                     )));
                 }
-                Ok(fs::read(full_path)?)
+                Ok(Cow::Owned(fs::read(full_path)?))
             }
             GroupKind::Packed(packed) => {
                 let relative = normalize_path(relative.as_ref());
-                packed.read_entry_bytes_by_path(&relative)
+                packed.read_entry_bytes_by_path_cow(&relative)
             }
         }
     }
@@ -277,11 +330,19 @@ impl Group {
     /// its legacy byte-string name through UTF-8. This is required when a
     /// C4Group contains names written in a legacy single-byte charset.
     pub fn read_entry_bytes_exact(&self, entry: &GroupEntry) -> Result<Vec<u8>, GroupError> {
+        self.read_entry_bytes_exact_cow(entry).map(Cow::into_owned)
+    }
+
+    /// Exact-name counterpart to [`Self::read_entry_bytes_cow`].
+    pub fn read_entry_bytes_exact_cow<'a>(
+        &'a self,
+        entry: &GroupEntry,
+    ) -> Result<Cow<'a, [u8]>, GroupError> {
         match &self.kind {
-            GroupKind::Directory(directory) => {
-                Ok(fs::read(directory.root.join(&entry.relative_path))?)
-            }
-            GroupKind::Packed(packed) => packed.read_entry_bytes_by_name(&entry.name_bytes),
+            GroupKind::Directory(directory) => Ok(Cow::Owned(fs::read(
+                directory.root.join(&entry.relative_path),
+            )?)),
+            GroupKind::Packed(packed) => packed.read_entry_bytes_by_name_cow(&entry.name_bytes),
         }
     }
 
@@ -657,13 +718,19 @@ impl PackedGroup {
     }
 
     fn from_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
-        Self::from_source(path, PackedSource::Memory(Arc::new(data)))
+        Self::from_source(path, PackedSource::from_memory(data))
     }
 
     fn from_raw_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
-        let data = Arc::new(data);
-        let source = PackedSource::Memory(Arc::clone(&data));
-        let mut cursor = Cursor::new(data.as_slice());
+        Self::from_raw_source(path, PackedSource::from_memory(data))
+    }
+
+    fn from_raw_source(path: PathBuf, source: PackedSource) -> Result<Self, GroupError> {
+        let reader_source = source.clone();
+        let data = reader_source.memory_slice().ok_or_else(|| {
+            GroupError::InvalidGroup("raw memory group has no memory source".into())
+        })?;
+        let mut cursor = Cursor::new(data);
         Self::parse_from_reader(
             path,
             source,
@@ -691,12 +758,17 @@ impl PackedGroup {
                     let mut compressed = Vec::new();
                     file.read_to_end(&mut compressed)?;
                     let data = decompress_group(compressed)?;
-                    let data_arc = Arc::new(data);
-                    let data_clone = Arc::clone(&data_arc);
-                    let mut cursor = Cursor::new(data_clone.as_slice());
+                    let source = PackedSource::from_memory(data);
+                    let reader_source = source.clone();
+                    let mut cursor =
+                        Cursor::new(reader_source.memory_slice().ok_or_else(|| {
+                            GroupError::InvalidGroup(
+                                "decompressed group has no memory source".into(),
+                            )
+                        })?);
                     return Self::parse_from_reader(
                         path,
-                        PackedSource::Memory(data_arc),
+                        source,
                         &mut cursor,
                         PackedEntryNamePolicy::RootValidated,
                     );
@@ -708,19 +780,24 @@ impl PackedGroup {
                     PackedEntryNamePolicy::RootValidated,
                 )
             }
-            PackedSource::Memory(data) => {
-                let data = if data.len() >= 2
-                    && (data[..2] == C4GROUP_GZ_MAGIC || data[..2] == GZ_MAGIC)
+            memory @ PackedSource::Memory { .. } => {
+                let bytes = memory.memory_slice().ok_or_else(|| {
+                    GroupError::InvalidGroup("memory group has invalid bounds".into())
+                })?;
+                let source = if bytes.len() >= 2
+                    && (bytes[..2] == C4GROUP_GZ_MAGIC || bytes[..2] == GZ_MAGIC)
                 {
-                    Arc::new(decompress_group(data.as_ref().clone())?)
+                    PackedSource::from_memory(decompress_group(bytes.to_vec())?)
                 } else {
-                    data
+                    memory
                 };
-                let data_clone = Arc::clone(&data);
-                let mut cursor = Cursor::new(data_clone.as_slice());
+                let reader_source = source.clone();
+                let mut cursor = Cursor::new(reader_source.memory_slice().ok_or_else(|| {
+                    GroupError::InvalidGroup("memory group has invalid bounds".into())
+                })?);
                 Self::parse_from_reader(
                     path,
-                    PackedSource::Memory(data),
+                    source,
                     &mut cursor,
                     PackedEntryNamePolicy::RootValidated,
                 )
@@ -793,20 +870,27 @@ impl PackedGroup {
     fn raw_image(&self) -> Result<Vec<u8>, GroupError> {
         match &self.source {
             PackedSource::File(path) => Ok(fs::read(path)?),
-            PackedSource::Memory(data) => Ok(data.as_ref().clone()),
+            PackedSource::Memory { .. } => self
+                .source
+                .memory_slice()
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| GroupError::InvalidGroup("memory group has invalid bounds".into())),
         }
     }
 
-    fn read_file(&self, relative: &Path) -> Result<Vec<u8>, GroupError> {
+    fn read_file_cow(&self, relative: &Path) -> Result<Cow<'_, [u8]>, GroupError> {
         let entry_index = self
             .index
             .get(&case_fold_group_path(relative))
             .copied()
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
-        self.read_entry_bytes(&self.entries[entry_index])
+        self.read_entry_bytes_cow(&self.entries[entry_index])
     }
 
-    fn read_entry_bytes(&self, entry: &PackedEntry) -> Result<Vec<u8>, GroupError> {
+    fn read_entry_bytes_cow<'a>(
+        &'a self,
+        entry: &PackedEntry,
+    ) -> Result<Cow<'a, [u8]>, GroupError> {
         if entry.size > usize::MAX as u64 {
             return Err(GroupError::InvalidGroup(format!(
                 "entry '{}' exceeds platform limits",
@@ -826,9 +910,9 @@ impl PackedGroup {
                 ))?;
                 let mut buffer = vec![0u8; entry.size as usize];
                 file.read_exact(&mut buffer)?;
-                Ok(buffer)
+                Ok(Cow::Owned(buffer))
             }
-            PackedSource::Memory(data) => {
+            PackedSource::Memory { data, range } => {
                 let start = self.data_offset.checked_add(entry.offset).ok_or_else(|| {
                     GroupError::InvalidGroup(format!(
                         "entry '{}' has invalid offset",
@@ -841,36 +925,36 @@ impl PackedGroup {
                         entry.relative_path.display()
                     ))
                 })?;
-                let data_len = data.len() as u64;
-                if end > data_len {
+                let source_len = range.len() as u64;
+                if end > source_len {
                     return Err(GroupError::InvalidGroup(format!(
                         "entry '{}' exceeds group bounds",
                         entry.relative_path.display()
                     )));
                 }
-                let start = start as usize;
-                let end = end as usize;
-                Ok(data[start..end].to_vec())
+                let start = range.start + start as usize;
+                let end = range.start + end as usize;
+                Ok(Cow::Borrowed(&data[start..end]))
             }
         }
     }
 
-    fn read_entry_bytes_by_path(&self, relative: &Path) -> Result<Vec<u8>, GroupError> {
+    fn read_entry_bytes_by_path_cow(&self, relative: &Path) -> Result<Cow<'_, [u8]>, GroupError> {
         let entry_index = self
             .index
             .get(&case_fold_group_path(relative))
             .copied()
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
-        self.read_entry_bytes(&self.entries[entry_index])
+        self.read_entry_bytes_cow(&self.entries[entry_index])
     }
 
-    fn read_entry_bytes_by_name(&self, name: &[u8]) -> Result<Vec<u8>, GroupError> {
+    fn read_entry_bytes_by_name_cow(&self, name: &[u8]) -> Result<Cow<'_, [u8]>, GroupError> {
         let entry = self
             .entries
             .iter()
             .find(|entry| entry.name_bytes == name)
             .ok_or_else(|| GroupError::EntryNotFound(crate::path_from_legacy_bytes(name)))?;
-        self.read_entry_bytes(entry)
+        self.read_entry_bytes_cow(entry)
     }
 
     fn contents_crc(&self) -> Result<u32, GroupError> {
@@ -885,7 +969,7 @@ impl PackedGroup {
                 let data_crc = if entry.crc_state == 1 {
                     entry.stored_crc
                 } else {
-                    crc32(0, &self.read_entry_bytes(entry)?)
+                    crc32(0, self.read_entry_bytes_cow(entry)?.as_ref())
                 };
                 crc32(data_crc, &entry.name_bytes)
             };
@@ -905,7 +989,7 @@ impl PackedGroup {
                 let data_crc = if entry.crc_state == 1 {
                     entry.stored_crc
                 } else {
-                    crc32(0, &self.read_entry_bytes(entry)?)
+                    crc32(0, self.read_entry_bytes_cow(entry)?.as_ref())
                 };
                 crc32(data_crc, &entry.name_bytes)
             };
@@ -953,12 +1037,61 @@ impl PackedGroup {
                 entry.relative_path.display()
             )));
         }
-        let data = self.read_entry_bytes(entry)?;
-        Group::from_raw_memory(
-            self.path
-                .join(path_component_from_name_bytes(&entry.name_bytes)),
-            data,
-        )
+        let path = self
+            .path
+            .join(path_component_from_name_bytes(&entry.name_bytes));
+        let packed = match &self.source {
+            PackedSource::File(_) => {
+                PackedGroup::from_raw_memory(path, self.read_entry_bytes_cow(entry)?.into_owned())?
+            }
+            PackedSource::Memory { data, range } => {
+                let relative_start = self
+                    .data_offset
+                    .checked_add(entry.offset)
+                    .and_then(|offset| usize::try_from(offset).ok())
+                    .ok_or_else(|| {
+                        GroupError::InvalidGroup(format!(
+                            "entry '{}' has invalid offset",
+                            entry.relative_path.display()
+                        ))
+                    })?;
+                let size = usize::try_from(entry.size).map_err(|_| {
+                    GroupError::InvalidGroup(format!(
+                        "entry '{}' exceeds platform limits",
+                        entry.relative_path.display()
+                    ))
+                })?;
+                let start = range.start.checked_add(relative_start).ok_or_else(|| {
+                    GroupError::InvalidGroup(format!(
+                        "entry '{}' has invalid offset",
+                        entry.relative_path.display()
+                    ))
+                })?;
+                let end = start.checked_add(size).ok_or_else(|| {
+                    GroupError::InvalidGroup(format!(
+                        "entry '{}' has invalid size",
+                        entry.relative_path.display()
+                    ))
+                })?;
+                if end > range.end {
+                    return Err(GroupError::InvalidGroup(format!(
+                        "entry '{}' exceeds group bounds",
+                        entry.relative_path.display()
+                    )));
+                }
+                let source =
+                    PackedSource::from_memory_range(data, start..end).ok_or_else(|| {
+                        GroupError::InvalidGroup(format!(
+                            "entry '{}' exceeds group bounds",
+                            entry.relative_path.display()
+                        ))
+                    })?;
+                PackedGroup::from_raw_source(path, source)?
+            }
+        };
+        Ok(Group {
+            kind: GroupKind::Packed(packed),
+        })
     }
 }
 
@@ -2285,6 +2418,91 @@ mod tests {
         assert_eq!(child.contents_crc().unwrap(), expected_crc);
         let root_file_crc = crc32(crc32(0, b"root"), b"a_b.txt");
         assert_eq!(root.contents_crc().unwrap(), root_file_crc ^ expected_crc);
+    }
+
+    #[test]
+    fn memory_backed_packed_child_shares_its_parent_image() {
+        let child_image = packed_group_image_with_entry("marker.txt", false, b"nested");
+        let outer = packed_group_image_with_entry("Child.c4g", true, &child_image);
+        let root = Group::from_memory(PathBuf::from("Outer.c4g"), outer).unwrap();
+        let child = root.open_child("Child.c4g").unwrap();
+        assert_eq!(child.read_file("marker.txt").unwrap(), b"nested");
+
+        let GroupKind::Packed(root) = &root.kind else {
+            panic!("memory image opens as packed group");
+        };
+        let GroupKind::Packed(child) = &child.kind else {
+            panic!("child image opens as packed group");
+        };
+        let PackedSource::Memory {
+            data: root_image, ..
+        } = &root.source
+        else {
+            panic!("root retains its memory image");
+        };
+        let PackedSource::Memory {
+            data: child_image, ..
+        } = &child.source
+        else {
+            panic!("child retains a memory image");
+        };
+
+        assert!(Arc::ptr_eq(root_image, child_image));
+    }
+
+    #[test]
+    fn small_memory_backed_child_detaches_from_an_oversized_parent_image() {
+        let child_image = packed_group_image_with_entry("marker.txt", false, b"nested");
+        let padding = vec![0_u8; 8 * 1024 * 1024 + 1];
+        let outer = packed_group_image_with_entries(&[
+            ("Child.c4g", true, &child_image),
+            ("Padding.bin", false, &padding),
+        ]);
+        drop(padding);
+        let root = Group::from_memory(PathBuf::from("Outer.c4g"), outer).unwrap();
+        let child = root.open_child("Child.c4g").unwrap();
+        assert_eq!(child.read_file("marker.txt").unwrap(), b"nested");
+
+        let GroupKind::Packed(root) = &root.kind else {
+            panic!("memory image opens as packed group");
+        };
+        let GroupKind::Packed(child) = &child.kind else {
+            panic!("child image opens as packed group");
+        };
+        let PackedSource::Memory {
+            data: root_image, ..
+        } = &root.source
+        else {
+            panic!("root retains its memory image");
+        };
+        let PackedSource::Memory {
+            data: child_image,
+            range: child_range,
+        } = &child.source
+        else {
+            panic!("child retains a memory image");
+        };
+
+        assert!(
+            !Arc::ptr_eq(root_image, child_image),
+            "a small escaping child must not pin an arbitrarily large parent archive"
+        );
+        assert_eq!(
+            child_image.len(),
+            child_range.len(),
+            "the detached backing contains only the child image"
+        );
+    }
+
+    #[test]
+    fn memory_backed_packed_entry_exposes_borrowed_bytes() {
+        let image = packed_group_image_with_entry("marker.txt", false, b"nested");
+        let group = Group::from_memory(PathBuf::from("Memory.c4g"), image).unwrap();
+
+        assert!(matches!(
+            group.read_file_cow("marker.txt").unwrap(),
+            std::borrow::Cow::Borrowed(b"nested")
+        ));
     }
 
     #[test]

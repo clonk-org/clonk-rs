@@ -119,18 +119,19 @@ impl ParticleDefinition {
         let entries = group.entries()?;
         let core_entry = find_immediate_entry(&entries, b"Particle.txt")
             .ok_or(ParticleDefinitionError::ParticleCoreMissing)?;
-        let source = group.read_entry_bytes_exact(core_entry)?;
-        let (core, raw_facet) = parse_particle_core(&source);
+        let source = group.read_entry_bytes_exact_cow(core_entry)?;
+        let (core, raw_facet) = parse_particle_core(source.as_ref());
 
         let graphics_entry = find_immediate_entry(&entries, b"Graphics.png")
             .ok_or(ParticleDefinitionError::GraphicsMissing)?;
-        let graphics_bytes = group.read_entry_bytes_exact(graphics_entry)?;
-        let rgba = image::load_from_memory_with_format(&graphics_bytes, image::ImageFormat::Png)
-            .map_err(|source| ParticleDefinitionError::GraphicsDecode {
-                path: graphics_entry.relative_path.clone(),
-                source,
-            })?
-            .into_rgba8();
+        let graphics_bytes = group.read_entry_bytes_exact_cow(graphics_entry)?;
+        let rgba =
+            image::load_from_memory_with_format(graphics_bytes.as_ref(), image::ImageFormat::Png)
+                .map_err(|source| ParticleDefinitionError::GraphicsDecode {
+                    path: graphics_entry.relative_path.clone(),
+                    source,
+                })?
+                .into_rgba8();
         let (image_width, image_height) = rgba.dimensions();
         let facet = normalize_facet(raw_facet, image_width, image_height)?;
         let image = GraphicsImage::new(image_width, image_height, rgba.into_raw());
