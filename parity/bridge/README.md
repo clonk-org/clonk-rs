@@ -90,13 +90,18 @@ Still open:
   swept — movement (`Goldrace`, `Skyrace`), landscape (`Greed`, `Canyon`,
   `Massif`) and script/effect (`Tutorial03/05/07/09/10`). All ten start and each
   reports a first divergence. **The network-record class has not been run.**
-- **A global-effect divergence is reported as the bare string `global effects
-  mismatch`**, with no indication of what differs — unlike the per-object
-  effect comparison, which prints both lists. The per-object path also
-  normalises `command_target`/`command_id` before comparing and the global path
-  does not, so some of those reports may be normalisation noise rather than
-  real divergences. Four of the ten scenarios swept stop here, so this is the
-  next thing worth sharpening.
+- **Weather is not compared, and cannot be**
+  (clonk-org/clonk-rs#1083). `lc_engine_runtime_compare_snapshot` takes no
+  environment parameters, so wind, season and climate never reach the
+  comparison; the header carries `LcEngineRuntimeEnvironmentState` only for
+  `lc_engine_runtime_export_environment`, which reads state *out of* the Rust
+  runtime. Extending the compared set does not help — the values never arrive,
+  and adding a parameter would break link compatibility with the bridge the
+  oracle builds. **A clean diff says nothing about weather**, which is on the
+  determinism-critical list; a weather divergence reaches the report only if
+  some object script happens to branch on it, as in
+  clonk-org/clonk-rs#1077. The same structural gap as
+  clonk-org/clonk-rs#1049.
 - The other bridges (`USE_RUST_CONFIG`, `USE_RUST_GROUP_VALIDATION`,
   `USE_RUST_GUI_VALIDATION`, `USE_RUST_PLATFORM_PATHS`) link their own `lc_*`
   libraries and need the `ffi` modules of the other crates, which are not
