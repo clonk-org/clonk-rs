@@ -1431,6 +1431,10 @@ impl ReliableUdpSocketDriver {
                         Some(ReliableUdpLastSend::BestEffort) => return Ok(Vec::new()),
                         None => {}
                     }
+                } else if reliable_udp_lost_datagram_error(&error) {
+                    // Nothing about the peer is known to be wrong, so the
+                    // reliable layer retransmits the lost datagram itself.
+                    return Ok(Vec::new());
                 }
                 return Err(error);
             }
@@ -1746,7 +1750,7 @@ impl ReliableUdpSocketDriver {
                 }
                 step.events.extend(events);
             }
-            if step.events.is_empty() {
+            if step.events.is_empty() && !reliable_udp_lost_datagram_error(&error) {
                 self.close_absent_peer_statistics_if_topology_changed();
                 return Err(error);
             }
@@ -1765,6 +1769,15 @@ pub enum ReliableUdpDriverError {
     Io(#[from] io::Error),
 }
 
+/// The host's send queue was momentarily full.
+///
+/// `std::io::ErrorKind` has no variant for it, so the raw code is the only way
+/// to tell a lost datagram apart from a broken socket.
+#[cfg(unix)]
+pub(crate) const RELIABLE_UDP_SEND_QUEUE_FULL: i32 = libc::ENOBUFS;
+#[cfg(windows)]
+pub(crate) const RELIABLE_UDP_SEND_QUEUE_FULL: i32 = 10_055; // WSAENOBUFS
+
 fn reliable_udp_unreachable_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -1773,6 +1786,23 @@ fn reliable_udp_unreachable_error(error: &io::Error) -> bool {
             | io::ErrorKind::HostUnreachable
             | io::ErrorKind::NetworkUnreachable
     )
+}
+
+/// Reports whether a socket error cost one datagram rather than the socket.
+///
+/// A UDP send is reported asynchronously, through the next receive, so this is
+/// where a transient local send failure arrives. Native keeps the socket and
+/// its I/O loop running through exactly these:
+/// `C4NetIOSimpleUDP::Send` sets an error and returns false for the one
+/// datagram (oracle-src-pinned src/C4NetIO.cpp:1772-1790), and
+/// `C4NetIOSimpleUDP::Execute` never sees it, because only receive failures
+/// reach that loop. Unreachable errors are handled ahead of this: they name a
+/// peer worth tearing down, and this class does not.
+fn reliable_udp_lost_datagram_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    ) || error.raw_os_error() == Some(RELIABLE_UDP_SEND_QUEUE_FULL)
 }
 
 fn reliable_udp_send_is_best_effort(payload: &[u8]) -> bool {
@@ -2001,6 +2031,76 @@ mod tests {
             driver.wait_ready().await,
             ReliableUdpPollReady::Timer
         ));
+    }
+
+    #[tokio::test]
+    async fn a_full_send_queue_keeps_the_socket_serving() {
+        // A UDP socket reports a failed send asynchronously, through the next
+        // receive. Native loses exactly that datagram and keeps going:
+        // `C4NetIOSimpleUDP::Send` sets an error and returns false while the
+        // socket and its I/O loop stay untouched (oracle-src-pinned
+        // src/C4NetIO.cpp:1772-1790), so a momentarily full interface queue
+        // must not end the session the way an unreachable peer does.
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let destination = spy.local_addr().unwrap();
+
+        let events = driver
+            .process_ready(ReliableUdpPollReady::SocketError(
+                io::Error::from_raw_os_error(RELIABLE_UDP_SEND_QUEUE_FULL),
+            ))
+            .await
+            .expect("a full send queue loses the datagram, not the socket");
+        udp_assert!(events.is_empty());
+
+        // The very next datagram still reaches the wire.
+        let datagram = ReliableUdpDatagram {
+            destination,
+            payload: b"after".to_vec(),
+        };
+        udp_assert_eq!(driver.send_planned_datagram(&datagram).await.2.unwrap() => datagram.payload.len());
+        let mut buffer = [0; 16];
+        let (length, _) = tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        udp_assert_eq!(&buffer[..length] => b"after");
+    }
+
+    #[tokio::test]
+    async fn a_full_send_queue_during_a_dial_keeps_the_socket_serving() {
+        // A dial's Connect datagram is peer-backed and carries no event beside
+        // it, which used to promote a local send failure into the end of the
+        // whole session. Native loses only that datagram --
+        // `C4NetIOSimpleUDP::Send` sets an error and returns false while the
+        // socket and its I/O loop stay untouched (oracle-src-pinned
+        // src/C4NetIO.cpp:1772-1790) -- and the reliable layer retransmits it.
+        // Joining a stock host reaches this: its reference advertises every
+        // local interface, and dialling them at once fills the send queue.
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let destination = spy.local_addr().unwrap();
+        driver
+            .set_send_hook(|_, _| Err(io::Error::from_raw_os_error(RELIABLE_UDP_SEND_QUEUE_FULL)));
+
+        let events = driver
+            .connect(destination)
+            .await
+            .expect("a full send queue loses the dial, not the socket");
+        udp_assert!(events.is_empty());
+
+        // The driver keeps running its protocol clock afterwards.
+        let later = driver
+            .process_ready(ReliableUdpPollReady::Timer)
+            .await
+            .expect("the driver still advances after a lost datagram");
+        udp_assert!(later.is_empty());
     }
 
     #[tokio::test]
