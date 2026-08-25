@@ -177,30 +177,13 @@
         let object = engine.spawn_test_object(crate::SpawnConfig::new("WIPF"));
         let before = engine.snapshot().object(object).test_value().clone();
 
-        // A named graphic that the reloaded definition no longer supplies must
-        // fall back to the object's own definition rather than being left
-        // pointing at a name nothing provides
-        // (`C4DefGraphicsPtrBackup::AssignUpdate`, C4DefGraphics.cpp:355-400).
-        if let Some(index) = engine.find_object_index(object) {
-            engine.objects[index].state.base_graphics = Some(crate::ObjectBaseGraphics {
-                definition: crate::DefinitionId::from("WIPF"),
-                graphics_name: Some("NoSuchVariant".to_string()),
-                blit_mode: 0,
-            });
-        }
-
+        // This object keeps the definition's default graphic, which
+        // `C4DefGraphics::Get("")` always re-resolves, so the reload refreshes
+        // it rather than disturbing it. The vanished-named-graphic paths are
+        // pinned separately in `reload_graphics_own_definition_regression`.
         assert!(engine.reload_definition("WIPF", false));
 
         let index = engine.test_object_index(object);
-        assert_eq!(
-            engine.objects[index]
-                .state
-                .base_graphics
-                .as_ref()
-                .and_then(|graphics| graphics.graphics_name.clone()),
-            None,
-            "a vanished named graphic falls back to the definition's own"
-        );
 
         // The object survives with its own state intact: `UpdateFace` writes
         // only definition projections, so position, Con, rotation and colour
