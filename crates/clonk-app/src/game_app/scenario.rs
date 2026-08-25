@@ -1368,6 +1368,10 @@ impl GameApp {
         loading_state.offline_startup_players = offline_startup_players;
         loading_state.offline_savegame = offline_savegame;
         loading_state.offline_random_seed = offline_random_seed;
+        // C4Game::Init re-arms the loader gate as a load *begins*
+        // (C4Game.cpp:351-352); `Finished` alone leaves it saturated at 100 and
+        // swallows the next load's 4%..93% (clonk-org/clonk-rs#1115).
+        self.taskbar_progress.begin_load();
         self.loading_state = Some(loading_state);
         self.mode = AppMode::Loading;
         Ok(())
