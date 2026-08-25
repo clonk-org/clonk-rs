@@ -7132,6 +7132,13 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
     // (Lance.c4d/Attached.c4d/Script.c:24-55). Camp loads the unmodified
     // Objects+Knights definition stack without auto-equipping the crew.
     let mut engine = load_installed_scenario("Knights.c4f/Camp.c4s", 0);
+    // Fair crew is this assertion's subject -- the fixture crew carries no
+    // physicals of its own, so the projection is what gives it energy at all.
+    // State it rather than lean on the engine default: `C4GameParameters`
+    // compiles `UseFairCrew` false absent a scenario forcing it
+    // (C4GameParameters.cpp:560), and the port's fresh-engine default
+    // disagrees (clonk-org/clonk-rs#1071).
+    engine.set_use_fair_crew(true);
     let crew = ["Rank Five Rider", "Rank Five Victim"]
         .into_iter()
         .map(|name| clonk_engine::player_file::CrewInfo {
