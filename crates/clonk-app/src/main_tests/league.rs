@@ -5386,6 +5386,54 @@ fn a_compatibility_session_withholds_the_content_appendto_divergences() {
 }
 
 #[test]
+fn compat_profile_overlays_the_cpp_ingame_game_tick_delay() {
+    use crate::settings::{session_game_tick_delay_ms, CompatProfile, CPP_INGAME_GAME_TICK_DELAY_MS};
+
+    // C4Game::OpenGame installs defaultIngameGameTickDelay, a literal 28 ms
+    // (src/C4Game.cpp:63,443). The port ships the parameterless SetGameSpeed
+    // cadence of 1000/38 = 26 ms instead, an approved divergence that makes
+    // offline play advance about 7.7% faster in wall time. The compatibility
+    // profile reverts it for the session without rewriting any saved key.
+    main_assert_eq!(CPP_INGAME_GAME_TICK_DELAY_MS => 28);
+    main_assert_eq!(clonk_engine::DEFAULT_GAME_TICK_DELAY_MS => 26);
+
+    main_assert_eq!(
+        session_game_tick_delay_ms(CompatProfile::Normal)
+            => clonk_engine::DEFAULT_GAME_TICK_DELAY_MS
+    );
+    main_assert_eq!(
+        session_game_tick_delay_ms(CompatProfile::LegacyClonk)
+            => CPP_INGAME_GAME_TICK_DELAY_MS
+    );
+}
+
+#[test]
+fn starting_a_session_installs_the_profiles_ingame_game_tick() {
+    use crate::settings::{CompatProfile, CPP_INGAME_GAME_TICK_DELAY_MS};
+
+    // C4Game::OpenGame installs the in-game timer once, as the game opens
+    // (src/C4Game.cpp:443). Resolving the value is not enough -- it has to
+    // reach the engine the scheduler paces from, on both the offline seam and
+    // the network GO seam, so a compatibility session advances in the same
+    // wall time a native one does.
+    let mut app = new_running_sandbox_app();
+    main_assert_eq!(
+        app.engine.game_tick_delay_ms() => clonk_engine::DEFAULT_GAME_TICK_DELAY_MS
+    );
+
+    app.compat_profile = CompatProfile::LegacyClonk;
+    app.configure_running_state("compat session".to_string(), 0);
+    main_assert_eq!(app.engine.game_tick_delay_ms() => CPP_INGAME_GAME_TICK_DELAY_MS);
+
+    // ... and a normal-profile session keeps the port's cadence.
+    app.compat_profile = CompatProfile::Normal;
+    app.configure_running_state("normal session".to_string(), 0);
+    main_assert_eq!(
+        app.engine.game_tick_delay_ms() => clonk_engine::DEFAULT_GAME_TICK_DELAY_MS
+    );
+}
+
+#[test]
 fn compat_profile_overlays_the_cpp_control_mode_without_touching_the_saved_key() {
     use crate::settings::{session_control_mode, CompatProfile, CPP_CONTROL_MODE_DECENTRAL};
     use clonk_core::std_config::Config;

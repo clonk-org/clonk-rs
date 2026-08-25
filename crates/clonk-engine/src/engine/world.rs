@@ -870,6 +870,19 @@ impl Engine {
         self.game_tick_delay_ms.get()
     }
 
+    /// Install the session's in-game timer, mirroring the single
+    /// `Application.SetGameTickDelay(defaultIngameGameTickDelay)` that
+    /// `C4Game::OpenGame` performs as the game opens (src/C4Game.cpp:63,443).
+    ///
+    /// It revises the timer exactly as `SetGameSpeed` does, so the embedding
+    /// scheduler restarts on it, and a later script `SetGameSpeed` overrides
+    /// it just as it overrides the native default.
+    pub fn install_ingame_game_tick_delay_ms(&mut self, delay_ms: u64) {
+        self.game_tick_delay_ms.set(delay_ms.max(1));
+        self.game_tick_delay_revision
+            .set(crate::next_game_tick_delay_revision());
+    }
+
     /// Changes on every successful SetGameSpeed, even when the delay is
     /// unchanged, so the embedding scheduler can mirror ResetTimer.
     #[doc(hidden)]

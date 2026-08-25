@@ -4745,8 +4745,22 @@ impl GameApp {
         self.pending_client_start_status = None;
         self.running_gui_mouse_owned = false;
         self.running_world_mouse_owned = true;
+        self.install_session_game_tick_delay();
         self.mode = AppMode::Running;
         Ok(true)
+    }
+
+    /// C4Game::OpenGame installs the in-game application timer as the game
+    /// opens, after network init and before the startup graphics are freed
+    /// (src/C4Game.cpp:63,443). The compatibility profile runs a session at
+    /// that native 28 ms; a normal session keeps the port's approved
+    /// `1000 / 38` cadence. Neither reads nor writes a saved key, and an
+    /// explicit script SetGameSpeed still overrides the result.
+    fn install_session_game_tick_delay(&mut self) {
+        self.engine
+            .install_ingame_game_tick_delay_ms(crate::settings::session_game_tick_delay_ms(
+                self.compat_profile,
+            ));
     }
 
     fn finish_network_go_activation_tail(&mut self) {
@@ -8835,6 +8849,7 @@ impl GameApp {
     }
 
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
+        self.install_session_game_tick_delay();
         self.terminal_loader_frame_pending = false;
         let retain_prepared_client_queues =
             matches!(self.network_mode, Some(NetworkMode::Client(_)))
