@@ -126,3 +126,8 @@ planet/System.c4g/*
 !planet/System.c4g/*.ttf
 !planet/System.c4g/COPYING
 /planet/Extra.c4g/
+
+# Staging for the shadow-diff harness: the pinned oracle hardcodes its Rust
+# include path to <source>/rust/include, and parity/bridge/build-oracle-validation.sh
+# points that at this checkout, so the header has to be reachable here too.
+/include/
