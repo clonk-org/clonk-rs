@@ -2,7 +2,7 @@
 
 `content.zip` is built and published by another repository, and this one records
 its digest and size in the update manifest. With no manifest signature that
-digest is the whole integrity story for 225 MB, so the publishing job downloads
+digest is the whole integrity story for 1.2 GB, so the publishing job downloads
 the archive and checks it before anything is tagged or published.
 
 These tests run the workflow's own `run:` bodies — extracted from
@@ -223,14 +223,14 @@ class ReleaseContentHandoffTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("verified content.zip", completed.stdout)
-        # 225 MB on a runner that still has to hold every platform's assets.
+        # 1.2 GB on a runner that still has to hold every platform's assets.
         self.assertFalse((self.runner_temp / "content.zip").exists())
 
     def test_a_sidecar_digest_the_bytes_do_not_have_fails_the_release(self):
         # The defect this whole step exists for: the digest was copied from the
         # producer's sidecar into the manifest without anything comparing it to
         # the bytes, so every client failed its own check after downloading
-        # 225 MB — or installed whatever the sidecar happened to claim.
+        # 1.2 GB — or installed whatever the sidecar happened to claim.
         self.seed_release(digest="b" * 64)
         _, outputs = self.resolve()
         completed, _ = self.verify(outputs)
@@ -247,7 +247,7 @@ class ReleaseContentHandoffTests(unittest.TestCase):
         self.assertIn("the release API says 999999", completed.stderr)
 
     def test_the_archive_never_lands_where_the_release_globs_would_publish_it(self):
-        # `assets/` and `components/` are uploaded wholesale, so a stray 225 MB
+        # `assets/` and `components/` are uploaded wholesale, so a stray 1.2 GB
         # download there would be published as one of this repository's own
         # assets — the duplicate upload that referencing the content release
         # removed in the first place.

@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No `submodules:` key. These targets need no game data, so fetching
-          # the 299 MB content checkout would add latency without coverage.
+          # the 1.3 GB content checkout would add latency without coverage.
           persist-credentials: false
 
       # alsa-sys and libudev-sys run pkg-config in their build scripts, which

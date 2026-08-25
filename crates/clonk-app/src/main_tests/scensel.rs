@@ -1472,7 +1472,28 @@ fn scensel_search_routes_window_text_and_enter() {
     let _lock = env_lock().lock();
     let (_guard, _user_data, mut app) = scensel_window_app("Search Tester");
 
-    let mut query = app.menu_state.visible_entries()[0].title.clone();
+    // The first *scenario*, not simply the first row. Enhanced search never
+    // matches a folder: `collect_enhanced_scenario_search_matches` pushes a
+    // folder's title onto the ancestor context and recurses into its children,
+    // so searching a folder title returns the scenarios inside it rather than
+    // the folder. Seeding the query from a folder row would therefore assert
+    // that a row reselects itself when it never can. This only became reachable
+    // once a folder sorted to the top of the list.
+    // Seeded from a scenario, reached by descending, rather than from the first
+    // row. Every top-level row is a folder, and enhanced search never matches
+    // one: `collect_enhanced_scenario_search_matches` pushes a folder's title
+    // onto the ancestor context and recurses into its children. Searching a
+    // folder title therefore returns the scenarios *inside* it, so asserting the
+    // row reselects itself only ever held because the top folder was "Tutorial"
+    // and a scenario happened to share that title. The first folder is no longer
+    // "Tutorial", so the coincidence is gone.
+    fn first_scenario_title(entries: &[FrontendScenario]) -> Option<String> {
+        entries.iter().find_map(|entry| match entry.kind {
+            ScenarioKind::Folder => first_scenario_title(&entry.children),
+            _ => Some(entry.title.clone()),
+        })
+    }
+    let mut query = first_scenario_title(app.menu_state.visible_entries()).test_value();
     Markup::strip_markup(&mut query);
     query.make_ascii_lowercase();
 
