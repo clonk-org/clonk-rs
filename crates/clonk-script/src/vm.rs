@@ -6222,6 +6222,14 @@ impl<'a> Vm<'a> {
                             if name == "Local" && self.retain_global_call_context_for_host_paths {
                                 return Ok(Value::Nil);
                             }
+                            // FnLocal returns C4VNull before the C4ValueList
+                            // clamp can apply (C4Script.cpp:3421), so a
+                            // negative index reads nil instead of aliasing
+                            // slot 0. FnVar has no such guard and does reach
+                            // the clamp, which is why only Local is gated.
+                            if name == "Local" && index < 0 {
+                                return Ok(Value::Nil);
+                            }
                             let cell = if name == "Var" {
                                 frame_slot_cell(&env.frame_locals, index)
                             } else {
@@ -9231,6 +9239,13 @@ impl<'a> Vm<'a> {
                     return Err(RuntimeError::new(
                         "function 'Local' does not return a reference",
                     ));
+                }
+                // FnLocal returns C4VNull before the C4ValueList clamp can
+                // apply (C4Script.cpp:3421). A detached cell keeps that shape:
+                // the read is nil and a write reaches no slot, where aliasing
+                // slot 0 would both read and corrupt it.
+                if index < 0 {
+                    return Ok(self.tracked_cell(value_cell(Value::Nil)));
                 }
                 Ok(self.tracked_cell(env.object_state.local_slot_cell(index)))
             }
