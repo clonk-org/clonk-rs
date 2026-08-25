@@ -195,6 +195,67 @@ fn artifact_names(stem: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The header is the oracle's contract; `ffi.rs` is what satisfies it. If
+    /// the two drift apart the failure is a link error inside a C++ build
+    /// nothing in this repository runs, so check it here instead.
+    ///
+    /// Both sides are read as text on purpose: the point is to compare the
+    /// *declared* surface against the *exported* one without building either.
+    #[test]
+    fn every_symbol_the_bridge_header_declares_is_exported_by_the_engine() {
+        let workspace = crate::parity::workspace_dir().expect("workspace root");
+        let header = std::fs::read_to_string(workspace.join("parity/bridge/lc_engine_ffi.h"))
+            .expect("vendored bridge header");
+        let implementation =
+            std::fs::read_to_string(workspace.join("crates/clonk-engine/src/ffi.rs"))
+                .expect("engine FFI module");
+
+        let declared = symbols(&header, |line| {
+            line.split_once("lc_engine_")
+                .map(|(_, rest)| rest)
+                .and_then(|rest| rest.split_once('('))
+                .map(|(name, _)| name)
+        });
+        let exported = symbols(&implementation, |line| {
+            line.trim()
+                .strip_prefix("pub extern \"C\" fn lc_engine_")
+                .or_else(|| {
+                    line.trim()
+                        .strip_prefix("pub unsafe extern \"C\" fn lc_engine_")
+                })
+                .and_then(|rest| rest.split_once('('))
+                .map(|(name, _)| name)
+        });
+
+        assert!(
+            !declared.is_empty() && !exported.is_empty(),
+            "both sides must parse: {} declared, {} exported",
+            declared.len(),
+            exported.len()
+        );
+        let missing: Vec<_> = declared.difference(&exported).collect();
+        assert!(
+            missing.is_empty(),
+            "declared by lc_engine_ffi.h but not exported by ffi.rs: {missing:?}"
+        );
+        let extra: Vec<_> = exported.difference(&declared).collect();
+        assert!(
+            extra.is_empty(),
+            "exported by ffi.rs but absent from lc_engine_ffi.h: {extra:?}"
+        );
+    }
+
+    fn symbols<'a>(
+        source: &'a str,
+        extract: impl Fn(&'a str) -> Option<&'a str>,
+    ) -> std::collections::BTreeSet<String> {
+        source
+            .lines()
+            .filter_map(extract)
+            .map(|name| format!("lc_engine_{name}"))
+            .collect()
+    }
+
     #[test]
     fn the_default_selection_is_every_ffi_crate_in_debug() {
         let options = parse_options(&[]).expect("no arguments parse");
