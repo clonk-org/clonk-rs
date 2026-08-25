@@ -1599,21 +1599,16 @@ pub(in crate::scenario) struct PhysicsManifest {
 
 impl PhysicsManifest {
     pub(in crate::scenario) fn into_settings(self) -> Result<PhysicsSettings, ScenarioError> {
-        let defaults = PhysicsSettings::default();
-        let gravity = self.gravity.unwrap_or(defaults.gravity);
-        let max_fall_speed = self.max_fall_speed.unwrap_or(defaults.max_fall_speed);
-        let max_rise_speed = self.max_rise_speed.unwrap_or(defaults.max_rise_speed);
-
-        let settings = PhysicsSettings::checked(gravity, max_fall_speed, max_rise_speed)
-            .map_err(|detail| ScenarioError::InvalidPhysics(detail.to_string()))?;
-
-        if let Some(max_horizontal_speed) = self.max_horizontal_speed {
-            return settings
-                .with_max_horizontal_speed(max_horizontal_speed)
-                .map_err(|detail| ScenarioError::InvalidPhysics(detail.to_string()));
-        }
-
-        Ok(settings)
+        // An unset bound means unbounded, matching the pinned engine, which has
+        // no terminal-speed limit at all. Only a fixture that names one gets
+        // one (clonk-org/clonk-rs#1112).
+        PhysicsSettings::from_optional(
+            self.gravity.unwrap_or(PhysicsSettings::default().gravity),
+            self.max_fall_speed,
+            self.max_rise_speed,
+            self.max_horizontal_speed,
+        )
+        .map_err(|detail| ScenarioError::InvalidPhysics(detail.to_string()))
     }
 }
 
