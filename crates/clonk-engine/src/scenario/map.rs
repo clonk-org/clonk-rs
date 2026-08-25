@@ -31,7 +31,27 @@ fn legacy_map_seed(random_seed: u64) -> i32 {
 /// the established `Parameters.RandomSeed`; the env shadow remains a test
 /// bridge for comparison with the C++ engine.
 pub(in crate::scenario) fn legacy_map_creation_rng(random_seed: u64) -> crate::rng::LcgRng {
-    crate::rng::LcgRng::seed_from_u64(legacy_random_seed(random_seed))
+    legacy_map_creation_rng_traced(random_seed, std::env::var("LC_RUST_RNG_TRACE").is_ok())
+}
+
+/// Map creation with the differential probe explicitly armed.
+///
+/// Native has no separate map generator: `C4Landscape::Init` draws from the one
+/// global `Random()`, brackets the whole of map and landscape creation with
+/// `Game.FixRandom(Game.Parameters.RandomSeed)` either side
+/// (`C4Landscape.cpp:579,735`) so a joining client that does not create the map
+/// ends at the same ledger, and traces every one of those draws like any other.
+///
+/// Modelling the bracket with a separate `LcgRng` is faithful, but leaving it
+/// untraced is not: it makes map creation invisible to `LC_RUST_RNG_TRACE`
+/// while the oracle records it, so the two traces cannot be compared across the
+/// phase where an initialisation divergence would live
+/// (clonk-org/clonk-rs#1050).
+pub(in crate::scenario) fn legacy_map_creation_rng_traced(
+    random_seed: u64,
+    trace: bool,
+) -> crate::rng::LcgRng {
+    crate::rng::LcgRng::seed_from_u64_traced(legacy_random_seed(random_seed), trace)
 }
 
 /// C4Game::InitGame overwrites the serialized parameter from the initial
