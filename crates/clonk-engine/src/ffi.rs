@@ -1306,6 +1306,13 @@ fn rng_ledger_divergence(
 fn comparable_effects(effects: &[EffectState]) -> Vec<EffectState> {
     effects
         .iter()
+        // A dead effect is one C++ still holds but never reports:
+        // `RustEngineBridge` skips it while collecting
+        // (`if (effect->IsDead()) continue;`), and `C4Effect::Execute` only
+        // unlinks it at the top of the next cycle. Keeping the port's dead
+        // entries would compare them against a list they were filtered out
+        // of, which reads as a divergence where the two agree.
+        .filter(|effect| effect.priority != 0)
         .cloned()
         .map(|mut effect| {
             effect.number = 0;
@@ -5085,6 +5092,56 @@ global func Step(state, frame, random)
             None,
             "the latch keeps this to one report per run"
         );
+    }
+
+    /// `RustEngineBridge` skips dead effects when it builds a snapshot --
+    /// `if (effect->IsDead()) continue;` for both the per-object and the
+    /// global list. C++ therefore never reports one, while both engines still
+    /// *hold* it: `C4Effect::Execute` unlinks a dead node at the top of the
+    /// next cycle, so the frame an effect is killed in ends with it linked and
+    /// dead on either side. Comparing the port's dead entries against a list
+    /// C++ filtered turns that agreement into a divergence.
+    #[test]
+    fn runtime_mismatch_ignores_dead_effects_the_bridge_never_reports() {
+        let effect_name = CString::new("IntAttackDelay").unwrap();
+        let effect = LcEngineEffectSnapshot {
+            name: effect_name.as_ptr(),
+            priority: 70,
+            interval: 70,
+            timer: 70,
+        };
+        let actual = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                &effect,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        // The port reaches the same frame still holding the killed effect,
+        // while the bridge filtered C++'s copy out of the snapshot entirely.
+        let mut expected = actual.clone();
+        expected.global_effects[0].priority = 0;
+        let mut actual = actual;
+        actual.global_effects.clear();
+
+        assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
     }
 
     #[test]
