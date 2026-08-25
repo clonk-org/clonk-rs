@@ -158,6 +158,7 @@ shard_modules!(
     mars_menu_override_drift,
     message_board_queries,
     optional_int_strictness,
+    scenario_save_fuzz,
     real_tutorial01_virtual_play,
     real_tutorial05_route,
     real_tutorial06_virtual_play,
