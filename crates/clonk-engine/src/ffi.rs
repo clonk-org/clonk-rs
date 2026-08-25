@@ -1260,6 +1260,31 @@ fn optional_fixed_vec(raw_x: i32, raw_y: i32, pixels: Vector2) -> Option<FixedVe
     }
 }
 
+/// Compares the synchronized RNG registers, which must agree once both engines
+/// have completed the frame (`C4Random.h:29-30`). A ledger slip precedes and
+/// explains most downstream state differences; `rng_mismatch_reported` keeps it
+/// to one report per run.
+fn report_rng_ledger(runtime: &mut RuntimeHandle, frame: u64, rng_hold: u32, rng_count: i32) {
+    let rng = runtime.engine.debug_rng_clone();
+    if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
+        eprintln!(
+            "RNGMARK frame={frame} rust_count={} cpp_count={rng_count}",
+            rng.count
+        );
+    }
+    if (rng.hold != rng_hold || rng.count != rng_count) && !runtime.rng_mismatch_reported {
+        runtime.rng_mismatch_reported = true;
+        tracing::error!(
+            frame,
+            rust_hold = rng.hold,
+            rust_count = rng.count,
+            cpp_hold = rng_hold,
+            cpp_count = rng_count,
+            "synced RNG ledger diverged"
+        );
+    }
+}
+
 /// Neutralises effect state the bridge ABI cannot carry.
 /// `LcEngineEffectSnapshot` transports name/priority/interval/timer only, so
 /// C++ reports everything else as a default; comparing those raw invents a
@@ -3245,31 +3270,7 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             expected.controls = entries.clone();
         } else {
             expected.controls.clear();
-            // The synced-RNG registers must match once both engines completed the
-            // frame (C4Random.h:29-30) — report the FIRST divergence; a ledger slip
-            // precedes and explains most downstream state diffs.
-            {
-                let rng = runtime.engine.debug_rng_clone();
-                if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
-                    eprintln!(
-                        "RNGMARK frame={frame} rust_count={} cpp_count={rng_count}",
-                        rng.count
-                    );
-                }
-                if (rng.hold != rng_hold || rng.count != rng_count)
-                    && !runtime.rng_mismatch_reported
-                {
-                    runtime.rng_mismatch_reported = true;
-                    tracing::error!(
-                        frame,
-                        rust_hold = rng.hold,
-                        rust_count = rng.count,
-                        cpp_hold = rng_hold,
-                        cpp_count = rng_count,
-                        "synced RNG ledger diverged"
-                    );
-                }
-            }
+            report_rng_ledger(runtime, frame, rng_hold, rng_count);
         }
         if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
             let detail = format!("frame {frame}: {detail}");
