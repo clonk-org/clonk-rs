@@ -12,6 +12,7 @@
 //! the presentation promise — which is already the case, through #587.
 
 use serde::Deserialize;
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
