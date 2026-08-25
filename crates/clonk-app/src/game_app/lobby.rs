@@ -7066,15 +7066,51 @@ impl GameApp {
         if self.compat_profile == crate::settings::CompatProfile::Normal {
             return;
         }
-        let text = format!(
-            "Compatibility profile: {}",
-            self.compat_profile.display_name()
-        );
+        // clonk-org/clonk-rs#588: the contract's fail-closed readiness rule is
+        // only worth having if the host is told *before* anyone joins. A
+        // blocked profile is reported and not claimed; discovering it mid-round
+        // costs everyone in a lockstep session their round.
+        let report =
+            crate::compat_readiness::blocked_profile_report(self.compat_profile.display_name());
+        let lines = if report.is_empty() {
+            vec![(
+                format!(
+                    "Compatibility profile: {}",
+                    self.compat_profile.display_name()
+                ),
+                [0xff, 0xff, 0xff, 0xff],
+            )]
+        } else {
+            report
+                .into_iter()
+                .map(|text| (text, [0xff, 0xd0, 0x60, 0xff]))
+                .collect()
+        };
         if let Some(lobby) = self.network_lobby.as_mut() {
-            lobby.push_log(clonk_frontend::game_lobby::LobbyLogLine {
-                text,
-                color: [0xff, 0xff, 0xff, 0xff],
-            });
+            for (text, color) in lines {
+                lobby.push_log(clonk_frontend::game_lobby::LobbyLogLine { text, color });
+            }
+        }
+    }
+
+    /// The profile this session may honestly claim to a peer.
+    ///
+    /// [`Self::compat_profile`] is what the player *asked for* and is never
+    /// rewritten; this is what the contract can currently back. They differ
+    /// only while `compat_readiness::blockers` is non-empty, and the difference
+    /// is always reported first — `announce_compat_profile_in_lobby` says so in
+    /// the lobby log, so this is a refusal a player can see rather than a
+    /// silent downgrade (clonk-org/clonk-rs#588).
+    ///
+    /// Advertisement and admission are clonk-org/clonk-rs#583's subject; this
+    /// is the single honest answer they will read.
+    pub(crate) fn claimed_compat_profile(&self) -> crate::settings::CompatProfile {
+        if self.compat_profile == crate::settings::CompatProfile::Normal
+            || crate::compat_readiness::is_ready()
+        {
+            self.compat_profile
+        } else {
+            crate::settings::CompatProfile::Normal
         }
     }
 

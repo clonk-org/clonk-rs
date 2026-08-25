@@ -127,12 +127,93 @@ pub fn is_ready() -> bool {
     blockers().is_empty()
 }
 
+/// How many blockers to name individually before summarising the rest.
+///
+/// The lobby log is a C++-mirrored surface with a small visible area, and a
+/// player cannot act on fourteen lines anyway. Naming a few by id and counting
+/// the remainder keeps the message actionable while staying quotable.
+const REPORTED_BLOCKERS: usize = 4;
+
+/// The lines to show a host that asked for a profile the contract cannot back.
+///
+/// Returns empty when the profile is claimable, so a caller can use it as the
+/// whole decision. Never phrased as a downgrade that already happened silently:
+/// the first line says the profile was requested and is not being claimed, which
+/// is the thing a player has to know before anyone joins.
+pub fn blocked_profile_report(profile: &str) -> Vec<String> {
+    let blockers = blockers();
+    if blockers.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "Compatibility profile {profile} requested but NOT claimed: {} unresolved contract \
+         item(s). This session runs as an ordinary one.",
+        blockers.len()
+    )];
+    lines.extend(
+        blockers
+            .iter()
+            .take(REPORTED_BLOCKERS)
+            .map(|blocker| format!("  [{}] {} — {}", blocker.area, blocker.id, blocker.recovery)),
+    );
+    if let Some(remaining) = blockers
+        .len()
+        .checked_sub(REPORTED_BLOCKERS)
+        .filter(|n| *n > 0)
+    {
+        lines.push(format!(
+            "  ...and {remaining} more; see docs/COMPAT_PROFILE.md and compat/profile.json."
+        ));
+    }
+    lines
+}
+
 #[cfg(all(
     test,
     any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
 ))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blocked_profile_reports_what_is_wrong_and_never_claims_it() {
+        // clonk-org/clonk-rs#588: the contract's fail-closed rule is only
+        // useful if a host is told before anyone joins. The report must say
+        // the profile is not claimed, and must stay quotable — every named
+        // line carries a manifest id and its recovery.
+        let lines = blocked_profile_report("LegacyClonk");
+        assert!(
+            !lines.is_empty(),
+            "the contract records gaps, so a report is owed"
+        );
+        assert!(
+            lines[0].contains("NOT claimed"),
+            "the first line must not read as a silent downgrade: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("LegacyClonk"),
+            "the report names the profile that was requested"
+        );
+
+        let blockers = blockers();
+        let named = lines.len().saturating_sub(1).min(REPORTED_BLOCKERS);
+        for (line, blocker) in lines[1..=named].iter().zip(&blockers) {
+            assert!(line.contains(&blocker.id), "{line} must quote its id");
+            assert!(
+                line.contains(&blocker.recovery),
+                "{line} must name what closes it"
+            );
+        }
+        if blockers.len() > REPORTED_BLOCKERS {
+            assert!(
+                lines
+                    .last()
+                    .is_some_and(|line| line.contains("more") && line.contains("COMPAT_PROFILE")),
+                "the remainder must be counted and pointed at the contract"
+            );
+        }
+    }
 
     #[test]
     fn the_profile_is_not_claimable_while_the_contract_records_gaps() {
