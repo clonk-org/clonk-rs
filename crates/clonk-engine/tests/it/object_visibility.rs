@@ -143,3 +143,84 @@ pub(crate) fn shipped_invisibility_recast_carries_remaining_time_into_reset_time
     assert_eq!(after[0].number, before.number);
     assert_eq!(after[0].timer, 1);
 }
+
+/// Invisibility does not tick down while its target is on the inactive list.
+///
+/// Reported as "invisibility never runs out" (clonk-org/clonk-rs#980). It is
+/// the shipped behaviour, not a port defect, and the reason is structural:
+/// `C4Game::ExecObjects` walks only the **active** list (C4Game.cpp:1582-1615)
+/// and effect timers advance from `C4Object::Execute` (C4Object.cpp:1069-1090;
+/// C4Effect.cpp:319-363). Dragon Rock's FoW generator hides objects with
+/// `SetObjectStatus(C4OS_INACTIVE, …)` (FoWGenerator.c4d/Script.c:93,107), so
+/// a mage sitting in the fog keeps its full remaining duration however long it
+/// stays there — an invisibility that expired on wall-clock time instead would
+/// be a gameplay change, and a divergence from the oracle.
+pub(crate) fn shipped_invisibility_pauses_while_its_target_is_inactive(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Invisibility owner");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+
+    let spell = engine.spawn_test_object(SpawnConfig::new("MINV").with_owner(owner));
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64()), Value::Nil],
+    );
+
+    // The generator's own hide/show calls, reached the way its script does.
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "FOWP",
+            "Fog status probe",
+            r#"#strict
+        public func Hide(object target) { return SetObjectStatus(C4OS_INACTIVE(), target); }
+        public func Show(object target) { return SetObjectStatus(C4OS_NORMAL(), target); }
+        "#,
+        ),
+    ));
+    let probe = engine.spawn_test_object(SpawnConfig::new("FOWP"));
+    let call = |engine: &mut clonk_engine::Engine, function: &str| {
+        let index = engine.test_object_index(probe);
+        engine.call_test_object_function(index, function, vec![Value::Object(mage.as_u64())]);
+    };
+    let invisibility_timer = |engine: &clonk_engine::Engine| {
+        crate::support::TestValueExt::test_value(
+            engine
+                .test_object_snapshot(mage)
+                .effects
+                .into_iter()
+                .find(|effect| effect.name == "InvisPSpell" && effect.priority != 0)
+                .map(|effect| effect.timer),
+        )
+    };
+
+    for _ in 0..5 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    let running = invisibility_timer(&engine);
+    assert!(
+        running > 0,
+        "the spell is ticking down while the mage is out"
+    );
+
+    call(&mut engine, "Hide");
+    for _ in 0..400 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert_eq!(
+        invisibility_timer(&engine),
+        running,
+        "an inactive object is never executed, so its effects hold their time"
+    );
+
+    call(&mut engine, "Show");
+    for _ in 0..5 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert!(
+        invisibility_timer(&engine) > running,
+        "reactivating the target resumes the same clock"
+    );
+}
