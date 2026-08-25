@@ -1799,6 +1799,67 @@
     }
 
     #[test]
+    fn script_reaction_keeps_ref_param_writes_made_before_an_error() {
+        // C++'s fail-safe exec aborts the call and returns C4VNull without
+        // restoring the caller's C4AulParSet, so the write-back at
+        // C4Material.cpp:822-832 reads whatever the reaction assigned before
+        // it failed. The port used to unwind with the values it was called
+        // with, which put the pixel somewhere native never puts it
+        // (clonk-org/clonk-rs#1094, `sim-script-unwind-args`).
+        //
+        // The abort is a link error: C4Aul keeps the bytecode before the
+        // offending token and redirects the unresolved call into AB_ERR, so
+        // the two assignments above it really do run.
+        let materials = materials_pxs_with_earth(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+            Friction=10
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=Deflect
+            TargetSpec=Earth
+            CheckSlide=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+        "#,
+        );
+        let [goo, water, earth] = pxs_material_ids(&materials, ["Goo", "Water", "Earth"]);
+
+        let mut engine = pxs_engine(21, materials);
+        let mut world = Landscape::flat_with_material(5, 10, Some(earth));
+        world.set_world_height(20);
+        engine.set_landscape(world);
+        engine
+            .install_scenario_script(
+                "Scenario",
+                r#"
+                global func Deflect(&x, &y, lsx, lsy, &xdir, &ydir, &pxs_mat, ls_mat, event) {
+                    xdir = 150;
+                    pxs_mat = 1; // Water's material index
+                    return NeverLinkedReaction();
+                }
+                "#,
+            )
+            .test_value();
+
+        unit_assert!(create_test_pxs(&mut engine, goo, 2, 9, 0, 1));
+        engine.tick_pxs();
+        let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        unit_assert_eq!(survivors.len() => 1, "a failed reaction returns C4VNull, which is falsy: the pixel lives");
+        unit_assert_eq!(survivors[0].mat => water, "the PxsMat written before the error stands");
+        unit_assert_eq!(
+            survivors[0].xdir => math::fixed100(150),
+            "the XDir written before the error stands"
+        );
+    }
+
+    #[test]
     fn script_reaction_writes_back_ref_params_like_cpp() {
         // mrfScript write-back (C4Material.cpp:814-832): X/Y/XDir/YDir/PxsMat
         // are passed by reference; after a falsy return, PxsMat writes back

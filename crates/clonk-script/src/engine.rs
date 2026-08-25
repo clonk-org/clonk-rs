@@ -2377,6 +2377,66 @@ impl Engine {
         Ok((result, finals))
     }
 
+    /// [`Engine::call_resolved_with_ref_args`], but reporting the parameter
+    /// cells whether or not the call succeeded.
+    ///
+    /// The cells are the caller's `C4AulParSet`: the callee writes through them
+    /// as it runs, so after an error they hold whatever it managed to assign
+    /// before failing. C++'s fail-safe exec aborts the call and returns
+    /// `C4VNull` without restoring them, and callers that read parameters back
+    /// — `Game.Landscape`'s `mrfScript` arm writes `iPxsMat`, `iLsMat` and the
+    /// coordinates out of the set at `C4Material.cpp:822-832` — therefore see
+    /// the partial mutations. Returning `Err` alone would discard them
+    /// (clonk-org/clonk-rs#1094, `sim-script-unwind-args`).
+    #[doc(hidden)]
+    pub fn call_resolved_with_ref_args_reporting_finals(
+        &self,
+        resolution: &ScriptFunctionResolution,
+        engine_global: bool,
+        args: &[Value],
+    ) -> (Result<Value, ScriptError>, Vec<Value>) {
+        let vm = self.vm();
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        let cells: Vec<crate::vm::ValueCell> =
+            args.iter().cloned().map(crate::vm::value_cell).collect();
+        let call_args = cells
+            .iter()
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
+            .collect();
+        let result = vm
+            .call_resolved_args(resolution, call_args)
+            .map_err(ScriptError::from);
+        let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
+        (result, finals)
+    }
+
+    /// [`Engine::call_with_ref_args`], but reporting the parameter cells
+    /// whether or not the call succeeded. See
+    /// [`Engine::call_resolved_with_ref_args_reporting_finals`].
+    #[doc(hidden)]
+    pub fn call_with_ref_args_reporting_finals(
+        &self,
+        function: &str,
+        args: &[Value],
+    ) -> (Result<Value, ScriptError>, Vec<Value>) {
+        let cells: Vec<crate::vm::ValueCell> =
+            args.iter().cloned().map(crate::vm::value_cell).collect();
+        let call_args: Vec<crate::vm::CallArg> = cells
+            .iter()
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
+            .collect();
+        let result = self
+            .vm()
+            .call_args(function, call_args)
+            .map_err(ScriptError::from);
+        let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
+        (result, finals)
+    }
+
     /// Execute an immutable function captured by a native callback against
     /// shared object-local cells and an explicit `this`. The entry body is
     /// never re-resolved by name; `engine_global` enables exact lookup through

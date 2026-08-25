@@ -1860,6 +1860,16 @@ impl Engine {
         let world = self.host_world_context();
         let (script, resolution) = world.resolve_engine_global_script(function)?;
         let rng = self.rng.clone();
+        // C++'s fail-safe exec aborts the call and returns C4VNull without
+        // restoring the caller's C4AulParSet, so the write-back below reads
+        // whatever the reaction assigned before it failed
+        // (C4Material.cpp:822-832). `execute_value_for_script` cannot report
+        // that: its closure hands back a `Result`, so an error arrives with no
+        // parameter values at all and it substitutes the ones it was called
+        // with. Capture the cells beside the call instead
+        // (clonk-org/clonk-rs#1094, `sim-script-unwind-args`).
+        let mutated_args: std::rc::Rc<std::cell::RefCell<Vec<Value>>> = Default::default();
+        let capture = std::rc::Rc::clone(&mutated_args);
         let (value, finals, batch, audio_state, rng, script_error) =
             ScenarioScript::execute_value_for_script(
                 "Game.ScriptEngine",
@@ -1874,7 +1884,15 @@ impl Engine {
                 self.environment,
                 self.audio_registry.clone(),
                 self.game_over_triggered,
-                || script.call_resolved_with_ref_args(&resolution, true, args),
+                || {
+                    let (result, finals) = script.call_resolved_with_ref_args_reporting_finals(
+                        &resolution,
+                        true,
+                        args,
+                    );
+                    *capture.borrow_mut() = finals.clone();
+                    result.map(|value| (value, finals))
+                },
             );
         self.rng = rng;
         self.audio_registry = audio_state;
@@ -1882,8 +1900,14 @@ impl Engine {
             tracing::warn!(%error, "material reaction script batch failed to apply");
         }
         // Ordinary raw callback errors were already logged by
-        // `call_value_for_script`.
-        let _ = script_error;
+        // `call_value_for_script`. A failed call still writes back: native
+        // returns C4VNull from the fail-safe exec and reads the parameter set
+        // it already mutated.
+        let finals = if script_error.is_some() {
+            mutated_args.take()
+        } else {
+            finals
+        };
         Some((value.unwrap_or(Value::Nil), finals))
     }
 
