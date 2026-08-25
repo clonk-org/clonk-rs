@@ -13930,6 +13930,10 @@ mod deferred_rank_extension_regression;
 mod dead_global_effect_removal;
 
 #[cfg(test)]
+#[path = "lib_tests/effect_cursor_probe.rs"]
+mod effect_cursor_probe;
+
+#[cfg(test)]
 #[path = "lib_tests/issue_62_scheduled_global_effect_callbacks.rs"]
 mod issue_62_scheduled_global_effect_callbacks;
 
