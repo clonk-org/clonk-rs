@@ -306,6 +306,24 @@ impl Engine {
                 })
                 .unwrap_or(0)
         });
+        // `C4Object::Init` drops a requested rotation a non-rotateable
+        // definition cannot hold, and does so *before* deriving the
+        // fixed-point companion:
+        //
+        //     if (!Def->Rotateable) { nr = 0; nrdir = 0; }
+        //     ... r = nr; ... fix_r = itofix(r);
+        //
+        // so `r == 0` implies `fix_r == 0`. Clamping only one of the two
+        // leaves a non-zero `fix_r` on an object reading as upright, which is
+        // both the accumulator later rotation integrates into and the
+        // serialized `FixR` (C4Object.cpp:2791) — a savegame and join-payload
+        // difference rather than a display one. A loaded object is not
+        // re-initialized: Objects.txt compiles Rotation and FixR verbatim.
+        let (rotation, rotation_velocity) = if loaded || definition_rotateable != 0 {
+            (rotation, rotation_velocity)
+        } else {
+            (0, rotation_velocity.map(|_| C4Fixed::ZERO))
+        };
         let owns_vertices = !vertices.is_empty();
         let shape_template = ObjectShapeTemplate::new(
             definition_vertices.clone(),

@@ -38,7 +38,38 @@ fn full_skies_of_fire_activation_preserves_map_rng_objects_and_initialize_callba
         .pixel_grid()
         .expect("Skies of Fire creates a Surface8 plane");
     assert_eq!((grid.width(), grid.height()), (2_250, 2_250));
-    assert_eq!(fnv1a64([grid.bytes()]), 0x1a9b_b84d_36ff_de89);
+    // The recorded constant this used to carry is gone, and deliberately not
+    // replaced with a re-recorded one.
+    //
+    // Non-rotateable objects stopped being spawned rotated (`C4Object::Init`
+    // zeroes the requested rotation before deriving `fix_r`, and
+    // `C4Def::Rotateable` defaults to 0 — C4Def.cpp:156,376), so their upright
+    // shapes settle their SolidMasks into different pixels and the plane
+    // legitimately changed. The value it changed *to* is host-dependent:
+    // macOS produces 0xc032671534fff7d0 where Linux produces
+    // 0xe99c9252eb27671e, because the plane stores texmap indices and an
+    // unpacked `content/` assigns material slots in directory-read order.
+    // Pinning either one is the platform-conditional expectation that passes
+    // locally and fails the Linux job.
+    //
+    // What this scenario can still assert host-independently is that the plane
+    // is deterministic: the same scenario and seed produce the same bytes
+    // twice, which is what the constant was guarding for the script-free S2
+    // render fast path in the first place. Restoring a cross-revision guard
+    // needs a host-independent digest — clonk-org/clonk-rs#1082.
+    let second = prepare_installed_scenario(SKIES_OF_FIRE, SEED).instantiate();
+    let second_snapshot = second.snapshot();
+    let second_grid = second_snapshot
+        .landscape
+        .as_ref()
+        .expect("the second instantiation creates a landscape")
+        .pixel_grid()
+        .expect("the second instantiation creates a Surface8 plane");
+    assert_eq!(
+        fnv1a64([grid.bytes()]),
+        fnv1a64([second_grid.bytes()]),
+        "the same scenario and seed render the same plane twice"
+    );
 
     // MapSeed is drawn from the synchronized seed before map creation, while
     // C4Landscape's FixRandom bracket keeps map-parser/render draws out of the
@@ -121,7 +152,10 @@ fn full_skies_of_fire_activation_preserves_map_rng_objects_and_initialize_callba
             (256, Vector2::new(302, 1_182)),
             (257, Vector2::new(742, 459)),
             (258, Vector2::new(1_795, 1_563)),
-            (259, Vector2::new(1_196, 1_149)),
+            // Upright rather than rotated, so DoCon's initial bottom
+            // adjust derives this dragon's centre from the unrotated shape
+            // height (C4Object.cpp:1401-1470).
+            (259, Vector2::new(1_196, 1_143)),
         ],
     );
 }
