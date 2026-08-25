@@ -63,9 +63,8 @@ impl Engine {
         // to request the same raw fixed velocity.
         if desired_velocity != -gravity {
             let position = self.objects[target_idx].state.position;
-            let solid_mask_indices = self.active_solid_mask_indices();
             let contacted = self
-                .object_contact_check_at(target_idx, position, &solid_mask_indices)?
+                .object_contact_check_at(target_idx, position)?
                 .is_some_and(|contact| contact.is_contact());
             if contacted {
                 // Contact callbacks above may have changed or removed the
@@ -2311,7 +2310,6 @@ impl Engine {
         &mut self,
         idx: usize,
         position: Vector2,
-        solid_mask_indices: &[usize],
     ) -> Result<Option<ShapeContact>, EngineError> {
         let mut contact = {
             let Some(object) = self.objects.get(idx) else {
@@ -2320,7 +2318,7 @@ impl Engine {
             let Some(landscape) = self.landscape.as_ref() else {
                 return Ok(None);
             };
-            let masks = self.solid_masks_for_movement(solid_mask_indices);
+            let masks = self.live_movement_solid_masks();
             let contact_density = object.state.contact_density;
             shape_contact_check(
                 &object.state.vertices,
@@ -2449,9 +2447,8 @@ impl Engine {
                 // C4Object::ContactCheck reads the live landscape on every
                 // corner candidate. A Contact* callback from the previous
                 // probe can change another object's mask before this one.
-                let solid_mask_indices = engine.active_solid_mask_indices();
                 Ok(engine
-                    .object_contact_check_at(idx, Vector2::new(ctx, cty), &solid_mask_indices)?
+                    .object_contact_check_at(idx, Vector2::new(ctx, cty))?
                     .is_some_and(|contact| contact.contact_cnat == 0))
             };
         let (range_x, range_y) = if matches!(procedure, ActionProcedure::Scale) {
@@ -3446,9 +3443,8 @@ impl Engine {
         if self.frame.is_multiple_of(35) && txdir.is_nonzero() && no_horizontal_move == 0 {
             let target_id = self.objects[target_idx].id;
             let position = self.objects[target_idx].state.position;
-            let solid_mask_indices = self.active_solid_mask_indices();
             let contacted = self
-                .object_contact_check_at(target_idx, position, &solid_mask_indices)?
+                .object_contact_check_at(target_idx, position)?
                 .is_some_and(|contact| contact.is_contact());
             if contacted {
                 if let Some(target_idx) = self.find_object_index(target_id).filter(|&index| {

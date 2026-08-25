@@ -155,3 +155,32 @@ fn blast_shift_without_texture_keeps_frozen_default_slot() {
     );
     assert_eq!(engine.rng, expected_rng);
 }
+
+#[test]
+fn raster_blast_resolves_each_material_shift_once() {
+    // C4Landscape::BlastFree counts the circle before its second raster walk,
+    // while C4Landscape::BlastFreePix consumes the already-crossmapped
+    // material properties for each pixel (C4Landscape.cpp:941-970,1022-1063;
+    // C4Material.cpp:474-479). Resolving that immutable property repeatedly
+    // must not add work or alter the row-major draw sequence.
+    let (mut engine, rock) = blast_engine(false, "Target-Smooth");
+    for y in 0..5 {
+        for x in 0..5 {
+            engine
+                .landscape
+                .as_mut()
+                .expect("raster landscape")
+                .grid_write_byte(x, y, 10 | 0x80);
+        }
+    }
+    BLAST_SHIFT_BYTE_RESOLUTIONS.with(|count| count.set(0));
+
+    let result = crate::TestValueExt::test_value(engine.blast_circle(Vector2::new(2, 2), 2, None));
+
+    assert!(result.pixel_count_by_material[&rock] > 1);
+    assert_eq!(
+        BLAST_SHIFT_BYTE_RESOLUTIONS.with(Cell::get),
+        1,
+        "the crossmapped shift byte is invariant for the complete blast"
+    );
+}

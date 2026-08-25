@@ -15,6 +15,9 @@ use clonk_resources::GraphicsImage;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+
+#[cfg(test)]
+use crate::PARTICLE_LIST_RETAIN_PASSES;
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -625,6 +628,8 @@ impl ParticleSystem {
     /// object's front and back lists. Def counts are released
     /// (C4Particles.cpp:291-310).
     pub fn remove(&mut self, def_name: Option<&str>, scope: &crate::ParticleScope) {
+        #[cfg(test)]
+        PARTICLE_LIST_RETAIN_PASSES.with(|count| count.set(count.get() + 1));
         let mut removed: Vec<String> = Vec::new();
         self.particles.retain(|particle| {
             let scope_matches = match scope {
@@ -642,6 +647,31 @@ impl ParticleSystem {
             } else {
                 true
             }
+        });
+        for name in removed {
+            if let Some(def) = self.defs.iter_mut().find(|def| def.core.name == name) {
+                def.count -= 1;
+            }
+        }
+    }
+
+    pub(crate) fn remove_object_scopes(&mut self, ids: &HashSet<crate::ObjectId>) {
+        if ids.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        PARTICLE_LIST_RETAIN_PASSES.with(|count| count.set(count.get() + 1));
+        let mut removed = Vec::new();
+        self.particles.retain(|particle| {
+            let remove = matches!(
+                particle.layer,
+                ParticleLayer::ObjectFront(id) | ParticleLayer::ObjectBack(id)
+                    if ids.contains(&id)
+            );
+            if remove {
+                removed.push(particle.def_name.clone());
+            }
+            !remove
         });
         for name in removed {
             if let Some(def) = self.defs.iter_mut().find(|def| def.core.name == name) {
@@ -1288,6 +1318,39 @@ mod tests {
         assert_eq!(found.position.x, particle.x);
         assert_eq!(found.position.y, particle.y);
         assert_eq!(found.life, particle.life);
+    }
+
+    #[test]
+    fn clearing_removed_object_particle_lists_uses_one_retain_pass() {
+        // C4Object::Clear drops both of that object's attached particle lists
+        // while C4GameObjects::DeleteObjects clears every removed object in
+        // the completed deletion pass (C4Object.cpp:272-273;
+        // C4GameObjects.cpp:295-335). Rust's flat storage may filter the
+        // union once as long as the surviving particle order is unchanged.
+        let mut system = ParticleSystem::default();
+        for raw in 1..=3 {
+            system.restore_particle(Particle {
+                def_name: "Smoke".to_owned(),
+                x: raw as f32,
+                y: 0.0,
+                xdir: 0.0,
+                ydir: 0.0,
+                life: 0,
+                a: 0.0,
+                b: 0,
+                layer: ParticleLayer::ObjectFront(ObjectId::new(raw)),
+            });
+        }
+        PARTICLE_LIST_RETAIN_PASSES.with(|count| count.set(0));
+
+        system.remove_object_scopes(&HashSet::from([ObjectId::new(1), ObjectId::new(2)]));
+
+        assert_eq!(system.particles.len(), 1);
+        assert_eq!(
+            system.particles[0].layer,
+            ParticleLayer::ObjectFront(ObjectId::new(3))
+        );
+        assert_eq!(PARTICLE_LIST_RETAIN_PASSES.with(Cell::get), 1);
     }
 
     // C4Game.cpp:2369-2394 — ReloadParticle's exact refusal and failure policy.

@@ -6947,8 +6947,7 @@ impl Engine {
         let Some(landscape) = self.landscape.as_ref() else {
             return false;
         };
-        let solid_mask_indices = (0..self.objects.len()).collect::<Vec<_>>();
-        let solid_masks = self.solid_masks_for_movement(&solid_mask_indices);
+        let solid_masks = self.live_movement_solid_masks();
         let density_at =
             |x, y| crate::movement_density_at(landscape, &self.materials, &solid_masks, None, x, y);
         let width = landscape.width() as i32;

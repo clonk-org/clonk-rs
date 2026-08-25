@@ -245,6 +245,7 @@ impl Engine {
         let blast_size = compute_blast_size(radius);
         let grade = compute_blast_grade(radius);
         let shift_threshold = (blast_size * grade) / 6;
+        let mut blast_properties = vec![None; self.materials.len()];
         let mut changed_columns = HashSet::new();
         for ycnt in -radius..=radius {
             let remaining =
@@ -258,31 +259,38 @@ impl Engine {
                     .as_ref()
                     .and_then(|landscape| landscape.border_material_at(x, y));
                 if let Some(material) = material {
-                    let (blast_free, shift_spec, shift_target) = self
-                        .materials
-                        .get_by_id(material)
-                        .map(|entry| {
-                            (
-                                entry.blast_free(),
-                                entry.blast_shift_to_spec().map(str::to_owned),
-                                entry.blast_shift_to_target(),
-                            )
-                        })
-                        .unwrap_or((false, None, None));
-                    let shift_byte =
-                        shift_spec
-                            .as_deref()
-                            .zip(shift_target)
-                            .and_then(|(spec, fallback)| {
-                                self.landscape.as_ref().and_then(|landscape| {
-                                    landscape.crossmapped_material_texture_byte(
-                                        spec,
-                                        material,
-                                        &self.materials,
-                                        fallback,
-                                    )
-                                })
-                            });
+                    let cached = blast_properties.get(material.index()).copied().flatten();
+                    let (blast_free, shift_byte) = if let Some(properties) = cached {
+                        properties
+                    } else {
+                        let properties = self
+                            .materials
+                            .get_by_id(material)
+                            .map(|entry| {
+                                let shift_byte = entry
+                                    .blast_shift_to_spec()
+                                    .zip(entry.blast_shift_to_target())
+                                    .and_then(|(spec, fallback)| {
+                                        #[cfg(test)]
+                                        BLAST_SHIFT_BYTE_RESOLUTIONS
+                                            .with(|count| count.set(count.get() + 1));
+                                        self.landscape.as_ref().and_then(|landscape| {
+                                            landscape.crossmapped_material_texture_byte(
+                                                spec,
+                                                material,
+                                                &self.materials,
+                                                fallback,
+                                            )
+                                        })
+                                    });
+                                (entry.blast_free(), shift_byte)
+                            })
+                            .unwrap_or((false, None));
+                        if let Some(slot) = blast_properties.get_mut(material.index()) {
+                            *slot = Some(properties);
+                        }
+                        properties
+                    };
                     if let Some(shift_byte) = shift_byte {
                         let material_count = result
                             .pixel_count_by_material

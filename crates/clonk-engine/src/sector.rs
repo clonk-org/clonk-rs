@@ -1,5 +1,10 @@
 use std::collections::HashSet;
 
+#[cfg(test)]
+use crate::SECTOR_RANK_REBUILDS;
+#[cfg(test)]
+use std::cell::Cell;
+
 use crate::{DefinitionRect, ObjectId, Vector2};
 
 pub(crate) const SECTOR_WIDTH: i32 = 50;
@@ -222,16 +227,29 @@ impl SectorMap {
     }
 
     pub(crate) fn remove(&mut self, id: ObjectId) {
-        let Some(previous) = self.memberships.remove(&id) else {
-            return;
-        };
-        let point_sector = self.sector_at(previous.position.x, previous.position.y);
-        self.remove_object(point_sector, id);
-        for key in previous.area.iter() {
-            self.remove_shape(key, id);
+        self.remove_many(std::iter::once(id));
+    }
+
+    pub(crate) fn remove_many<I>(&mut self, ids: I)
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        let mut removed = HashSet::new();
+        for id in ids {
+            let Some(previous) = self.memberships.remove(&id) else {
+                continue;
+            };
+            let point_sector = self.sector_at(previous.position.x, previous.position.y);
+            self.remove_object(point_sector, id);
+            for key in previous.area.iter() {
+                self.remove_shape(key, id);
+            }
+            removed.insert(id);
         }
-        self.order.retain(|&candidate| candidate != id);
-        self.rebuild_ranks();
+        if !removed.is_empty() {
+            self.order.retain(|candidate| !removed.contains(candidate));
+            self.rebuild_ranks();
+        }
     }
 
     pub(crate) fn sector_at(&self, x: i32, y: i32) -> SectorKey {
@@ -390,6 +408,8 @@ impl SectorMap {
     }
 
     fn rebuild_ranks(&mut self) {
+        #[cfg(test)]
+        SECTOR_RANK_REBUILDS.with(|count| count.set(count.get() + 1));
         self.ranks.clear();
         for (rank, &id) in self.order.iter().enumerate() {
             self.ranks.insert(id, rank);
@@ -793,5 +813,26 @@ mod tests {
             .is_empty());
         assert_eq!(sectors.shape_ids(SectorKey::Inside { x: 1, y: 1 }), &[id]);
         assert_eq!(sectors.shape_ids(SectorKey::Inside { x: 2, y: 2 }), &[id]);
+    }
+
+    #[test]
+    fn removing_many_objects_rebuilds_master_ranks_once() {
+        // C4GameObjects::DeleteObjects removes every flagged link while
+        // retaining the relative order of surviving master-list entries;
+        // sector teardown observes that same completed removal set
+        // (C4GameObjects.cpp:295-335; C4Sector.cpp:74-86).
+        let mut sectors = SectorMap::new(100, 100);
+        sectors.rebuild((1..=3).map(|raw| SectorObject {
+            id: ObjectId::new(raw),
+            position: Vector2::new(raw as i32, raw as i32),
+            shape_rect: DefinitionRect::new(raw as i32, raw as i32, 1, 1),
+        }));
+        SECTOR_RANK_REBUILDS.with(|count| count.set(0));
+
+        sectors.remove_many([ObjectId::new(1), ObjectId::new(2)]);
+
+        assert_eq!(sectors.order, vec![ObjectId::new(3)]);
+        assert_eq!(sectors.rank(ObjectId::new(3)), 0);
+        assert_eq!(SECTOR_RANK_REBUILDS.with(Cell::get), 1);
     }
 }
