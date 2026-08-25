@@ -150,12 +150,40 @@ pub fn blocked_profile_report(profile: &str) -> Vec<String> {
          item(s). This session runs as an ordinary one.",
         blockers.len()
     )];
-    lines.extend(
-        blockers
-            .iter()
-            .take(REPORTED_BLOCKERS)
-            .map(|blocker| format!("  [{}] {} — {}", blocker.area, blocker.id, blocker.recovery)),
-    );
+    lines.extend(named_blockers(&blockers));
+    lines
+}
+
+/// The lines to show a *client* that asked for a profile the contract cannot
+/// back, when it is about to join someone else's session.
+///
+/// Deliberately not [`blocked_profile_report`]. That one states what the
+/// session will be, which is the host's to say — a client announcing it would
+/// assert a promise the session never made. This one is about the client's own
+/// request and says only what the client can answer for. Empty when the profile
+/// is claimable, so a caller can use it as the whole decision.
+pub fn blocked_join_report(profile: &str) -> Vec<String> {
+    let blockers = blockers();
+    if blockers.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "This client requested compatibility profile {profile} but cannot honour it: {} \
+         unresolved contract item(s). It joins as an ordinary client.",
+        blockers.len()
+    )];
+    lines.extend(named_blockers(&blockers));
+    lines
+}
+
+/// The blocker detail shared by every report: a few named by id with their
+/// recovery action, then a count of the remainder and where to read the rest.
+fn named_blockers(blockers: &[CompatBlocker]) -> Vec<String> {
+    let mut lines = blockers
+        .iter()
+        .take(REPORTED_BLOCKERS)
+        .map(|blocker| format!("  [{}] {} — {}", blocker.area, blocker.id, blocker.recovery))
+        .collect::<Vec<_>>();
     if let Some(remaining) = blockers
         .len()
         .checked_sub(REPORTED_BLOCKERS)
