@@ -467,7 +467,10 @@ impl Engine {
     /// silently relocates ChangeDef's Unsorted link on a later frame.
     pub(crate) fn fix_exec_list_order(&mut self) {
         if std::env::var("LC_EXECDBG").is_ok() {
-            crate::rng::rng_trace_line(&format!("FIXORDER len={}", self.exec_list.len()));
+            crate::rng::rng_trace_line(
+                self.rng.trace_index,
+                &format!("FIXORDER len={}", self.exec_list.len()),
+            );
         }
         let mut keyed: Vec<(i32, usize, ObjectId)> = Vec::with_capacity(self.exec_list.len());
         for (position, &id) in self.exec_list.iter().enumerate() {

@@ -8924,9 +8924,9 @@ fn sign_i32(value: i32) -> i32 {
 }
 
 /// TEMP stage probe for the traced object.
-fn dbg_stage(object: &Object, stage: &str) {
+fn dbg_stage(trace_index: u32, object: &Object, stage: &str) {
     if coach_debug_id() == Some(object.id.as_u64()) {
-        crate::rng::rng_trace_line(&format!(
+        crate::rng::rng_trace_line(trace_index, &format!(
             "STG {stage} pos=({},{}) fix=({},{}) dirs=({},{}) act={} comdir={:?} dir={:?} mobile={}",
             object.state.position.x,
             object.state.position.y,

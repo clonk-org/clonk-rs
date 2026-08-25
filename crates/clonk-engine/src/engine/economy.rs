@@ -3045,8 +3045,11 @@ impl Engine {
     /// and rebuild FRndBuf3. This leaves RandomCount at 500 and FRndPtr3 at
     /// zero (C4Game.cpp:3554-3558; C4Random.cpp:29-33).
     pub(crate) fn fix_random(&mut self) {
+        // Keep this engine's trace sink across the re-seed; allocating a new
+        // ordinal here would split one engine's stream across two files.
+        let trace_index = self.rng.trace_index;
         self.rng = LcgRng::seed_from_u64(self.random_seed);
-        self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
+        self.rng.trace_index = trace_index;
     }
 
     /// Apply the mutable half of `C4PlayerList::SynchronizeLocalFiles` before

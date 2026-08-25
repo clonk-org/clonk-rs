@@ -1291,15 +1291,18 @@ impl Engine {
         // Frame first: this runs once per live PXS, and `env::var` takes a
         // global lock and allocates before it can answer.
         if (17..=19).contains(&self.frame) && std::env::var("LC_RUST_RNG_TRACE").is_ok() {
-            crate::rng::rng_trace_line(&format!(
-                "PXS {} {} {} {} {} {}",
-                pixel.mat.raw(),
-                fixtoi_prec(pixel.x, 256),
-                fixtoi_prec(pixel.y, 256),
-                fixtoi_prec(pixel.xdir, 256),
-                fixtoi_prec(pixel.ydir, 256),
-                self.frame
-            ));
+            crate::rng::rng_trace_line(
+                self.rng.trace_index,
+                &format!(
+                    "PXS {} {} {} {} {} {}",
+                    pixel.mat.raw(),
+                    fixtoi_prec(pixel.x, 256),
+                    fixtoi_prec(pixel.y, 256),
+                    fixtoi_prec(pixel.xdir, 256),
+                    fixtoi_prec(pixel.ydir, 256),
+                    self.frame
+                ),
+            );
         }
         // Safety: MatValid(Mat) (C4PXS.cpp:46-50; C4Wrappers.h:100-103). A
         // raw index Load or a script reaction stored survives in the slot
@@ -1920,11 +1923,10 @@ impl Engine {
         vy: i32,
     ) -> bool {
         if (15..=19).contains(&self.frame) && std::env::var("LC_RUST_RNG_TRACE").is_ok() {
-            crate::rng::rng_trace_line(&format!(
-                "INSMAT {} {tx} {ty} {vx} {vy} {}",
-                mat.index(),
-                self.frame
-            ));
+            crate::rng::rng_trace_line(
+                self.rng.trace_index,
+                &format!("INSMAT {} {tx} {ty} {vx} {vy} {}", mat.index(), self.frame),
+            );
         }
         let Some(material) = self.materials.get_by_id(mat) else {
             return false;

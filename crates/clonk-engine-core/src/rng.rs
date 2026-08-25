@@ -18,9 +18,10 @@ const RND3_SIZE: usize = 500;
 pub struct LcgRng {
     pub hold: u32,
     pub count: i32,
-    /// Temp forensics: when set, draws append to LC_RUST_RNG_TRACE.
+    /// Temp forensics: nonzero routes draws to this engine's own trace file
+    /// under LC_RUST_RNG_TRACE. Zero means untraced.
     #[serde(skip, default)]
-    pub trace: bool,
+    pub trace_index: u32,
     /// Pre-computed Rnd3 circular buffer (FRndBuf3). C4Random.cpp:26.
     rnd3_buf: Vec<i32>,
     /// Current buffer index (FRndPtr3). C4Random.cpp:27.
@@ -35,7 +36,7 @@ impl LcgRng {
         Self {
             hold: seed,
             count: 0,
-            trace: false,
+            trace_index: 0,
             rnd3_buf: vec![0i32; RND3_SIZE],
             rnd3_ptr: 0,
         }
@@ -56,7 +57,7 @@ impl LcgRng {
     /// (clonk-org/clonk-rs#1050).
     pub fn seed_from_u64_traced(seed: u64, trace: bool) -> Self {
         let mut rng = Self::new(seed as u32);
-        rng.trace = trace;
+        rng.trace_index = if trace { next_trace_index() } else { 0 };
         rng.randomize3();
         rng
     }
@@ -70,8 +71,8 @@ impl LcgRng {
         }
         self.hold = self.hold.wrapping_mul(214013).wrapping_add(2531011);
         let value = ((self.hold >> 16) % range as u32) as i32;
-        if self.trace {
-            rng_trace(self.count, range, value);
+        if self.trace_index != 0 {
+            rng_trace(self.trace_index, self.count, range, value);
         }
         value
     }
@@ -164,48 +165,79 @@ impl rand_core::TryRng for LcgRng {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-/// Temp forensics: append draws to LC_RUST_RNG_TRACE (mirrors the C++
-/// C4Random.h probe; alignment by count/range/value).
-fn trace_file() -> &'static Option<std::sync::Mutex<std::fs::File>> {
-    use std::sync::OnceLock;
-    static TRACE: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
-    TRACE.get_or_init(|| {
-        std::env::var("LC_RUST_RNG_TRACE")
-            .ok()
-            .and_then(|path| std::fs::File::create(path).ok())
-            .map(std::sync::Mutex::new)
-    })
+/// The file one engine's draws are written to.
+///
+/// The sink used to be a single process-global file while `RandomCount` is
+/// per-engine, so a process that builds several engines interleaved their
+/// streams with colliding counters — which reads as duplicated counts and
+/// breaks any diff against the oracle. Giving each engine its own file keeps
+/// every line in the oracle's exact `count range value` format while making
+/// each file a single coherent stream.
+///
+/// The first engine keeps the base path, so an existing single-engine workflow
+/// is unchanged; later engines get `.2`, `.3` and so on. After a run, the file
+/// carrying `FRAME` markers is the engine that played the round — which is a
+/// property of the output rather than a guess at construction order
+/// (clonk-org/clonk-rs#1050).
+pub(crate) fn trace_path_for_engine(base: &str, index: u32) -> String {
+    if index <= 1 {
+        base.to_string()
+    } else {
+        format!("{base}.{index}")
+    }
 }
 
-fn rng_trace(count: i32, range: i32, value: i32) {
+/// Temp forensics: append draws to this engine's LC_RUST_RNG_TRACE file
+/// (mirrors the C++ C4Random.h probe; alignment by count/range/value).
+fn trace_base_path() -> Option<&'static str> {
+    static BASE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| std::env::var("LC_RUST_RNG_TRACE").ok())
+        .as_deref()
+}
+
+/// Ordinal of the next traced engine in this process, starting at 1.
+fn next_trace_index() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+type TraceSinks = std::sync::Mutex<std::collections::HashMap<u32, Option<std::fs::File>>>;
+
+fn trace_sinks() -> &'static TraceSinks {
+    static SINKS: std::sync::OnceLock<TraceSinks> = std::sync::OnceLock::new();
+    SINKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn write_trace(index: u32, line: &str) {
     use std::io::Write;
-    if let Some(file) = trace_file() {
-        if let Ok(mut file) = file.lock() {
-            let _ = writeln!(file, "{count} {range} {value}");
-        }
+    let Some(base) = trace_base_path() else {
+        return;
+    };
+    let Ok(mut sinks) = trace_sinks().lock() else {
+        return;
+    };
+    let sink = sinks
+        .entry(index)
+        .or_insert_with(|| std::fs::File::create(trace_path_for_engine(base, index)).ok());
+    if let Some(file) = sink.as_mut() {
+        let _ = writeln!(file, "{line}");
     }
+}
+
+fn rng_trace(index: u32, count: i32, range: i32, value: i32) {
+    write_trace(index, &format!("{count} {range} {value}"));
 }
 
 /// Ledger-forensics free-form probe line (env-gated diagnostics).
-pub fn rng_trace_line(text: &str) {
-    use std::io::Write;
-    if let Some(file) = trace_file() {
-        if let Ok(mut file) = file.lock() {
-            let _ = writeln!(file, "{text}");
-        }
-    }
+pub fn rng_trace_line(index: u32, text: &str) {
+    write_trace(index, text);
 }
 
 /// Ledger-forensics frame marker: mirrors the C++ probe's `FRAME n`
 /// lines so per-frame draw censuses align (env-gated, diagnostic only).
-pub fn rng_trace_frame_marker(frame: u64) {
-    use std::io::Write;
-    if let Some(file) = trace_file() {
-        if let Ok(mut file) = file.lock() {
-            let _ = writeln!(file, "FRAME {frame}");
-            let _ = file.flush();
-        }
-    }
+pub fn rng_trace_frame_marker(index: u32, frame: u64) {
+    write_trace(index, &format!("FRAME {frame}"));
 }
 
 #[cfg(test)]
@@ -362,6 +394,22 @@ mod tests {
     }
 
     #[test]
+    fn each_engine_gets_its_own_trace_file() {
+        // One process builds many engines; RandomCount is per-engine, so a
+        // shared sink interleaves streams with colliding counters and breaks
+        // any diff against the oracle. Per-engine files keep each stream
+        // coherent and each line in the oracle's exact format
+        // (clonk-org/clonk-rs#1050).
+        //
+        // The first engine keeps the base path, so an existing single-engine
+        // workflow is unchanged.
+        assert_eq!(trace_path_for_engine("/tmp/rng.txt", 1), "/tmp/rng.txt");
+        assert_eq!(trace_path_for_engine("/tmp/rng.txt", 0), "/tmp/rng.txt");
+        assert_eq!(trace_path_for_engine("/tmp/rng.txt", 2), "/tmp/rng.txt.2");
+        assert_eq!(trace_path_for_engine("/tmp/rng.txt", 31), "/tmp/rng.txt.31");
+    }
+
+    #[test]
     fn seeding_arms_the_trace_before_the_rnd3_fill() {
         // Native's Randomize3 runs with LcRngTraceFile already available, so an
         // oracle trace opens with 500 `range=3` lines (C4Random.h:40-47,76-83).
@@ -370,13 +418,13 @@ mod tests {
         // which is a silent wrong answer, not a missing file
         // (clonk-org/clonk-rs#1050).
         let traced = LcgRng::seed_from_u64_traced(7, true);
-        assert!(traced.trace, "the flag must survive seeding");
+        assert_ne!(traced.trace_index, 0, "the sink must survive seeding");
         assert_eq!(traced.count, RND3_SIZE as i32, "the Rnd3 fill still runs");
 
         // Arming it changes nothing about the stream itself: same hold, same
         // count, same buffer as the untraced constructor.
         let plain = LcgRng::seed_from_u64(7);
-        assert!(!plain.trace);
+        assert_eq!(plain.trace_index, 0);
         assert_eq!(traced.count, plain.count);
         assert_eq!(traced.hold, plain.hold);
         assert_eq!(traced.rnd3_buf, plain.rnd3_buf);

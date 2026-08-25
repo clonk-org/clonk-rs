@@ -4370,14 +4370,17 @@ impl Engine {
                     if coach_debug_id() == Some(candidate_id.as_u64())
                         || coach_debug_id() == Some(obj1_id.as_u64())
                     {
-                        crate::rng::rng_trace_line(&format!(
-                            "XCOLLECT collector={} ({:?}) at {:?} takes {} at {:?}",
-                            obj1_id.as_u64(),
-                            self.objects[idx].definition_id,
-                            live_obj1_position,
-                            candidate_id.as_u64(),
-                            live_candidate_position
-                        ));
+                        crate::rng::rng_trace_line(
+                            self.rng.trace_index,
+                            &format!(
+                                "XCOLLECT collector={} ({:?}) at {:?} takes {} at {:?}",
+                                obj1_id.as_u64(),
+                                self.objects[idx].definition_id,
+                                live_obj1_position,
+                                candidate_id.as_u64(),
+                                live_candidate_position
+                            ),
+                        );
                     }
                     // C4Object::Collect runs the full Enter-and-tail path:
                     // both vetoes, fCopyMotion=false callbacks, attach
