@@ -10322,11 +10322,7 @@ impl Engine {
             },
             solid_mask_host_state_generation: Cell::new(1),
             solid_mask_host_state_cache: RefCell::new(None),
-            rng: {
-                let mut rng = LcgRng::seed_from_u64(seed);
-                rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
-                rng
-            },
+            rng: LcgRng::seed_from_u64_traced(seed, std::env::var("LC_RUST_RNG_TRACE").is_ok()),
             scenario_script_go: false,
             scenario_script_counter: 0,
             random_seed: seed,
