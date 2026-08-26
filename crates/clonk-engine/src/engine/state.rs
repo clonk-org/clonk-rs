@@ -357,10 +357,21 @@ impl Engine {
         )
         .unwrap_or(i32::MAX);
         let object_enumeration_index = saturating_u64_to_i32(self.next_object_id.saturating_sub(1));
+        // `C4ObjectList::ObjectCount` skips links whose object has no
+        // `Status` (C4ObjectList.cpp:320-330), so a removed object still
+        // linked into a sector must not be counted here.
+        let active_ids: std::collections::HashSet<_> = self
+            .objects
+            .iter()
+            .filter(|object| !object.destroyed && object.state.status.is_active())
+            .map(|object| object.id)
+            .collect();
         let sector_shape_sum = self
             .sectors
             .as_ref()
-            .map(|sectors| i32::try_from(sectors.shape_sum()).unwrap_or(i32::MAX))
+            .map(|sectors| {
+                i32::try_from(sectors.shape_sum(|id| active_ids.contains(&id))).unwrap_or(i32::MAX)
+            })
             .unwrap_or(0);
 
         SyncCheckPacket {
