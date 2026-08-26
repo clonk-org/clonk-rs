@@ -240,19 +240,6 @@
       "owner": "parity/README.md (Accepted safety divergences)"
     },
     {
-      "id": "sim-script-nested-local-snapshot",
-      "area": "simulation",
-      "summary": "A call into an object whose own script is already in flight starts from the pre-call local snapshot; C++ keeps named locals on the C4Object and the nested call would read them live. The overlay_foreign_cells pass replays earlier cross-object LocalN writes onto the snapshot and narrows, but does not close, the gap.",
-      "cited_in": [
-        "crates/clonk-engine/src/compat/contexts.rs:6098"
-      ],
-      "cpp_reference": "C4AulExec.cpp:411",
-      "disposition": "open-gap",
-      "profile_action": "blocked",
-      "determinism_critical": true,
-      "owner": "clonk-org/clonk-rs#1094"
-    },
-    {
       "id": "ctrl-async-default",
       "area": "control",
       "summary": "Network.ControlMode defaults to CNM_Async (2) instead of C++'s CNM_Decentral (0), which C4Config.cpp:540 calls the standard mode and C4GameOptions.cpp:93 labels async experimental. Only the default differs -- the mechanism is a faithful port -- but the value is synchronized, so it decides whether the host bounds its wait for a straggler and drops that client's input for the tick instead of pacing every participant on the slowest peer. The profile reverts it to the C++ default as a non-persistent overlay applied at session construction; the saved key is never rewritten.",
