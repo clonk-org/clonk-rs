@@ -136,7 +136,8 @@ port-authored `planet/System.c4g` `#appendto` scripts are disabled, so
 definitions and scripts behave exactly as the shipped content specifies.
 That is a claim about behaviour and does not by itself make the group
 interchangeable with a stock one: `System.c4g` is compared as bytes by a
-joining peer, which `content-system-group-identity` blocks on.
+joining peer, which is why `content-system-group-identity` puts joining a stock
+host out of scope.
 Definition version gating prunes content newer than the engine exactly as C++
 does.
 
@@ -306,13 +307,24 @@ no. `cargo xtask compat verify` prints the count it acts on: the pending
 evidence entries and the blocked divergences. While either is non-zero the
 profile must not be presented to a player as compatible.
 
-One open gap currently blocks it, and it is determinism-critical:
+No open gap blocks it any more. What remains is unproven promises, not known
+defects.
 
-| Id | Owner |
-| --- | --- |
-| `content-system-group-identity` — `planet/System.c4g` carries port-authored files stock LegacyClonk does not, so the group's `ContentsCRC` differs and a stock peer aborts the join before any script runs. Disabling the appends does not close it: the check compares the group's bytes, not what it executes. | clonk-org/clonk-rs#586 |
+The last one, `content-system-group-identity`, is now `accepted` rather than
+blocked, by a product decision recorded on 2026-08-26. `planet/System.c4g`
+carries port-authored files stock LegacyClonk does not, so the group's
+`ContentsCRC` differs and a stock peer aborts the join before any script runs;
+because the check compares the group's bytes rather than what it executes,
+disabling the appends does not close it. Nothing the port can *compute*
+differently changes that CRC — only shipping a byte-identical group would, and
+that means not shipping the port's own content.
 
-Plus seven pending evidence entries naming six issues —
+So **joining a stock LegacyClonk host is out of scope**: the profile covers
+matching what a C++ peer computes, not passing its resource negotiation. The
+entry is kept in the manifest rather than removed, so the limitation is stated
+where the contract is read.
+
+The seven pending evidence entries name six issues —
 clonk-org/clonk-rs#585 (simulation), clonk-org/clonk-rs#586 (control and
 transport, once each), clonk-org/clonk-rs#583 (transport),
 clonk-org/clonk-rs#587 (presentation), and clonk-org/clonk-rs#524 and
