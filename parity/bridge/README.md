@@ -161,10 +161,10 @@ Still open:
 
 - **No gate runs this.** It needs an oracle checkout and builds only where the
   oracle builds, so it is a local investigation tool, not CI coverage.
-- Of the four scenario classes clonk-org/clonk-rs#585 asks for, three have been
-  swept — movement (`Goldrace`, `Skyrace`), landscape (`Greed`, `Canyon`,
-  `Massif`) and script/effect (`Tutorial03/05/07/09/10`). All ten start and each
-  reports a first divergence. **The network-record class has not been run.**
+- All four scenario classes clonk-org/clonk-rs#585 asks for have now been swept
+  — movement (`Goldrace`, `Skyrace`), landscape (`Greed`, `Canyon`, `Massif`),
+  script/effect (`Tutorial03/05/07/09/10`) and network-record (see below). Each
+  starts and reports a first divergence.
 - **Weather is not compared, and cannot be**
   (clonk-org/clonk-rs#1083). `lc_engine_runtime_compare_snapshot` takes no
   environment parameters, so wind, season and climate never reach the
@@ -184,6 +184,52 @@ Still open:
 
 So `parity verify` remains the primitive-section differential, and a green run
 of it is still not evidence of full-scenario parity.
+
+## Replaying a record
+
+The network-record class needs a record to replay, and nothing in the tree
+produces one. The engine records only when `Config.General.Record` is set, and
+that lives in a config file the engine writes itself — so seed it rather than
+hand-authoring one, because the key is `Record=false` inside `[General]` and a
+guessed path is silently ignored (on macOS the default is
+`$HOME/Library/Preferences/legacyclonk.config`, which a `HOME` override does not
+create on its own).
+
+```sh
+cd <oracle>/build-validation
+
+# 1. Let the engine write a config, then enable recording in it.
+printf '/quit\n' | ./clonk "/config:$PWD/rec.config"
+sed -i '' 's/^Record=false/Record=true/' rec.config
+
+# 2. Record a run. The record lands in `Records.c4f` beside the build tree.
+printf '/open %s/Tutorial.c4f/Tutorial01.c4s %s/Tyler.c4p\n' "$PWD" "$PWD" \
+  | ./clonk "/config:$PWD/rec.config"
+
+# 3. Replay it with the diff ARMED.
+printf '/open %s/Records.c4f/001-Tutorial.c4s\n' "$PWD" \
+  | LC_RUST_ENGINE_RUNTIME=1 ./clonk "/config:$PWD/rec.config"
+```
+
+**Check that it actually replayed.** The log looks the same as an ordinary run —
+it still says `Player join`, and nothing says "replay" — so the reliable tell is
+that `C4Game::Execute` skips recording for a replay (`C4Game.cpp:2935`,
+`if (!C4S.Head.Replay && ...)`). Leave `Record=true` set for step 3: if
+`Records.c4f` gains no `002-` entry, the engine took the replay path. If it does
+gain one, the record was opened as an ordinary scenario and the run says nothing
+about control or record.
+
+On `001-Tutorial` the replay reports one divergence, byte-identical across
+repeated runs:
+
+```
+frame 1: synced RNG ledger diverged:
+  rust hold 2460695438 count 501, cpp hold 3481787565 count 506
+```
+
+Unlike the landscape sweeps, this one is stable rather than intermittent, which
+makes it the better starting point for the frame-1 draw-count family
+(clonk-org/clonk-rs#1139 is the other member).
 
 ## Faithfulness
 
