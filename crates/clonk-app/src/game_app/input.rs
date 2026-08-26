@@ -9860,21 +9860,11 @@ impl GameApp {
         });
         let resources = self.script_text_spec_resources();
         let font_images = resolve_script_menu_font_images(&self.engine, menu, resources);
-        // Drawing consumes an unresolved inline image and carries on, but hit
-        // testing still refuses one: matching C++'s zero-advance geometry here
-        // is clonk-org/clonk-rs#1204, and until then a click must not fall
-        // through to the world on geometry the renderer and this path disagree
-        // about.
-        if let Some(spec) = engine_script_menu_inline_image_specs(menu)
-            .into_iter()
-            .find(|spec| !font_images.contains_key(spec))
-        {
-            return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                ClassicParityBoundary::ScriptMenuPointerResources {
-                    detail: format!("unresolved classic menu text image '{{{{{spec}}}}}'"),
-                },
-            )));
-        }
+        // An unresolved inline image is consumed with no advance here exactly
+        // as it is when drawing: `CStdFont::DrawText` and `GetTextExtent`
+        // both skip an unknown id (src/StdFont.cpp:868-890), and the geometry
+        // helpers below read the same `font_images` map the renderer does, so
+        // the two agree without a check.
         let item_icons = if menu.style == 3 {
             self.script_menu_item_icons(menu)
         } else {

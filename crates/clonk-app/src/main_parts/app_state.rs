@@ -2601,9 +2601,6 @@ pub(crate) enum ClassicParityBoundary {
         overlay: &'static str,
         detail: String,
     },
-    ScriptMenuPointerResources {
-        detail: String,
-    },
     IngameMenuChild(ClassicIngameMenuChild),
     AppObjectMenu(AppObjectMenuMode),
     RuntimeHelpResources {
@@ -2727,10 +2724,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::GuiOverlayResources { overlay, detail } => write!(
                 f,
                 "classic {overlay} resources are unavailable: {detail}; refusing overlay construction or base pixels"
-            ),
-            Self::ScriptMenuPointerResources { detail } => write!(
-                f,
-                "classic script-menu pointer resources are unavailable: {detail}; refusing world-pointer fallthrough"
             ),
             Self::IngameMenuChild(child) => write!(
                 f,
