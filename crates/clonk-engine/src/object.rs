@@ -5,7 +5,7 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct LocalVariables(Rc<HashMap<String, Value>>);
+pub struct LocalVariables(Arc<HashMap<String, Value>>);
 
 impl LocalVariables {
     pub fn snapshot(&self) -> HashMap<String, Value> {
@@ -24,16 +24,16 @@ impl std::ops::Deref for LocalVariables {
 impl std::ops::DerefMut for LocalVariables {
     fn deref_mut(&mut self) -> &mut Self::Target {
         #[cfg(test)]
-        if Rc::strong_count(&self.0) > 1 {
+        if Arc::strong_count(&self.0) > 1 {
             SCRIPT_STATE_LOCAL_VAR_DEEP_CLONES.with(|count| count.set(count.get() + 1));
         }
-        Rc::make_mut(&mut self.0)
+        Arc::make_mut(&mut self.0)
     }
 }
 
 impl From<HashMap<String, Value>> for LocalVariables {
     fn from(values: HashMap<String, Value>) -> Self {
-        Self(Rc::new(values))
+        Self(Arc::new(values))
     }
 }
 
