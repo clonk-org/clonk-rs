@@ -836,6 +836,8 @@ pub(crate) struct ObjectDelta {
     /// Sub-pixel angular velocity (16.16 fixed-point degrees/frame) set by
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
     rotation_velocity: Option<C4Fixed>,
+    /// Native rdir write that must not arm `Mobile`; see the update field.
+    rotation_velocity_raw: Option<C4Fixed>,
     pub(crate) energy: Option<i32>,
     /// The energy write already evaluated C4Object::DoEnergy's synchronous
     /// zero-crossing predicate at its host-call site. This marker belongs to
@@ -1019,6 +1021,9 @@ impl ObjectDelta {
         if let Some(rotation_velocity) = update.rotation_velocity {
             self.rotation_velocity = Some(rotation_velocity);
         }
+        if let Some(rotation_velocity) = update.rotation_velocity_raw {
+            self.rotation_velocity_raw = Some(rotation_velocity);
+        }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
             self.host_energy_death_checked = update.host_energy_death_checked;
@@ -1185,6 +1190,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             contact_density: update.contact_density,
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
+            rotation_velocity_raw: update.rotation_velocity_raw,
             energy: update.energy,
             host_energy_death_checked: update.host_energy_death_checked,
             breath: update.breath,
@@ -1374,6 +1380,14 @@ pub struct ObjectUpdate {
     /// Sub-pixel angular velocity (16.16 fixed degrees/frame) from `SetRDir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_velocity: Option<C4Fixed>,
+    /// The same value written the way `C4Object::AdjustWalkRotation` writes
+    /// it — straight onto `rdir` with **no** `Mobile` arming
+    /// (C4Object.cpp:6085-6088). `FnSetRDir` is the path that mobilises
+    /// (C4Script.cpp:732); a native rdir write must not, or the staged field
+    /// re-mobilises the object in a later fold, after ExecMovement has
+    /// demobilised it (clonk-org/clonk-rs#1157).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_velocity_raw: Option<C4Fixed>,
     #[serde(default)]
     pub rotation: Option<i32>,
     pub energy: Option<i32>,
@@ -1816,6 +1830,7 @@ impl ObjectUpdate {
             && self.t_attach.is_none()
             && self.rotation.is_none()
             && self.rotation_velocity.is_none()
+            && self.rotation_velocity_raw.is_none()
             && self.energy.is_none()
             && self.breath.is_none()
             && self.need_energy.is_none()
@@ -2718,6 +2733,7 @@ impl Object {
             self.fixed_velocity.y = y;
             self.state.velocity = self.velocity_pixels();
         }
+
         // Script dir writes mobilize unconditionally: FnSetXDir/FnSetYDir/
         // FnSetRDir all end in `pObj->Mobile = 1` (C4Script.cpp:705,718,732).
         if delta.fixed_velocity.is_some()
@@ -2745,6 +2761,9 @@ impl Object {
             // An explicit rotation re-seeds the fixed accumulator, mirroring C++
             // forcing `fix_r = itofix(r)` (`C4Movement.cpp:418`).
             self.fixed_rotation = itofix(self.state.rotation);
+        }
+        if let Some(rotation_velocity) = delta.rotation_velocity_raw {
+            self.rotation_velocity = rotation_velocity;
         }
         if let Some(rotation_velocity) = delta.rotation_velocity {
             self.rotation_velocity = rotation_velocity;
@@ -4639,4 +4658,86 @@ pub struct DefinitionLineMetadata {
     pub line: i32,
     #[serde(default)]
     pub line_intersect: i32,
+}
+
+#[cfg(test)]
+mod walk_rotation_mobility_tests {
+    use super::*;
+
+    /// `FnSetRDir` mobilises (`C4Script.cpp:732`), so a staged
+    /// `rotation_velocity` must keep arming `Mobile`.
+    #[test]
+    fn a_script_rdir_write_still_mobilizes() {
+        let mut delta = ObjectDelta::default();
+        delta.rotation_velocity = Some(C4Fixed::from_raw(4096));
+
+        let mut object = test_object();
+        object.state.mobile = false;
+        object.apply_delta(&delta, &ActionLibrary::default());
+
+        assert!(object.state.mobile, "SetRDir must mobilize like C++");
+        assert_eq!(object.rotation_velocity, C4Fixed::from_raw(4096));
+    }
+
+    /// `C4Object::AdjustWalkRotation` writes `rdir` directly and never
+    /// touches `Mobile` (`C4Object.cpp:6085-6088`). The staged field outlives
+    /// the procedure that set it, so a walking object that dies in the same
+    /// frame carried it into `ChangeDef`'s fold and was re-mobilised after
+    /// `ExecMovement` had demobilised it — a corpse the oracle had at rest
+    /// (clonk-org/clonk-rs#1157).
+    #[test]
+    fn a_native_rdir_write_leaves_mobile_alone() {
+        let mut delta = ObjectDelta::default();
+        delta.rotation_velocity_raw = Some(C4Fixed::from_raw(4096));
+
+        let mut object = test_object();
+        object.state.mobile = false;
+        object.apply_delta(&delta, &ActionLibrary::default());
+
+        assert!(
+            !object.state.mobile,
+            "a native rdir write must not mobilize; C++ leaves Mobile untouched"
+        );
+        assert_eq!(object.rotation_velocity, C4Fixed::from_raw(4096));
+    }
+
+    /// And it must not *clear* the flag either: C++ leaves it exactly as it
+    /// found it.
+    #[test]
+    fn a_native_rdir_write_preserves_an_already_mobile_object() {
+        let mut delta = ObjectDelta::default();
+        delta.rotation_velocity_raw = Some(C4Fixed::from_raw(-2048));
+
+        let mut object = test_object();
+        object.state.mobile = true;
+        object.apply_delta(&delta, &ActionLibrary::default());
+
+        assert!(object.state.mobile, "an already-mobile object stays mobile");
+    }
+
+    fn test_object() -> Object {
+        Object::new(
+            ObjectId::new(1),
+            "FISH".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "position": {"x": 0, "y": 0},
+                "velocity": {"x": 0, "y": 0},
+                "rotation": 0,
+                "energy": 0,
+                "action": {
+                    "name": "Walk",
+                    "phase": 0,
+                    "ticks": 0,
+                    "time": 0,
+                    "data": 0
+                },
+                "vertices": [],
+                "contents": [],
+                "effects": [],
+            }))
+            .expect("object state deserializes"),
+            ObjectShapeTemplate::new(Vec::new(), None, 0, false, 0),
+            None,
+        )
+    }
 }

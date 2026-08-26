@@ -5173,11 +5173,13 @@ pub(crate) fn adjust_walk_rotation(args: &[Value]) -> Result<Value, RuntimeError
         let Some(object) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
-        // Move to destination angle (C4Object.cpp:6089-6095). C++ writes
-        // rdir directly (no Mobile flag); the pending-update path arms
-        // mobile, but every caller runs from an attached procedure that
-        // has already set it.
-        object.set_rotation_velocity(rotation_velocity);
+        // Move to destination angle (C4Object.cpp:6085-6088). C++ writes
+        // rdir directly and never touches Mobile, so this uses the raw
+        // staging path. The mobilising one outlived its procedure: a
+        // walking object that died in the same frame still carried the
+        // staged field into ChangeDef's fold, which re-mobilised the corpse
+        // after ExecMovement had demobilised it (clonk-org/clonk-rs#1157).
+        object.set_rotation_velocity_raw(rotation_velocity);
         Ok(Value::Bool(true))
     })
 }
