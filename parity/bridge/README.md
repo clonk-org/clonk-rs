@@ -177,6 +177,23 @@ Still open:
   some object script happens to branch on it, as in
   clonk-org/clonk-rs#1077. The same structural gap as
   clonk-org/clonk-rs#1049.
+- **The landscape is not compared either, and both engines build their own.**
+  `runtime_snapshot_mismatch` (`ffi.rs`) diffs the frame, the object count and
+  histogram, and per-object fields — there is no landscape checksum anywhere in
+  it. The bridge *can* hand the port's landscape to C++
+  (`ApplyAuthoritativeLandscapeState`), but only under
+  `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE`; in an ordinary
+  `LC_RUST_ENGINE_RUNTIME=1` run each engine generates its own from the seed and
+  nothing ever compares them. **A clean diff says nothing about the landscape**,
+  which matters more than it looks: three of the swept scenarios above are the
+  *landscape* class, and a pure material divergence reaches the report only once
+  it perturbs an object.
+
+  This is not hypothetical. On `Massif` with the mass-mover work landed, all six
+  pinned seeds run clean to frame 500 while the two engines still transfer mass
+  at partly different pixels (95 shared, 7 port-only, 5 C++-only in one measured
+  frame) — invisible to the comparison because only the landscape records it.
+  Same structural gap as the weather one above.
 - The other bridges (`USE_RUST_CONFIG`, `USE_RUST_GROUP_VALIDATION`,
   `USE_RUST_GUI_VALIDATION`, `USE_RUST_PLATFORM_PATHS`) link their own `lc_*`
   libraries and need the `ffi` modules of the other crates, which are not
