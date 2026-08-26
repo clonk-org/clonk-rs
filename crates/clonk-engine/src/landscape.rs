@@ -11641,6 +11641,86 @@ func TransactionThenRaw()
             .with_temperature_range(temperature_range)
     }
 
+    /// `C4Landscape::DoTempConvert` (C4Landscape.cpp:225-226) writes the
+    /// converted pixel with `SBackPix` and only then calls
+    /// `CheckInstabilityRange`, so the instability probe reads the *new*
+    /// material. On Massif that is Ice -> Water, and Water is `Instable=1`,
+    /// so every converted pixel spawns a mass mover.
+    #[test]
+    fn temperature_conversion_reports_the_converted_material_as_instable() {
+        let materials = test_materials! {
+            HotAbove {
+                Density = 80; AboveTempConvert = -1; AboveTempConvertDir = 0;
+                AboveTempConvertTo = Target-Smooth; TempConvStrength = 0;
+            }
+            ColdBelow {
+                Density = 80; BelowTempConvert = 1; BelowTempConvertDir = 0;
+                BelowTempConvertTo = Target-Smooth; TempConvStrength = 0;
+            }
+            Target { Density = 30; Instable = 1; }
+        };
+        let mut landscape = frozen_temperature_pixel_landscape(&materials);
+        let mut probes = Vec::new();
+        landscape.apply_temperature_conversions_with(&materials, 0, &mut |landscape, x, y| {
+            let instable = landscape
+                .material_at(x, y)
+                .and_then(|id| materials.get_by_id(id))
+                .map(|material| material.instable())
+                .unwrap_or(false);
+            probes.push((x, y, instable));
+        });
+
+        assert!(
+            !probes.is_empty(),
+            "temperature conversion must report converted pixels"
+        );
+        assert!(
+            probes.iter().all(|(_, _, instable)| *instable),
+            "each converted pixel must read back as the instable target: {probes:?}"
+        );
+    }
+
+    /// Same invariant as the frozen-crossmap case, but through the
+    /// `crossmapped_material_texture_byte` branch that a scenario without a
+    /// frozen crossmap entry takes.
+    #[test]
+    fn temperature_conversion_without_a_frozen_crossmap_still_reads_back_instable() {
+        let materials = test_materials! {
+            HotAbove {
+                Density = 80; AboveTempConvert = -1; AboveTempConvertDir = 0;
+                AboveTempConvertTo = Target-Smooth; TempConvStrength = 0;
+            }
+            ColdBelow {
+                Density = 80; BelowTempConvert = 1; BelowTempConvertDir = 0;
+                BelowTempConvertTo = Target-Smooth; TempConvStrength = 0;
+            }
+            Target { Density = 30; Instable = 1; }
+        };
+        let mut landscape = frozen_temperature_pixel_landscape(&materials);
+        let mut texmap = test_raster_state(&landscape).texmap().clone();
+        texmap.material_crossmap_entries.clear();
+        landscape.set_raster_state(LandscapeRasterState::new(1, 0, texmap));
+
+        let mut probes = Vec::new();
+        landscape.apply_temperature_conversions_with(&materials, 0, &mut |landscape, x, y| {
+            let instable = landscape
+                .material_at(x, y)
+                .and_then(|id| materials.get_by_id(id))
+                .map(|material| material.instable())
+                .unwrap_or(false);
+            probes.push((x, y, instable));
+        });
+
+        assert!(
+            !probes.is_empty(),
+            "temperature conversion must report converted pixels"
+        );
+        assert!(
+            probes.iter().all(|(_, _, instable)| *instable),
+            "each converted pixel must read back as the instable target: {probes:?}"
+        );
+    }
+
     #[test]
     fn temperature_scan_uses_frozen_crossmap_slots_after_lower_index_copy() {
         let materials = test_materials! {
