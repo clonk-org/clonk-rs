@@ -2851,21 +2851,32 @@ fn classic_loader_setup_accepts_an_activated_cosmetic_extra_child() {
     main_assert_eq!(setup.screen.selection().selected_filename() => "LoaderExtra.png");
 }
 
+/// C4Extra::InitGroup opens exactly `Config.AtExePath(C4CFN_Extra)`
+/// (C4Extra.cpp:40-49), so a same-named group elsewhere is simply not the
+/// file it opens — it never makes the mapped one ambiguous.
 #[test]
-fn distinct_global_extra_hits_take_ambiguity_boundary() {
+fn an_unrelated_extra_group_does_not_displace_the_mapped_one() {
     let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
-    fs::create_dir(paths.planet_dir().join("Extra.c4g")).test_value();
+    let mapped = paths.planet_dir().join("Extra.c4g");
+    fs::create_dir(&mapped).test_value();
     fs::create_dir(content.join("Extra.c4g")).test_value();
 
-    let error = startup_loader_registrations(&paths).err().test_value();
-    main_assert!(error.to_string().contains("mapping is ambiguous"));
-    main_assert!(error.to_string().contains("planet"));
-    main_assert!(error.to_string().contains("content"));
+    let registrations = startup_loader_registrations(&paths).test_value();
+    main_assert_eq!(
+        registrations
+            .iter()
+            .map(|registration| registration.group.root())
+            .collect::<Vec<_>>() => [mapped.as_path()],
+        "the mapped Extra registers even though an unrelated copy shares its name"
+    );
 }
 
+/// The mapped path is the only candidate, so an unrelated copy is neither
+/// adopted nor fatal: C++ finds nothing at the exe path and carries on with
+/// no extra root at all (C4Extra.cpp:41).
 #[test]
-fn content_only_extra_cannot_enter_mapped_global_loader_set() {
+fn content_only_extra_is_neither_adopted_nor_fatal() {
     let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let extra_path = content.join("Extra.c4g");
@@ -2875,9 +2886,29 @@ fn content_only_extra_cannot_enter_mapped_global_loader_set() {
         [0x12, 0x34, 0x56, 0xff],
     );
 
-    let error = startup_loader_registrations(&paths).err().test_value();
-    main_assert!(error.to_string().contains("outside the mapped global-data namespace"));
-    main_assert!(error.to_string().contains(&extra_path.display().to_string()));
+    main_assert!(startup_loader_registrations(&paths).test_value().is_empty());
+}
+
+/// `if (!ItemExists(Config.AtExePath(C4CFN_Extra))) return false;`
+/// (C4Extra.cpp:41) — an absent extra root is ordinary, not an error.
+#[test]
+fn a_missing_mapped_extra_stays_optional() {
+    let root = tempdir();
+    let (_guard, paths, _content) = loader_origin_fixture_paths(root.path());
+
+    main_assert!(startup_loader_registrations(&paths).test_value().is_empty());
+}
+
+/// `if (!ExtraGrp.Open(...)) return false;` (C4Extra.cpp:43) — a mapped group
+/// that will not open leaves the game with no extra root, and startup
+/// continues exactly as if none had been installed.
+#[test]
+fn an_unopenable_mapped_extra_registers_nothing_without_failing() {
+    let root = tempdir();
+    let (_guard, paths, _content) = loader_origin_fixture_paths(root.path());
+    fs::write(paths.planet_dir().join("Extra.c4g"), b"not a group").test_value();
+
+    main_assert!(startup_loader_registrations(&paths).test_value().is_empty());
 }
 
 #[test]
