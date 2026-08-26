@@ -4565,3 +4565,65 @@ fn a_deferred_participant_list_is_flushed_in_its_quoted_native_form() {
     );
     reset_cached_app_paths();
 }
+
+
+// `CStdFont::DrawText` consumes `{{...}}` markup and `continue`s when the id
+// is unknown (src/StdFont.cpp:868-890), and `GetTextExtent` measures it the
+// same way — so the row an unresolved image sits in keeps the geometry its
+// remaining text gives it. Hit testing has to agree with what was drawn, or a
+// click lands somewhere the player did not aim (clonk-org/clonk-rs#1204).
+#[test]
+fn script_menu_hit_testing_gives_an_unresolved_inline_image_zero_advance() {
+    let hit_row = |caption: &str| {
+        let (mut app, _owner, cursor, _first, _target, _inventory_point) =
+            inventory_region_fixture();
+        install_classic_test_assets(&mut app);
+        let mut menu = two_item_script_menu(cursor);
+        menu.items[0].caption = caption.to_string();
+        install_test_cursor_menu(&mut app, cursor, menu);
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width() as i32, surface.height() as i32)
+        };
+        let point = (0..height)
+            .flat_map(|y| (0..width).map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5)))
+            .find(|point| {
+                matches!(
+                    app.script_menu_pointer_target(*point),
+                    Ok(Some(EngineScriptMenuPointerTarget::Item(0)))
+                )
+            });
+        (app, point)
+    };
+
+    // The unresolved image never refuses the hit test, and the first item is
+    // still reachable.
+    let (mut app, unresolved) = hit_row("{{NOSUCHDEF}}First");
+    let unresolved = unresolved.test_value();
+    main_assert!(
+        matches!(
+            app.script_menu_pointer_target(unresolved),
+            Ok(Some(EngineScriptMenuPointerTarget::Item(0)))
+        ),
+        "the row with the consumed markup is hit-testable"
+    );
+
+    // The click reaches the menu rather than falling through to the world.
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(unresolved.x),
+        f64::from(unresolved.y),
+    ));
+    app.handle_ingame_mouse_button(ElementState::Pressed)
+        .expect("a consumed image does not abort the pointer frame");
+    app.handle_ingame_mouse_button(ElementState::Released)
+        .expect("release is equally well defined");
+
+    // Mixed markup measures as its text alone plus the token's own spacing:
+    // the row a plain caption occupies is the same row.
+    let (_plain_app, plain) = hit_row("First");
+    let plain = plain.test_value();
+    main_assert!(
+        (unresolved.y - plain.y).abs() < 1.5,
+        "the consumed markup does not move the row: {unresolved:?} vs {plain:?}"
+    );
+}

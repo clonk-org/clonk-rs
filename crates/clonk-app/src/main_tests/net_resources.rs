@@ -3356,16 +3356,16 @@ fn valid_construction_menu_drop_submits_exact_shift_append_packet() {
     main_assert!(app.construction_menu_drag.is_none());
 }
 
+// `CStdFont::DrawText` and `GetTextExtent` both consume an unknown `{{...}}`
+// id with no advance (src/StdFont.cpp:868-890), so a caption carrying one is
+// laid out, drawn and hit-tested on the geometry its remaining text gives it.
+// The pointer keeps reaching the menu rather than the world, and no entry
+// point fails (clonk-org/clonk-rs#1204).
 #[test]
-fn script_menu_pointer_resource_failure_never_clicks_through_to_the_world() {
+fn a_script_menu_with_an_unresolved_image_still_owns_its_pointer() {
     let mut app = new_classic_running_sandbox_app();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(app.local_owner).test_value();
-    let point = PhysicalPosition::new(
-        f64::from(viewport.x) + f64::from(viewport.width) / 2.0,
-        f64::from(viewport.y) + f64::from(viewport.height) / 2.0,
-    );
     let cursor = app.engine.test_crew_cursor(app.local_owner);
     let mut menu = two_item_script_menu(cursor);
     menu.caption = "{{MISS}} unavailable".to_string();
@@ -3379,30 +3379,41 @@ fn script_menu_pointer_resource_failure_never_clicks_through_to_the_world() {
         )
         .test_value();
 
-    let hover = app
-        .handle_cursor_moved(point)
-        .expect_err("hover must propagate the missing pointer resource");
-    main_assert!(matches!(&hover, EngineError::ClassicMenuParityBoundary { .. }));
-    main_assert!(hover.to_string().contains("{{MISS}}"));
-    main_assert!(app.ingame_pointer.is_some());
+    // A point the menu owns, found through the same hit test the renderer's
+    // geometry feeds.
+    let (width, height) = {
+        let surface = app.graphics.surface();
+        (surface.width() as i32, surface.height() as i32)
+    };
+    let menu_point = (0..height)
+        .flat_map(|y| (0..width).map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5)))
+        .find(|point| {
+            matches!(
+                app.script_menu_pointer_target(*point),
+                Ok(Some(EngineScriptMenuPointerTarget::Item(_)))
+            )
+        })
+        .test_value();
+    let point = PhysicalPosition::new(f64::from(menu_point.x), f64::from(menu_point.y));
 
-    main_assert!(app.mouse_state.is_none());
-    let left = app
-        .handle_mouse_button(ElementState::Pressed)
-        .expect_err("left-down must fail before world drag handling");
-    main_assert!(matches!(&left, EngineError::ClassicMenuParityBoundary { .. }));
-    main_assert!(left.to_string().contains("{{MISS}}"));
-    main_assert!(app.mouse_state.is_none());
+    // Hover, left-down and right-up all succeed where they used to raise a
+    // typed boundary.
+    app.handle_cursor_moved(point)
+        .expect("hover is well defined over consumed markup");
+    app.handle_mouse_button(ElementState::Pressed)
+        .expect("left-down is well defined");
 
     let (manager, _events) = NetworkManager::test_stub();
     app.network = Some(manager);
-    app.status_text.clear();
-    let right = app
-        .handle_right_mouse_button(ElementState::Released)
-        .expect_err("right-up must fail before network/world context handling");
-    main_assert!(matches!(&right, EngineError::ClassicMenuParityBoundary { .. }));
-    main_assert!(right.to_string().contains("{{MISS}}"));
-    main_assert!(app.status_text.is_empty(), "resource failure must not reach the network context-command fallback");
+    app.handle_right_mouse_button(ElementState::Released)
+        .expect("right-up is well defined");
+
+    // And the hit test still names the row, which is what the pointer routes
+    // on — the consumed markup costs the caption no advance.
+    main_assert!(matches!(
+        app.script_menu_pointer_target(menu_point),
+        Ok(Some(EngineScriptMenuPointerTarget::Item(_)))
+    ));
 }
 
 #[test]
