@@ -4,6 +4,31 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-08-26
+
+### Bug fixes
+
+- Drop the unreachable nested-local snapshot divergence (#1147)
+- Read the ift bit in the script wind lookup (#1143)
+- Keep the facing when a swim exit falls into walk (#1138)
+
+### Documentation
+
+- Record the shadow-diff measurement traps (#1133)
+
+### Features
+
+- Bundle the Ultimate Clonk Compilation collection (#1144)
+- Separate shared bases from team accounts (#1135)
+
+### Performance
+
+- Reduce simulation, script, and rendering overhead (#1140)
+
+### Testing
+
+- Pin the instable readback of a temperature-converted pixel (#1145)
+
 ## [0.20.0] - 2026-08-25
 
 ### Bug fixes
