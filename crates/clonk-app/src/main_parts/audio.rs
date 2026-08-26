@@ -2032,7 +2032,7 @@ fn legacy_virtual_key(
     selected.map(normalize_platform_virtual_key)
 }
 
-fn legacy_virtual_key_from_event(
+pub(crate) fn legacy_virtual_key_from_event(
     event: &winit::event::KeyEvent,
     modifiers: ModifiersState,
 ) -> Option<VirtualKeyCode> {

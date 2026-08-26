@@ -3089,6 +3089,12 @@ impl GameApp {
         true
     }
 
+    /// Whether a detached viewport's console popup is open, which is what
+    /// decides who owns Escape.
+    pub(crate) fn console_viewport_context_menu_open(&self) -> bool {
+        self.console_viewport_context_menu.is_some()
+    }
+
     /// Close the popup without running anything — the Escape key.
     pub(crate) fn dismiss_console_viewport_context_menu(&mut self) -> bool {
         self.console_viewport_context_menu.take().is_some()

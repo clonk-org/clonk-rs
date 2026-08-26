@@ -170,6 +170,54 @@ pub(crate) fn event_window_id(
 /// (`C4GraphicsSystem.cpp:205-224`) by way of this window's identity, so
 /// closing one window never takes a sibling viewport of the same player with
 /// it — that is what the player-keyed overload (`:314-331`) would do.
+/// What a detached viewport window does with one keyboard event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewportKeyRoute {
+    /// `VK_SCROLL` is bound to this viewport's own lock and deliberately kept
+    /// out of `Game.DoKeyboardInput` (`C4Viewport.cpp:82-86`).
+    TogglePlayerLock,
+    /// Escape closes the port's console popup without running anything, as it
+    /// does for both native menus. The popup is port-only, so C++ has no arm
+    /// here — but it owns the key only while it is open.
+    DismissPopup,
+    /// Everything else reaches the process-global scope/priority dispatcher,
+    /// which is what `WM_KEYDOWN`/`WM_KEYUP` do for every other key
+    /// (`C4Viewport.cpp:88-96`).
+    Dispatch,
+    /// Nothing to do: a key this process has no legacy code for, or the
+    /// autorepeat of the viewport-local lock.
+    Ignore,
+}
+
+/// `C4ViewportWindow::WndProc`'s keyboard switch (`C4Viewport.cpp:79-100`).
+///
+/// `WM_KEYUP` has no `VK_SCROLL` case, so only the *press* is viewport-local;
+/// the release goes to the dispatcher with every other key.
+pub(crate) fn viewport_key_route(
+    key: Option<crate::VirtualKeyCode>,
+    state: winit::event::ElementState,
+    repeat: bool,
+    popup_open: bool,
+) -> ViewportKeyRoute {
+    let pressed = state == winit::event::ElementState::Pressed;
+    match key {
+        Some(crate::VirtualKeyCode::ScrollLock) if pressed => {
+            if repeat {
+                // Pre-existing choice: an autorepeated lock toggle would
+                // flicker the lock rather than express an intent.
+                ViewportKeyRoute::Ignore
+            } else {
+                ViewportKeyRoute::TogglePlayerLock
+            }
+        }
+        Some(crate::VirtualKeyCode::Escape) if pressed && popup_open => {
+            ViewportKeyRoute::DismissPopup
+        }
+        Some(_) => ViewportKeyRoute::Dispatch,
+        None => ViewportKeyRoute::Ignore,
+    }
+}
+
 pub(crate) fn handle_console_viewport_event(
     key: crate::developer_windows::WindowId,
     event: &winit::event::Event<crate::NetworkEventWake>,
@@ -208,27 +256,40 @@ pub(crate) fn handle_console_viewport_event(
         } => {
             windows.request_redraw(key);
         }
-        // The Win32 handler binds `VK_SCROLL` to this viewport's own lock and
-        // deliberately keeps it out of `Game.DoKeyboardInput`
-        // (`C4Viewport.cpp:83-86`).
+        // `WM_KEYDOWN`/`WM_KEYUP` reach `Game.DoKeyboardInput` for every key
+        // but the viewport-local lock (`C4Viewport.cpp:79-96`).
         Event::WindowEvent {
-            event:
-                WindowEvent::KeyboardInput {
-                    event:
-                        winit::event::KeyEvent {
-                            physical_key:
-                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ScrollLock),
-                            state: winit::event::ElementState::Pressed,
-                            repeat: false,
-                            ..
-                        },
-                    ..
-                },
+            event: WindowEvent::KeyboardInput { event: input, .. },
             ..
         } => {
-            if let Some(identity) = windows.host(key).and_then(DeveloperHost::viewport_identity) {
-                app.toggle_console_viewport_player_lock(identity);
-                windows.request_redraw(key);
+            let legacy = crate::legacy_virtual_key_from_event(input, app.keyboard_modifiers);
+            match viewport_key_route(
+                legacy,
+                input.state,
+                input.repeat,
+                app.console_viewport_context_menu_open(),
+            ) {
+                ViewportKeyRoute::TogglePlayerLock => {
+                    if let Some(identity) =
+                        windows.host(key).and_then(DeveloperHost::viewport_identity)
+                    {
+                        app.toggle_console_viewport_player_lock(identity);
+                        windows.request_redraw(key);
+                    }
+                }
+                ViewportKeyRoute::DismissPopup => {
+                    if app.dismiss_console_viewport_context_menu() {
+                        windows.request_redraw(key);
+                    }
+                }
+                ViewportKeyRoute::Dispatch => {
+                    if let Some(legacy) = legacy {
+                        if let Err(error) = app.handle_key(legacy, input.state) {
+                            tracing::error!(%error, "detached viewport key dispatch failed");
+                        }
+                    }
+                }
+                ViewportKeyRoute::Ignore => {}
             }
         }
         // Scrolling stands in for the native scroll bars this window does not
@@ -264,6 +325,11 @@ pub(crate) fn handle_console_viewport_event(
             ..
         } => {
             app.update_console_editor_modifiers(modifiers.state());
+            // `Application.IsControlDown()`/`IsShiftDown()` are a
+            // process-global state that `DoKeyboardInput` reads for whichever
+            // window delivered the key (`C4Viewport.cpp:89`), so a detached
+            // window's modifiers have to reach the dispatcher's too.
+            app.keyboard_modifiers = modifiers.state();
         }
         // `C4Viewport`'s pointer handlers convert the coordinates carried by
         // each message through this viewport's own ViewX/ViewY and scale
@@ -426,26 +492,6 @@ pub(crate) fn handle_console_viewport_event(
             app.drop_file_on_console_viewport(identity, path, local);
             windows.request_redraw(key);
         }
-        // Escape closes the popup without running anything, as it does for
-        // both native menus.
-        Event::WindowEvent {
-            event:
-                WindowEvent::KeyboardInput {
-                    event:
-                        winit::event::KeyEvent {
-                            physical_key:
-                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape),
-                            state: winit::event::ElementState::Pressed,
-                            ..
-                        },
-                    ..
-                },
-            ..
-        } => {
-            if app.dismiss_console_viewport_context_menu() {
-                windows.request_redraw(key);
-            }
-        }
         Event::WindowEvent {
             event: WindowEvent::RedrawRequested,
             ..
@@ -466,6 +512,110 @@ pub(crate) fn handle_console_viewport_event(
 ))]
 mod tests {
     use super::*;
+
+    // `C4ViewportWindow::WndProc` sends every key but the viewport-local lock
+    // to `Game.DoKeyboardInput` (`C4Viewport.cpp:79-100`), and its `WM_KEYUP`
+    // arm has no `VK_SCROLL` case at all.
+    #[test]
+    fn detached_viewport_keys_reach_the_dispatcher_except_the_viewport_lock() {
+        use winit::event::ElementState::{Pressed, Released};
+
+        // The lock is the one key the dialog keeps, and only on the press.
+        assert_eq!(
+            viewport_key_route(
+                Some(crate::VirtualKeyCode::ScrollLock),
+                Pressed,
+                false,
+                false
+            ),
+            ViewportKeyRoute::TogglePlayerLock
+        );
+        assert_eq!(
+            viewport_key_route(
+                Some(crate::VirtualKeyCode::ScrollLock),
+                Released,
+                false,
+                false
+            ),
+            ViewportKeyRoute::Dispatch,
+            "WM_KEYUP has no VK_SCROLL case"
+        );
+        assert_eq!(
+            viewport_key_route(
+                Some(crate::VirtualKeyCode::ScrollLock),
+                Pressed,
+                true,
+                false
+            ),
+            ViewportKeyRoute::Ignore,
+            "an autorepeated lock toggle expresses no intent"
+        );
+
+        // Everything else goes to the dispatcher, down and up alike, repeated
+        // or not — the repeat flag is an argument `DoKeyboardInput` carries,
+        // not a reason to drop the event.
+        for key in [
+            crate::VirtualKeyCode::KeyA,
+            crate::VirtualKeyCode::F5,
+            crate::VirtualKeyCode::AltLeft,
+            crate::VirtualKeyCode::ShiftLeft,
+            crate::VirtualKeyCode::Space,
+        ] {
+            for state in [Pressed, Released] {
+                for repeat in [false, true] {
+                    assert_eq!(
+                        viewport_key_route(Some(key), state, repeat, false),
+                        ViewportKeyRoute::Dispatch,
+                        "{key:?} {state:?} repeat={repeat}"
+                    );
+                }
+            }
+        }
+
+        // A key this process has no legacy code for is dropped rather than
+        // dispatched as something else.
+        assert_eq!(
+            viewport_key_route(None, Pressed, false, false),
+            ViewportKeyRoute::Ignore
+        );
+    }
+
+    // The port-only console popup owns Escape while it is open, and only
+    // then; C++ has no popup here, so an unowned Escape is an ordinary key.
+    #[test]
+    fn detached_viewport_escape_belongs_to_an_open_popup_and_otherwise_dispatches() {
+        use winit::event::ElementState::{Pressed, Released};
+
+        assert_eq!(
+            viewport_key_route(Some(crate::VirtualKeyCode::Escape), Pressed, false, true),
+            ViewportKeyRoute::DismissPopup
+        );
+        assert_eq!(
+            viewport_key_route(Some(crate::VirtualKeyCode::Escape), Pressed, false, false),
+            ViewportKeyRoute::Dispatch,
+            "with no popup open Escape is the dispatcher's"
+        );
+        assert_eq!(
+            viewport_key_route(Some(crate::VirtualKeyCode::Escape), Released, false, true),
+            ViewportKeyRoute::Dispatch,
+            "the popup consumes the press, not the release"
+        );
+        // The popup never claims another key.
+        assert_eq!(
+            viewport_key_route(Some(crate::VirtualKeyCode::KeyA), Pressed, false, true),
+            ViewportKeyRoute::Dispatch
+        );
+        assert_eq!(
+            viewport_key_route(
+                Some(crate::VirtualKeyCode::ScrollLock),
+                Pressed,
+                false,
+                true
+            ),
+            ViewportKeyRoute::TogglePlayerLock,
+            "the viewport lock outranks the popup, as it outranks the dispatcher"
+        );
+    }
 
     // C4GraphicsSystem.cpp:205-224,226-251 — one window per viewport, and a
     // close that erases exactly the viewport it names.
