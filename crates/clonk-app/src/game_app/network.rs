@@ -7804,7 +7804,24 @@ impl GameApp {
 
     /// Enters the portion of `C4PlayerList::Join` that runs before player
     /// allocation and profile loading (C4PlayerList.cpp:278-294).
-    fn begin_player_list_join(&mut self, info: &clonk_engine::ControlPlayerInfoEntry) -> bool {
+    /// The local client's name while a network game is running, which is what
+    /// `C4PlayerList::FileInUse`'s prefix comparison is given
+    /// (C4PlayerList.cpp:441-449); `None` offline, where that branch is skipped.
+    fn network_local_client_name(&self) -> Option<String> {
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())?;
+        self.control_clients
+            .state(local_client_id)
+            .map(|client| clonk_script::c4_string_from_bytes(client.name.as_bytes()))
+    }
+
+    fn begin_player_list_join(
+        &mut self,
+        info: &clonk_engine::ControlPlayerInfoEntry,
+        player_file: Option<&str>,
+    ) -> bool {
         let player_name = legacy_presentation_text(control_player_effective_name(info));
         let join_template = self.runtime_resource_text("IDS_PRC_JOINPLR", "Player join: %s");
         self.append_control_message_log(
@@ -7813,7 +7830,25 @@ impl GameApp {
             None,
         );
         match self.engine.check_player_capacity() {
-            Ok(()) => true,
+            Ok(()) => {
+                // `if (szFilename) if (FileInUse(szFilename))`, after the
+                // capacity check and before the player is created
+                // (C4PlayerList.cpp:288-300). Every peer executes the same
+                // join control, so a peer that skipped this would hold a
+                // player the others refused (clonk-org/clonk-rs#1172).
+                let duplicate_file = player_file.is_some_and(|filename| {
+                    self.engine
+                        .player_file_in_use(filename, self.network_local_client_name().as_deref())
+                });
+                if duplicate_file {
+                    let template = self.runtime_resource_text(
+                        "IDS_PRC_PLRFILEINUSE",
+                        "Player file already in use.",
+                    );
+                    self.append_control_message_log(template, CONTROL_LOG_COLOR, None);
+                }
+                !duplicate_file
+            }
             Err(EngineError::TooManyPlayers { maximum }) => {
                 let maximum = maximum.to_string();
                 let template = self.runtime_resource_text(
@@ -7902,6 +7937,59 @@ impl GameApp {
                 data,
             ),
         };
+        // `C4Player::Filename` as *this* peer resolves it, which is what
+        // `C4PlayerList::FileInUse` compares. It is deliberately per-peer:
+        // `C4ControlJoinPlayer::Execute` hands a locally controlled join its
+        // own path and every remote one a temp file named after the owning
+        // client (C4Control.cpp:726-744), so two peers can hold different
+        // spellings of the same join and still agree on which joins collide.
+        let joined_player_file = match &join.source {
+            clonk_engine::JoinPlayerSource::Resource(core) => self
+                .admission_resources
+                .complete_path(core.id)
+                .map(|path| path.to_string_lossy().into_owned())
+                .or_else(|| {
+                    // The replay branch reads the player out of the scenario
+                    // file under `<id>-<name>` (C4Control.cpp:765-769); the
+                    // port has no extracted path, and the name alone is
+                    // already unique per resource.
+                    self.control_playback.is_some().then(|| {
+                        String::from_utf8_lossy(&recorded_player_resource_name(core)).into_owned()
+                    })
+                }),
+            clonk_engine::JoinPlayerSource::Embedded(_)
+                if info.is_script_player() && join.filename.is_empty() =>
+            {
+                // `Game.JoinPlayer(nullptr, ...)` — no file, so no collision
+                // (C4Control.cpp:745-749; C4PlayerList.cpp:296).
+                None
+            }
+            clonk_engine::JoinPlayerSource::Embedded(_)
+                if local_client_id == Some(join.by_client)
+                    || (offline_local && join.by_client == join.at_client) =>
+            {
+                Some(join.filename.to_string_lossy().into_owned())
+            }
+            clonk_engine::JoinPlayerSource::Embedded(_) => {
+                // `Config.AtTempPath(std::format("{}-{}", client, name))`
+                // (C4Control.cpp:736-737). The port never writes that file, but
+                // the name is the identity `FileInUse` compares, and keeping
+                // the temp directory in front of it stops a remote join from
+                // colliding with a local player's own path.
+                let name = join.filename.to_string_lossy();
+                let name = name
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                Some(
+                    std::env::temp_dir()
+                        .join(format!("{at_client_name}-{name}"))
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
+        };
         let player_file = match &join.source {
             clonk_engine::JoinPlayerSource::Resource(core) => {
                 // Rust has no stable local temp path to serialize while this
@@ -7912,7 +8000,7 @@ impl GameApp {
                     .complete_path(core.id)
                     .map(Path::to_path_buf)
                 {
-                    if !self.begin_player_list_join(&info) {
+                    if !self.begin_player_list_join(&info, joined_player_file.as_deref()) {
                         return Ok(());
                     }
                     match PlayerFile::load_from_path(&path) {
@@ -7923,7 +8011,7 @@ impl GameApp {
                         }
                     }
                 } else if self.control_playback.is_some() {
-                    if !self.begin_player_list_join(&info) {
+                    if !self.begin_player_list_join(&info, joined_player_file.as_deref()) {
                         return Ok(());
                     }
                     match self.replay_record_player_file(core) {
@@ -7942,7 +8030,7 @@ impl GameApp {
             {
                 // Script players have no .c4p file even on the host that issued
                 // their fileless JoinPlayer control (C4Control.cpp:745-749).
-                if !self.begin_player_list_join(&info) {
+                if !self.begin_player_list_join(&info, joined_player_file.as_deref()) {
                     return Ok(());
                 }
                 None
@@ -7952,7 +8040,7 @@ impl GameApp {
                     || (offline_local && join.by_client == join.at_client) =>
             {
                 let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
-                if !self.begin_player_list_join(&info) {
+                if !self.begin_player_list_join(&info, joined_player_file.as_deref()) {
                     return Ok(());
                 }
                 match PlayerFile::load_from_path(&path) {
@@ -7971,7 +8059,7 @@ impl GameApp {
                         &info,
                     )
                 } else {
-                    if !self.begin_player_list_join(&info) {
+                    if !self.begin_player_list_join(&info, joined_player_file.as_deref()) {
                         return Ok(());
                     }
                     clonk_engine::resolve_remote_embedded_player_data_with_engine(
@@ -8051,6 +8139,8 @@ impl GameApp {
             retained_player_info_core,
         ) {
             Ok(joined) if locally_controlled => {
+                self.engine
+                    .set_player_file(joined.number(), joined_player_file.as_deref());
                 self.cache_joined_player_big_icon(join.info_id, pending_player_big_icon.as_ref());
                 // InitializePlayer callbacks run before JoinPlayer creates
                 // the new local viewport. Apply their physical mutations to
@@ -8091,6 +8181,8 @@ impl GameApp {
                 self.check_fullscreen_physical_viewports(game_running);
             }
             Ok(joined) => {
+                self.engine
+                    .set_player_file(joined.number(), joined_player_file.as_deref());
                 self.cache_joined_player_big_icon(join.info_id, pending_player_big_icon.as_ref());
                 let _ = self.apply_pending_viewport_presentation_requests();
                 let player_info_changed = self.control_player_infos.mark_joined(

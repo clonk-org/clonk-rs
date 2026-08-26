@@ -910,6 +910,17 @@ pub struct Player {
     rounds_lost: i32,
     total_playing_time: i32,
     player_info_core: Option<PlayerInfoCoreState>,
+    /// `C4Player::Filename` — the player file this join was read from *on
+    /// this peer*, empty for a player that has none (a script player).
+    ///
+    /// Local runtime state, like `game_join_time` below: `C4Player::Init`
+    /// copies it (C4Player.cpp:258), `C4Player::Default` clears it
+    /// (C4Player.cpp:1059) and `CompileFunc` never serializes it, so it is
+    /// deliberately absent from PlayerState and save data. It exists so
+    /// `C4PlayerList::FileInUse` can refuse a second join of the same file
+    /// (C4PlayerList.cpp:296-300, 433-452); nothing else reads it, and script
+    /// cannot see it at all.
+    player_file: String,
     /// `C4Player::GameJoinTime`: local runtime baseline, deliberately absent
     /// from PlayerState/save data (C4Player.h:78; C4Player.cpp:389-390).
     game_join_time: i32,
@@ -1026,6 +1037,7 @@ impl Player {
             rounds_lost: 0,
             total_playing_time: 0,
             player_info_core: None,
+            player_file: String::new(),
             game_join_time: 0,
             retire_delay: 0,
             value: 0,
@@ -1345,6 +1357,7 @@ impl Player {
             rounds_lost,
             total_playing_time,
             player_info_core: None,
+            player_file: String::new(),
             game_join_time: 0,
             retire_delay: 0,
             value,
@@ -1553,6 +1566,9 @@ impl Player {
             rounds_lost,
             total_playing_time,
             player_info_core,
+            // Restored players get no filename, exactly as `C4Player::Default`
+            // leaves it: `CompileFunc` never carried one (C4Player.cpp:1059).
+            player_file: String::new(),
             game_join_time: 0,
             retire_delay: 0,
             value,
@@ -1754,6 +1770,17 @@ impl Player {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// `C4Player::Filename`, empty when the join carried no file.
+    pub fn player_file(&self) -> &str {
+        &self.player_file
+    }
+
+    /// `C4Player::Init`'s `if (szFilename) SCopy(szFilename, Filename); else
+    /// *Filename = '\0'` (C4Player.cpp:258).
+    pub fn set_player_file(&mut self, filename: Option<&str>) {
+        self.player_file = filename.unwrap_or_default().to_string();
     }
 
     pub fn is_script_player(&self) -> bool {
