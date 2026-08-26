@@ -790,6 +790,21 @@ impl Engine {
         })
     }
 
+    /// Ordered destination mutations `C4GameSave::SaveScenarioSections`
+    /// (`C4GameSave.cpp:111-137`) makes over the current section list.
+    ///
+    /// Reachable from the parity differential, which drives this sweep
+    /// directly: getting to it through an exact
+    /// [`Engine::serialize_live_c4_save_with_policy`] would need a pixel grid,
+    /// a map and a material group first, and that fixture — not the sweep —
+    /// would become what the comparison pins.
+    #[cfg(test)]
+    pub(crate) fn live_c4_scenario_section_mutations(
+        &self,
+    ) -> Vec<LiveC4SaveScenarioSectionMutation> {
+        serialize_scenario_sections(self, &mut LegacyStringTable::default()).2
+    }
+
     fn live_object_numbers_for_save(&self) -> HashMap<u64, i32> {
         let mut seen = HashSet::new();
         self.exec_list

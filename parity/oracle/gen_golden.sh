@@ -1562,6 +1562,56 @@ for cls in Savegame Record Network; do
   ' "$src/C4GameSave.cpp" > "$gen/game_save_adjust_$(echo "$cls" | tr 'A-Z' 'a-z').inc"
 done
 
+# 3w. Lift C4GameSave::SaveScenarioSections together with the C4ScenarioSection
+#     constructor that builds the list it walks. `save_runtime_sequence`
+#     records that an exact save *reaches* this step; what the step does is
+#     stubbed there, and nothing else pins it.
+#
+#     Three rules live in these two bodies and none is visible from the call
+#     site:
+#       * the constructor PREPENDS (`pNext = Game.pScenarioSections`), so the
+#         sweep runs in reverse construction order and the implicit current
+#         node -- created at the first section switch, hence newest -- is
+#         visited FIRST;
+#       * the current section is deleted and never re-added, whether or not it
+#         is modified, because its state is implied by CurrentScenarioSection
+#         and the main landscape/object data;
+#       * a modified section deletes before it adds and the Add result is
+#         DISCARDED, so a broken temp file leaves that entry absent instead of
+#         failing the save.
+#
+#     The constructor also folds an empty or "Main" name onto C4ScenSect_Main,
+#     which is what decides the entry name for the implicit root.
+awk '
+  /^bool C4GameSave::SaveScenarioSections\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4GameSave.cpp" > "$gen/game_save_scenario_sections.inc"
+
+awk '
+  /^const char \*C4ScenSect_Main = "main";$/ { print; ++found; next }
+  /^C4ScenarioSection::C4ScenarioSection\(char \*szName\)$/ ||
+  /^const char \*C4ScenarioSection::GetName\(\) const$/ ||
+  /^const char \*C4ScenarioSection::GetTempFilename\(\) const$/ { p = 1; ++found }
+  p { print; if ($0 ~ /^}$/) p = 0 }
+  END { if (found != 4) exit 1 }
+' "$src/C4Scenario.cpp" > "$gen/scenario_section_ctor.inc"
+
+# Each entry name is `SCopy` of the pattern, `SDelete` of the wildcard, then
+# `SInsert` of the section name at that position -- so the composed name is
+# `Sect` + section name + `.c4g` only because of where the splice lands.
+# SCopy/SCharPos/SEqualNoCase already come from `c4strings_helpers.inc` (3q);
+# these are the two the span there stops short of. Lifting them keeps the real
+# `Sect*.c4g` from the real C4Components.h and the splice that rewrites it
+# honest together.
+awk '
+  /^void SInsert\(char \*szString, const char \*szInsert, size_t iPosition, size_t iMaxLen\)$/ ||
+  /^void SDelete\(char \*szString, size_t iLen, size_t iPosition\)$/ { p = 1; ++found }
+  p { print; if ($0 ~ /^}$/) p = 0 }
+  END { if (found != 2) exit 1 }
+' "$src/C4Strings.cpp" > "$gen/c4strings_insert_delete.inc"
+
 # 3r. Lift C4Value::operator== whole. It is a nested switch on the LEFT tag and
 #     then the right, which is what makes it asymmetric: the object arm demands
 #     an equal tag as well as an equal payload, so `nil == object_zero` is true
