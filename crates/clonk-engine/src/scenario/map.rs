@@ -1791,6 +1791,33 @@ pub(in crate::scenario) fn derive_legacy_environment(
     Ok(environment)
 }
 
+/// `C4ScenSect_Main` (src/C4Scenario.cpp:555).
+pub(in crate::scenario) const SCENARIO_SECTION_MAIN: &str = "main";
+
+/// `C4ScenarioSection`'s constructor folds an empty name, and any case of
+/// `main`, onto `C4ScenSect_Main` (src/C4Scenario.cpp:555-566):
+///
+/// ```cpp
+/// C4ScenarioSection::C4ScenarioSection(char *szName)
+///     : Name{(szName && !SEqualNoCase(szName, C4ScenSect_Main) && *szName)
+///         ? szName : C4ScenSect_Main}
+/// ```
+///
+/// Every other section keeps its authored case. This is not cosmetic:
+/// `C4GameSave::SaveScenarioSections` composes each written entry name from
+/// the stored name (src/C4GameSave.cpp:111-137), so a scenario that ships
+/// `SectMain.c4g` is saved back as `Sectmain.c4g`. C4Group lookups are
+/// case-insensitive, so a reload finds it either way — but the saved bytes
+/// differ, which matters wherever an entry name reaches a hash or a byte
+/// comparison.
+pub(in crate::scenario) fn folded_scenario_section_name(name: &str) -> String {
+    if name.is_empty() || name.eq_ignore_ascii_case(SCENARIO_SECTION_MAIN) {
+        SCENARIO_SECTION_MAIN.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 pub(in crate::scenario) fn legacy_scenario_section_name(
     path: &Path,
 ) -> Result<Option<String>, ScenarioError> {
@@ -1805,12 +1832,15 @@ pub(in crate::scenario) fn legacy_scenario_section_name(
         return Ok(None);
     }
     let name = &filename[4..filename.len() - 4];
+    // C4Game::LoadScenarioSections rejects an empty or over-long name *before*
+    // constructing the section (src/C4Game.cpp:3318-3322), so the constructor's
+    // empty-name fold is unreachable from discovery.
     if name.is_empty() || name.len() > 30 {
         return Err(ScenarioError::InvalidScenarioSectionName {
             path: path.to_path_buf(),
         });
     }
-    Ok(Some(name.to_owned()))
+    Ok(Some(folded_scenario_section_name(name)))
 }
 
 pub(in crate::scenario) fn load_legacy_landscape_systems(

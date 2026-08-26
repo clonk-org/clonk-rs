@@ -61,7 +61,11 @@ pub(in crate::scenario) fn load_legacy_scenario_sections(
         // identifies it through Game.CurrentScenarioSection. `SectMain.c4g`
         // is then a distinct departed section when the current one is not
         // Main (C4GameSave::SaveScenarioSections).
-        name: root_section_name.to_string(),
+        // `C4Game::InitGame` builds the root the same way, through
+        // `new C4ScenarioSection(CurrentScenarioSection)`
+        // (src/C4Game.cpp:4094-4098), so a resumed `Main` folds to `main` here
+        // too and is written back under that name.
+        name: map::folded_scenario_section_name(root_section_name),
         source_group: Some(group.clone()),
         landscape: main_landscape.clone(),
         landscape_systems: main_landscape_systems.clone(),
