@@ -152,16 +152,14 @@ pub(crate) struct SweepResolver {
 impl clonk_engine::scenario::LegacyDefinitionResolver for SweepResolver {
     fn resolve_definition_groups(
         &self,
-        _scenario: &clonk_resources::Group,
+        scenario: &clonk_resources::Group,
         identifier: &str,
     ) -> std::result::Result<Vec<clonk_resources::Group>, clonk_engine::ScenarioError> {
         let mut groups: Vec<clonk_resources::Group> = Vec::new();
         let normalized = identifier.replace('\\', "/");
         let path = Path::new(&normalized);
 
-        // DefinitionFilenames are opened from executable-data roots. Folder
-        // and scenario-local definitions are appended by clonk-engine's
-        // separate InitDefs passes (C4Game.cpp:81-103, 184-213).
+        // Keep executable-data roots first.
         for root in &self.roots {
             let candidate = root.join(path);
             if !candidate.exists() {
@@ -174,6 +172,27 @@ impl clonk_engine::scenario::LegacyDefinitionResolver for SweepResolver {
             {
                 groups.push(group);
             }
+        }
+
+        // If none contains the explicit name, match the installed resolver's
+        // fallback through the folders enclosing the scenario, innermost
+        // first. Stop at the nearest configured root because it was already
+        // searched above.
+        let mut current = scenario.root().parent();
+        while groups.is_empty() {
+            let Some(folder) = current else {
+                break;
+            };
+            if self.roots.iter().any(|root| folder == root) {
+                break;
+            }
+            if self.roots.iter().any(|root| folder.starts_with(root)) {
+                let candidate = folder.join(path);
+                if candidate.exists() {
+                    groups.push(clonk_resources::Group::open(&candidate)?);
+                }
+            }
+            current = folder.parent();
         }
 
         if groups.is_empty() {
@@ -2506,6 +2525,81 @@ mod tests {
             target_triple: FIXTURE_TARGET.to_string(),
         };
         (temp, paths)
+    }
+
+    #[test]
+    fn sweep_resolver_falls_back_to_a_folder_local_definition_pack() {
+        let temp = TempDir::new().expect("temporary content tree");
+        let content = temp.path().join("content");
+        let family = content.join("E.P.I.C.c4f");
+        let definition = family.join("E.P.I.C.c4d");
+        let scenario = family.join("Death_Canyon.c4s");
+        write_fixture(
+            &definition.join("DefCore.txt"),
+            b"[DefCore]\nid=EPIC\nName=EPIC\nCategory=0\n",
+        );
+        write_fixture(
+            &scenario.join("Scenario.txt"),
+            b"[Head]\nTitle=Death Canyon\n\n[Definitions]\nDefinition1=E.P.I.C.c4d\n",
+        );
+
+        let scenario_group = clonk_resources::Group::open(&scenario).expect("open scenario");
+        let resolver = SweepResolver {
+            roots: vec![content, temp.path().to_path_buf()],
+        };
+        let groups = clonk_engine::scenario::LegacyDefinitionResolver::resolve_definition_groups(
+            &resolver,
+            &scenario_group,
+            "E.P.I.C.c4d",
+        )
+        .expect("resolve the definition pack beside the scenarios");
+
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            vec![definition]
+        );
+    }
+
+    #[test]
+    fn sweep_resolver_keeps_configured_roots_ahead_of_folder_fallbacks() {
+        let temp = TempDir::new().expect("temporary content tree");
+        let content = temp.path().join("content");
+        let global = content.join("E.P.I.C.c4d");
+        let family = content.join("E.P.I.C.c4f");
+        let local = family.join("E.P.I.C.c4d");
+        let scenario = family.join("Death_Canyon.c4s");
+        for definition in [&global, &local] {
+            write_fixture(
+                &definition.join("DefCore.txt"),
+                b"[DefCore]\nid=EPIC\nName=EPIC\nCategory=0\n",
+            );
+        }
+        write_fixture(
+            &scenario.join("Scenario.txt"),
+            b"[Head]\nTitle=Death Canyon\n\n[Definitions]\nDefinition1=E.P.I.C.c4d\n",
+        );
+
+        let scenario_group = clonk_resources::Group::open(&scenario).expect("open scenario");
+        let resolver = SweepResolver {
+            roots: vec![content, temp.path().to_path_buf()],
+        };
+        let groups = clonk_engine::scenario::LegacyDefinitionResolver::resolve_definition_groups(
+            &resolver,
+            &scenario_group,
+            "E.P.I.C.c4d",
+        )
+        .expect("resolve the configured-root definition pack");
+
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            vec![global]
+        );
     }
 
     #[test]
