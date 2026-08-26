@@ -8500,3 +8500,195 @@ fn runtime_pause_gamepad_override_yields_to_a_colliding_player_control() {
     .test_value();
     runtime_assert!(!app.runtime_halt_active());
 }
+
+
+// `C4Game::InitKeyboard` registers every global action through one
+// `C4CustomKey` path and `LoadCustomConfig` rebinds any of them
+// (src/C4Game.cpp:3365-3482), so a configured gamepad code has to reach each
+// callback — not only the six the dispatcher used to know
+// (clonk-org/clonk-rs#1219).
+#[test]
+fn runtime_gamepad_overrides_reach_every_fullscreen_global_action() {
+    // One physical button per action, so a single config can drive them all.
+    // `\x0042ssbb` is slot `ss`, button `bb`; button 10 is physical button 0.
+    let entries = [
+        ("MusicToggle", 0x0a),
+        ("SoundToggle", 0x0b),
+        ("Screenshot", 0x0c),
+        ("ScreenshotEx", 0x0d),
+        ("ToggleChat", 0x0e),
+        ("ToggleShowHelp", 0x0f),
+        ("MsgBoardScrollUp", 0x10),
+        ("MsgBoardScrollDown", 0x11),
+        ("StatsToggle", 0x12),
+    ];
+    let mut config = String::from("[Keys]\n");
+    for (name, code) in entries {
+        config.push_str(&format!("{name}=\\x004200{code:02x}\n"));
+    }
+    let press = |app: &mut GameApp, code: u8| {
+        app.handle_gamepad_button(
+            GamepadSlot::new(0),
+            LegacyGamepadButton::new(code - 0x0a),
+            ElementState::Pressed,
+        )
+        .test_value();
+    };
+
+    // The F1 help needs the classic UpperBoard resource, as it does for the
+    // keyboard route.
+    let mut app = new_classic_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parse_runtime_key_config(config.as_bytes()).test_value()))
+        .test_value();
+
+    // Screenshot and ScreenshotEx queue the two distinct kinds, in order.
+    press(&mut app, 0x0c);
+    press(&mut app, 0x0d);
+    runtime_assert_eq!(
+        app.pending_screenshots
+            .iter()
+            .map(|request| request.kind)
+            .collect::<Vec<_>>() =>
+        vec![ScreenshotKind::PresentedFrame, ScreenshotKind::FullLandscape]
+    );
+
+    // ToggleShowHelp is a toggle, and the release must not toggle it back:
+    // the callback has no Up handler.
+    runtime_assert!(!app.runtime_help_visible);
+    press(&mut app, 0x0f);
+    runtime_assert!(app.runtime_help_visible);
+    app.handle_gamepad_button(
+        GamepadSlot::new(0),
+        LegacyGamepadButton::new(0x0f - 0x0a),
+        ElementState::Released,
+    )
+    .test_value();
+    runtime_assert!(app.runtime_help_visible, "the release has no callback");
+    press(&mut app, 0x0f);
+    runtime_assert!(!app.runtime_help_visible);
+
+    // The port-only stats overlay is off by default and toggles like the rest.
+    runtime_assert!(!app.display_flags.show_stats);
+    press(&mut app, 0x12);
+    runtime_assert!(app.display_flags.show_stats);
+
+    // The message board scrolls in both directions without erroring.
+    press(&mut app, 0x10);
+    press(&mut app, 0x11);
+
+    // Sound and music toggles run their config-writing callbacks.
+    press(&mut app, 0x0a);
+    press(&mut app, 0x0b);
+
+    // ToggleChat opens the external IRC dialog.
+    runtime_assert!(!app.external_irc_dialog_visible);
+    press(&mut app, 0x0e);
+    runtime_assert!(app.external_irc_dialog_visible);
+}
+
+// Every one of these actions is default-unbound on a gamepad: C++ registers
+// them with keyboard codes, and only `Config.Controls.GamepadGuiControl`
+// adds gamepad codes — to the fullscreen *menu* keys, not to these
+// (src/C4Game.cpp:3395-3401).
+#[test]
+fn runtime_gamepad_fullscreen_globals_have_no_default_binding() {
+    let mut app = new_running_sandbox_app();
+    let before = (
+        app.pending_screenshots.len(),
+        app.runtime_help_visible,
+        app.display_flags.show_stats,
+        app.external_irc_dialog_visible,
+    );
+
+    for button in 0..8 {
+        app.handle_gamepad_button(
+            GamepadSlot::new(0),
+            LegacyGamepadButton::new(button),
+            ElementState::Pressed,
+        )
+        .test_value();
+    }
+    for direction in [
+        ControlButton::Left,
+        ControlButton::Right,
+        ControlButton::Up,
+        ControlButton::Down,
+    ] {
+        app.handle_gamepad_direction(GamepadSlot::new(0), direction, ElementState::Pressed)
+            .test_value();
+    }
+
+    runtime_assert_eq!(
+        (
+            app.pending_screenshots.len(),
+            app.runtime_help_visible,
+            app.display_flags.show_stats,
+            app.external_irc_dialog_visible,
+        ) => before
+    );
+}
+
+// `StatsToggle` registers after every C++ action and yields its chord to all
+// of them, so a code it shares with `ChartToggle` belongs to the chart.
+#[test]
+fn runtime_gamepad_stats_toggle_yields_its_code_to_the_actions_it_shadows() {
+    let mut app = new_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nStatsToggle=\\x0042000a\nChartToggle=\\x0042000a\n",
+        )
+        .test_value()))
+        .test_value();
+
+    app.handle_gamepad_button(
+        GamepadSlot::new(0),
+        LegacyGamepadButton::new(0),
+        ElementState::Pressed,
+    )
+    .test_value();
+
+    runtime_assert!(
+        !app.display_flags.show_stats,
+        "the earlier registration owns the shared code"
+    );
+}
+
+
+// `FilmNextPlayer` is KEYSCOPE_FilmView and the free-view scrolls are
+// KEYSCOPE_FreeView (src/C4Game.cpp:3415, 3423-3426), so a bound gamepad code
+// is inert while an owned viewport holds the screen — the same scope gate the
+// keyboard route applies.
+#[test]
+fn runtime_gamepad_view_actions_stay_inside_their_keyboard_scope() {
+    let mut app = new_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nFreeViewScrollLeft=\\x0042000a\nFilmNextPlayer=\\x0042000b\n",
+        )
+        .test_value()))
+        .test_value();
+    runtime_assert!(
+        !app.engine.film_replay(),
+        "a sandbox round is not a film replay"
+    );
+    runtime_assert!(
+        !app.primary_physical_viewport_is_no_owner(),
+        "the sandbox player owns the primary viewport"
+    );
+    let before = runtime_global_ui_snapshot(&app);
+
+    for button in [0, 1] {
+        app.handle_gamepad_button(
+            GamepadSlot::new(0),
+            LegacyGamepadButton::new(button),
+            ElementState::Pressed,
+        )
+        .test_value();
+    }
+
+    runtime_assert_eq!(runtime_global_ui_snapshot(&app) => before);
+}

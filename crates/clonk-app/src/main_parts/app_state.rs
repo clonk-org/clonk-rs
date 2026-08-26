@@ -2446,6 +2446,30 @@ pub(crate) enum RuntimeCustomGamepadAction {
     Abort,
     Pause,
     Chart,
+    /// `C4Game::ToggleMusic` (C4Game.cpp:3370).
+    Music,
+    /// `C4Game::ToggleSound` (C4Game.cpp:3371).
+    Sound,
+    /// `C4GraphicsSystem::SaveScreenshot`; `true` is the `ScreenshotEx`
+    /// full-landscape argument (C4Game.cpp:3372-3373).
+    Screenshot {
+        full_landscape: bool,
+    },
+    /// `C4Game::ToggleChat` — the external IRC dialog (C4Game.cpp:3374).
+    ToggleChat,
+    /// `C4GraphicsSystem::ToggleShowHelp` (C4Game.cpp:3377).
+    Help,
+    /// `C4MessageBoard::ControlScrollUp`/`Down` (C4Game.cpp:3381-3382).
+    MessageBoardScroll {
+        up: bool,
+    },
+    /// `C4GraphicsSystem::ViewportNextPlayer` in film view (C4Game.cpp:3415).
+    FilmNextPlayer,
+    /// `C4GraphicsSystem::FreeScroll` with its registered vector
+    /// (C4Game.cpp:3423-3426).
+    FreeViewScroll(Vector2),
+    /// The port-only `StatsToggle`, which registers after every C++ action.
+    StatsToggle,
     SpeedUp,
     SpeedDown,
     Menu(ControlCommand),

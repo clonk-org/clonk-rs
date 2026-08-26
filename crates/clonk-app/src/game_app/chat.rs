@@ -1179,7 +1179,7 @@ impl GameApp {
         self.external_irc_pointer_capture = false;
     }
 
-    fn toggle_external_irc_dialog(&mut self) -> Result<(), EngineError> {
+    pub(crate) fn toggle_external_irc_dialog(&mut self) -> Result<(), EngineError> {
         if self.external_irc_dialog_visible {
             self.hide_external_irc_dialog();
             Ok(())
