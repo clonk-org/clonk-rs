@@ -10432,28 +10432,60 @@ fn message_board_query_opens_on_tick35_and_routes_ui_answer_at_ready_tick() {
     );
 }
 
+// One `C4MainMenu::MenuCommand` branch serves `Player:Goal:` and
+// `Player:Rule:` alike: it closes the menu, looks the object up, and queues
+// `CID_ActivateGameGoalRule` only when `FindInternal` answers — otherwise it
+// is a plain `return false` (src/C4MainMenu.cpp:885-896), not a diagnostic
+// (clonk-org/clonk-rs#1200, clonk-org/clonk-rs#1201).
 #[test]
-fn goal_rule_activation_on_unresolved_definition_returns_typed_boundary() {
+fn a_goal_or_rule_activation_runs_its_object_and_a_vanished_one_does_nothing() {
     let mut app = new_running_sandbox_app();
     let player = app.local_owner;
+    for (id, name) in [("IGOL", "Integrated Goal"), ("IRUL", "Integrated Rule")] {
+        let mut definition = test_definition(
+            id,
+            name,
+            "#strict 3\nfunc Activate(int plr) { SetWealth(plr, GetWealth(plr) + 5); }",
+        );
+        definition.set_category(C4D_GOAL);
+        app.engine.register_test_definition(definition);
+        app.engine
+            .spawn_test_object(clonk_engine::SpawnConfig::new(id));
+    }
 
-    for (action, child) in [
-        (
-            MenuAction::GoalInfo("MISS".to_string()),
-            ClassicIngameMenuChild::GoalInfo("MISS".to_string()),
-        ),
-        (
-            MenuAction::RuleInfo("MISS".to_string()),
-            ClassicIngameMenuChild::RuleInfo("MISS".to_string()),
-        ),
+    main_assert!(
+        app.engine
+            .first_active_object_for_definition("IGOL")
+            .is_some(),
+        "the goal object is live"
+    );
+    main_assert_eq!(app.engine.test_player(player).wealth() => 0, "baseline");
+    // The live path is unchanged: the object's `Activate` runs.
+    for (action, expected) in [
+        (MenuAction::GoalInfo("IGOL".to_string()), 5),
+        (MenuAction::RuleInfo("IRUL".to_string()), 10),
     ] {
-        let error = app
-            .apply_ingame_menu_action_for_player(player, action)
-            .expect_err("an unresolved goal/rule must reach its typed menu boundary");
-        let EngineError::ClassicMenuParityBoundary { detail } = error else {
-            panic!("unexpected unresolved goal/rule error: {error:?}");
-        };
-        main_assert_eq!(detail => format!("classic in-game menu child {child:?} is not implemented; refusing status/no-op substitute"));
+        app.apply_ingame_menu_action_for_player(player, action)
+            .test_value();
+        main_assert_eq!(app.engine.test_player(player).wealth() => expected);
+    }
+
+    // A row whose object disappeared between drawing and selecting is not a
+    // failure, and queues nothing.
+    for action in [
+        MenuAction::GoalInfo("MISS".to_string()),
+        MenuAction::RuleInfo("MISS".to_string()),
+    ] {
+        let status = app.status_text.clone();
+        app.apply_ingame_menu_action_for_player(player, action.clone())
+            .unwrap_or_else(|error| {
+                panic!("a vanished {action:?} object is not a failure: {error:?}")
+            });
+        main_assert_eq!(
+            app.engine.test_player(player).wealth() => 10,
+            "{action:?} activated nothing"
+        );
+        main_assert_eq!(app.status_text => status, "{action:?} wrote no status");
     }
 }
 
