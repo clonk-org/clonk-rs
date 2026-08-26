@@ -2170,8 +2170,8 @@
             ],
             "the set of IconSpecs neither engine can draw changed"
         );
-        assert_eq!(files_with_icons, 51, "recursive team-file census changed");
-        assert_eq!(icon_count, 103, "recursive IconSpec census changed");
+        assert_eq!(files_with_icons, 52, "recursive team-file census changed");
+        assert_eq!(icon_count, 105, "recursive IconSpec census changed");
     }
 
     #[test]

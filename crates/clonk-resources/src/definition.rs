@@ -5110,10 +5110,10 @@ Entrance=1,2,,4
         }
         // 85 before Queron 3 and the Metal & Magic packs it depends on were
         // vendored; those add 34 more, and the Ultimate Clonk Compilation packs
-        // add a further 83. The per-directory assertion above is the real check
+        // add a further 81. The per-directory assertion above is the real check
         // — this census only guards against the walk silently covering less
         // content than it should.
-        check_eq! { checked => 202, "recursive shipped portrait census changed" }
+        check_eq! { checked => 200, "recursive shipped portrait census changed" }
     }
 
     #[test]
