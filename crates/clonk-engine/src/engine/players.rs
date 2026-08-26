@@ -5,6 +5,42 @@
 
 use super::*;
 
+/// `ItemIdentical`'s comparison key — `RealPath`, then the platform's own case
+/// sensitivity (StdFile.cpp:696-706).
+fn same_item_key(path: &str) -> String {
+    let absolute = std::path::absolute(path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string());
+    if cfg!(windows) {
+        absolute.to_ascii_lowercase()
+    } else {
+        absolute
+    }
+}
+
+/// `GetFilename` — the item's own name, after either separator.
+fn item_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// `SetClientPrefix` (C4PlayerList.cpp:472-486): prefix the name with the
+/// client's, unless it already carries exactly that prefix.
+fn with_client_prefix(name: &str, client: &str) -> String {
+    let prefix = format!("{client}-");
+    if name
+        .get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(&prefix))
+    {
+        return name.to_string();
+    }
+    format!("{prefix}{name}")
+}
+
+/// `SEqualNoCase`, which is ASCII-only and case-insensitive on every platform.
+fn name_key(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
 impl Engine {
     /// Checks the next `C4PlayerList::Join` admission without mutating player
     /// or team state. The join entry points repeat this check authoritatively.
@@ -20,6 +56,49 @@ impl Engine {
             return Err(EngineError::TooManyPlayers { maximum });
         }
         Ok(())
+    }
+
+    /// `C4PlayerList::FileInUse` (C4PlayerList.cpp:433-452) — the check
+    /// `C4PlayerList::Join` applies before it creates the player
+    /// (C4PlayerList.cpp:296-300).
+    ///
+    /// `network_local_client` carries `Game.Clients.getLocalName()` while
+    /// `Game.Network.isEnabled()`, and `None` otherwise: the prefix comparison
+    /// below runs only in a network game.
+    pub fn player_file_in_use(&self, filename: &str, network_local_client: Option<&str>) -> bool {
+        // `ItemIdentical` compares the two paths after `RealPath`, so a
+        // relative and an absolute spelling of one file are the same item
+        // (StdFile.cpp:696-706).
+        let candidate = same_item_key(filename);
+        if self.players.values().any(|player| {
+            !player.player_file().is_empty() && same_item_key(player.player_file()) == candidate
+        }) {
+            return true;
+        }
+        // "Compare to any network path player files with prefix (hack)": the
+        // candidate's own name, prefixed with the local client's, against the
+        // *name* of each player's file. Two peers that share a client name
+        // reach this, which is how a loopback session sees it.
+        network_local_client.is_some_and(|local| {
+            let prefixed = with_client_prefix(item_name(filename), local);
+            self.players.values().any(|player| {
+                !player.player_file().is_empty()
+                    && name_key(item_name(player.player_file())) == name_key(&prefixed)
+            })
+        })
+    }
+
+    /// Record the file a finished join was read from, so a later join of the
+    /// same file is refused (`C4Player::Init`, C4Player.cpp:258).
+    ///
+    /// C++ assigns it inside `Init`, before `ScenarioInit`; here it is
+    /// assigned immediately after, which no observer can tell apart —
+    /// `Filename` is read only by `C4PlayerList::FileInUse` and by
+    /// `C4Player::Save`, and neither runs during a join.
+    pub fn set_player_file(&mut self, number: i32, filename: Option<&str>) {
+        if let Some(player) = self.players.get_mut(&number) {
+            player.set_player_file(filename);
+        }
     }
 
     pub(crate) fn join_player_at_client_with_semantics(
@@ -3034,5 +3113,78 @@ impl Engine {
     ) -> Result<u32, EngineError> {
         let player = self.player_mut(id)?;
         Ok(player.adjust_home_base_production(definition_id, delta))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine_with_player_file(filename: &str) -> Engine {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(0, "Alice"))
+            .expect("a player registers");
+        engine.set_player_file(0, Some(filename));
+        engine
+    }
+
+    /// `ItemIdentical` compares the two paths after `RealPath`
+    /// (StdFile.cpp:696-706), so the same file named two ways is one item.
+    #[test]
+    fn a_relative_and_an_absolute_spelling_of_one_file_are_the_same_item() {
+        let absolute = std::path::absolute("Alice.c4p")
+            .expect("an absolute spelling")
+            .to_string_lossy()
+            .into_owned();
+        let engine = engine_with_player_file(&absolute);
+
+        assert!(engine.player_file_in_use("Alice.c4p", None));
+        assert!(!engine.player_file_in_use("Bob.c4p", None));
+    }
+
+    /// A player that joined without a file — a script player — owns no file
+    /// and must not swallow one (`C4PlayerList.cpp:437-439` compares against
+    /// `Filename`, which `C4Player::Default` leaves empty).
+    #[test]
+    fn a_player_without_a_file_matches_nothing() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(0, "Script"))
+            .expect("a player registers");
+        engine.set_player_file(0, None);
+
+        assert!(!engine.player_file_in_use("", None));
+        assert!(!engine.player_file_in_use("Alice.c4p", None));
+    }
+
+    /// The network branch prefixes the *candidate's* name with the local
+    /// client's and compares it to each player's file name
+    /// (C4PlayerList.cpp:441-449). Two peers sharing a client name — what a
+    /// loopback session has — is exactly when that fires.
+    #[test]
+    fn a_network_join_collides_with_the_local_clients_own_prefixed_copy() {
+        let engine =
+            engine_with_player_file(&format!("{}Host-Alice.c4p", std::path::MAIN_SEPARATOR));
+
+        assert!(engine.player_file_in_use("Alice.c4p", Some("Host")));
+        assert!(
+            !engine.player_file_in_use("Alice.c4p", Some("Other")),
+            "a different local client name composes a different prefix"
+        );
+        assert!(
+            !engine.player_file_in_use("Alice.c4p", None),
+            "the prefix comparison is a network-only branch"
+        );
+    }
+
+    /// `SetClientPrefix` returns early when the name already carries the
+    /// prefix (C4PlayerList.cpp:478-481), so a name is never prefixed twice.
+    #[test]
+    fn a_name_that_already_carries_the_prefix_is_not_prefixed_again() {
+        let engine =
+            engine_with_player_file(&format!("{}Host-Alice.c4p", std::path::MAIN_SEPARATOR));
+
+        assert!(engine.player_file_in_use("Host-Alice.c4p", Some("Host")));
     }
 }

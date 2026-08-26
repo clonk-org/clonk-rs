@@ -14920,3 +14920,132 @@ fn muting_a_participant_discards_their_voice_locally_for_the_session() {
     voice.set_client_muted(noisy_client, false);
     main_assert!(!voice.is_client_muted(noisy_client));
 }
+
+
+#[test]
+fn a_second_join_from_the_same_player_file_is_refused() {
+    // `C4PlayerList::Join` refuses a duplicate file before it creates the
+    // player (src/C4PlayerList.cpp:296-300, 433-452), and every peer executes
+    // the same join control, so a peer that accepted it would hold a player
+    // the others do not (clonk-org/clonk-rs#1172).
+    let mut app = new_synthetic_running_sandbox_app();
+    let (manager, event_tx) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    app.engine.set_network_game(true);
+    let tick = u32::try_from(app.engine.frame()).test_value();
+    let player_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../clonk-engine/tests/fixtures/embedded_player.c4p"
+    );
+    let filename =
+        clonk_engine::LegacyCString::from_bytes(player_path.as_bytes().to_vec()).test_value();
+    let first = n2_fixture!(player {
+        name: clonk_engine::LegacyCString::from_bytes(b"Tyler".to_vec()).test_value(),
+        id: 8,
+    });
+    let second = n2_fixture!(player {
+        name: clonk_engine::LegacyCString::from_bytes(b"Tyler".to_vec()).test_value(),
+        id: 9,
+    });
+    n2_send_event(
+        &event_tx,
+        n2_fixture!(ready_tick:
+            tick,
+            vec![
+                NetworkControl::PlayerInfo(n2_fixture!(player_data: 0, vec![first, second], by: 0)),
+                NetworkControl::JoinPlayer(n2_fixture!(join_player:
+                    filename.clone(),
+                    0,
+                    8,
+                    clonk_engine::JoinPlayerSource::Embedded(vec![0, 0]),
+                    0
+                )),
+                NetworkControl::JoinPlayer(n2_fixture!(join_player:
+                    filename,
+                    0,
+                    9,
+                    clonk_engine::JoinPlayerSource::Embedded(vec![0, 0]),
+                    0
+                )),
+            ]
+        ),
+    );
+
+    app.test_update();
+
+    main_assert!(
+        app.snapshot
+            .players
+            .iter()
+            .any(|player| player.player_info_id == 8),
+        "the first join owns the file"
+    );
+    main_assert!(
+        !app.snapshot
+            .players
+            .iter()
+            .any(|player| player.player_info_id == 9),
+        "the second join reads the same file and must be refused"
+    );
+}
+
+#[test]
+fn a_join_from_a_different_player_file_is_not_refused() {
+    let mut app = new_synthetic_running_sandbox_app();
+    let (manager, event_tx) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    app.engine.set_network_game(true);
+    let tick = u32::try_from(app.engine.frame()).test_value();
+    let first_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../clonk-engine/tests/fixtures/embedded_player.c4p"
+    );
+    let temp = tempdir();
+    let second_path = temp.path().join("Other.c4p");
+    std::fs::copy(first_path, &second_path).test_value();
+    let first = n2_fixture!(player {
+        name: clonk_engine::LegacyCString::from_bytes(b"Tyler".to_vec()).test_value(),
+        id: 8,
+    });
+    let second = n2_fixture!(player {
+        name: clonk_engine::LegacyCString::from_bytes(b"Other".to_vec()).test_value(),
+        id: 9,
+    });
+    n2_send_event(
+        &event_tx,
+        n2_fixture!(ready_tick:
+            tick,
+            vec![
+                NetworkControl::PlayerInfo(n2_fixture!(player_data: 0, vec![first, second], by: 0)),
+                NetworkControl::JoinPlayer(n2_fixture!(join_player:
+                    clonk_engine::LegacyCString::from_bytes(first_path.as_bytes().to_vec())
+                        .test_value(),
+                    0,
+                    8,
+                    clonk_engine::JoinPlayerSource::Embedded(vec![0, 0]),
+                    0
+                )),
+                NetworkControl::JoinPlayer(n2_fixture!(join_player:
+                    clonk_engine::LegacyCString::from_bytes(
+                        second_path.to_string_lossy().as_bytes().to_vec()
+                    )
+                    .test_value(),
+                    0,
+                    9,
+                    clonk_engine::JoinPlayerSource::Embedded(vec![0, 0]),
+                    0
+                )),
+            ]
+        ),
+    );
+
+    app.test_update();
+
+    main_assert_eq!(
+        app.snapshot
+            .players
+            .iter()
+            .filter(|player| [8, 9].contains(&player.player_info_id))
+            .count() => 2
+    );
+}
