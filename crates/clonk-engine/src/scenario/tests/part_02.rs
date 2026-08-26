@@ -1284,6 +1284,21 @@
             scenario_dir.join("Game.txt"),
             "[DefinitionFiles]\nDefinition1=OldObjects.c4d\nDefinition2=OldPack.c4d\n\n[Game]\n",
         );
+        // Named for what `line.substr(1)` asks the loader to open
+        // (src/C4Game.cpp:3646).
+        for (module, id) in [
+            ("efinition1=OldObjects.c4d", "OLDA"),
+            ("efinition2=OldPack.c4d", "OLDB"),
+        ] {
+            let definition = dir.path().join(module).join(format!("{id}.c4d"));
+            std::fs::create_dir_all(&definition).test_value();
+            write_test_file(
+                definition.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\nCrewMember=0\n"),
+            );
+            write_test_file(definition.join("Script.c"), "// old\n");
+            write_test_definition_graphics(&definition);
+        }
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         let scenario = load_test_scenario(&scenario_dir, &resolver);
@@ -1325,8 +1340,12 @@
             ScenarioDefinitionSelectionSource::ScenarioPreset
         );
         assert!(!definitions.definition_root_applied());
-        assert!(definitions.resolved_load_resources().is_none());
-        assert!(definitions.effective_modules().is_none());
+        assert_eq!(
+            definitions.effective_modules(),
+            ["efinition1=OldObjects.c4d", "efinition2=OldPack.c4d"],
+            "the override replaced the Defs.c4d preset above"
+        );
+        assert_eq!(definitions.resolved_load_resources().len(), 2);
         assert_eq!(
             definitions
                 .savegame_override()
@@ -1410,13 +1429,7 @@
             replay_lobby.definitions().savegame_override(),
             &ScenarioSavegameDefinitionOverride::None
         );
-        assert_eq!(
-            replay_lobby
-                .definitions()
-                .effective_modules()
-                .expect("replay modules are effective"),
-            ["Defs.c4d"]
-        );
+        assert_eq!(replay_lobby.definitions().effective_modules(), ["Defs.c4d"]);
     }
 
     #[test]
@@ -1948,8 +1961,11 @@
         assert!(reentered.core.landscape.layers.is_empty());
     }
 
+    /// The override replaces the preset before anything is resolved
+    /// (src/C4Game.cpp:180-227), so a save whose Scenario.txt names a module
+    /// that no longer exists fails — or not — on the *override's* module.
     #[test]
-    fn savegame_definition_boundary_precedes_missing_scenario_modules() {
+    fn savegame_definition_override_replaces_missing_scenario_modules() {
         let dir = test_tempdir();
         let scenario_dir = dir.path().join("OldSave.c4s");
         std::fs::create_dir(&scenario_dir).test_value();
@@ -1963,17 +1979,19 @@
         );
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
-        let scenario = load_test_scenario(&scenario_dir, &resolver);
-        let definitions = scenario.lobby_metadata().test_value().definitions();
-        assert_eq!(definitions.configured_modules(), ["Missing.c4d"]);
-        assert_eq!(definitions.requested_modules(), ["Missing.c4d"]);
-        assert_eq!(definitions.effective_modules(), None);
-        assert_eq!(
-            definitions
-                .savegame_override()
-                .definition_lines()
-                .expect("Game.txt boundary"),
-            ["Definition1=Historical.c4d"]
+        let error = Scenario::load_from_group_with_languages(
+            &Group::open(&scenario_dir).test_value(),
+            &resolver,
+            &["US"],
+        )
+        .expect_err("the override's own module is missing too");
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::LegacyDefinitionNotFound { path }
+                    if path == "efinition1=Historical.c4d"
+            ),
+            "the preset is never consulted once the override replaced it: {error:?}"
         );
     }
 
@@ -2498,4 +2516,154 @@ Objects=STNE=1;TREE=1
         assert_eq!(core.animals.free_life.len(), 1);
         assert_eq!(core.animals.earth_nest.len(), 1);
         assert_eq!(core.environment.objects.len(), 2);
+    }
+
+    /// `C4Game::DefinitionFilenamesFromSaveGame` clears the whole vector when
+    /// Game.txt carries `[DefinitionFiles]` and appends `line.substr(1)` for
+    /// every accepted line (src/C4Game.cpp:3625-3653). `substr(1)` is not a
+    /// typo: the precedence bug at 3643 assigns the *result of the comparison*
+    /// to `p`, so `p` is 1 and the pushed name is the line minus its first
+    /// character, not the text after `=`.
+    ///
+    /// The caller runs it after the preset, the DefinitionPath expansion and
+    /// the folder-local scan (src/C4Game.cpp:180-227), so it replaces all
+    /// three.
+    #[test]
+    fn an_old_save_definition_files_section_replaces_the_definition_vector() {
+        let dir = test_tempdir();
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        // Named for what the precedence bug actually asks the loader to open.
+        let overridden = dir.path().join("efinition1=Old.c4d");
+        let definition = overridden.join("Old.c4d");
+        std::fs::create_dir_all(&definition).test_value();
+        write_test_file(
+            definition.join("DefCore.txt"),
+            "[DefCore]\nid=OLDD\nName=Old\nCategory=0\nCrewMember=0\n",
+        );
+        write_test_file(definition.join("Script.c"), "// old\n");
+        write_test_definition_graphics(&definition);
+        write_test_file(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Old Save\nSaveGame=1\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        );
+        write_test_file(
+            scenario_dir.join("Game.txt"),
+            "[DefinitionFiles]\nDefinition1=Old.c4d\n\n[Game]\n",
+        );
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
+        let lobby = scenario.lobby_metadata().test_value();
+        let definitions = lobby.definitions();
+
+        assert_eq!(
+            definitions.effective_modules(),
+            ["efinition1=Old.c4d"]
+        );
+        let resolved = definitions.resolved_load_resources();
+        assert!(
+            resolved.iter().any(|path| path.ends_with("efinition1=Old.c4d")),
+            "the replacement drives loading: {resolved:?}"
+        );
+        assert!(
+            !resolved.iter().any(|path| path.ends_with("Defs.c4d")),
+            "the preset the override cleared must not survive: {resolved:?}"
+        );
+    }
+
+    /// The loop that `[DefinitionFiles]` drives (src/C4Game.cpp:3637-3651):
+    /// a line is accepted only when `find("Definition") == 0` *and* the line
+    /// holds an `=`; the first line that fails after one was accepted breaks
+    /// out; and the section header itself never matches, so lines before the
+    /// first accepted one are skipped rather than ending the scan.
+    #[test]
+    fn old_save_definition_lines_follow_the_cpp_accept_and_break_rules() {
+        for (label, game_text, expected) in [
+            (
+                "order is kept and every accepted line loses its first character",
+                "[DefinitionFiles]\nDefinition1=A.c4d\nDefinition2=B.c4d\n",
+                vec!["efinition1=A.c4d", "efinition2=B.c4d"],
+            ),
+            (
+                "a duplicate line is kept twice, like push_back",
+                "[DefinitionFiles]\nDefinition1=A.c4d\nDefinition1=A.c4d\n",
+                vec!["efinition1=A.c4d", "efinition1=A.c4d"],
+            ),
+            (
+                "a line without `=` is not accepted",
+                "[DefinitionFiles]\nDefinition1\nDefinition2=B.c4d\n",
+                vec!["efinition2=B.c4d"],
+            ),
+            (
+                "a line that only contains `Definition` later does not match",
+                "[DefinitionFiles]\n Definition1=A.c4d\nDefinition2=B.c4d\n",
+                vec!["efinition2=B.c4d"],
+            ),
+            (
+                "the first non-matching line after an accepted one ends the scan",
+                "[DefinitionFiles]\nDefinition1=A.c4d\n\n[Game]\nDefinition2=B.c4d\n",
+                vec!["efinition1=A.c4d"],
+            ),
+            (
+                "an empty section clears the vector and adds nothing",
+                "[DefinitionFiles]\n\n[Game]\nFrame=3\n",
+                Vec::new(),
+            ),
+            (
+                "the match is case-sensitive, like std::string::find",
+                "[DefinitionFiles]\ndefinition1=A.c4d\nDefinition2=B.c4d\n",
+                vec!["efinition2=B.c4d"],
+            ),
+        ] {
+            let dir = test_tempdir();
+            write_test_file(
+                dir.path().join("Scenario.txt"),
+                "[Head]\nTitle=Old Save\nSaveGame=1\n",
+            );
+            write_test_file(dir.path().join("Game.txt"), game_text);
+            let group = Group::open(dir.path()).test_value();
+
+            let override_lines = load_savegame_definition_override(&group, true)
+                .expect("the section parses")
+                .effective_modules()
+                .expect("Game.txt carried a section");
+
+            assert_eq!(override_lines, expected, "{label}");
+        }
+    }
+
+    /// Without the section the ordinary selection stands — `None`, not an
+    /// empty replacement (src/C4Game.cpp:3653).
+    #[test]
+    fn a_save_without_the_section_keeps_the_ordinary_definition_selection() {
+        let dir = test_tempdir();
+        write_test_file(
+            dir.path().join("Scenario.txt"),
+            "[Head]\nTitle=Old Save\nSaveGame=1\n",
+        );
+        write_test_file(dir.path().join("Game.txt"), "[Game]\nFrame=3\n");
+        let group = Group::open(dir.path()).test_value();
+
+        assert!(load_savegame_definition_override(&group, true)
+            .expect("Game.txt parses")
+            .effective_modules()
+            .is_none());
+    }
+
+    /// `if (C4S.Head.SaveGame)` gates the whole call (src/C4Game.cpp:227), so
+    /// an ordinary scenario carrying the same text is untouched.
+    #[test]
+    fn a_scenario_that_is_not_a_savegame_never_reads_the_section() {
+        let dir = test_tempdir();
+        write_test_file(dir.path().join("Scenario.txt"), "[Head]\nTitle=Live\n");
+        write_test_file(
+            dir.path().join("Game.txt"),
+            "[DefinitionFiles]\nDefinition1=A.c4d\n",
+        );
+        let group = Group::open(dir.path()).test_value();
+
+        assert!(load_savegame_definition_override(&group, false)
+            .expect("Game.txt parses")
+            .effective_modules()
+            .is_none());
     }

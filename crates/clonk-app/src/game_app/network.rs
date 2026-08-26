@@ -9395,16 +9395,9 @@ impl GameApp {
                 detail: "legacy Scenario.txt lobby metadata is unavailable".to_string(),
             })
         })?;
-        let effective_definition_modules = metadata
-            .definitions()
-            .effective_modules()
-            .unwrap_or_default()
-            .to_vec();
-        let effective_definition_spellings = metadata
-            .definitions()
-            .effective_modules()
-            .map(|_| metadata.definitions().requested_module_spellings().to_vec())
-            .unwrap_or_default();
+        let effective_definition_modules = metadata.definitions().effective_modules().to_vec();
+        let effective_definition_spellings =
+            metadata.definitions().requested_module_spellings().to_vec();
         let native_config = load_native_config_bytes(Some(paths));
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(Some(paths), &native_config);

@@ -1381,12 +1381,6 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         LegacyCString::from_bytes(loader_head.scenario_title_bytes().to_vec())
             .expect("a resolved scenario title contains no interior NUL");
     let scenario_title_c4 = clonk_script::c4_string_from_bytes(scenario_title_native.as_bytes());
-    if !matches!(
-        loader_head.savegame_definition_override(),
-        clonk_engine::scenario::ScenarioSavegameDefinitionOverride::None
-    ) {
-        return Err(PrepareHostBootstrapError::SavegameDefinitionOverrideUnsupported);
-    }
     let original_game_text = validate_scenario_group(&scenario_group)?;
     let has_embedded_parameters = read_direct_entry(&scenario_group, "Parameters.txt")?
         .is_some_and(|source| !source.is_empty());
@@ -1412,10 +1406,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     let lobby_metadata = scenario
         .lobby_metadata()
         .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)?;
-    let prepared_definition_modules = lobby_metadata
-        .definitions()
-        .effective_modules()
-        .ok_or(PrepareHostBootstrapError::SavegameDefinitionOverrideUnsupported)?;
+    let prepared_definition_modules = lobby_metadata.definitions().effective_modules();
     if prepared_definition_modules != spec.effective_definition_modules {
         return Err(
             PrepareHostBootstrapError::StagedDefinitionSelectionChanged {
@@ -1424,10 +1415,8 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             },
         );
     }
-    let effective_definition_resource_paths = lobby_metadata
-        .definitions()
-        .resolved_load_resources()
-        .ok_or(PrepareHostBootstrapError::SavegameDefinitionOverrideUnsupported)?;
+    let effective_definition_resource_paths =
+        lobby_metadata.definitions().resolved_load_resources();
     let staged_definition_resource_paths = spec
         .definition_resources
         .iter()
@@ -1441,7 +1430,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             },
         );
     }
-    let prepared_definition_spellings = lobby_metadata.definitions().requested_module_spellings();
+    let prepared_definition_spellings = lobby_metadata.definitions().effective_module_spellings();
     let prepared_definition_resources = freeze_host_definition_resource_sources(
         effective_definition_resource_paths,
         spec.scenario_path,

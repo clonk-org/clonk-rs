@@ -1108,6 +1108,8 @@ pub struct ScenarioLobbyDefinitions {
     configured_module_spellings: Vec<String>,
     requested_modules: Vec<String>,
     requested_module_spellings: Vec<String>,
+    effective_modules: Vec<String>,
+    effective_module_spellings: Vec<String>,
     selection_source: ScenarioDefinitionSelectionSource,
     definition_root_applied: bool,
     resolved_load_resources: Vec<PathBuf>,
@@ -1154,33 +1156,44 @@ impl ScenarioLobbyDefinitions {
         self.definition_root_applied
     }
 
-    /// External and folder-local resources resolved before the old-save
-    /// Game.txt compatibility override. The scenario group is absent.
-    pub fn load_resources_before_savegame_override(&self) -> &[PathBuf] {
+    /// External and folder-local resources, the scenario group aside. An old
+    /// save's `[DefinitionFiles]` override has already replaced them.
+    pub fn resolved_load_resources(&self) -> &[PathBuf] {
         &self.resolved_load_resources
     }
 
-    pub fn resolved_load_resources(&self) -> Option<&[PathBuf]> {
-        matches!(
-            &self.savegame_override,
-            ScenarioSavegameDefinitionOverride::None
-        )
-        .then_some(self.resolved_load_resources.as_slice())
-    }
-
-    /// The load vector is final only when this is `None`. Old exact saves may
-    /// replace it from Game.txt after Scenario.txt has been compiled.
+    /// The `[DefinitionFiles]` lines an old save's Game.txt carried, verbatim.
+    /// Kept for reporting: the vectors above already reflect them.
     pub fn savegame_override(&self) -> &ScenarioSavegameDefinitionOverride {
         &self.savegame_override
     }
 
-    pub fn effective_modules(&self) -> Option<&[String]> {
-        matches!(
-            &self.savegame_override,
-            ScenarioSavegameDefinitionOverride::None
-        )
-        .then_some(self.requested_modules.as_slice())
+    /// The vector definitions are actually loaded from — `requested_modules`,
+    /// unless an old save's `[DefinitionFiles]` section replaced it
+    /// (C4Game.cpp:222-227).
+    pub fn effective_modules(&self) -> &[String] {
+        &self.effective_modules
     }
+
+    /// The exact native strings behind `effective_modules`. An old save's
+    /// `[DefinitionFiles]` names are their own spelling — C++ pushes one
+    /// string and never keeps a second (C4Game.cpp:3646).
+    pub fn effective_module_spellings(&self) -> &[String] {
+        &self.effective_module_spellings
+    }
+}
+
+/// One `[DefinitionFiles]` line as `C4Game::DefinitionFilenamesFromSaveGame`
+/// stores it: `line.substr(1)` (C4Game.cpp:3646).
+///
+/// Not `line.split('=').nth(1)`. `p = line.find('=', p) != std::string::npos`
+/// at C4Game.cpp:3643 assigns the *comparison's* result, so `p` is 1 by the
+/// time `substr` reads it and the stored name is the line minus its first
+/// character. It is a long-standing C++ bug, and it decides which definition
+/// files a savegame asks for, so the port reproduces it rather than the
+/// evident intent.
+fn savegame_definition_module(line: &str) -> String {
+    line.chars().skip(1).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1201,6 +1214,20 @@ impl ScenarioSavegameDefinitionOverride {
             Self::None => None,
             Self::GameText { definition_lines } => Some(definition_lines),
         }
+    }
+
+    /// The vector `C4Game::DefinitionFilenamesFromSaveGame` leaves behind —
+    /// `line.substr(1)` per accepted line, and empty for a section with none
+    /// (C4Game.cpp:3635-3651). `None` when Game.txt carried no section at all,
+    /// which is the only case that keeps the ordinary selection.
+    pub fn effective_modules(&self) -> Option<Vec<String>> {
+        self.definition_lines().map(|lines| {
+            lines
+                .iter()
+                .map(String::as_str)
+                .map(savegame_definition_module)
+                .collect()
+        })
     }
 }
 
@@ -3143,10 +3170,20 @@ impl Scenario {
         // those modules may intentionally no longer exist.
         let savegame_override =
             load_savegame_definition_override(group, manifest.core.head.save_game != 0)?;
-        let has_unresolved_savegame_definitions = matches!(
-            &savegame_override,
-            ScenarioSavegameDefinitionOverride::GameText { .. }
-        );
+        // `DefinitionFilenames.clear()` followed by `push_back(line.substr(1))`
+        // for every accepted line (C4Game.cpp:3635-3651). The caller applies
+        // it after the preset, the DefinitionPath expansion and the
+        // folder-local scan (C4Game.cpp:180-227), so it replaces all three —
+        // including an empty section, which clears the vector and adds
+        // nothing.
+        // Only the peer that builds `DefinitionFilenames` itself applies it.
+        // A network client's definitions arrive as published `GameRes`, and
+        // `C4Game::OpenScenario` skips `Parameters.Load` for one
+        // (C4Game.cpp:230-236), so the section never reaches its load — which
+        // is the same condition that decides the folder-local scan below.
+        let savegame_definition_modules = discover_folder_definitions
+            .then(|| savegame_override.effective_modules())
+            .flatten();
         report_progress(4, "Scenario manifest and components decoded");
 
         let skip_ids: HashSet<String> = manifest
@@ -3199,22 +3236,22 @@ impl Scenario {
             };
         let requested_definition_modules = definition_specs.to_vec();
         let requested_definition_spellings = selected_definition_spellings.to_vec();
+        let (definition_specs_to_resolve, definition_spellings_to_resolve) =
+            match savegame_definition_modules.as_deref() {
+                Some(modules) => (modules, modules),
+                None => (definition_specs, selected_definition_spellings),
+            };
+        let effective_definition_modules = definition_specs_to_resolve.to_vec();
+        let effective_definition_spellings = definition_spellings_to_resolve.to_vec();
         report_progress(8, "Definition selection resolved");
-        let definition_specs_to_resolve = if has_unresolved_savegame_definitions {
-            &[][..]
-        } else {
-            definition_specs
-        };
-        let definition_spellings_to_resolve = if has_unresolved_savegame_definitions {
-            &[][..]
-        } else {
-            selected_definition_spellings
-        };
-        let folder_definition_groups = if discover_folder_definitions {
-            folder_local_definition_groups(group)?
-        } else {
-            Vec::new()
-        };
+        let folder_definition_groups =
+            if discover_folder_definitions && savegame_definition_modules.is_none() {
+                folder_local_definition_groups(group)?
+            } else {
+                // The override's `clear()` also drops the folder-local paths the
+                // caller appended just before it (C4Game.cpp:210-227).
+                Vec::new()
+            };
         let external_definition_group_count = definition_specs_to_resolve.len()
             * if definition_path_expansion.is_some() {
                 2
@@ -3474,7 +3511,7 @@ impl Scenario {
 
         // C4Game checks for an entirely missing definition load before these
         // filters; filtering every loaded def is therefore not itself fatal.
-        if collected.is_empty() && !has_unresolved_savegame_definitions {
+        if collected.is_empty() {
             return Err(ScenarioError::NoDefinitions);
         }
 
@@ -3555,13 +3592,7 @@ impl Scenario {
             group,
             legacy_game_is_melee_after_conversion(&converted_core.game),
         )?;
-        let initial_spawns = if has_unresolved_savegame_definitions {
-            // Object IDs cannot be decoded truthfully until the legacy
-            // DefinitionFiles text has been interpreted by a runtime loader.
-            Vec::new()
-        } else {
-            collect_legacy_objects(group, &collected, &legacy_string_table)?
-        };
+        let initial_spawns = collect_legacy_objects(group, &collected, &legacy_string_table)?;
         report_progress(93, "Object records decoded");
         let (mut physics, gravity) = derive_legacy_physics(&manifest)?;
         if let Some(runtime) = runtime_landscape.filter(|_| is_savegame) {
@@ -3632,6 +3663,8 @@ impl Scenario {
                 configured_module_spellings: configured_definition_spellings,
                 requested_modules: requested_definition_modules,
                 requested_module_spellings: requested_definition_spellings,
+                effective_modules: effective_definition_modules,
+                effective_module_spellings: effective_definition_spellings,
                 selection_source: definition_selection_source,
                 definition_root_applied: definition_path_expansion.is_some(),
                 resolved_load_resources: definition_resource_paths.clone(),
