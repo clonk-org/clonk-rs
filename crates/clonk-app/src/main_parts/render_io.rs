@@ -168,6 +168,17 @@ impl MapFolderTransform {
         )
     }
 
+    /// An identity-placed transform, so a caption probe can be drawn without
+    /// a background image or a laid-out sheet.
+    #[cfg(test)]
+    pub(crate) fn identity_for_test() -> Self {
+        Self {
+            background: GuiRect::new(0.0, 0.0, 0.0, 0.0),
+            scale_x: 1.0,
+            scale_y: 1.0,
+        }
+    }
+
     pub(crate) fn point(self, x: i32, y: i32) -> (i32, i32) {
         (
             (self.background.origin.x + x as f32 * self.scale_x).round() as i32,
@@ -243,6 +254,55 @@ pub(crate) fn book_font_by_height(
     (font, tolerated_font_zoom(height, font.line_height))
 }
 
+/// One folder-map button's caption.
+///
+/// `C4StartupScenSelDlg` picks the font by the scaled title height and passes
+/// the tolerated zoom straight into `SetTextFont`
+/// (`src/C4StartupScenSelDlg.cpp:371-377`).
+pub(crate) fn draw_map_scenario_title(
+    surface: &mut clonk_graphics::Surface,
+    fonts: &clonk_frontend::ClonkFontSet,
+    book_fonts: &clonk_frontend::startup_scensel::BookFontSet,
+    button: &MapFolderScenarioButton,
+    transform: &MapFolderTransform,
+    active: bool,
+    gamma: &clonk_graphics::GammaRamp,
+) {
+    if button.title.is_empty() {
+        return;
+    }
+    let scaled_size = (button.title_font_size as f32 * transform.scale_y).round() as i32;
+    let (font, zoom) = if button.title_use_book_font {
+        book_font_by_height(book_fonts, scaled_size)
+    } else {
+        gui_font_by_height(fonts, scaled_size)
+    };
+    let (x, y) = transform.point(
+        button.area.x + button.title_offset_x,
+        button.area.y + button.title_offset_y,
+    );
+    let align = match button.title_align {
+        0 => clonk_graphics::clonk_font::TextAlign::Left,
+        2 => clonk_graphics::clonk_font::TextAlign::Right,
+        _ => clonk_graphics::clonk_font::TextAlign::Center,
+    };
+    font.draw_zoomed_with_gamma(
+        surface,
+        x,
+        y,
+        &button.title,
+        map_folder_text_color(if active {
+            button.title_color_active
+        } else {
+            button.title_color_inactive
+        }),
+        align,
+        true,
+        Some(gamma),
+        zoom,
+    );
+}
+
 fn map_folder_text_color(color: u32) -> [u8; 4] {
     [
         ((color >> 16) & 0xff) as u8,
@@ -315,37 +375,9 @@ fn draw_scensel_map_dynamic(
         if let Some(image) = image {
             clonk_frontend::draw_image_x_float(surface, &rect, image, Some(gamma));
         }
-        if !button.title.is_empty() {
-            let scaled_size = (button.title_font_size as f32 * transform.scale_y).round() as i32;
-            let (font, _zoom) = if button.title_use_book_font {
-                book_font_by_height(book_fonts, scaled_size)
-            } else {
-                gui_font_by_height(fonts, scaled_size)
-            };
-            let (x, y) = transform.point(
-                button.area.x + button.title_offset_x,
-                button.area.y + button.title_offset_y,
-            );
-            let align = match button.title_align {
-                0 => clonk_graphics::clonk_font::TextAlign::Left,
-                2 => clonk_graphics::clonk_font::TextAlign::Right,
-                _ => clonk_graphics::clonk_font::TextAlign::Center,
-            };
-            font.draw_with_gamma(
-                surface,
-                x,
-                y,
-                &button.title,
-                map_folder_text_color(if active {
-                    button.title_color_active
-                } else {
-                    button.title_color_inactive
-                }),
-                align,
-                true,
-                Some(gamma),
-            );
-        }
+        draw_map_scenario_title(
+            surface, fonts, book_fonts, button, &transform, active, gamma,
+        );
     }
 
     let info_rect = transform.rect(scenario_info_area);
