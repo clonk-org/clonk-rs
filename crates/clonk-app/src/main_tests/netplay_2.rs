@@ -6707,19 +6707,18 @@ fn offline_runtime_join_player_local_no_network() {
     fs::write(&malformed, b"not a packed player group").test_value();
     let before_failure_players = app.engine.snapshot().players;
     let before_failure_infos = app.control_player_infos.retained_rows_snapshot();
-    let error = app
-        .apply_ingame_menu_action(MenuAction::JoinPlayer(
-            malformed.to_string_lossy().into_owned(),
-        ))
-        .expect_err("malformed offline player returns a typed boundary");
-    let detail = match error {
-        EngineError::ClassicMenuParityBoundary { detail } => detail,
-        other => panic!("offline failure returned the wrong error: {other}"),
-    };
-    main_assert!(detail.contains("classic offline in-game player join failed"));
-    main_assert!(detail.contains("failed to load"));
-    main_assert!(detail.contains(&malformed.to_string_lossy().into_owned()));
-    main_assert_eq!(app.status_text => "offline join sentinel");
+    // C4MainMenu::MenuCommand discards CtrlJoinLocalNoNetwork's result and
+    // reports the JoinPlayer command handled either way
+    // (src/C4MainMenu.cpp:761-771), so a malformed player file is a silent
+    // no-op rather than a typed boundary.
+    app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+        malformed.to_string_lossy().into_owned(),
+    ))
+    .test_value();
+    main_assert_eq!(
+        app.status_text => "offline join sentinel",
+        "a refused offline join reports nothing to the player"
+    );
     main_assert_eq!(app.engine.snapshot().players => before_failure_players);
     main_assert_eq!(app.control_player_infos.retained_rows_snapshot() => before_failure_infos);
 }

@@ -3311,3 +3311,67 @@ fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
     );
     main_assert_eq!(network.offline_halt_count => 0);
 }
+
+/// `C4MainMenu::MenuCommand` discards `CtrlJoinLocalNoNetwork`'s result and
+/// reports the JoinPlayer command handled regardless
+/// (src/C4MainMenu.cpp:761-771), and that function refuses a file
+/// `ItemExists` cannot see before touching any state
+/// (src/C4PlayerList.cpp:320-329). An offline join of a player file that is
+/// missing — or present but unreadable — is therefore a silent no-op, never a
+/// fatal menu boundary.
+#[test]
+fn an_offline_runtime_player_join_of_an_unusable_file_is_a_silent_no_op() {
+    let directory = tempfile::tempdir().test_value();
+    let unreadable = directory.path().join("Broken.c4p");
+    fs::write(&unreadable, b"not a player group").test_value();
+    let missing = directory.path().join("Absent.c4p");
+
+    for (path, name) in [(missing, "missing"), (unreadable, "unreadable")] {
+        let mut app = new_running_sandbox_app();
+        main_assert!(
+            app.network.is_none(),
+            "{name}: this path is the no-network branch"
+        );
+        let players_before = app.control_player_infos.retained_rows_snapshot();
+        let status_before = app.status_text.clone();
+
+        app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+            path.to_string_lossy().into_owned(),
+        ))
+        .expect("an unusable offline player file must not fail the menu action");
+
+        main_assert_eq!(
+            app.control_player_infos.retained_rows_snapshot() => players_before,
+            "{name}: no player or control state may change"
+        );
+        main_assert_eq!(
+            app.status_text => status_before,
+            "{name}: C++ reports nothing to the player for a refused offline join"
+        );
+    }
+}
+
+/// The other half of `CtrlJoinLocalNoNetwork`: a file `ItemExists` does see
+/// still reaches `DoLocalNonNetworkPlayerJoin` (src/C4PlayerList.cpp:320-329),
+/// so tolerating the refusal above must not have made the success path a
+/// no-op too.
+#[test]
+fn a_readable_offline_runtime_player_join_still_registers_the_player() {
+    let (_directory, player_path) = n2_packed_player_fixture(
+        "Offline.c4p",
+        b"[Player]\nName=Offline Join\n[Preferences]\nColorDw=1193046\n",
+    );
+    let mut app = new_running_sandbox_app();
+    main_assert!(app.network.is_none(), "this path is the no-network branch");
+    let players_before = app.control_player_infos.retained_rows_snapshot();
+
+    app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+        player_path.to_string_lossy().into_owned(),
+    ))
+    .test_value();
+
+    main_assert!(
+        app.control_player_infos.retained_rows_snapshot() != players_before,
+        "a readable offline player file still joins"
+    );
+}
