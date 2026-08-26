@@ -5281,6 +5281,15 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(final_construction) = context.adjust_object_construction(target, FULL_CON) else {
             return false;
         };
+        // `UpdateFace(true)` updates the solid mask straight after the shape
+        // refresh and BEFORE the keep-bottom move (C4Object.cpp:1487). The
+        // move's own update then finds a mask present and removes it, and
+        // that Remove is what probes the landscape for instability
+        // (C4Object.cpp:1490-1497; C4SolidMask.cpp:256). Without this first
+        // put there is nothing to remove, so a script-created object seeds no
+        // mass movers -- the engine placement path was given the same pair in
+        // clonk-org/clonk-rs#1165.
+        context.update_live_solid_mask(target, false);
         let (pre_growth_position, adjusted_position) = {
             let Some(scope) = context.object_scope_mut(target) else {
                 return false;
