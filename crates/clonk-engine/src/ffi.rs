@@ -2252,18 +2252,10 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.mobile, actual_object.mobile
                     ));
                 }
-                // Con scales the float line every liquid probe samples
-                // (`Def->Float * Con / FullCon`, C4Object.cpp:5634 and the
-                // DFA_SWIM probes at :4970,:4980) and drives shape, mass and
-                // OCF besides. Diff it so a Con disagreement is reported
-                // where it happens rather than as a liquid or contact
-                // difference further downstream.
-                if expected_object.construction != actual_object.construction {
-                    problems.push(format!(
-                        "object {} construction rust {}, cpp {}",
-                        id, expected_object.construction, actual_object.construction
-                    ));
-                }
+                // Con is deliberately NOT diffed: the bridge's export block
+                // never assigns it, so the C++ side is always zero and every
+                // fully-built object would read as a divergence. See
+                // `runtime_mismatch_does_not_report_construction_the_bridge_never_collects`.
                 // InLiquid drives the DFA_SWIM out-of-liquid branch
                 // (C4Object.cpp:4967-4973): paddle back down, or
                 // `ObjectActionWalk(this); return;`. Diff it so a
@@ -5046,15 +5038,26 @@ global func Step(state, frame, random)
         }
     }
 
-    /// `Con` scales the float line every liquid probe is taken at —
-    /// `Def->Float * Con / FullCon` appears in `IsInLiquidCheck`
-    /// (`C4Object.cpp:5634`) and in both DFA_SWIM probes (`:4970`, `:4980`) —
-    /// as well as driving shape, mass and OCF. The bridge collects it from
-    /// both engines and never diffed it, so a `Con` disagreement could only
-    /// ever surface downstream, as a liquid or contact difference at a pixel
-    /// the two engines never agreed to sample (clonk-org/clonk-rs#1157).
+    /// `Con` must **not** be diffed: the bridge never collects it from C++.
+    ///
+    /// `RustEngineBridge.cpp` populates the exported snapshot field by field
+    /// (position, velocity, rotation, the fixed-point trio, `Mobile`,
+    /// `InLiquid`, `Timer`, `rdir`, `Energy`, `Damage`, `MagicEnergy`,
+    /// magic capacity, `Owner`, `Category`, crew flag, alive flag and the
+    /// action block) and assigns `construction` nowhere, so the C++ side is
+    /// always the zero it was initialised with. `object->GetCon()` is read
+    /// only on the *inbound* path, where Rust state is applied to a C4Object.
+    ///
+    /// Diffing it therefore reported every fully-built object as a
+    /// divergence — `construction rust 100000, cpp 0` — which stopped the
+    /// port at frame 1 and hid whatever the run was meant to find.
+    /// clonk-org/clonk-rs#1160 added that diff on the stated premise that
+    /// "the bridge collects it from both engines"; that premise was wrong.
+    ///
+    /// This pins the absence so the diff cannot come back without the export
+    /// side landing first. `need_energy` is held out for the same reason.
     #[test]
-    fn runtime_mismatch_reports_construction() {
+    fn runtime_mismatch_does_not_report_construction_the_bridge_never_collects() {
         let object = || -> ObjectSnapshot {
             serde_json::from_value(serde_json::json!({
                 "id": 1,
@@ -5095,11 +5098,14 @@ global func Step(state, frame, random)
         let mut actual = expected.clone();
         actual.objects[0].construction = 50_000;
 
-        let detail = runtime_snapshot_mismatch(&expected, &actual)
-            .expect("a construction difference is reported");
+        // The shape the bridge actually produces: the port fully built, the
+        // C++ side left at its initialised zero.
+        actual.objects[0].construction = 0;
+
         assert!(
-            detail.contains("construction rust 100000, cpp 50000"),
-            "detail did not name the construction difference: {detail}"
+            runtime_snapshot_mismatch(&expected, &actual).is_none(),
+            "a construction-only difference must not be reported: the bridge \
+             never collects Con from C++, so every built object would diverge"
         );
     }
 
