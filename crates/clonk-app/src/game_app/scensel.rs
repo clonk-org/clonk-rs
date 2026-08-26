@@ -162,6 +162,26 @@ fn startup_player_portrait_locations(
 }
 
 impl GameApp {
+    /// The scenario selector as a platform accessibility bridge sees it
+    /// (clonk-org/clonk-rs#392).
+    ///
+    /// Empty away from the selector: the description is of what is drawn, and
+    /// a reader that kept finding a search field on the main menu would be
+    /// describing a screen that is not there. The status text is read from the
+    /// same enhanced-search presentation `render_startup_frame` draws, so the
+    /// count a reader announces cannot drift from the one on screen.
+    pub(crate) fn scen_sel_accessibility(&self) -> clonk_frontend::accessibility::ScenSelSemantics {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            return clonk_frontend::accessibility::ScenSelSemantics::default();
+        }
+        clonk_frontend::accessibility::scen_sel_semantics(
+            self.menu_state.search_text(),
+            self.menu_state.search_focused(),
+            self.menu_state.enhanced_search_caption().as_deref(),
+            self.menu_state.enhanced_search_empty_message().as_deref(),
+        )
+    }
+
     pub(crate) fn set_scensel_dialog_focus(&mut self, focus: ScenselDialogFocus) {
         self.menu_state.set_dialog_focus(focus);
         if focus != ScenselDialogFocus::Options {

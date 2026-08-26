@@ -72,6 +72,8 @@ thiserror = "2"
 gethostname = "1.0"
 tempfile = "3.8"
 unicode-normalization = "0.1"
+accesskit = "0.24"
+accesskit_winit = "0.33"
 
 [build-dependencies]
 # Embeds the Windows executable icon resources. The `build-script` feature stays

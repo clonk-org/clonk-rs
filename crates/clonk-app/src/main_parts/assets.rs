@@ -9177,6 +9177,10 @@ pub(crate) fn startup_window_attributes(
 ) -> winit::window::WindowAttributes {
     let mut attributes = Window::default_attributes()
         .with_title(native_window_title(false))
+        // AccessKit refuses to adapt a window that has already been shown, so
+        // the carrier opens hidden and `run` reveals it as soon as the
+        // accessibility bridge is attached (clonk-org/clonk-rs#392).
+        .with_visible(false)
         // Both shells share this builder, matching C++ assigning one icon
         // resource to the fullscreen and console window classes alike
         // (C4FullScreen.cpp:196-211; C4Console.cpp:297-310). Inert on macOS,
