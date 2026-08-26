@@ -10228,6 +10228,14 @@ impl ObjectScopeContext {
         self.pending_update.rotation_velocity = Some(rotation_velocity);
     }
 
+    /// `rdir` written the way `C4Object::AdjustWalkRotation` writes it
+    /// (C4Object.cpp:6085-6088): directly, with no `Mobile` arming. Only
+    /// `FnSetRDir` mobilises (C4Script.cpp:732).
+    pub(crate) fn set_rotation_velocity_raw(&mut self, rotation_velocity: C4Fixed) {
+        self.current_rotation_velocity = rotation_velocity;
+        self.pending_update.rotation_velocity_raw = Some(rotation_velocity);
+    }
+
     /// Queue a cyclic contents rotation so `new_front` becomes the first
     /// content (C4ObjectList::ShiftContents, C4ObjectList.cpp:815-833).
     pub(crate) fn shift_contents_front(&mut self, new_front: ObjectId) {

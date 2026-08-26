@@ -1081,9 +1081,12 @@
         assert_eq!(
             outcome
                 .object_update
-                .and_then(|update| update.rotation_velocity),
+                .and_then(|update| update.rotation_velocity_raw),
             Some(C4Fixed::from_raw(-9 * 65536 / 100)),
-            "rdir = itofix(-9) / (10000/100)"
+            "rdir = itofix(-9) / (10000/100), staged on the non-mobilising \
+             field: C++ writes rdir here without touching Mobile \
+             (C4Object.cpp:6085-6088), unlike FnSetRDir \
+             (clonk-org/clonk-rs#1157)"
         );
     }
 
@@ -1098,7 +1101,7 @@
         assert_eq!(
             outcome
                 .object_update
-                .and_then(|update| update.rotation_velocity),
+                .and_then(|update| update.rotation_velocity_raw),
             None
         );
 
@@ -1123,7 +1126,7 @@
         assert_eq!(
             outcome
                 .object_update
-                .and_then(|update| update.rotation_velocity),
+                .and_then(|update| update.rotation_velocity_raw),
             Some(C4Fixed::from_raw(-15 * 65536 / 100)),
             "rdir = itofix(-15) / 100"
         );
@@ -1148,7 +1151,7 @@
         assert_eq!(
             outcome
                 .object_update
-                .and_then(|update| update.rotation_velocity),
+                .and_then(|update| update.rotation_velocity_raw),
             Some(C4Fixed::ZERO)
         );
     }
