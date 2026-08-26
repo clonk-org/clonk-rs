@@ -3688,3 +3688,61 @@ fn scensel_accessibility_announces_the_enhanced_search_result_status() {
         .test_value();
     main_assert_eq!(status.value.clone() => Some(format!("{caption} {guidance}")));
 }
+
+
+// `C4StartupScenSelDlg` hands `fFontZoom` to `SetTextFont`
+// (src/C4StartupScenSelDlg.cpp:371-377), so a folder-map caption whose scaled
+// height falls outside `GetFontByHeight`'s tolerance band is rasterized at the
+// resolved zoom rather than at the font's native size
+// (clonk-org/clonk-rs#1174).
+#[test]
+fn folder_map_titles_rasterize_at_the_resolved_font_zoom() {
+    let app = new_real_classic_menu_app(320, 200);
+    let fonts = app.assets.clonk_fonts.as_deref().test_value();
+    let book_fonts = app.assets.book_fonts.as_deref().test_value();
+    let gamma = clonk_graphics::GammaRamp::identity();
+
+    // `title` painted height for one requested size, measured on its own
+    // surface so nothing else can contribute a pixel.
+    let painted_height = |size: i32, use_book_font: bool| {
+        let button = MapFolderScenarioButton::title_probe_for_test("III", size, use_book_font);
+        let mut surface = Surface::new(256, 256, PixelFormat::Rgba8888);
+        draw_map_scenario_title(
+            &mut surface,
+            fonts,
+            book_fonts,
+            &button,
+            &MapFolderTransform::identity_for_test(),
+            false,
+            &gamma,
+        );
+        let rows = (0..256)
+            .filter(|y| {
+                (0..256).any(|x| {
+                    surface
+                        .get_pixel(x, *y as u32)
+                        .is_some_and(|pixel| pixel.a > 0)
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.last().copied().unwrap_or(0) - rows.first().copied().unwrap_or(0) + 1
+    };
+
+    for (label, native) in [
+        ("gui", fonts.title.line_height),
+        ("book", book_fonts.title.line_height),
+    ] {
+        let use_book_font = label == "book";
+        let inside = painted_height(native, use_book_font);
+        let outside = painted_height(native * 3, use_book_font);
+        main_assert!(
+            outside > inside * 2,
+            "{label} titles outside the tolerance band draw at the zoom: {inside} -> {outside}"
+        );
+    }
+
+    // Inside `[0.8, 1.25)` the zoom snaps to 1.0, so nothing changes there.
+    let native = fonts.caption.line_height;
+    let tolerated = (native as f32 * 0.9).round() as i32;
+    main_assert_eq!(painted_height(tolerated, false) => painted_height(native, false));
+}

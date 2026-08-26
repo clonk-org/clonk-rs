@@ -4729,6 +4729,33 @@ pub(crate) struct MapFolderScenarioButton {
     pub(crate) title_use_book_font: bool,
 }
 
+impl MapFolderScenarioButton {
+    /// A caption-only button, for probing how a title is rasterized.
+    #[cfg(test)]
+    pub(crate) fn title_probe_for_test(title: &str, font_size: i32, use_book_font: bool) -> Self {
+        Self {
+            entry: None,
+            base_image: None,
+            overlay_image: None,
+            single_click: false,
+            area: MapFolderRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            title: title.to_string(),
+            title_font_size: font_size,
+            title_color_inactive: 0x00ff_ffff,
+            title_color_active: 0x00ff_ffff,
+            title_offset_x: 0,
+            title_offset_y: 0,
+            title_align: 0,
+            title_use_book_font: use_book_font,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MapFolderAccessOverlay {
     pub(crate) image: Option<ImageData>,
