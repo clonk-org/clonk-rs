@@ -3023,10 +3023,16 @@ fn initial_docon_removes_the_solid_mask_it_just_put_and_probes_instability() {
         engine.objects[index].solid_mask_bake.is_some(),
         "the object ends creation with its mask put"
     );
-    assert!(
-        !probes.is_empty(),
-        "the initial DoCon must remove the mask it just put, probing instability; \
-         no probe means the second UpdateSolidMask never ran"
+    // Exactly the 4x4 mask, probed once. C4Object::DoCon updates the solid
+    // mask TWICE (UpdateFace's put, then the keep-bottom remove-and-re-put),
+    // so precisely one Remove finds a mask to probe. A third update would
+    // probe every pixel again and read 32 here, seeding movers the oracle
+    // never creates (clonk-org/clonk-rs#1166).
+    assert_eq!(
+        probes.len(),
+        16,
+        "expected one mask-remove worth of instability probes, got {}",
+        probes.len()
     );
 }
 
