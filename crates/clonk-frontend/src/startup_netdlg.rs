@@ -801,10 +801,20 @@ pub enum NetDlgChatLineKind {
     Error,
 }
 
+/// One *display* line of the transcript, which is the unit `C4LogBuffer`
+/// stores: `AppendLines` splits a message on CR/LF and word-wraps each part at
+/// the width in force when it arrived, then hands every resulting line to
+/// `AppendSingleLine` separately (src/C4LogBuf.cpp:96-148,174-205).
+/// `TextWindow::UpdateSize` only re-bounds the buffer control
+/// (src/C4GuiLabels.cpp:490-500), so a later resize never re-flows what is
+/// already stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetDlgChatLine {
     pub kind: NetDlgChatLineKind,
     pub text: String,
+    /// True on the first display line produced by a source message or by a
+    /// CR/LF-separated part of one, which is what spaces paragraphs apart.
+    pub new_paragraph: bool,
 }
 
 impl PartialEq<&str> for NetDlgChatLine {
@@ -1722,6 +1732,9 @@ impl NetDlgController {
     /// refreshes, while parted channels disappear as in `C4ChatControl::Update`.
     pub fn sync_chat_snapshot(&mut self, snapshot: NetDlgChatSnapshot) {
         let previous_page = self.chat_page;
+        // Every line appended below wraps against the width in force now, the
+        // way `AddTextLine` hands `AppendLines` the window's current extent.
+        let wrap_width = self.chat_transcript_wrap_width();
         let has_error = snapshot
             .last_error
             .as_ref()
@@ -1826,8 +1839,11 @@ impl NetDlgController {
                         &self.chat_strings.connecting,
                         &[&self.chat_server, ""],
                     ),
+                    new_paragraph: true,
                 },
                 true,
+                self.text_font.as_ref(),
+                wrap_width,
             );
         }
 
@@ -1920,13 +1936,21 @@ impl NetDlgController {
             let line = NetDlgChatLine {
                 kind: Self::chat_line_kind(message.kind),
                 text: Self::format_chat_message(&message, source_nick, &snapshot.nick),
+                new_paragraph: true,
             };
-            Self::append_chat_line(&mut sheets[target], line, target == selected);
+            Self::append_chat_line(
+                &mut sheets[target],
+                line,
+                target == selected,
+                self.text_font.as_ref(),
+                wrap_width,
+            );
         }
         if let Some(error) = snapshot.last_error.filter(|error| !error.is_empty()) {
             let line = NetDlgChatLine {
                 kind: NetDlgChatLineKind::Error,
                 text: format!("Error: {error}"),
+                new_paragraph: true,
             };
             let target = self
                 .chat_send_error_origin
@@ -1937,8 +1961,24 @@ impl NetDlgController {
                     })
                 })
                 .unwrap_or(0);
-            if sheets[target].lines.last() != Some(&line) {
-                Self::append_chat_line(&mut sheets[target], line, target == selected);
+            // The same error must not be repeated when a snapshot re-reports
+            // it. Now that the transcript holds display lines, the comparison
+            // is against the whole wrapped tail rather than one stored line.
+            let mut candidate = line.clone();
+            candidate.text = Self::sanitize_chat_line(&candidate.text);
+            let display = Self::chat_display_lines(&candidate, self.text_font.as_ref(), wrap_width);
+            let stored = &sheets[target].lines;
+            let repeated = !display.is_empty()
+                && stored.len() >= display.len()
+                && stored[stored.len() - display.len()..] == display[..];
+            if !repeated {
+                Self::append_chat_line(
+                    &mut sheets[target],
+                    line,
+                    target == selected,
+                    self.text_font.as_ref(),
+                    wrap_width,
+                );
             }
         }
 
@@ -3245,10 +3285,55 @@ impl NetDlgController {
         }
     }
 
-    fn append_chat_line(sheet: &mut NetDlgChatSheet, mut line: NetDlgChatLine, active: bool) {
+    /// The display lines one incoming message becomes, in `AppendLines`
+    /// order: split on CR/LF — `|` stays literal, because chat TextWindows are
+    /// built with `fMarkup = false` (C4Gui.h:1309; C4LogBuf.cpp:174-205) —
+    /// then word-wrapped at the width in force right now. Empty parts are
+    /// dropped, matching `AppendSingleLine`'s "do not append empty line"
+    /// guard (C4LogBuf.cpp:98).
+    fn chat_display_lines(
+        line: &NetDlgChatLine,
+        font: Option<&ClonkFont>,
+        width: i32,
+    ) -> Vec<NetDlgChatLine> {
+        let mut display = Vec::new();
+        let mut first_physical = true;
+        for paragraph in line.text.split(['\r', '\n']) {
+            let broken = font.map_or_else(
+                || paragraph.to_string(),
+                |font| break_message(font, paragraph, width.max(1)),
+            );
+            for physical in broken.split('\n') {
+                if physical.is_empty() {
+                    continue;
+                }
+                display.push(NetDlgChatLine {
+                    kind: line.kind,
+                    text: physical.to_string(),
+                    new_paragraph: first_physical,
+                });
+                first_physical = false;
+            }
+        }
+        display
+    }
+
+    fn append_chat_line(
+        sheet: &mut NetDlgChatSheet,
+        mut line: NetDlgChatLine,
+        active: bool,
+        font: Option<&ClonkFont>,
+        width: i32,
+    ) {
         line.text = Self::sanitize_chat_line(&line.text);
-        sheet.lines.push(line);
-        Self::bound_chat_transcript(sheet);
+        // `AppendSingleLine` applies the line and character caps to each
+        // wrapped line as it is stored, so a message long enough to overflow
+        // the transcript on its own loses its own leading lines
+        // (C4LogBuf.cpp:100-104).
+        for display in Self::chat_display_lines(&line, font, width) {
+            sheet.lines.push(display);
+            Self::bound_chat_transcript(sheet);
+        }
         // TextWindow::AddTextLine always ScrollToBottom, even on an inactive
         // tab. The inactive caption is then marked unread.
         sheet.transcript_follow_bottom = true;
@@ -3415,6 +3500,12 @@ impl NetDlgController {
         self.chat_layout_in(self.chat_caption_and_group().1)
     }
 
+    /// The width `AppendLines` word-wraps against: the transcript viewport the
+    /// renderer draws into, less the same 6px the draw path subtracts.
+    fn chat_transcript_wrap_width(&self) -> i32 {
+        (self.chat_layout().transcript_viewport.w - 6).max(1)
+    }
+
     fn chat_dialog_close_rect(caption: IntRect) -> IntRect {
         IntRect::new(caption.x + caption.w - 20, caption.y + 4, 16, 16)
     }
@@ -3534,59 +3625,39 @@ impl NetDlgController {
         }
     }
 
-    fn wrapped_chat_lines(
-        sheet: &NetDlgChatSheet,
-        font: Option<&ClonkFont>,
-        width: i32,
-    ) -> Vec<NetDlgWrappedChatLine> {
-        let mut wrapped = Vec::new();
-        for line in &sheet.lines {
-            let mut first_physical = true;
-            // Chat TextWindows are constructed with `fMarkup = false`, so
-            // `AppendLines` only counts CR and LF as line breaks and `|` stays
-            // literal (C4Gui.h:1309; C4LogBuf.cpp:180-183).
-            for paragraph in line.text.split(['\r', '\n']) {
-                let broken = font.map_or_else(
-                    || paragraph.to_string(),
-                    |font| break_message(font, paragraph, width.max(1)),
-                );
-                for physical in broken.split('\n') {
-                    if physical.is_empty() {
-                        continue;
-                    }
-                    wrapped.push(NetDlgWrappedChatLine {
-                        text: physical.to_string(),
-                        kind: line.kind,
-                        new_paragraph: first_physical,
-                    });
-                    first_physical = false;
-                }
-            }
-        }
-        wrapped
+    /// The transcript is already stored as display lines, wrapped when each
+    /// message arrived. `TextWindow::UpdateSize` re-bounds the buffer control
+    /// without re-flowing its contents (src/C4GuiLabels.cpp:490-500), so a
+    /// later width or font change must not re-wrap them here either.
+    fn wrapped_chat_lines(sheet: &NetDlgChatSheet) -> Vec<NetDlgWrappedChatLine> {
+        sheet
+            .lines
+            .iter()
+            .map(|line| NetDlgWrappedChatLine {
+                text: line.text.clone(),
+                kind: line.kind,
+                new_paragraph: line.new_paragraph,
+            })
+            .collect()
     }
 
-    fn chat_transcript_content_height(&self, index: usize, layout: &NetDlgChatLayout) -> i32 {
+    fn chat_transcript_content_height(&self, index: usize, _layout: &NetDlgChatLayout) -> i32 {
         let Some(sheet) = self.chat_sheets.get(index) else {
             return 0;
         };
         let line_h = self.metrics.text_line_height.max(1);
-        Self::wrapped_chat_lines(
-            sheet,
-            self.text_font.as_ref(),
-            (layout.transcript_viewport.w - 6).max(1),
-        )
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            line_h
-                + if index > 0 && line.new_paragraph {
-                    line_h / 3
-                } else {
-                    0
-                }
-        })
-        .sum()
+        Self::wrapped_chat_lines(sheet)
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                line_h
+                    + if index > 0 && line.new_paragraph {
+                        line_h / 3
+                    } else {
+                        0
+                    }
+            })
+            .sum()
     }
 
     fn chat_transcript_max_scroll_for(&self, index: usize, layout: &NetDlgChatLayout) -> i32 {
@@ -3865,14 +3936,19 @@ impl NetDlgController {
     }
 
     fn chat_error(&mut self, error: impl Into<String>) -> Vec<NetDlgAction> {
+        let wrap_width = self.chat_transcript_wrap_width();
+        let font = self.text_font.clone();
         if let Some(sheet) = self.chat_sheets.get_mut(self.chat_active_sheet) {
             Self::append_chat_line(
                 sheet,
                 NetDlgChatLine {
                     kind: NetDlgChatLineKind::Error,
                     text: error.into(),
+                    new_paragraph: true,
                 },
                 true,
+                font.as_ref(),
+                wrap_width,
             );
         }
         vec![NetDlgAction::GuiSound(NetDlgSound::Error)]
@@ -5841,11 +5917,7 @@ impl NetDlgScreen {
         );
         let line_h = fonts.text.line_height.max(1);
         if let Some(sheet) = controller.active_chat_sheet() {
-            let lines = NetDlgController::wrapped_chat_lines(
-                sheet,
-                Some(&fonts.text),
-                (chat_layout.transcript_viewport.w - 6).max(1),
-            );
+            let lines = NetDlgController::wrapped_chat_lines(sheet);
             let content_height = lines
                 .iter()
                 .enumerate()
@@ -8061,6 +8133,77 @@ mod tests {
         assert_same!(controller.chat_sheets()[channel_index].user_scroll => max_scroll, "the offset is bounded by the overflow");
     }
 
+    // `AppendLines` word-wraps a message at the width in force and hands every
+    // resulting line to `AppendSingleLine` on its own, and that is where the
+    // `iMaxLines = 100` / `iMaxTextLen = 4096` caps evict from the front
+    // (src/C4Gui.h:1309; src/C4LogBuf.cpp:96-148,174-205). The caps therefore
+    // count *display* lines, so one message long enough to overflow the
+    // transcript by itself loses its own leading lines instead of being
+    // retained whole.
+    #[test]
+    fn the_transcript_caps_count_wrapped_display_lines() {
+        let mut controller = controller();
+        controller.set_text_font(text_font());
+        let width = controller.chat_transcript_wrap_width();
+        assert!(width > 0, "the transcript has a wrap width");
+
+        // One message, long enough to overflow the transcript on its own, with
+        // every word individually identifiable.
+        let words = (0..1500)
+            .map(|index| format!("w{index}"))
+            .collect::<Vec<_>>();
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            vec![channel_message(words.join(" "))],
+            0,
+        ));
+        let channel = chat_sheet(&controller, NetDlgChatSheetKind::Channel, "channel tab");
+
+        assert!(
+            channel.lines.len() > 1,
+            "a single long message is stored as the display lines it wraps to, not one entry"
+        );
+        assert!(
+            channel.lines.len() <= CHAT_TRANSCRIPT_MAX_LINES,
+            "the line cap counts display lines: {} retained",
+            channel.lines.len()
+        );
+        let retained = channel
+            .lines
+            .iter()
+            .map(|line| line.text.len() + 1)
+            .sum::<usize>();
+        assert!(
+            retained <= CHAT_TRANSCRIPT_MAX_TEXT,
+            "retained {retained} bytes exceeds iMaxTextLen"
+        );
+
+        // Front eviction reaches inside the message: its opening words are
+        // gone while its last word survives.
+        let transcript = channel
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            transcript.contains("w1499"),
+            "the newest display line always survives"
+        );
+        assert!(
+            !transcript.contains("<Keeper>"),
+            "the message's own opening line is evicted, not preserved whole"
+        );
+        assert!(
+            !channel
+                .lines
+                .first()
+                .expect("a retained line")
+                .new_paragraph,
+            "the retained head is a continuation line, not the paragraph start"
+        );
+    }
+
     #[test]
     fn irc_login_validation_counts_legacy_bytes_and_rejects_unrepresentable_text() {
         let password_at_limit = format!("{}é", "a".repeat(30));
@@ -8429,11 +8572,7 @@ mod tests {
         ));
         controller.force_chat_mode_and_focus();
         let channel = chat_sheet_index(&controller, NetDlgChatSheetKind::Channel, "channel sheet");
-        let lines = NetDlgController::wrapped_chat_lines(
-            &controller.chat_sheets()[channel],
-            Some(text_font()),
-            4000,
-        );
+        let lines = NetDlgController::wrapped_chat_lines(&controller.chat_sheets()[channel]);
         assert_same!(lines .iter() .map(|line| line.text.as_str()) .collect::<Vec<_>>() => vec!["<Keeper> a|b"]);
 
         // A source-less notice reaches the active sheet, not Server.
