@@ -1796,51 +1796,6 @@ fn absolute_loader_path(path: &Path, exe_data_root: &Path) -> PathBuf {
     }
 }
 
-fn classic_global_group_candidates(paths: &AppPaths, filename: &str) -> Vec<PathBuf> {
-    let mut roots = vec![paths.planet_dir()];
-    if let Some(content) = paths.content_dir() {
-        roots.push(content);
-    }
-    roots.push(paths.install_root());
-    let mut candidates = Vec::new();
-    for root in roots {
-        let candidate = root.join(filename);
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
-        }
-    }
-    candidates
-}
-
-fn existing_classic_global_group_paths(paths: &AppPaths, filename: &str) -> Result<Vec<PathBuf>> {
-    let mut hits: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for candidate in classic_global_group_candidates(paths, filename) {
-        match fs::symlink_metadata(&candidate) {
-            Ok(_) => {
-                let identity = fs::canonicalize(&candidate).with_context(|| {
-                    format!(
-                        "classic loader cannot resolve global data path {}",
-                        candidate.display()
-                    )
-                })?;
-                if !hits.iter().any(|(seen, _)| seen == &identity) {
-                    hits.push((identity, candidate));
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "classic loader cannot inspect global data path {}",
-                        candidate.display()
-                    )
-                });
-            }
-        }
-    }
-    Ok(hits.into_iter().map(|(_, path)| path).collect())
-}
-
 pub(crate) fn classic_language_packs(paths: &AppPaths) -> LanguagePacks {
     let mut logical_roots = Vec::new();
     if let Some(content) = paths.content_dir() {
@@ -1879,27 +1834,26 @@ pub(crate) fn load_lobby_scenario_description(
     Ok(None)
 }
 
+/// C4Extra::InitGroup opens exactly one path, `Config.AtExePath(C4CFN_Extra)`,
+/// and returns false when `ItemExists` says it is absent (C4Extra.cpp:40-49).
+/// The Rust install layout maps that classic global-data namespace to
+/// `planet`, as `classic_language_packs` already does for `Language.c4g`, so
+/// same-named groups under the content or install roots are unrelated files:
+/// C++ never sees them, and they must neither be adopted nor make the mapped
+/// group ambiguous. An unreadable mapped group stays optional too — the
+/// callers mirror `Open` failing by carrying on without an extra root.
 pub(crate) fn mapped_classic_extra_group_path(paths: &AppPaths) -> Result<Option<PathBuf>> {
-    let mut hits = existing_classic_global_group_paths(paths, "Extra.c4g")?;
-    anyhow::ensure!(
-        hits.len() <= 1,
-        "classic loader global `Extra.c4g` mapping is ambiguous across: {}",
-        hits.iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let Some(hit) = hits.pop() else {
-        return Ok(None);
-    };
     let mapped = paths.planet_dir().join("Extra.c4g");
-    anyhow::ensure!(
-        hit == mapped,
-        "classic loader found Extra.c4g outside the mapped global-data namespace: {} (expected {})",
-        hit.display(),
-        mapped.display()
-    );
-    Ok(Some(hit))
+    match fs::symlink_metadata(&mapped) {
+        Ok(_) => Ok(Some(mapped)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "classic loader cannot inspect global data path {}",
+                mapped.display()
+            )
+        }),
+    }
 }
 
 /// `RealPath` used by C++ `ItemIdentical` does not require the leaf to exist.
