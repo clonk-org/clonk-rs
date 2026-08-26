@@ -6094,13 +6094,15 @@ impl EffectHostContext {
         if !resolvable {
             return None;
         }
-        // A VM session owns its `local` cells for the length of the call,
-        // so a call onto an object whose own script is already in flight
-        // cannot see that session's uncommitted writes: it starts from the
-        // pre-call snapshot. C++ keeps named locals on the C4Object itself,
-        // where the nested call would read them live — a known divergence,
-        // narrowed by the `overlay_foreign_cells` pass below, which does
-        // replay earlier cross-object LocalN writes onto the snapshot.
+        // These locals only ever SEED a session. Both call sites consult
+        // `session_local_cells` first (:2890, :3177), so a call onto an
+        // object whose own script is already in flight binds that object's
+        // live cell table and this snapshot is discarded — matching C++,
+        // which keeps named locals on the C4Object itself and has no
+        // per-call copy. The snapshot is used only when no session exists,
+        // where the world state is the correct seed. `overlay_foreign_cells`
+        // below replays earlier cross-object LocalN writes onto it for that
+        // case. Covered by `lib_tests/nested_local_liveness_parity.rs`.
         let mut snapshot_locals = world_object
             .as_ref()
             .and_then(|object| object.full_state())
