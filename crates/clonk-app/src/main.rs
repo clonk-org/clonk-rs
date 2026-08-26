@@ -4069,7 +4069,7 @@ impl GameApp {
             &self.engine,
             &request.scoreboard,
             self.script_text_spec_resources(),
-        )?;
+        );
         let assets = Arc::clone(&self.assets);
         let resources = assets.scoreboard_resources(&font_images)?;
         let live_preferred = scoreboard_preferred_rect(
@@ -4102,7 +4102,7 @@ impl GameApp {
             &self.engine,
             &self.snapshot.hud.scoreboard,
             self.script_text_spec_resources(),
-        )?;
+        );
         let assets = Arc::clone(&self.assets);
         let resources = assets.scoreboard_resources(&font_images)?;
         let scoreboard = self.snapshot.hud.scoreboard.clone();

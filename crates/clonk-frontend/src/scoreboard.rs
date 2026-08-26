@@ -297,12 +297,12 @@ pub fn scoreboard_layout_with_title_presence(
 
     let font = &resources.fonts.text;
     let images = resources.font_images();
-    for spec in scoreboard_inline_image_specs(scoreboard) {
-        ensure!(
-            font_image(images, &spec).is_some(),
-            "scoreboard FontRegular image token `{{{{{spec}}}}}` is unresolved"
-        );
-    }
+    // An unresolved `{{...}}` is deliberately not checked here.
+    // `CStdFont::DrawText` consumes the markup and `continue`s when the image
+    // renderer is not hooked or the id is unknown — "printing it out wouldn't
+    // look better" (src/StdFont.cpp:868-890) — and `GetTextExtent` measures it
+    // the same way, so the cell keeps its surrounding text and loses only the
+    // image (clonk-org/clonk-rs#1209).
     let mut column_widths = Vec::with_capacity(columns);
     for column in 0..columns {
         let mut width = X_INDENT;
@@ -2482,24 +2482,52 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_or_empty_custom_images_fail_before_layout() {
+    /// `CStdFont::DrawText` consumes `{{...}}` markup and `continue`s when the
+    /// image renderer is not hooked, the id is unknown, or the resolved facet
+    /// has no surface or height — "printing it out wouldn't look better"
+    /// (src/StdFont.cpp:868-890). `GetTextExtent` measures it the same way, so
+    /// the cell is laid out as if the markup were not there
+    /// (clonk-org/clonk-rs#1209).
+    fn unresolved_or_empty_custom_images_lay_out_as_consumed_markup() {
         let fonts = endeavour_font_set();
         let caption = load_graphics_png("GUICaption.png");
         let icons = load_graphics_png("GUIIcons.png");
-        let board = scoreboard(serde_json::json!([
-            [{"text":"Scores","value":-1}],
-            [{"text":"{{MISSING}}","value":1}]
-        ]));
+        let board = |cell: &str| {
+            scoreboard(serde_json::json!([
+                [{"text":"Scores","value":-1}],
+                [{"text":cell,"value":1}]
+            ]))
+        };
         let resources =
             ScoreboardResources::new(&caption, &icons, fonts.as_ref()).expect("resources");
-        let error = scoreboard_layout(preferred(), &board, &resources)
-            .expect_err("unresolved image must fail");
-        assert!(error.to_string().contains("{{MISSING}}"));
 
+        // The layout succeeds rather than refusing the board.
+        let unresolved = scoreboard_layout(preferred(), &board("{{MISSING}}"), &resources)
+            .expect("an unhooked image renderer does not refuse the board");
+
+        // A resolved facet with no surface or height reaches the same
+        // `continue`, so it is not a refusal either.
         let empty = ImageData::new(0, 0, Vec::new());
         let images = HashMap::from([("MISSING".to_string(), empty)]);
-        let resources = resources.with_font_images(&images);
-        assert!(scoreboard_layout(preferred(), &board, &resources).is_err());
+        let zero_sized = resources.with_font_images(&images);
+        scoreboard_layout(preferred(), &board("{{MISSING}}"), &zero_sized)
+            .expect("a zero-sized image does not refuse the board either");
+        let _ = &unresolved;
+
+        // Mixed markup lays out too, and the text around the token is intact.
+        scoreboard_layout(preferred(), &board("a{{MISSING}}b"), &resources)
+            .expect("mixed markup lays out");
+
+        // The token itself contributes no width. It is still a *recognized*
+        // token, so `GetTextExtent` applies `iHSpace` after it while raw text
+        // remains (src/StdFont.cpp:625-630) — that one spacing step, and no
+        // glyph, is the whole difference from the plain text.
+        let font = &resources.fonts.text;
+        let no_images = HashMap::new();
+        assert_eq!(
+            scoreboard_text_width("a{{MISSING}}b", font, &no_images),
+            scoreboard_text_width("ab", font, &no_images) + font.h_space,
+        );
     }
 
     /// A facet drawn from the shared icon sheet samples only its own cell

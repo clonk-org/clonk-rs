@@ -4665,37 +4665,45 @@ fn visible_script_scoreboard_preflights_live_data_and_user_tab_can_close_it() {
     app.test_render(&mut frame);
 }
 
+// `CStdFont::DrawText` consumes `{{...}}` markup and `continue`s when the
+// image renderer is not hooked or the id is unknown — "printing it out
+// wouldn't look better" (src/StdFont.cpp:868-890). The board keeps drawing;
+// only the image is lost (clonk-org/clonk-rs#1209). The exact widths that
+// follow from `GetTextExtent`'s matching branch are pinned in
+// clonk-frontend's own scoreboard tests.
 #[test]
-fn unresolved_scoreboard_font_image_fails_typed_before_pixels() {
-    let mut app = new_scoreboard_test_app(
-        r#"global func ShowBroken()
-                   {
+fn an_unresolved_scoreboard_font_image_still_draws_the_rest_of_the_board() {
+    let show = |cell: &str| {
+        format!(
+            r#"global func Show()
+                   {{
                        SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-                       SetScoreboardData(1, SBRD_Caption, "{{NO_SUCH_DEFINITION}}");
+                       SetScoreboardData(SBRD_Caption, 1, "Points");
+                       SetScoreboardData(1, SBRD_Caption, "{cell}");
+                       SetScoreboardData(1, 1, "42");
                        DoScoreboardShow(1);
-                   }"#,
-    );
-    call_scoreboard_function_and_update(&mut app, "ShowBroken");
-    main_assert!(app.scoreboard_dialog.is_some());
-    let before_surface = app.graphics.surface().pixels().to_vec();
-    let mut frame = vec![0x71; 320 * 200 * 4];
-    let sentinel = frame.clone();
+                   }}"#
+        )
+    };
+    let render = |source: String| {
+        let mut app = new_scoreboard_test_app(&source);
+        call_scoreboard_function_and_update(&mut app, "Show");
+        main_assert!(app.scoreboard_dialog.is_some());
+        let mut frame = vec![0x71; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("an unresolved FontRegular image does not fail the frame");
+        (app.graphics.surface().pixels().to_vec(), frame)
+    };
 
-    let error = app
-        .render(&mut frame)
-        .expect_err("an unresolved FontRegular image must fail closed");
-    main_assert!(matches!(
-        error.downcast_ref::<ClassicParityBoundary>(),
-        Some(ClassicParityBoundary::Scoreboard {
-            trigger: ClassicScoreboardTrigger::ScriptVisibility,
-            rows: 2,
-            columns: 1,
-            show_count: 1,
-        })
-    ));
-    main_assert_eq!(frame => sentinel);
-    main_assert_eq!(app.graphics.surface().pixels() => before_surface.as_slice());
-    main_assert!(app.scoreboard_dialog.is_some());
+    // The frame is drawn rather than refused, and the board reached it.
+    let (unresolved, frame) = render(show("{{NO_SUCH_DEFINITION}}"));
+    main_assert_ne!(frame => vec![0x71; 320 * 200 * 4], "the board drew over the sentinel");
+
+    // Mixed markup is equally fine, and the board is still a *board*: a
+    // resolvable label paints something else.
+    render(show("a{{NO_SUCH_DEFINITION}}b"));
+    let (plain, _) = render(show("Team"));
+    main_assert_ne!(unresolved => plain);
 }
 
 #[test]
