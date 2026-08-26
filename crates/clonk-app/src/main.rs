@@ -4608,7 +4608,13 @@ impl GameApp {
             .first_active_object_for_definition(definition_id)
             .and_then(|object| i32::try_from(object.as_u64()).ok())
         else {
-            return Err(classic_ingame_menu_child_error(unresolved));
+            // `else return false` — `Game.Objects.FindInternal` answering
+            // nothing queues no `CID_ActivateGameGoalRule` and reports nothing
+            // (C4MainMenu.cpp:891-895). The menu is already closed: `C4Menu::
+            // Enter` closes a non-permanent menu before the command runs
+            // (C4Menu.cpp:512-518), which is the port's `close_menu` outcome,
+            // and the branch's own `Close(true)` is redundant after it.
+            return Ok(());
         };
         if self.network.is_some() {
             let tick = self.local_control_submission_tick();
