@@ -3029,3 +3029,85 @@ fn initial_docon_removes_the_solid_mask_it_just_put_and_probes_instability() {
          no probe means the second UpdateSolidMask never ran"
     );
 }
+
+#[test]
+fn script_created_object_probes_instability_like_the_engine_placement_path() {
+    // The port has two initial-DoCon implementations. clonk-org/clonk-rs#1165
+    // gave the engine placement path (`do_initial_con`) C++'s two
+    // UpdateSolidMask calls -- put, keep-bottom move, remove-and-re-put --
+    // where the Remove is what probes the landscape for instability
+    // (C4Object.cpp:1487,1490-1497; C4SolidMask.cpp:256).
+    //
+    // Script `CreateObject` does not use that path: it runs its own initial
+    // DoCon in `compat::objects::create_object`, which adjusted the position
+    // and updated the mask exactly once. So every script-created object --
+    // basements, for one -- skipped the probe and seeded no mass movers
+    // (clonk-org/clonk-rs#1166).
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 8;
+
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
+        r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            MaxSlide=1
+            Instable=1
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            "#,
+    ));
+    let materials = MaterialSet::from_resource_library(&library);
+    let mut landscape =
+        crate::TestValueExt::test_value(Landscape::new(WIDTH, vec![HEIGHT as i32; WIDTH as usize]));
+    landscape.set_world_height(HEIGHT as i32);
+    landscape.set_pixel_grid(PixelGrid::new(
+        WIDTH,
+        HEIGHT,
+        vec![1; (WIDTH * HEIGHT) as usize],
+        vec![0, 25, 100],
+        vec![None, Some("Water".into()), Some("Vehicle".into())],
+        vec![None; 3],
+    ));
+    landscape.set_border_open(0, 0, false, false);
+    landscape.resolve_grid_materials(|name| materials.id_of(name));
+
+    let mut engine = Engine::with_seed(0);
+    engine.set_materials(materials);
+    engine.set_landscape(landscape);
+    register_fixture!(
+        engine,
+        "MASK",
+        "Masked builder",
+        "#strict\n",
+        set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4))),
+        set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 4, 4, 0, 0))),
+    );
+    register_fixture!(
+        engine,
+        "SPWN",
+        "Spawner",
+        "#strict\npublic func Go() { return(CreateObject(MASK, 0, 0, -1)); }\n",
+        // The spawner itself carries no solid mask; the shape only keeps
+        // `register_fixture!` from binding an unmutated `definition`.
+        set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1))),
+    );
+
+    let spawner = spawn_fixture!(engine, "SPWN", with_position: Vector2::new(4, 4));
+    let spawner_index = engine.test_object_index(spawner);
+
+    crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow_mut().clear());
+    engine
+        .call_object_function(spawner_index, "Go", Vec::new())
+        .expect("the script creation callback succeeds");
+    let probes =
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow().clone());
+
+    assert!(
+        !probes.is_empty(),
+        "a script-created masked object must probe instability during its \
+         initial DoCon, exactly as an engine-placed one does"
+    );
+}
