@@ -38,8 +38,8 @@ pub enum SurfaceError {
     /// An extent was zero or beyond what the device supports.
     #[error("{0}")]
     Extent(#[from] ExtentError),
-    /// The adapter does not meet the interactive graphics floor. Carries every
-    /// unmet requirement, not just the first one found.
+    /// The adapter does not meet the retained GPU graphics floor. Carries
+    /// every unmet requirement, not just the first one found.
     #[error("{0}")]
     BelowGraphicsFloor(crate::capability::CapabilityReport),
     /// The surface is gone and must be rebuilt by its owner, not reconfigured.

@@ -1,10 +1,11 @@
 # Software presentation smoke
 
 This opt-in probe drives the shipped `clonk-app` event handler through a real
-window that has **no wgpu instance, adapter or device behind it**. It exists for
-the no-adapter environments in clonk-org/clonk-rs#299 — GLES 2.0-only Raspberry
-Pi 0–3 / VideoCore IV and anything else below the graphics floor established in
-clonk-org/clonk-rs#298 — where the ordinary GPU presenter cannot start at all.
+window that has **no wgpu instance, adapter or device behind it**. It exercises
+the fallback for environments below the retained GPU floor established in
+clonk-org/clonk-rs#298. GLES 2.0-only Raspberry Pi 0–3 / VideoCore IV is one
+intended route, but this smoke's X11/macOS evidence does not qualify those
+boards; clonk-org/clonk-rs#1249 owns that hardware run.
 
 It is the counterpart to `HEADED_SURFACE_TEARDOWN_SMOKE.md`, not a mode of it.
 That runner validates GPU adapter and driver teardown and quotes
@@ -93,3 +94,9 @@ Run and passing on:
 - **Linux / X11 under Xvfb** — `aarch64`, Debian-based `rust:1.97.1` container,
   no GPU present.
 - **macOS** — an ordinary desktop session.
+
+These are path-specific reference runs, not a claim about every `softbuffer`
+platform. Windows qualification is tracked by clonk-org/clonk-rs#1254, native
+Wayland by clonk-org/clonk-rs#1255, fullscreen/input-coordinate proof by
+clonk-org/clonk-rs#1262, and presenter-specific performance evidence by
+clonk-org/clonk-rs#1263.

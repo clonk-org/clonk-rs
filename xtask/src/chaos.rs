@@ -1,9 +1,8 @@
 //! `cargo xtask chaos` — the potato-on-a-bad-link regression harness.
 //!
-//! Report-only by design. `docs/PERFORMANCE.md` ("Baseline collection") is
-//! explicit that timings from an arbitrary machine must not become blocking
-//! thresholds until enough comparable samples exist, so `verify` prints deltas
-//! against a recorded baseline and does not fail on them.
+//! Report-only by design. `docs/PERFORMANCE.md` requires enough comparable
+//! default-branch samples before a timing may become a blocking threshold, so
+//! `verify` prints deltas against a recorded baseline and does not fail on them.
 //!
 //! Two kinds of check *do* fail, because neither is a timing measurement:
 //!
@@ -17,12 +16,13 @@
 //! Percentiles are taken once over the merged sample set from every seed, never
 //! averaged across seeds — you cannot average a percentile.
 //!
-//! **Known limitation.** Each participant gets its own independent simulated
+//! **Coverage boundary.** Each participant gets its own independent simulated
 //! link, so the host's uplink is not shared between peers. Adding participants
 //! therefore does not add host-side contention, and `potato-dialup-8p` currently
 //! reports the same numbers as `potato-dialup`. Real host uplink is one pipe
-//! carrying N copies of every aggregate, which is exactly where a larger game
-//! degrades first — see `chaos/README.md`.
+//! carrying N copies of every aggregate. The missing shared pipe is tracked by
+//! clonk-org/clonk-rs#1229 and documented with the other boundaries in
+//! `chaos/README.md`.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -140,8 +140,8 @@ fn profiles() -> Vec<Profile> {
         },
         Profile {
             name: "potato-dialup-8p",
-            description:
-                "same, with 8 participants; see the host-uplink limitation in chaos/README.md",
+            description: "same, with 8 participants; shared host-uplink contention is not \
+                          modelled (clonk-org/clonk-rs#1229)",
             link: Some(dialup()),
             cpu: Some(CpuProfile::potato()),
             clients: 8,
@@ -625,7 +625,7 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
             }
             println!(
                 "\nReport-only: deltas above are not a pass/fail signal. Promote a threshold \
-                 only after docs/PERFORMANCE.md's baseline-collection rule is satisfied."
+                 only under docs/PERFORMANCE.md's Baselines and regression gates policy."
             );
         }
         _ => {}

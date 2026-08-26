@@ -165,6 +165,7 @@ cargo nextest run --workspace --no-fail-fast
 cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
 cargo xtask engine-snapshots verify
 cargo xtask parity verify
+cargo xtask compat verify
 ```
 
 The Python unittest discovery covers repository scripts, including public-path
@@ -172,48 +173,31 @@ portability and the 24-player benchmark harness. The explicit engine-tools
 test command exercises the feature-gated packager, archive, and release-dependency
 checks that the default workspace feature set does not build. The workspace
 test run includes the focused tutorial, virtual-play, snapshot, and C++↔Rust
-differential tests. The explicit snapshot and parity commands remain named
-completion gates so both baselines are visible independently in local and CI
-output. The parity wrapper invokes the pinned cargo-nextest 0.9.91 tool listed
-above.
+differential tests. The explicit snapshot, parity, and compatibility commands
+remain named completion gates so the three independent contracts are visible
+in local and CI output. The parity wrapper invokes the pinned cargo-nextest
+0.9.91 tool listed above.
 The explicit Clippy target set covers every production library, binary, and
 test without rebuilding `test = false` libraries as implicit benchmark
-harnesses. The three Criterion benchmarks remain opt-in through their `bench`
-features.
+harnesses. Criterion benchmarks remain opt-in through their `bench` features.
 Behavior changes can additionally require the relevant scenario sweep/audit and
 a rebuilt live C++ comparison against an oracle checkout selected by
 `LEGACYCLONK_ORACLE_ROOT`.
 
 `.github/workflows/landing.yml` keeps pull-request admission small, then runs
-the exhaustive workspace suite as compile-time shards against the exact merge
-queue tree. Twelve application feature selectors cover the exhaustive fragment
-inventory, with one route-support fragment shared by selectors 3 and 11; nine
-shared harness tests run once in selector 5. Nine application rows distribute
-all 12 feature shards, including the two independently compiled netplay
-modules. Three engine-integration rows, one combined engine/frontend-unit and
-parity row, two disjoint residual-package rows, and dedicated quality and
-contract rows complete the 17-row Linux matrix. Two Windows rows keep the slow
-network compile independent while the shorter runtime row also runs quality
-and NSIS checks. Formatting,
-script tests, lints, parity, snapshots, packaging, and Windows checks feed one
-fail-closed `Landing gate`.
+the exhaustive workspace suite against the exact merge-queue tree. Formatting,
+script tests, lints, parity, snapshots, compatibility, packaging, and Windows
+checks feed one fail-closed `Landing gate`. The workflow is the source of truth
+for the current shard topology; do not copy its row counts or selectors into
+documentation that will drift when the suite is rebalanced.
 
-`.github/workflows/rust.yml` runs slower diagnostic coverage, macOS
-recording-host oracles, and Windows release tooling after an ordinary SHA
-lands. Release candidates instead run exact-SHA qualification inside their
-merge-group `Landing` run, and release publication resolves only those
-queue-qualified artifacts. A short, non-preempted trusted-main job publishes
-an exact content Git-object cache keyed by
-`.gitmodules` and the pinned gitlink. Landing consumers restore it, materialize
-the submodule, and verify its exact
-revision and clean state. A separate trusted-main Windows producer compiles the
-landing test/lint graph before publishing its reusable dependency artifacts as
-`windows-runtime-msvc-v2`, leaving shipped-runtime validation downstream.
-Selected merge-group rows may preempt the rolling Linux and Windows cache
-producers. Release commits use exact-SHA groups and remain isolated from that
-preemption. Before post-merge diagnostics fan out, a read-only admission job
-checks for an active merge group; a shared concurrency lane also lets any
-candidate arriving after that check cancel the diagnostic caller.
+`.github/workflows/rust.yml` runs slower diagnostic coverage, recording-host
+oracles, and release-platform tooling after an ordinary SHA lands. Release
+candidates instead run exact-SHA qualification inside their merge-group
+`Landing` run, and release publication resolves only queue-qualified artifacts.
+Cache producers and consumers verify the pinned content revision and retain
+separate trust boundaries for merge-group and default-branch artifacts; read
+the workflow itself for current cache keys and concurrency lanes.
 
 After a landing-cache key change lands on `main`, seed it without running
 post-merge diagnostics:
@@ -223,22 +207,9 @@ gh workflow run rust.yml --repo clonk-org/clonk-rs --ref main \
   -f cache_only=true
 ```
 
-The explicit dispatch gives all three producers exact-SHA concurrency lanes
-that a busy merge queue or newer push cannot preempt or replace. Ordinary
-content publishers still coalesce safely on their rolling lane. Fresh dependent
-Linux and Windows jobs must restore both Rust caches before the bootstrap can
-report success.
-
-The measured baseline is a 649-second ordinary p50 across 88 successful,
-non-release merge-group `Landing` runs ending 2026-08-20; a full 50% reduction
-means an ordinary p50 at or below 324.5 seconds (324 seconds when reported as a
-whole duration). The first uncontended fully seeded sample, run `32410157185`,
-finished in 354 seconds, 45.5% below baseline. The revised 17-plus-two graph
-splits that sample's longest application pairs, avoids serializing Windows
-network tests, and removes setup scans from Linux rows. It remains a candidate
-until a comparable live merge-group sample reaches the strict target; record
-queue delay, runner availability, cache state, and content revision while
-separating canceled, failed, and release runs.
+The explicit dispatch gives the producers exact-SHA concurrency lanes suitable
+for seeding a changed key. Confirm success from the current workflow report;
+the number and names of caches are implementation details of that workflow.
 
 ## Cache and timing hygiene
 

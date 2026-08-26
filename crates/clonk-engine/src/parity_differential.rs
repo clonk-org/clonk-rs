@@ -3522,8 +3522,7 @@ fn parity_differential_matches_cpp_golden() {
     }
 
     // 0g. C4Shape::ContactCheck (C4Shape.cpp:370-406), the per-pixel probe every
-    //     step of C4Object::DoMovement runs — the explicit Phase 2 per-pixel
-    //     collision gap in parity/README.md, for this bounded matrix. It decides
+    //     step of C4Object::DoMovement runs, for this bounded matrix. It decides
     //     ContactCNAT, ContactCount and the per-vertex VtxContactCNAT, so a
     //     vertex that answers differently by one pixel moves the object
     //     differently for the rest of the frame.

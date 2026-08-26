@@ -1,4 +1,4 @@
-# C++↔Rust Differential Parity Harness (Phase 1)
+# C++↔Rust primitive differential harness
 
 This harness verifies that the Rust port (`crates/clonk-engine`) reproduces the
 determinism-critical C++ primitives **bit-for-bit**. It is a true *differential*
@@ -7,15 +7,17 @@ against the C++ source snapshot pinned at
 not a Rust-vs-Rust regression check (that is
 `cargo xtask engine-snapshots verify`).
 
-It exists to **gate Theme C** (wiring fixed-point precision through the physics /
-collision / procedure code): the sub-pixel accumulation it covers is exactly the
-arithmetic that movement physics extends, so any divergence introduced while
-porting physics is caught immediately, with the first mismatch pinpointed.
+The harness is the required, reproducible oracle for bounded behavior that can
+be extracted from C++ without booting a complete scenario. The live
+full-scenario complement is documented in [`bridge/README.md`](bridge/README.md).
 
 ## What it covers
 
 The golden (`golden/parity_golden.json`) is generated from the **real engine
-code** and the Rust side runs identical inputs and asserts byte-exact equality:
+code** and the Rust side runs identical inputs and asserts byte-exact equality.
+The keys in that file are the authoritative section inventory; the table below
+highlights the highest-coupling sections rather than duplicating that evolving
+inventory in prose:
 
 | Section | C++ source of truth | Why it matters |
 |---|---|---|
@@ -58,11 +60,11 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `do_movement_rotation_matrix` | mechanically extracted rotation block plus complete `C4Shape::Rotate` (`src/C4Movement.cpp:372-436`; `src/C4Shape.cpp:41-101`) | absolute-shape one-degree turns, rotation limits, contact rollback, rdir redirection, and raw `fix_r` accumulation |
 | `do_movement_contact_action_handoff` | `src/C4Movement.cpp:467-472` handoff plus the exact bottom `DFA_FLIGHT` arm | the aggregate contact mask replaces the last-probe mask and changes Flight to Walk with bottom precedence |
 
-The bounded ordinary, non-attached per-pixel collision loop is covered. Still
-out of scope for this phase are attached movement and evolving content-driven
-landscape/material state beyond the isolated fixtures above. Full-scenario
-interactions still require running the C++ engine through the
-`RustEngineBridge` live shadow-diff — see "Phase 2" below.
+Each golden section is deliberately bounded to the named function bodies and
+fixtures. Cross-system behavior must be checked with the live `RustEngineBridge`
+shadow diff. The remaining direct attached-movement differential is tracked by
+clonk-org/clonk-rs#516, and live landscape comparison by
+clonk-org/clonk-rs#1240.
 
 ## Accepted safety divergences
 
@@ -86,7 +88,8 @@ interactions still require running the C++ engine through the
 
 ## How the oracle stays honest
 
-`oracle/gen_golden.sh` uses the actual engine code, not a hand-rewrite:
+`oracle/gen_golden.sh` uses the actual engine code, not a hand-rewrite. Selected
+construction rules and examples:
 
 - `oracle_fixed.h` is **mechanically stripped** from `src/Fixed.h` (only the
   `StdCompiler`/`StdAdaptors` includes and the serialization `CompileFunc` are
@@ -128,8 +131,8 @@ interactions still require running the C++ engine through the
   other cases enter definition-only DirectExec through `DefinitionCall` and
   `Game.Script` through `global->eval`. The focused C++ scaffold validates
   receiver/setup/strict/source forwarding but does not run C++ `ParseFn` or
-  expression execution; full scheduled-expression parity still requires a
-  native scenario differential.
+  expression execution. Scheduled expressions are exercised as part of the
+  native scenario differential described in [`bridge/README.md`](bridge/README.md).
 - `definition_commanded_effect_position` mechanically extracts the complete
   production `C4Effect::Execute`, `C4AulScriptFunc::Exec` engine-call
   forwarding, `C4AulExec::Exec` script-context setup, and `FnGetX`/`FnGetY`.
@@ -184,9 +187,9 @@ interactions still require running the C++ engine through the
   `C4Shape::LineConnect` one-vertex failure guard and the later DFA_CONNECT
   `LineBreak()`/removal block. Rust drives both through the real
   `Engine::exec_connect_line` method and inspects each deleted line before frame
-  cleanup. These focused fixtures do not model the rest of `AssignRemoval`
-  (contents, effects, or pointer clearing), nor LineConnect's
-  landscape-dependent path and bend search after its vertex-count guard.
+  cleanup. Other golden sections cover the general removal lifecycle; the
+  landscape-dependent `LineConnect` path and bend search after its vertex-count
+  guard are tracked by clonk-org/clonk-rs#1243.
 - `solid_mask_graphics` calls the production `C4SolidMaskBitmap.h` helpers used
   by `C4SolidMask`. Its decisive `(219,86)` input is the minimized Goldrush
   frame-184 CTWR Graphics2/SNKE contact: default graphics are transparent,
@@ -291,9 +294,9 @@ makes synchronized `FRndPtr3`/`RandomHold`/`RandomCount` mismatches fail closed
 on every frame without changing simulation logic.
 
 This is historical evidence for clonk-org/clonk-rs#394, not a claim that the
-current Rust engine matches the full C++ scenario. The later oracle pin carries
-a different bundled Rust tree, and the current tree no longer exposes the live
-C ABI bridge; neither is validated by this report.
+current Rust engine matches the full C++ scenario. It remains tied to the Rust
+revision recorded in the artifact. Use the live bridge below for the current
+tree.
 
 ## Layout
 
@@ -308,19 +311,19 @@ parity/
   reports/
     goldrush_seed_424242.json             # historical scenario horizon
     goldrush_seed_424242_rng_ledger.diff  # fail-closed RNG diagnostic
+  bridge/                                 # current-tree full-scenario shadow diff
 ```
 
-## Phase 2 (future): live full-scenario shadow-diff
+## Live full-scenario shadow diff
 
-The current Rust tree does not expose the C ABI consumed by the historical
-`src/rust/RustEngineBridge.cpp`. The execution checkout used by the report links
-its own historical Rust snapshot; its base C++ `src` tree is byte-identical to
-the later pin. That bridge already transports raw
-`fix_x/fix_y/fix_r/xdir/ydir/rdir` values and reports first-field mismatches,
-but it cannot validate current Rust.
+The current tree exposes the C ABI consumed by the pinned oracle's
+`src/rust/RustEngineBridge.cpp`. Build and arming instructions, comparison
+boundaries, and the traps that can make a run compare nothing are in
+[`bridge/README.md`](bridge/README.md).
 
-A current-tree full-scenario gate needs a new live trace or C-ABI consumer that
-runs the current engine against the same pinned C++ source, content revision,
-seed, and controls. Until that exists, `cargo xtask parity verify` remains the
-Phase 1 primitive gate and historical scenario reports must stay explicitly
-scoped to their bundled Rust revision.
+The two harnesses answer different questions. `cargo xtask parity verify`
+compares the committed bounded C++ fixtures and is a required gate. The live
+bridge boots real content and finds cross-system drift, but requires a local
+oracle build and is intentionally an investigation tool rather than a CI gate.
+A green result from either one must not be reported as evidence for state the
+other harness alone observes.

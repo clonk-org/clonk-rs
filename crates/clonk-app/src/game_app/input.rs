@@ -1,8 +1,8 @@
 //! `impl GameApp` — pointer, keyboard, gamepad & touch input methods.
 //!
-//! Moved verbatim from the root `impl GameApp` block in `main.rs`
-//! (step 6a of the decomposition campaign, see rust/REFACTOR_PLAN.md).
-//! Structural only: same crate, same type, same method bodies.
+//! This remains an `impl GameApp` module so it can share private application
+//! state. Extracting an independently owned input state is tracked by
+//! clonk-org/clonk-rs#1237.
 
 use super::*;
 

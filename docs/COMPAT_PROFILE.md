@@ -16,13 +16,12 @@ evidence for each part of it is named separately, every deliberate difference
 has an owner and a disposition, and every combination the promise does not cover
 is refused rather than approximated.
 
-The profile is defined before it is implemented, on purpose. A configuration
-key that turns on an undefined promise is worse than no key at all: it invites a
-player into a mixed session that may desync, and a desync in a lockstep engine
-is a lost round for everyone in it, not a cosmetic glitch. Implementation of the
-toggle, its negotiation, and its enforcement are tracked separately in
-clonk-org/clonk-rs#583, clonk-org/clonk-rs#584 and clonk-org/clonk-rs#588; the
-tracker for the whole effort is clonk-org/clonk-rs#498.
+The profile fails closed while any promised evidence is pending. Configuration,
+synchronized-default overlays, and readiness diagnostics are implemented in
+clonk-org/clonk-rs#582, clonk-org/clonk-rs#584, and clonk-org/clonk-rs#588.
+Per-route connection enforcement remains incomplete in
+clonk-org/clonk-rs#583. The coordination tracker for the whole effort is
+clonk-org/clonk-rs#498.
 
 ## What the profile pins
 
@@ -82,21 +81,28 @@ cannot be checked by a reader.
 
 With a fixed seed and a fixed frame-counted control sequence, engine state is
 bit-identical to the oracle in every raw `C4Fixed` value, the
-`Random`/`RandomCount`/`FRnd3` ledgers, landscape and material state, PXS
-execution, and C4Script VM semantics — except at the two accepted safety
-boundaries below. No intentional simulation divergence is retained by the
-profile.
+`Random`/`RandomCount`/`FRnd3` ledgers, landscape and material state, weather
+and environment state, PXS execution, and C4Script VM semantics — except at
+the two accepted safety boundaries below. No intentional simulation divergence
+is retained by the profile.
 
-Held: `cargo xtask parity verify` (the C++-golden primitive sections) and
-`cargo xtask engine-snapshots verify` (Rust self-consistency of the synthetic
-scenarios). `parity/reports/goldrush_seed_424242.json` is a historical
-continuous shadow differential and is scoped evidence about its own bundled
-revision only.
+Held: `cargo xtask parity verify` (the C++-golden primitive sections),
+`cargo xtask engine-snapshots verify` (Rust self-consistency of synthetic
+scenarios), and the current-tree full-scenario bridge documented in
+`parity/bridge/README.md` (clonk-org/clonk-rs#585). The bridge is an operational
+local investigation tool, not a CI gate, and its clean result means only that
+the fields carried by its comparison ABI matched. The historical
+`parity/reports/goldrush_seed_424242.json` remains scoped to its bundled
+revision.
 
-Pending: clonk-org/clonk-rs#585, a current-tree full-scenario C++ shadow diff.
-`cargo xtask parity verify` is roughly 31 primitive sections; it passes untouched
-through a change to players, savegames, or scenario init, so it is not proof of
-full-scenario parity and this contract does not present it as such.
+Pending: clonk-org/clonk-rs#1261 adds independently evolving weather and
+environment state to the live comparison; clonk-org/clonk-rs#1240 adds the
+live landscape and material planes. clonk-org/clonk-rs#516 owns the missing
+attached-`DoMovement` raw-state differential matrix, and
+clonk-org/clonk-rs#1243 owns landscape-aware `LineConnect` routing. Until those
+issues close, the bounded primitive golden and a clean shadow-diff run do not
+prove the corresponding parts of the simulation promise; the golden's keys are
+the authoritative inventory of what `cargo xtask parity verify` covers.
 
 ### Control
 
@@ -126,8 +132,8 @@ Held: the ReliableUDP, NetPuncher, and session-protocol conformance tests in
 comparison; and `crates/clonk-network/src/capabilities.rs`, which pins what a
 released port build reads from this build's announcement and datagrams.
 
-Pending: clonk-org/clonk-rs#583 (advertising and enforcing the profile during
-connection setup) and clonk-org/clonk-rs#586.
+Pending: clonk-org/clonk-rs#583 (restart, rejoin, and per-route connection
+enforcement) and clonk-org/clonk-rs#586.
 
 ### Content and resources
 
@@ -158,8 +164,9 @@ Held: `docs/RENDERING_PARITY.md` and the F9 reference-capture pixel-parity
 suites in `crates/clonk-frontend`.
 
 Pending: clonk-org/clonk-rs#587, C++/Rust presentation capture diffs taken with
-the profile active. `compat/presentation_captures.json` is the detail behind
-that entry: the thirteen screens a comparison has to cover, the single
+the profile active, and clonk-org/clonk-rs#1241, live platform qualification of
+complete retained-GPU device-loss recovery through the shipped event loop.
+`compat/presentation_captures.json` is the detail behind the first entry: the thirteen screens a comparison has to cover, the single
 resolution and scale every capture is taken at, the tolerances a comparison may
 apply — nothing at all for the software renderer, the documented one byte for
 GPU readback — and the regions a comparison is allowed to ignore. A screen
@@ -179,12 +186,18 @@ Interchange with a stock C++ build is claimed only as far as the stated evidence
 goes — format round-trips are not a claim that a C++ build will restore the file
 into the same state.
 
-Held: the `C4Record` format round-trips in `crates/clonk-engine/src/record.rs`
-and the savegame component serialization tests in
-`crates/clonk-app/src/main_tests/saves.rs`.
+Held: the `C4Record` format round-trips in `crates/clonk-engine/src/record.rs`,
+the savegame component serialization tests in
+`crates/clonk-app/src/main_tests/saves.rs`, plus the component-level checkpoint,
+resync, and post-mortem tests in `crates/clonk-network`.
 
-Pending: clonk-org/clonk-rs#524 (save serialization and restore ordering) and
-clonk-org/clonk-rs#527 (resync and post-mortem recovery).
+Pending: clonk-org/clonk-rs#524. Its component-selection and ordering tests are
+held, but representative C++/Rust save bytes, callback traces, restored state,
+and the first post-load tick remain without the differential evidence the
+issue requires. clonk-org/clonk-rs#527 likewise remains pending: its component
+tests do not differentially compare the complete checkpoint decision,
+post-mortem transcript, attribution, recovery state, and subsequent tick
+against C++.
 
 ## Accepted divergences
 
@@ -324,10 +337,12 @@ matching what a C++ peer computes, not passing its resource negotiation. The
 entry is kept in the manifest rather than removed, so the limitation is stated
 where the contract is read.
 
-The seven pending evidence entries name six issues —
-clonk-org/clonk-rs#585 (simulation), clonk-org/clonk-rs#586 (control and
-transport, once each), clonk-org/clonk-rs#583 (transport),
-clonk-org/clonk-rs#587 (presentation), and clonk-org/clonk-rs#524 and
+The eleven pending evidence entries name ten issues:
+clonk-org/clonk-rs#1261, clonk-org/clonk-rs#1240, clonk-org/clonk-rs#516, and
+clonk-org/clonk-rs#1243 (simulation),
+clonk-org/clonk-rs#586 (control and transport, once each),
+clonk-org/clonk-rs#583 (transport), clonk-org/clonk-rs#587 and
+clonk-org/clonk-rs#1241 (presentation), and clonk-org/clonk-rs#524 and
 clonk-org/clonk-rs#527 (save and replay).
 
 ## Changing this contract
