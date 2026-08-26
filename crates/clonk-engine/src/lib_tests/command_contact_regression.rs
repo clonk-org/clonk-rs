@@ -2941,3 +2941,91 @@ fn read_only_terrain_queries_never_clone_the_landscape() {
         "the borrowed landscape reports untouched sky"
     );
 }
+
+#[test]
+fn initial_docon_removes_the_solid_mask_it_just_put_and_probes_instability() {
+    // C4Object::DoCon touches the solid mask TWICE on an initial con.
+    // UpdateFace(true) -> UpdateSolidMask(false) NEWs and Puts it
+    // (C4Object.cpp:1487); then the `if (!r || fInitial)` bottom-y-adjust
+    // branch calls UpdateSolidMask again (C4Object.cpp:1490-1497), which
+    // now finds pSolidMaskData set and takes the `else` arm --
+    // pSolidMaskData->Remove(true, false) (C4Object.cpp:5683). That Remove
+    // probes every mask pixel for instability and seeds a mass mover on
+    // each instable one (C4SolidMask.cpp:256).
+    //
+    // The port collapsed both updates into one, so there was never a put
+    // mask to remove and the probe never ran -- landscape init created no
+    // movers at all where C++ created hundreds (clonk-org/clonk-rs#1139).
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 8;
+
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
+        r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            MaxSlide=1
+            Instable=1
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            "#,
+    ));
+    let materials = MaterialSet::from_resource_library(&library);
+    let mut landscape =
+        crate::TestValueExt::test_value(Landscape::new(WIDTH, vec![HEIGHT as i32; WIDTH as usize]));
+    landscape.set_world_height(HEIGHT as i32);
+    // Solid-mask pixels are written as MCVehic, so the grid needs a
+    // Vehicle entry for the mask to be put at all.
+    landscape.set_pixel_grid(PixelGrid::new(
+        WIDTH,
+        HEIGHT,
+        vec![1; (WIDTH * HEIGHT) as usize],
+        vec![0, 25, 100],
+        vec![None, Some("Water".into()), Some("Vehicle".into())],
+        vec![None; 3],
+    ));
+    landscape.set_border_open(0, 0, false, false);
+    landscape.resolve_grid_materials(|name| materials.id_of(name));
+
+    let mut engine = Engine::with_seed(0);
+    engine.set_materials(materials);
+    engine.set_landscape(landscape);
+    register_fixture!(
+        engine,
+        "MASK",
+        "Masked builder",
+        "#strict\n",
+        // A shape that grows with Con, so the keep-bottom adjust moves the
+        // object and opens the second UpdateSolidMask.
+        set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4))),
+        set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 4, 4, 0, 0))),
+    );
+
+    crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow_mut().clear());
+    // The creation lifecycle, not the bare spawn: this is the path that
+    // runs the initial DoCon (C4Game.cpp:1142).
+    let object = crate::TestValueExt::test_value(
+        engine.spawn_object_with_initial_lifecycle(
+            crate::SpawnConfig::new("MASK")
+                .with_position(Vector2::new(4, 4))
+                .with_construction(FULL_CON),
+            None,
+        ),
+    )
+    .expect("the masked object survives creation");
+    let probes =
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow().clone());
+
+    let index = engine.test_object_index(object);
+    assert!(
+        engine.objects[index].solid_mask_bake.is_some(),
+        "the object ends creation with its mask put"
+    );
+    assert!(
+        !probes.is_empty(),
+        "the initial DoCon must remove the mask it just put, probing instability; \
+         no probe means the second UpdateSolidMask never ran"
+    );
+}

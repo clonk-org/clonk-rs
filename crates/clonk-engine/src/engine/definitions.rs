@@ -1829,27 +1829,53 @@ impl Engine {
         let previous_rect = self.objects[index].current_shape_rect();
         let stale_fixed_position = self.objects[index].fixed_position;
 
-        {
+        // UpdateFace(true) refreshes the shape and then updates the solid
+        // mask (C4Object.cpp:1487, C4Object.cpp:362-365) -- BEFORE the
+        // bottom-keep y-adjust below. Splitting the two is load-bearing:
+        // this call puts the mask, so the one after the y-adjust finds it
+        // present and removes it, and that Remove is what probes the
+        // landscape for instability (clonk-org/clonk-rs#1139).
+        let refreshes = docon_refreshes_construction(before, after) && {
             let object = &mut self.objects[index];
             object.state.construction = after;
-            if docon_refreshes_construction(before, after) && object.shape_template.line == 0 {
+            let refreshes = object.shape_template.line == 0;
+            if refreshes {
                 object.refresh_shape_geometry();
-                let current_rect = object.current_shape_rect();
-                if let (Some(previous), Some(current)) = (previous_rect, current_rect) {
-                    if previous.height != current.height || previous.y != current.y {
-                        let bottom = object
-                            .state
-                            .position
-                            .y
-                            .saturating_add(previous.y)
-                            .saturating_add(previous.height);
-                        object.state.position.y = bottom
-                            .saturating_sub(current.height)
-                            .saturating_sub(current.y);
-                    }
+            }
+            object.fixed_position = stale_fixed_position;
+            refreshes
+        };
+        if !refreshes {
+            self.objects[index].state.construction = after;
+            self.objects[index].fixed_position = stale_fixed_position;
+        } else {
+            self.update_solid_mask(index);
+        }
+
+        if refreshes {
+            let object = &mut self.objects[index];
+            let current_rect = object.current_shape_rect();
+            let mut moved = false;
+            if let (Some(previous), Some(current)) = (previous_rect, current_rect) {
+                if previous.height != current.height || previous.y != current.y {
+                    let bottom = object
+                        .state
+                        .position
+                        .y
+                        .saturating_add(previous.y)
+                        .saturating_add(previous.height);
+                    object.state.position.y = bottom
+                        .saturating_sub(current.height)
+                        .saturating_sub(current.y);
+                    moved = true;
                 }
             }
             object.fixed_position = stale_fixed_position;
+            // `if (!r || fInitial)` always opens for an initial DoCon, and
+            // the shape test gates the second update (C4Object.cpp:1490-1497).
+            if moved {
+                self.update_solid_mask(index);
+            }
         }
 
         // ComponentConGain follows the Con update and precedes Completion
