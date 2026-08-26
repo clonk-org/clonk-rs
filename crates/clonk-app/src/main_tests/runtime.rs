@@ -8341,3 +8341,162 @@ fn console_play_and_halt_track_the_live_offline_halt_count() {
     app.toggle_runtime_pause();
     runtime_assert!(!app.developer_console_view_model().halted);
 }
+
+
+// `FullscreenPauseToggle` is registered with a gamepad-capable `C4CustomKey`
+// like every other global action (src/C4Game.cpp:3429), and
+// `LoadCustomConfig` replaces its code with whatever `[Keys]` holds
+// (src/C4Game.cpp:3481-3482). A configured button therefore has to reach
+// `C4Game::TogglePause`, and — the callback has no `Up` handler — only on the
+// press.
+#[test]
+fn runtime_pause_gamepad_button_override_toggles_once_per_press() {
+    let config =
+        parse_runtime_key_config(b"[Keys]\nFullscreenPauseToggle=\\x0042000a\n").test_value();
+    let mut app = new_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache.set(Ok(config)).test_value();
+    runtime_assert!(!app.runtime_halt_active());
+
+    app.handle_gamepad_button(
+        GamepadSlot::new(0),
+        LegacyGamepadButton::new(0),
+        ElementState::Pressed,
+    )
+    .test_value();
+    runtime_assert!(app.runtime_halt_active(), "the rebound button pauses");
+
+    app.handle_gamepad_button(
+        GamepadSlot::new(0),
+        LegacyGamepadButton::new(0),
+        ElementState::Released,
+    )
+    .test_value();
+    runtime_assert!(
+        app.runtime_halt_active(),
+        "the callback has no Up handler, so the release must not toggle back"
+    );
+
+    app.handle_gamepad_button(
+        GamepadSlot::new(0),
+        LegacyGamepadButton::new(0),
+        ElementState::Pressed,
+    )
+    .test_value();
+    runtime_assert!(!app.runtime_halt_active(), "a second press unpauses");
+}
+
+// `Joy%d` spellings resolve to a direction rather than a button
+// (src/C4KeyboardInput.cpp's `sscanf` branch), so a direction override has to
+// dispatch on the same terms as a button one.
+#[test]
+fn runtime_pause_gamepad_direction_override_toggles_the_hold() {
+    let config = parse_runtime_key_config(b"[Keys]\nFullscreenPauseToggle=Joy1A\n").test_value();
+    let mut app = new_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache.set(Ok(config)).test_value();
+
+    app.handle_gamepad_direction(
+        GamepadSlot::new(0),
+        ControlButton::Left,
+        ElementState::Pressed,
+    )
+    .test_value();
+    runtime_assert!(app.runtime_halt_active());
+
+    app.handle_gamepad_direction(
+        GamepadSlot::new(0),
+        ControlButton::Right,
+        ElementState::Pressed,
+    )
+    .test_value();
+    runtime_assert!(
+        app.runtime_halt_active(),
+        "only the configured direction is the pause binding"
+    );
+}
+
+// The registered default is `K_PAUSE` — a keyboard key. Without a custom
+// entry no gamepad input is a pause binding, and the keyboard default keeps
+// working.
+#[test]
+fn runtime_pause_has_no_default_gamepad_binding() {
+    let mut app = new_running_sandbox_app();
+
+    for button in 0..4 {
+        app.handle_gamepad_button(
+            GamepadSlot::new(0),
+            LegacyGamepadButton::new(button),
+            ElementState::Pressed,
+        )
+        .test_value();
+    }
+    for direction in [
+        ControlButton::Left,
+        ControlButton::Right,
+        ControlButton::Up,
+        ControlButton::Down,
+    ] {
+        app.handle_gamepad_direction(GamepadSlot::new(0), direction, ElementState::Pressed)
+            .test_value();
+    }
+    runtime_assert!(!app.runtime_halt_active());
+
+    app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+        .test_value();
+    runtime_assert!(app.runtime_halt_active(), "the K_PAUSE default still pauses");
+}
+
+// `C4Game::TogglePause` refuses while the evaluation dialog owns the halt, and
+// the gamepad route reaches the same guard the keyboard one does.
+#[test]
+fn runtime_pause_gamepad_override_is_refused_under_the_evaluation_dialog() {
+    let config =
+        parse_runtime_key_config(b"[Keys]\nFullscreenPauseToggle=\\x0042000a\n").test_value();
+    let mut app = new_game_over_keyboard_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache.set(Ok(config)).test_value();
+    runtime_assert!(
+        app.runtime_halt_active(),
+        "the evaluation dialog owns a halt of its own"
+    );
+
+    app.handle_gamepad_button(
+        GamepadSlot::new(0),
+        LegacyGamepadButton::new(0),
+        ElementState::Pressed,
+    )
+    .test_value();
+    runtime_assert!(
+        app.runtime_halt_active(),
+        "an accepted toggle would have released the dialog's hold"
+    );
+}
+
+
+// Player controls register with `PRIO_PlrControl` (src/C4Game.cpp:3455-3461),
+// above the `PRIO_Base` pause callback, so a set that claims the same gamepad
+// code owns it and the game must not pause.
+#[test]
+fn runtime_pause_gamepad_override_yields_to_a_colliding_player_control() {
+    let config = parse_runtime_key_config(
+        b"[Keys]\nFullscreenPauseToggle=\\x0042000a\nKbd1Key1=\\x0042000a\n",
+    )
+    .test_value();
+    let mut app = new_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache.set(Ok(config)).test_value();
+    runtime_assert!(
+        !app.runtime_control_candidates_for_gamepad_button(0, 0, ElementState::Pressed)
+            .is_empty(),
+        "the player set claims the same code"
+    );
+
+    app.handle_gamepad_button(
+        GamepadSlot::new(0),
+        LegacyGamepadButton::new(0),
+        ElementState::Pressed,
+    )
+    .test_value();
+    runtime_assert!(!app.runtime_halt_active());
+}

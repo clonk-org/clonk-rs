@@ -2444,6 +2444,7 @@ pub(crate) enum RuntimeCustomGamepadAction {
     Chat(RunningChatMode),
     Scoreboard,
     Abort,
+    Pause,
     Chart,
     SpeedUp,
     SpeedDown,
