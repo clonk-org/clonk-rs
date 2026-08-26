@@ -68,6 +68,7 @@ mod ready_check_notification;
 use clonk_app_netplay::prepared_host_bootstrap;
 use clonk_app_netplay::resource_path_identity;
 mod runtime_join_save;
+mod save_worker;
 mod settings;
 mod shell_window_host;
 mod software_window;
@@ -2576,6 +2577,8 @@ impl GameApp {
             retained_native_capture_surface: None,
             pending_gpu_thumbnail_paths: VecDeque::new(),
             pending_native_save_thumbnails: VecDeque::new(),
+            background_save_worker: None,
+            last_native_save_timings: None,
             pending_options_display_requests: VecDeque::new(),
             gamepads_enabled,
             gamepad_input_enabled: gamepads_enabled,
@@ -2803,6 +2806,7 @@ impl GameApp {
             aborted_player_resource_joins: HashSet::new(),
             host_join_snapshot,
             pending_runtime_dynamic_request: None,
+            next_runtime_dynamic_save_generation: 0,
             pending_network_join_data: None,
             pending_round_restart_join_data: false,
             initial_lobby_status_ack_pending: false,

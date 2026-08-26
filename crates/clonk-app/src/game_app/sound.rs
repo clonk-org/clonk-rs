@@ -634,6 +634,7 @@ impl GameApp {
         self.poll_scenario_selector_discovery()?;
         self.poll_update_check()?;
         self.poll_update_download()?;
+        self.poll_background_save_jobs();
         self.poll_startup_irc()?;
         self.poll_classic_direct_reference_query()?;
         self.poll_startup_network_connection()?;

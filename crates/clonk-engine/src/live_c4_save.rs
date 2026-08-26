@@ -245,6 +245,78 @@ pub struct LiveC4SaveComponents {
     pub scenario_section_mutations: Vec<LiveC4SaveScenarioSectionMutation>,
 }
 
+/// Owned, immutable projection of one exact live-save boundary.
+///
+/// Capturing performs the native pointer/string enumeration side effects on
+/// the simulation thread. [`Self::encode`] consumes only owned state and is
+/// therefore safe to run while the source engine advances on another thread.
+pub struct LiveC4SaveCapture {
+    policy: OwnedLiveC4SavePolicy,
+    scenario_txt: Vec<u8>,
+    state: crate::EngineState,
+    initial_game: Option<InitialNetworkGameData>,
+    music_enabled: bool,
+    string_values: Vec<Vec<u8>>,
+    string_ids: Vec<(C4StringValue, i32)>,
+    object_numbers: HashMap<u64, i32>,
+    script_global_name_order: Vec<String>,
+    scenario_script_go: bool,
+    scenario_script_counter: i32,
+    objects: LiveC4ObjectsCapture,
+    landscape: LiveC4LandscapeCapture,
+    copied_material_group_is_file: bool,
+    scenario_sections: Vec<LiveC4SaveNamedComponent>,
+    deleted_scenario_sections: Vec<String>,
+    scenario_section_mutations: Vec<LiveC4SaveScenarioSectionMutation>,
+    fallback_team_configuration: TeamConfiguration,
+    scenario_is_melee: bool,
+    title_txt: Option<LiveC4SaveNamedComponent>,
+    info_txt: Option<LiveC4SaveNamedComponent>,
+    script_c: Option<LiveC4SaveNamedComponent>,
+    deleted_components: Vec<String>,
+    component_host_mutations: Vec<LiveC4SaveComponentMutation>,
+}
+
+#[derive(Clone)]
+enum OwnedLiveC4SavePolicy {
+    Scenario { force_exact_landscape: bool },
+    Savegame { target_group_name: String },
+    Record,
+    RuntimeNetwork,
+}
+
+impl OwnedLiveC4SavePolicy {
+    fn from_borrowed(policy: LiveC4SavePolicy<'_>) -> Self {
+        match policy {
+            LiveC4SavePolicy::Scenario {
+                force_exact_landscape,
+            } => Self::Scenario {
+                force_exact_landscape,
+            },
+            LiveC4SavePolicy::Savegame { target_group_name } => Self::Savegame {
+                target_group_name: target_group_name.to_owned(),
+            },
+            LiveC4SavePolicy::Record => Self::Record,
+            LiveC4SavePolicy::RuntimeNetwork => Self::RuntimeNetwork,
+        }
+    }
+
+    fn as_borrowed(&self) -> LiveC4SavePolicy<'_> {
+        match self {
+            Self::Scenario {
+                force_exact_landscape,
+            } => LiveC4SavePolicy::Scenario {
+                force_exact_landscape: *force_exact_landscape,
+            },
+            Self::Savegame { target_group_name } => {
+                LiveC4SavePolicy::Savegame { target_group_name }
+            }
+            Self::Record => LiveC4SavePolicy::Record,
+            Self::RuntimeNetwork => LiveC4SavePolicy::RuntimeNetwork,
+        }
+    }
+}
+
 /// Components native has already committed when a later landscape operation
 /// fails. The application applies this prefix to its destination C4Group
 /// before it propagates the serializer error.
@@ -288,6 +360,7 @@ pub enum LiveC4SaveScenarioSectionMutation {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveC4ValueEnumeration {
     values: Vec<Vec<u8>>,
+    string_ids: Vec<(C4StringValue, i32)>,
     /// C4Value object payloads are compiled through
     /// `Game.Objects.ObjectNumber`, not from the allocation's raw ID. `None`
     /// is retained for standalone reconstructed enumerations which have no
@@ -324,6 +397,7 @@ impl LiveC4ValueEnumeration {
                 enum_id
             };
             value.set_enum_id(enum_id);
+            enumeration.string_ids.push((value, enum_id));
         }
         enumeration
     }
@@ -332,13 +406,9 @@ impl LiveC4ValueEnumeration {
         encode_value_by(
             value,
             &mut |value| {
-                let enum_id = value.enum_id();
-                let bytes = clonk_script::c4_string_bytes(value);
-                usize::try_from(enum_id)
-                    .ok()
-                    .and_then(|index| self.values.get(index))
-                    .filter(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
-                    .map(|_| enum_id)
+                self.string_ids
+                    .iter()
+                    .find_map(|(candidate, id)| candidate.ptr_eq(value).then_some(*id))
                     .ok_or_else(|| LiveC4ValueEncodeError::MissingString(value.to_string()))
             },
             &mut |object| self.object_number(object),
@@ -349,6 +419,7 @@ impl LiveC4ValueEnumeration {
         LegacyStringTable {
             values: self.values.clone(),
             object_numbers: self.object_numbers.clone(),
+            frozen_string_ids: Some(self.string_ids.clone()),
         }
         .encoded()
     }
@@ -432,6 +503,140 @@ impl LiveC4SaveComponents {
         push_optional_file(&mut entries, "SavePlayerInfos.txt", save_player_infos);
         entries.extend_from_slice(player_groups);
         entries
+    }
+}
+
+impl LiveC4SaveCapture {
+    pub fn frame(&self) -> u64 {
+        self.state.frame
+    }
+
+    pub fn value_enumeration(&self) -> LiveC4ValueEnumeration {
+        LiveC4ValueEnumeration {
+            values: self.string_values.clone(),
+            object_numbers: Some(self.object_numbers.clone()),
+            string_ids: self.string_ids.clone(),
+        }
+    }
+
+    /// Encode the frozen projection without consulting the source engine.
+    pub fn encode(self) -> Result<LiveC4SaveComponents, LiveC4SaveError> {
+        let policy = self.policy.as_borrowed();
+        let mut strings = LegacyStringTable::from_enumerated_values(self.string_values.clone());
+        strings.set_object_numbers(self.object_numbers.clone());
+        strings.set_frozen_string_ids(self.string_ids.clone());
+        let value_enumeration = strings.enumeration();
+        let strings_txt = strings.encoded();
+        let script_engine = serialize_script_globals(
+            &self.state.script_globals,
+            &self.script_global_name_order,
+            self.scenario_script_go,
+            self.scenario_script_counter,
+            &mut strings,
+        );
+        let effects = serialize_effects(&self.state.global_effects, &mut strings);
+        let game_txt = match (|| -> Result<Vec<u8>, LiveC4SaveError> {
+            Ok(if policy.is_exact() {
+                let mut game = self
+                    .initial_game
+                    .clone()
+                    .expect("an exact capture owns initial game data");
+                game.music_enabled = self.music_enabled;
+                game.compiled_sections = InitialNetworkCompiledSections {
+                    script_engine,
+                    sky: self.state.sky.as_ref().and_then(serialize_sky),
+                    effects,
+                    scoreboard: serialize_scoreboard(&self.state.scoreboard),
+                };
+                let player_sections =
+                    serialize_players(&self.objects.objects, &self.state.players, &mut strings);
+                append_runtime_player_sections(
+                    serialize_initial_network_game(&game, None)?.unwrap_or_default(),
+                    &player_sections,
+                )
+            } else {
+                serialize_non_exact_game(script_engine, effects)
+            })
+        })() {
+            Ok(game_txt) => game_txt,
+            Err(source) => {
+                return Err(LiveC4SaveError::AfterPreLandscape {
+                    source: Box::new(source),
+                    partial: Box::new(LiveC4SavePreLandscapeComponents {
+                        scenario_txt: self.scenario_txt,
+                        game_txt: None,
+                        scenario_sections: Vec::new(),
+                        deleted_scenario_sections: Vec::new(),
+                        scenario_section_mutations: Vec::new(),
+                        landscape_mutations: Vec::new(),
+                    }),
+                });
+            }
+        };
+        let landscape = match serialize_captured_landscape_for_policy(
+            &self.landscape,
+            policy,
+            self.copied_material_group_is_file,
+        ) {
+            Ok(landscape) => landscape,
+            Err(failure) => {
+                return Err(LiveC4SaveError::AfterPreLandscape {
+                    source: Box::new(failure.source),
+                    partial: Box::new(LiveC4SavePreLandscapeComponents {
+                        scenario_txt: self.scenario_txt,
+                        game_txt: Some(game_txt),
+                        scenario_sections: self.scenario_sections,
+                        deleted_scenario_sections: self.deleted_scenario_sections,
+                        scenario_section_mutations: self.scenario_section_mutations,
+                        landscape_mutations: failure.mutations,
+                    }),
+                });
+            }
+        };
+        let objects_txt = serialize_captured_objects(
+            &self.objects,
+            &mut strings,
+            matches!(policy, LiveC4SavePolicy::Scenario { .. }),
+        );
+
+        Ok(LiveC4SaveComponents {
+            scenario_txt: self.scenario_txt,
+            title_txt: self.title_txt,
+            game_txt,
+            objects_txt,
+            strings_txt,
+            value_enumeration,
+            landscape_bmp: landscape.landscape_bmp,
+            landscape_png: landscape.landscape_png,
+            diff_landscape_bmp: landscape.diff_landscape_bmp,
+            map_bmp: landscape.map_bmp,
+            material_group: landscape.material_group,
+            mat_map_txt: landscape.mat_map_txt,
+            pxs_c4b: landscape.pxs_c4b,
+            mass_mover_c4b: landscape.mass_mover_c4b,
+            delete_sky_entry: landscape.delete_sky_entry,
+            teams_txt: serialize_teams(
+                &self.state.teams,
+                self.state
+                    .team_configuration
+                    .unwrap_or(self.fallback_team_configuration),
+                self.state.team_last_team_id,
+                self.state.team_max_script_players,
+                &self.state.team_script_player_names,
+                self.state.team_random_team_count,
+            ),
+            round_results_txt: policy
+                .is_exact()
+                .then(|| serialize_round_results(&self.state.round_results, self.scenario_is_melee))
+                .flatten(),
+            info_txt: self.info_txt,
+            script_c: self.script_c,
+            deleted_components: self.deleted_components,
+            component_host_mutations: self.component_host_mutations,
+            scenario_sections: self.scenario_sections,
+            deleted_scenario_sections: self.deleted_scenario_sections,
+            scenario_section_mutations: self.scenario_section_mutations,
+        })
     }
 }
 
@@ -609,6 +814,113 @@ impl Engine {
         self.serialize_live_c4_save_with_policy(spec, LiveC4SavePolicy::RuntimeNetwork)
     }
 
+    /// Freeze the state needed by a live-save encoder without retaining a
+    /// reference to this engine.
+    ///
+    /// The capture remains on the synchronized simulation boundary because
+    /// native string and pointer enumeration have observable side effects.
+    /// C4 component text, landscape images, PXS/mass-mover payloads and the
+    /// object stream are deferred to [`LiveC4SaveCapture::encode`].
+    pub fn capture_live_c4_save_with_policy(
+        &mut self,
+        spec: LiveC4SaveSpec<'_>,
+        policy: LiveC4SavePolicy<'_>,
+    ) -> Result<LiveC4SaveCapture, LiveC4SaveError> {
+        let state = self.capture_state();
+        let referenced_strings = collect_live_referenced_strings(self, &state);
+        let string_values = clonk_script::enumerate_c4_strings(
+            &self.script_string_registrations,
+            &referenced_strings,
+        );
+        let string_ids = freeze_enumerated_string_ids(&referenced_strings);
+        let object_numbers = self.live_object_numbers_for_save();
+        let scenario_txt = serialize_scenario_for_policy(&self.scenario_values, spec, policy);
+        let initial_game = if policy.is_exact() {
+            match InitialNetworkGameData::from_engine_live(self) {
+                Ok(game) => Some(game),
+                Err(source) => {
+                    return Err(LiveC4SaveError::AfterPreLandscape {
+                        source: Box::new(source.into()),
+                        partial: Box::new(LiveC4SavePreLandscapeComponents {
+                            scenario_txt,
+                            game_txt: None,
+                            scenario_sections: Vec::new(),
+                            deleted_scenario_sections: Vec::new(),
+                            scenario_section_mutations: Vec::new(),
+                            landscape_mutations: Vec::new(),
+                        }),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
+        self.denumerate_game_save_pointer_fields(
+            &object_numbers.keys().copied().collect::<HashSet<_>>(),
+        );
+        let mut strings = LegacyStringTable::from_enumerated_values(string_values.clone());
+        strings.set_object_numbers(object_numbers.clone());
+        let (scenario_sections, deleted_scenario_sections, scenario_section_mutations) =
+            if policy.is_exact() {
+                serialize_scenario_sections(self, &mut strings)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+        let landscape = LiveC4LandscapeCapture::from_engine(self);
+        let objects = LiveC4ObjectsCapture::from_engine(self);
+
+        let mut deleted_components = Vec::new();
+        let mut component_host_mutations = Vec::new();
+        let script_c = materialize_component_host(
+            spec.script_component,
+            &mut deleted_components,
+            &mut component_host_mutations,
+        );
+        let title_txt = policy
+            .keeps_title_components()
+            .then(|| {
+                materialize_component_host(
+                    spec.title_component,
+                    &mut deleted_components,
+                    &mut component_host_mutations,
+                )
+            })
+            .flatten();
+        let info_txt = materialize_component_host(
+            spec.info_component,
+            &mut deleted_components,
+            &mut component_host_mutations,
+        );
+
+        Ok(LiveC4SaveCapture {
+            policy: OwnedLiveC4SavePolicy::from_borrowed(policy),
+            scenario_txt,
+            state,
+            initial_game,
+            music_enabled: spec.music_enabled,
+            string_values,
+            string_ids,
+            object_numbers,
+            script_global_name_order: self.script_global_name_order(),
+            scenario_script_go: self.scenario_script_go,
+            scenario_script_counter: self.scenario_script_counter,
+            objects,
+            landscape,
+            copied_material_group_is_file: spec.copied_material_group_is_file,
+            scenario_sections,
+            deleted_scenario_sections,
+            scenario_section_mutations,
+            fallback_team_configuration: self.team_state.team_configuration,
+            scenario_is_melee: self.scenario_values.is_melee(),
+            title_txt,
+            info_txt,
+            script_c,
+            deleted_components,
+            component_host_mutations,
+        })
+    }
+
     /// Capture live components using the selected native `C4GameSave`
     /// specialization. Application-owned copy/delete and player-file work is
     /// described by [`LiveC4SavePolicy`] and remains outside the simulation.
@@ -624,11 +936,13 @@ impl Engine {
         // Filter out dead registrations exactly as C4StringTable::EnumStrings
         // does, but include values in player groups saved after the scenario.
         let referenced_strings = collect_live_referenced_strings(self, &state);
-        let mut strings =
-            LegacyStringTable::from_enumerated_values(clonk_script::enumerate_c4_strings(
-                &self.script_string_registrations,
-                &referenced_strings,
-            ));
+        let string_values = clonk_script::enumerate_c4_strings(
+            &self.script_string_registrations,
+            &referenced_strings,
+        );
+        let string_ids = freeze_enumerated_string_ids(&referenced_strings);
+        let mut strings = LegacyStringTable::from_enumerated_values(string_values);
+        strings.set_frozen_string_ids(string_ids);
         let game_object_numbers = self.live_object_numbers_for_save();
         strings.set_object_numbers(game_object_numbers.clone());
         // C4GameSave::SaveRuntimeData writes Strings.txt immediately after
@@ -655,7 +969,8 @@ impl Engine {
                     effects,
                     scoreboard: serialize_scoreboard(&state.scoreboard),
                 };
-                let player_sections = serialize_players(self, &state.players, &mut strings);
+                let player_sections =
+                    serialize_players(&self.objects, &state.players, &mut strings);
                 append_runtime_player_sections(
                     serialize_initial_network_game(&game, None)?.unwrap_or_default(),
                     &player_sections,
@@ -992,6 +1307,7 @@ fn serialize_non_exact_game(script_engine: Option<Vec<u8>>, effects: Option<Vec<
 struct LegacyStringTable {
     values: Vec<Vec<u8>>,
     object_numbers: Option<HashMap<u64, i32>>,
+    frozen_string_ids: Option<Vec<(C4StringValue, i32)>>,
 }
 
 fn c4_string_table_prefix(bytes: &[u8]) -> &[u8] {
@@ -1012,7 +1328,24 @@ impl LegacyStringTable {
         Self {
             values,
             object_numbers: None,
+            frozen_string_ids: None,
         }
+    }
+
+    fn set_frozen_string_ids(&mut self, string_ids: Vec<(C4StringValue, i32)>) {
+        self.frozen_string_ids = Some(string_ids);
+    }
+
+    fn string_id(&self, value: &C4StringValue) -> i32 {
+        self.frozen_string_ids.as_ref().map_or_else(
+            || value.enum_id(),
+            |string_ids| {
+                string_ids
+                    .iter()
+                    .find_map(|(candidate, id)| candidate.ptr_eq(value).then_some(*id))
+                    .unwrap_or_else(|| value.enum_id())
+            },
+        )
     }
 
     fn set_object_numbers(&mut self, object_numbers: HashMap<u64, i32>) {
@@ -1092,6 +1425,7 @@ impl LegacyStringTable {
         LiveC4ValueEnumeration {
             values: self.values.clone(),
             object_numbers: self.object_numbers.clone(),
+            string_ids: self.frozen_string_ids.clone().unwrap_or_default(),
         }
     }
 }
@@ -1246,6 +1580,17 @@ fn collect_live_referenced_strings(
     strings
 }
 
+fn freeze_enumerated_string_ids(values: &[C4StringValue]) -> Vec<(C4StringValue, i32)> {
+    let mut frozen = Vec::<(C4StringValue, i32)>::new();
+    for value in values {
+        if frozen.iter().any(|(candidate, _)| candidate.ptr_eq(value)) {
+            continue;
+        }
+        frozen.push((value.clone(), value.enum_id()));
+    }
+    frozen
+}
+
 #[derive(Default)]
 struct TextComponentWriter {
     output: Vec<u8>,
@@ -1372,7 +1717,7 @@ fn encode_value_by<E>(
 fn encode_value(value: &Value, _strings: &mut LegacyStringTable) -> String {
     encode_value_by(
         value,
-        &mut |value| Ok::<_, std::convert::Infallible>(value.enum_id()),
+        &mut |value| Ok::<_, std::convert::Infallible>(_strings.string_id(value)),
         &mut |object| _strings.object_number(object),
     )
     .expect("infallible mutable string-table enumeration")
@@ -1393,7 +1738,7 @@ fn encode_effect_value(value: &EffectVarValue, strings: &mut LegacyStringTable) 
         EffectVarValue::Int(value) => format!("i{value}"),
         EffectVarValue::Bool(value) => format!("b{}", i32::from(*value)),
         EffectVarValue::RawBool(value) => format!("b{}", *value as u32 as i32),
-        EffectVarValue::String(value) => format!("S{}", value.enum_id()),
+        EffectVarValue::String(value) => format!("S{}", strings.string_id(value)),
         EffectVarValue::C4Id(value) => {
             let raw = clonk_script::c4_id_raw(value) as u32 as i32;
             format!("I{raw}")
@@ -1693,14 +2038,16 @@ fn encode_id_list(entries: impl IntoIterator<Item = (String, i32)>) -> String {
         .join(";")
 }
 
-fn encode_object_list(engine: &Engine, entries: &[ObjectId]) -> String {
+fn encode_object_list(objects: &[Object], entries: &[ObjectId]) -> String {
     entries
         .iter()
         .filter(|id| {
-            engine.find_object_index(**id).is_some_and(|index| {
-                let object = &engine.objects[index];
-                !object.destroyed && object.state.status != ObjectStatus::Deleted
-            })
+            objects
+                .iter()
+                .find(|object| object.id == **id)
+                .is_some_and(|object| {
+                    !object.destroyed && object.state.status != ObjectStatus::Deleted
+                })
         })
         .map(|id| i32::try_from(id.as_u64()).unwrap_or(0).to_string())
         .collect::<Vec<_>>()
@@ -1723,7 +2070,7 @@ fn encode_section_object_list(objects: &[Object], entries: &[ObjectId]) -> Strin
 }
 
 fn serialize_players(
-    engine: &Engine,
+    objects: &[Object],
     players: &[PlayerState],
     strings: &mut LegacyStringTable,
 ) -> Vec<u8> {
@@ -1938,7 +2285,7 @@ fn serialize_players(
             }
         }
         if !player.crew.is_empty() {
-            let crew = encode_object_list(engine, &player.crew);
+            let crew = encode_object_list(objects, &player.crew);
             if !crew.is_empty() {
                 writer.field(0, "Crew", crew);
             }
@@ -1962,6 +2309,127 @@ fn serialize_players(
 
 fn serialize_objects(engine: &Engine, strings: &mut LegacyStringTable) -> Vec<u8> {
     serialize_objects_for_save(engine, strings, false)
+}
+
+#[derive(Clone)]
+struct LiveC4ObjectsCapture {
+    objects: Vec<Object>,
+    active_order: Vec<ObjectId>,
+    inactive_order: Vec<ObjectId>,
+    metadata: HashMap<ObjectId, LiveC4ObjectSaveMetadata>,
+}
+
+#[derive(Clone)]
+struct LiveC4ObjectSaveMetadata {
+    mass: i32,
+    definition_solid_mask: Option<crate::DefinitionTargetRect>,
+    named_local_names: Vec<String>,
+    user_player_object: bool,
+}
+
+impl LiveC4ObjectsCapture {
+    fn from_engine(engine: &mut Engine) -> Self {
+        let enumeration = engine.enumerate_object_compiler_caches_for_save();
+        let objects = engine.objects.clone();
+        let metadata = engine
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| {
+                let definition = engine.definition(&object.definition_id);
+                let named_local_names = definition
+                    .map(|definition| {
+                        definition
+                            .script
+                            .local_variable_names()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let user_player_object =
+                    engine
+                        .players
+                        .get(&object.state.owner)
+                        .is_some_and(|player| {
+                            !player.is_script_player()
+                                && (object.definition_id.as_str() == "FLAG"
+                                    || player.crew().contains(&object.id))
+                        });
+                (
+                    object.id,
+                    LiveC4ObjectSaveMetadata {
+                        mass: engine.effective_object_mass(index),
+                        definition_solid_mask: definition.and_then(crate::Definition::solid_mask),
+                        named_local_names,
+                        user_player_object,
+                    },
+                )
+            })
+            .collect();
+        let capture = Self {
+            objects,
+            active_order: engine.exec_list.clone(),
+            inactive_order: engine.inactive_exec_list.clone(),
+            metadata,
+        };
+        engine.denumerate_object_compiler_caches_after_save(&enumeration);
+        capture
+    }
+}
+
+fn serialize_captured_objects(
+    capture: &LiveC4ObjectsCapture,
+    strings: &mut LegacyStringTable,
+    skip_user_player_objects: bool,
+) -> Vec<u8> {
+    fn serialize_list(
+        capture: &LiveC4ObjectsCapture,
+        ids: &[ObjectId],
+        strings: &mut LegacyStringTable,
+        skip_user_player_objects: bool,
+    ) -> Vec<u8> {
+        let mut writer = TextComponentWriter::default();
+        for id in ids {
+            let Some(object) = capture.objects.iter().find(|object| object.id == *id) else {
+                continue;
+            };
+            let Some(metadata) = capture.metadata.get(id) else {
+                continue;
+            };
+            if object.destroyed || object.state.status == ObjectStatus::Deleted {
+                continue;
+            }
+            if skip_user_player_objects && metadata.user_player_object {
+                continue;
+            }
+            serialize_object(
+                &mut writer,
+                object,
+                metadata.mass,
+                strings,
+                None,
+                &capture.objects,
+                metadata.definition_solid_mask,
+                &metadata.named_local_names,
+            );
+        }
+        writer.finish()
+    }
+
+    let mut output = serialize_list(
+        capture,
+        &capture.active_order,
+        strings,
+        skip_user_player_objects,
+    );
+    output.extend_from_slice(b"\r\n");
+    output.extend_from_slice(&serialize_list(
+        capture,
+        &capture.inactive_order,
+        strings,
+        skip_user_player_objects,
+    ));
+    output
 }
 
 fn serialize_objects_for_save(
@@ -1996,7 +2464,7 @@ fn serialize_objects_for_save(
             {
                 continue;
             }
-            serialize_object(
+            serialize_engine_object(
                 &mut writer,
                 engine,
                 object,
@@ -2028,13 +2496,48 @@ fn serialize_objects_for_save(
     output
 }
 
-fn serialize_object(
+fn serialize_engine_object(
     writer: &mut TextComponentWriter,
     engine: &Engine,
     object: &Object,
     mass: i32,
     strings: &mut LegacyStringTable,
     section_objects: Option<&[Object]>,
+) {
+    let definition_solid_mask = engine
+        .definition(&object.definition_id)
+        .and_then(crate::Definition::solid_mask);
+    let named_local_names = engine
+        .definition(&object.definition_id)
+        .map(|definition| {
+            definition
+                .script
+                .local_variable_names()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serialize_object(
+        writer,
+        object,
+        mass,
+        strings,
+        section_objects,
+        &engine.objects,
+        definition_solid_mask,
+        &named_local_names,
+    );
+}
+
+fn serialize_object(
+    writer: &mut TextComponentWriter,
+    object: &Object,
+    mass: i32,
+    strings: &mut LegacyStringTable,
+    section_objects: Option<&[Object]>,
+    live_objects: &[Object],
+    definition_solid_mask: Option<crate::DefinitionTargetRect>,
+    named_local_names: &[String],
 ) {
     let state = &object.state;
     writer.section(0, "Object");
@@ -2159,9 +2662,6 @@ fn serialize_object(
         object.own_shape_vertices.is_some(),
         false,
     );
-    let definition_solid_mask = engine
-        .definition(&object.definition_id)
-        .and_then(crate::Definition::solid_mask);
     if let Some(mask) = state
         .solid_mask_override
         .filter(|mask| Some(*mask) != definition_solid_mask)
@@ -2244,7 +2744,7 @@ fn serialize_object(
     }
     if !state.contents.is_empty() {
         let contents = section_objects.map_or_else(
-            || encode_object_list(engine, &state.contents),
+            || encode_object_list(live_objects, &state.contents),
             |objects| encode_section_object_list(objects, &state.contents),
         );
         if !contents.is_empty() {
@@ -2253,22 +2753,16 @@ fn serialize_object(
     }
     field_i32(writer, 0, "PlrViewRange", state.plr_view_range, 0);
     field_i32(writer, 0, "Visibility", state.visibility, 0);
-    let named_locals = engine
-        .definition(&object.definition_id)
-        .map(|definition| {
-            definition
-                .script
-                .local_variable_names()
-                .map(|name| {
-                    let encoded = state
-                        .local_vars
-                        .get(name)
-                        .map_or_else(|| "A0".to_owned(), |value| encode_value(value, strings));
-                    (name.to_owned(), encoded)
-                })
-                .collect::<Vec<_>>()
+    let named_locals = named_local_names
+        .iter()
+        .map(|name| {
+            let encoded = state
+                .local_vars
+                .get(name)
+                .map_or_else(|| "A0".to_owned(), |value| encode_value(value, strings));
+            (name.clone(), encoded)
         })
-        .unwrap_or_default();
+        .collect::<Vec<_>>();
     if !named_locals.is_empty() {
         writer.field(
             0,
@@ -2989,7 +3483,7 @@ fn serialize_persisted_objects(
             continue;
         }
         let mass = section_object_mass(engine, &objects, index, &mut HashSet::new());
-        serialize_object(&mut writer, engine, object, mass, strings, Some(&objects));
+        serialize_engine_object(&mut writer, engine, object, mass, strings, Some(&objects));
     }
     writer.finish()
 }
@@ -3129,7 +3623,7 @@ fn serialize_initial_section_objects(
     let mut writer = TextComponentWriter::default();
     for (index, object) in objects.iter().enumerate().rev() {
         let mass = section_object_mass(engine, &objects, index, &mut HashSet::new());
-        serialize_object(&mut writer, engine, object, mass, strings, Some(&objects));
+        serialize_engine_object(&mut writer, engine, object, mass, strings, Some(&objects));
     }
     let output = writer.finish();
     strings.object_numbers = previous_object_numbers;
@@ -3346,6 +3840,27 @@ struct SerializedLandscape {
     delete_sky_entry: bool,
 }
 
+#[derive(Clone)]
+struct LiveC4LandscapeCapture {
+    landscape: Option<crate::Landscape>,
+    materials: crate::MaterialSet,
+    pxs_system: crate::pxs::PxsSystem,
+    mass_movers: crate::MassMoverSet,
+    no_sky: bool,
+}
+
+impl LiveC4LandscapeCapture {
+    fn from_engine(engine: &Engine) -> Self {
+        Self {
+            landscape: engine.landscape_without_solid_masks(),
+            materials: engine.materials.clone(),
+            pxs_system: engine.pxs_system.clone(),
+            mass_movers: engine.mass_movers.clone(),
+            no_sky: engine.scenario_values.no_sky(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SerializedLandscapeFailure {
     source: LiveC4SaveError,
@@ -3357,7 +3872,19 @@ fn serialize_landscape_for_policy(
     policy: LiveC4SavePolicy<'_>,
     copied_material_group_is_file: bool,
 ) -> Result<SerializedLandscape, SerializedLandscapeFailure> {
-    let Some(landscape) = engine.landscape_without_solid_masks() else {
+    serialize_captured_landscape_for_policy(
+        &LiveC4LandscapeCapture::from_engine(engine),
+        policy,
+        copied_material_group_is_file,
+    )
+}
+
+fn serialize_captured_landscape_for_policy(
+    capture: &LiveC4LandscapeCapture,
+    policy: LiveC4SavePolicy<'_>,
+    copied_material_group_is_file: bool,
+) -> Result<SerializedLandscape, SerializedLandscapeFailure> {
+    let Some(landscape) = capture.landscape.as_ref() else {
         if matches!(
             policy,
             LiveC4SavePolicy::Scenario {
@@ -3395,8 +3922,7 @@ fn serialize_landscape_for_policy(
     }
     let saves_auxiliary_systems =
         landscape.mode() == LANDSCAPE_MODE_EXACT || policy.forces_runtime_landscape();
-    let delete_sky_entry =
-        landscape.mode() == LANDSCAPE_MODE_EXACT && engine.scenario_values.no_sky();
+    let delete_sky_entry = landscape.mode() == LANDSCAPE_MODE_EXACT && capture.no_sky;
 
     let mut mutations = Vec::new();
     if landscape.mode() == LANDSCAPE_MODE_EXACT {
@@ -3439,7 +3965,7 @@ fn serialize_landscape_for_policy(
         });
 
         let landscape_png =
-            encode_landscape_png(&landscape).map_err(|source| SerializedLandscapeFailure {
+            encode_landscape_png(landscape).map_err(|source| SerializedLandscapeFailure {
                 source: source.into(),
                 mutations: mutations.clone(),
             })?;
@@ -3453,7 +3979,7 @@ fn serialize_landscape_for_policy(
             name: "Landscape.png".to_owned(),
             payload: landscape_png,
         });
-        match engine.save_changed_c4_landscape_map(&mut scratch) {
+        match landscape.save_changed_c4_map(&capture.materials, &mut scratch) {
             Ok(true) => append_scratch_file_mutation(&scratch, "Map.bmp", &mut mutations),
             Ok(false) => {}
             Err(source) => {
@@ -3463,7 +3989,7 @@ fn serialize_landscape_for_policy(
                 });
             }
         }
-        match engine.save_c4_landscape_textures(&mut scratch) {
+        match landscape.save_c4_textures(&mut scratch) {
             Ok(true) => append_scratch_material_mutation(&scratch, &mut mutations),
             Ok(false) => {}
             Err(source) => {
@@ -3476,9 +4002,11 @@ fn serialize_landscape_for_policy(
     } else if policy.forces_runtime_landscape() {
         // Exact savegames and forced scenario saves use a full sync diff;
         // SyncSynchronized runtime-network saves use the 0xff-masked diff.
-        if let Err(source) =
-            engine.save_c4_landscape_diff(&mut scratch, policy.landscape_diff_is_sync_save())
-        {
+        if let Err(source) = landscape.save_c4_diff(
+            &capture.materials,
+            &mut scratch,
+            policy.landscape_diff_is_sync_save(),
+        ) {
             append_scratch_file_mutation(&scratch, "DiffLandscape.bmp", &mut mutations);
             append_scratch_file_mutation(&scratch, "Map.bmp", &mut mutations);
             append_scratch_material_mutation(&scratch, &mut mutations);
@@ -3496,7 +4024,7 @@ fn serialize_landscape_for_policy(
         mutations.push(LiveC4SaveLandscapeMutation::DeleteEntry {
             name: "Landscape.bmp".to_owned(),
         });
-        if let Err(source) = engine.save_c4_static_landscape(&mut scratch) {
+        if let Err(source) = landscape.save_c4_static_scenario(&capture.materials, &mut scratch) {
             append_scratch_file_mutation(&scratch, "Map.bmp", &mut mutations);
             append_scratch_material_mutation(&scratch, &mut mutations);
             return Err(SerializedLandscapeFailure {
@@ -3508,7 +4036,7 @@ fn serialize_landscape_for_policy(
         append_scratch_material_mutation(&scratch, &mut mutations);
     }
     let (pxs_c4b, mass_mover_c4b) = if saves_auxiliary_systems {
-        let pxs = engine.pxs_system.to_c4b();
+        let pxs = capture.pxs_system.to_c4b();
         mutations.push(LiveC4SaveLandscapeMutation::DeleteEntry {
             name: "PXS.c4b".to_owned(),
         });
@@ -3518,7 +4046,7 @@ fn serialize_landscape_for_policy(
                 payload: payload.clone(),
             });
         }
-        let mass_movers = engine.mass_movers.to_c4b();
+        let mass_movers = capture.mass_movers.to_c4b();
         mutations.push(LiveC4SaveLandscapeMutation::DeleteEntry {
             name: "MassMover.c4b".to_owned(),
         });
@@ -3528,7 +4056,7 @@ fn serialize_landscape_for_policy(
                 payload: payload.clone(),
             });
         }
-        engine
+        capture
             .materials
             .save_enumeration(&mut scratch)
             .map_err(|source| SerializedLandscapeFailure {
@@ -3965,7 +4493,7 @@ mod tests {
     }
 
     fn player_bytes(players: &[PlayerState]) -> Vec<u8> {
-        serialize_players(&Engine::new(), players, &mut LegacyStringTable::default())
+        serialize_players(&[], players, &mut LegacyStringTable::default())
     }
 
     fn player_text(players: &[PlayerState]) -> String {
@@ -4170,6 +4698,93 @@ mod tests {
                 b"alpha created second".to_vec(),
             ]
         );
+    }
+
+    #[test]
+    fn captured_value_enumeration_ignores_later_live_enum_id_changes() {
+        let value = C4StringValue::new("captured".to_owned());
+        let enumeration = LiveC4ValueEnumeration::from_strings_in_id_order([
+            C4StringValue::new("first".to_owned()),
+            value.clone(),
+        ]);
+        value.set_enum_id(47);
+
+        assert_eq!(
+            enumeration
+                .encode_value(&Value::String(value))
+                .expect("captured value remains encodable"),
+            "S1"
+        );
+    }
+
+    #[test]
+    fn immutable_live_save_capture_is_send_and_ignores_later_engine_state() {
+        fn assert_send<T: Send>() {}
+        assert_send::<LiveC4SaveCapture>();
+
+        let (mut engine, _object, _off_list, _index) = save_pointer_fixture();
+        let capture = engine
+            .capture_live_c4_save_with_policy(save_spec("Captured", "Capture.c4s"), SCENARIO_SAVE)
+            .expect("capture succeeds");
+        let captured_frame = capture.frame();
+        let mut later = engine.capture_state();
+        later.frame = 99;
+        engine
+            .restore_state(&later)
+            .expect("advance source engine state");
+
+        let encoded = std::thread::spawn(move || capture.encode())
+            .join()
+            .expect("encoder thread does not panic")
+            .expect("capture encodes");
+        let (mut oracle, _object, _off_list, _index) = save_pointer_fixture();
+        let expected = oracle
+            .serialize_live_c4_save_with_policy(save_spec("Captured", "Capture.c4s"), SCENARIO_SAVE)
+            .expect("synchronous oracle encodes");
+
+        assert_eq!(captured_frame, 0);
+        assert_eq!(engine.frame(), 99);
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn immutable_exact_capture_matches_synchronous_landscape_and_object_encoding() {
+        fn exact_engine() -> Engine {
+            let (mut engine, _object, _off_list, _index) = save_pointer_fixture();
+            let mut landscape = crate::Landscape::flat(2, 1);
+            assert!(landscape.set_mode(LANDSCAPE_MODE_EXACT));
+            landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+                2,
+                1,
+                vec![0, 1],
+                vec![0; 256],
+                vec![None; 256],
+                vec![None; 256],
+            ));
+            engine.set_landscape(landscape);
+            engine
+        }
+
+        let mut captured_engine = exact_engine();
+        let capture = captured_engine
+            .capture_live_c4_save_with_policy(
+                save_spec("Exact", "Exact.c4s"),
+                LiveC4SavePolicy::RuntimeNetwork,
+            )
+            .expect("exact capture succeeds");
+        let captured = std::thread::spawn(move || capture.encode())
+            .join()
+            .expect("exact encoder does not panic")
+            .expect("exact capture encodes");
+        let mut oracle = exact_engine();
+        let synchronous = oracle
+            .serialize_live_c4_save_with_policy(
+                save_spec("Exact", "Exact.c4s"),
+                LiveC4SavePolicy::RuntimeNetwork,
+            )
+            .expect("synchronous exact save encodes");
+
+        assert_eq!(captured, synchronous);
     }
 
     #[test]
@@ -4519,7 +5134,7 @@ mod tests {
             )],
             ..PlayerState::default()
         };
-        let player = String::from_utf8(serialize_players(&engine, &[player], &mut strings))
+        let player = String::from_utf8(serialize_players(&engine.objects, &[player], &mut strings))
             .expect("player section is text");
         assert!(!player.contains("Cursor=2\r\n"));
         assert!(player.contains("ViewCursor=3\r\n"));

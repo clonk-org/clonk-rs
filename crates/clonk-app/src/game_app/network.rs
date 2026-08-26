@@ -7301,21 +7301,25 @@ impl GameApp {
 
         let save = self
             .engine
-            .serialize_live_c4_save(clonk_engine::LiveC4SaveSpec {
-                title: &title,
-                definition_modules: &definition_modules,
-                definition_executable_path,
-                definition_path,
-                origin: &origin,
-                music_enabled: self.runtime_music_enabled,
-                copied_material_group_is_file: false,
-                // The app has no mutable C4ComponentHost counterparts yet;
-                // native Save is a no-op while these hosts are unmodified.
-                title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-                info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-                script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-            })
-            .map_err(|error| format!("serialize synchronized runtime game: {error}"))?;
+            .capture_live_c4_save_with_policy(
+                clonk_engine::LiveC4SaveSpec {
+                    title: &title,
+                    definition_modules: &definition_modules,
+                    definition_executable_path,
+                    definition_path,
+                    origin: &origin,
+                    music_enabled: self.runtime_music_enabled,
+                    copied_material_group_is_file: false,
+                    // The app has no mutable C4ComponentHost counterparts yet;
+                    // native Save is a no-op while these hosts are unmodified.
+                    title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                    info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                    script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                },
+                clonk_engine::LiveC4SavePolicy::RuntimeNetwork,
+            )
+            .map_err(|error| format!("capture synchronized runtime game: {error}"))?;
+        let value_enumeration = save.value_enumeration();
 
         // C4PlayerList::Save walks live players in link order and looks each
         // one up in RestoreInfos by stable PlayerInfo ID. Do not inherit the
@@ -7350,7 +7354,7 @@ impl GameApp {
                 target.filename.as_bytes(),
                 &maker,
                 player_save_options,
-                &save.value_enumeration,
+                &value_enumeration,
             )
             .map_err(|error| {
                 format!(
@@ -7366,27 +7370,88 @@ impl GameApp {
         let parameter_bytes =
             clonk_network::serialize_initial_network_parameters(&parameters, &scenario_defaults)
                 .map_err(|error| format!("serialize synchronized runtime parameters: {error}"))?;
-        let dynamic = runtime_join_save::compose_runtime_join_dynamic(
-            group_filename,
-            maker,
-            parameter_bytes,
-            save,
-            &restore_plan.restore_infos,
-            player_groups,
-        )
-        .map_err(|error| error.to_string())?;
-        let dynamic = self
+        self.next_runtime_dynamic_save_generation =
+            self.next_runtime_dynamic_save_generation.wrapping_add(1);
+        let generation = self.next_runtime_dynamic_save_generation;
+        if let Some(pending) = self.pending_runtime_dynamic_request.as_mut() {
+            pending.save_generation = Some(generation);
+        }
+        self.submit_background_save_job(save_worker::runtime_dynamic_save_job(
+            save_worker::RuntimeDynamicSaveRequest {
+                generation,
+                synchronized_control_tick,
+                dynamic_tick,
+                parameters,
+                group_filename,
+                maker,
+                parameter_bytes,
+                save,
+                restore_infos: restore_plan.restore_infos,
+                player_groups,
+            },
+        ))
+        .map_err(|error| format!("queue synchronized runtime dynamic: {error:#}"))?;
+
+        Ok(None)
+    }
+
+    pub(crate) fn finish_runtime_dynamic_save(
+        &mut self,
+        completion: save_worker::RuntimeDynamicSaveCompletion,
+    ) {
+        let current = self
+            .pending_runtime_dynamic_request
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.save_generation == Some(completion.generation)
+                    && pending.synchronized_control_tick
+                        == Some(completion.synchronized_control_tick)
+            });
+        if !current {
+            tracing::debug!(
+                generation = completion.generation,
+                synchronized_control_tick = completion.synchronized_control_tick,
+                "discarding stale completed runtime dynamic"
+            );
+            return;
+        }
+        let dynamic = match completion.result {
+            Ok(dynamic) => dynamic,
+            Err(error) => {
+                self.fail_pending_runtime_dynamic_request(error.to_string());
+                return;
+            }
+        };
+        let published = self
             .network
             .as_ref()
-            .ok_or_else(|| "runtime JoinData capture has no network manager".to_string())?
-            .publish_runtime_dynamic(dynamic, synchronized_control_tick, parameters.clone())
-            .map_err(|error| format!("publish synchronized runtime dynamic: {error}"))?;
-
-        Ok(Some(clonk_network::HostJoinSnapshot {
+            .ok_or_else(|| anyhow!("runtime JoinData completion has no network manager"))
+            .and_then(|network| {
+                network.publish_runtime_dynamic(
+                    dynamic,
+                    completion.synchronized_control_tick,
+                    completion.parameters.clone(),
+                )
+            });
+        let dynamic = match published {
+            Ok(dynamic) => dynamic,
+            Err(error) => {
+                self.fail_pending_runtime_dynamic_request(format!(
+                    "publish synchronized runtime dynamic: {error}"
+                ));
+                return;
+            }
+        };
+        self.pending_runtime_dynamic_request = None;
+        self.host_join_snapshot = Some(clonk_network::HostJoinSnapshot {
             dynamic,
-            dynamic_tick,
-            parameters,
-        }))
+            dynamic_tick: completion.dynamic_tick,
+            parameters: completion.parameters,
+        });
+        // publish_runtime_dynamic already installed this exact core and woke
+        // every waiting client. Refresh references without queueing a
+        // redundant generic JoinData publication.
+        self.refresh_published_host_join_snapshot_views();
     }
 
     pub(crate) fn on_runtime_join_synchronized(&mut self, synchronized_control_tick: Tick) {

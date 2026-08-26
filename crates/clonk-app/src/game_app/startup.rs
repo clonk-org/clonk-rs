@@ -46,12 +46,12 @@ impl GameApp {
         matches!(self.mode, AppMode::Menu | AppMode::Loading) && !self.console_game_active()
     }
 
-    pub(crate) fn save_main_menu_slot_game(
+    pub(crate) fn prepare_main_menu_slot_game(
         &mut self,
         requested_target: &Path,
         title_png: Option<&[u8]>,
-    ) -> Result<bool> {
-        self.save_native_c4_game(
+    ) -> Result<Option<save_worker::PreparedNativeSave>> {
+        self.prepare_native_c4_game(
             ConsoleSaveKind::Savegame,
             Some(requested_target),
             false,

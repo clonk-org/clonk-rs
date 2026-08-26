@@ -262,29 +262,44 @@ impl GameApp {
                         }
                     }
                 });
-                persist_console_save_group(&group, &path, local_control && path.is_dir())
-                    .with_context(|| format!("persist player profile {}", path.display()))?;
-                if official_derivation {
-                    if let (Some(network), Some((derivation, ownership))) =
-                        (self.network.as_ref(), derivation)
-                    {
-                        match network.finish_resource_derive(derivation) {
-                            Ok(core) => self.admission_resources.register_finished_derivation(
-                                &core,
-                                path.clone(),
-                                ownership,
-                            ),
-                            Err(error) => {
-                                // FinishDerive's result is ignored by
-                                // C4Player::Save; the profile itself has
-                                // already been saved.
-                                tracing::warn!(
-                                    player_number,
-                                    info_id,
-                                    path = %path.display(),
-                                    %error,
-                                    "failed to publish synchronized player resource derivation"
-                                );
+                if self.network.is_some() {
+                    let preserve_folder_group = local_control && path.is_dir();
+                    self.submit_background_save_job(save_worker::player_file_save_job(
+                        save_worker::PreparedPlayerFileSave {
+                            player_number,
+                            info_id,
+                            group,
+                            path: path.clone(),
+                            preserve_folder_group,
+                            official_derivation,
+                            derivation,
+                        },
+                    ))?;
+                } else {
+                    persist_console_save_group(&group, &path, local_control && path.is_dir())
+                        .with_context(|| format!("persist player profile {}", path.display()))?;
+                    if official_derivation {
+                        if let (Some(network), Some((derivation, ownership))) =
+                            (self.network.as_ref(), derivation)
+                        {
+                            match network.finish_resource_derive(derivation) {
+                                Ok(core) => self.admission_resources.register_finished_derivation(
+                                    &core,
+                                    path.clone(),
+                                    ownership,
+                                ),
+                                Err(error) => {
+                                    // FinishDerive's result is ignored by
+                                    // C4Player::Save; the profile itself has
+                                    // already been saved.
+                                    tracing::warn!(
+                                        player_number,
+                                        info_id,
+                                        path = %path.display(),
+                                        %error,
+                                        "failed to publish synchronized player resource derivation"
+                                    );
+                                }
                             }
                         }
                     }
