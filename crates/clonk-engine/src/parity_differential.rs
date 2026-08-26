@@ -10321,6 +10321,229 @@ protected func ContactBottom()
         expect_rng_state_at(&label, case_index, case, &engine.rng);
     }
 
+    // 16b11b. C4Object::DoMovement's *attached* walk (C4Movement.cpp:324-370).
+    //         A separate loop from the unattached one above: every step
+    //         re-runs Shape.Attach (C4Shape.cpp:165-271), an attachment that
+    //         moves the step target overrides the momentum target and zeroes
+    //         that axis' velocity, a contact aborts the walk by snapping both
+    //         target and raw accumulator back, and a failed attachment raises
+    //         fNoAttach. Raw C4Fixed values are compared, never fixtoi alone.
+    for (case_index, case) in golden["do_movement_attached"]
+        .as_array()
+        .expect("do_movement_attached is an array")
+        .iter()
+        .enumerate()
+    {
+        const WIDTH: u32 = 24;
+        const HEIGHT: i32 = 16;
+        const EARTH: u8 = 1;
+        const VEHICLE: u8 = 3;
+
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("do_movement_attached[{name}]");
+
+        let mut definition = Definition::from_script("ATCH", "Attached movement", "#strict 2\n")
+            .expect("attached movement definition compiles");
+        definition.set_border_bound(i(case, "border_bound") as i32);
+        definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 5, 5)));
+        definition.set_shape_vertices(
+            case["vertices"]
+                .as_array()
+                .expect("attached movement vertices")
+                .iter()
+                .map(|vertex| crate::ObjectVertex {
+                    friction: i(vertex, "friction") as i32,
+                    ..crate::ObjectVertex::new(i(vertex, "x") as i32, i(vertex, "y") as i32)
+                        .with_cnat(i(vertex, "cnat") as u32)
+                })
+                .collect(),
+        );
+
+        let mut engine = Engine::with_seed(i(case, "seed") as u64);
+        engine.configure_materials_from_library(&contact_oracle_materials());
+        let floor_y = i(case, "floor_y") as i32;
+        let ceiling_y = i(case, "ceiling_y") as i32;
+        let wall_x = i(case, "wall_x") as i32;
+        let wall_material = i(case, "wall_material") as u8;
+        let mut bytes = vec![0_u8; WIDTH as usize * HEIGHT as usize];
+        if floor_y >= 0 {
+            for y in floor_y..HEIGHT {
+                for x in 0..WIDTH as usize {
+                    bytes[y as usize * WIDTH as usize + x] = EARTH;
+                }
+            }
+        }
+        if ceiling_y >= 0 {
+            for y in 0..=ceiling_y {
+                for x in 0..WIDTH as usize {
+                    bytes[y as usize * WIDTH as usize + x] = EARTH;
+                }
+            }
+        }
+        if wall_x >= 0 && wall_material != VEHICLE {
+            for y in 0..HEIGHT {
+                bytes[y as usize * WIDTH as usize + wall_x as usize] = wall_material;
+            }
+        }
+        let mut densities = vec![0; 128];
+        densities[EARTH as usize] = 50;
+        densities[VEHICLE as usize] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[EARTH as usize] = Some("Earth".to_string());
+        material_names[VEHICLE as usize] = Some("Vehicle".to_string());
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT as u32,
+            bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        ));
+        landscape.set_world_height(HEIGHT);
+        landscape.set_border_open(
+            i(case, "left_open") as i32,
+            i(case, "right_open") as i32,
+            i(case, "top_open") != 0,
+            i(case, "bottom_open") != 0,
+        );
+        let vehicle = engine
+            .materials
+            .id_of("Vehicle")
+            .expect("attached movement declares Vehicle");
+        landscape.set_vehicle_material(Some(vehicle));
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("attached movement definition registers");
+
+        if wall_material == VEHICLE {
+            let mut blocker = Definition::from_script("ATMB", "Mask blocker", "#strict 2\n")
+                .expect("attached mask blocker compiles");
+            blocker.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, HEIGHT, 0, 0)));
+            engine
+                .register_definition(blocker)
+                .expect("attached mask blocker registers");
+            engine
+                .spawn_object(
+                    SpawnConfig::new("ATMB").with_position(crate::Vector2::new(wall_x, 0)),
+                )
+                .expect("attached mask blocker spawns");
+        }
+
+        // `x`/`y` are the *post-walk* position the golden reports, so the
+        // authored start travels separately as `start_x`/`start_y`.
+        let start_x = i(case, "start_x") as i32;
+        let start_y = i(case, "start_y") as i32;
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("ATCH").with_position(crate::Vector2::new(start_x, start_y)),
+            )
+            .expect("attached movement object spawns");
+        let object_index = engine
+            .find_object_index(object_id)
+            .expect("attached movement object remains");
+        {
+            let object = &mut engine.objects[object_index];
+            object.state.position = crate::Vector2::new(start_x, start_y);
+            object.fixed_position = FixedVec2::new(
+                itofix(start_x) + C4Fixed::from_raw(i(case, "fix_x_offset") as i32),
+                itofix(start_y) + C4Fixed::from_raw(i(case, "fix_y_offset") as i32),
+            );
+            object.fixed_velocity = FixedVec2::new(
+                itofix_prec(i(case, "xdir_n") as i32, i(case, "xdir_d") as i32),
+                itofix_prec(i(case, "ydir_n") as i32, i(case, "ydir_d") as i32),
+            );
+            object.state.alive = true;
+            // `Action.t_attach` as ExecAction would have latched it
+            // (C4Object.cpp:4692); this section drives the movement walk
+            // directly, so the latch is set here instead.
+            object.frame_t_attach = i(case, "t_attach") as u32;
+        }
+
+        let (outcome, trace) = engine
+            .parity_advance_live_position_per_pixel(object_index)
+            .expect("attached movement translation succeeds");
+        let object = &engine.objects[object_index];
+        for (field, actual) in [
+            ("x", i64::from(object.state.position.x)),
+            ("y", i64::from(object.state.position.y)),
+            ("fix_x", i64::from(object.fixed_position.x.val())),
+            ("fix_y", i64::from(object.fixed_position.y.val())),
+            ("xdir", i64::from(object.fixed_velocity.x.val())),
+            ("ydir", i64::from(object.fixed_velocity.y.val())),
+            ("motion_x", i64::from(object.motion_x)),
+            ("motion_y", i64::from(object.motion_y)),
+            ("no_attach", i64::from(outcome.no_attach)),
+            ("any_contact", i64::from(outcome.any_contact)),
+            ("contacts", i64::from(outcome.contact_cnat)),
+            ("t_contact", i64::from(object.frame_t_contact)),
+            (
+                "attach_mat_valid",
+                i64::from(object.state.shape_attach.mat_valid),
+            ),
+            (
+                "attach_mat_vehicle",
+                i64::from(object.state.shape_attach.mat_vehicle),
+            ),
+            ("attach_x", i64::from(object.state.shape_attach.x)),
+            ("attach_y", i64::from(object.state.shape_attach.y)),
+            ("attach_vtx", i64::from(object.state.shape_attach.vtx)),
+        ] {
+            expect_eq(&label, case_index, field, i(case, field), actual);
+        }
+
+        let expected_traces = case["probes"].as_array().expect("attached movement probes");
+        expect_eq(
+            &label,
+            case_index,
+            "probe_count",
+            expected_traces.len() as i64,
+            trace.probes.len() as i64,
+        );
+        for (probe_index, (expected, actual)) in
+            expected_traces.iter().zip(&trace.probes).enumerate()
+        {
+            let probe_label = format!("{label}.probe[{probe_index}]");
+            for (field, actual_value) in [
+                ("x", i64::from(actual.position.x)),
+                ("y", i64::from(actual.position.y)),
+                ("object_x", i64::from(actual.object_position.x)),
+                ("object_y", i64::from(actual.object_position.y)),
+                ("fix_x", i64::from(actual.fixed_position.x.val())),
+                ("fix_y", i64::from(actual.fixed_position.y.val())),
+                ("xdir", i64::from(actual.fixed_velocity.x.val())),
+                ("ydir", i64::from(actual.fixed_velocity.y.val())),
+                ("motion_x", i64::from(actual.motion_x)),
+                ("motion_y", i64::from(actual.motion_y)),
+                ("t_contact", i64::from(actual.t_contact)),
+            ] {
+                expect_eq(
+                    &probe_label,
+                    case_index,
+                    field,
+                    i(expected, field),
+                    actual_value,
+                );
+            }
+            expect_eq(
+                &probe_label,
+                case_index,
+                "result_is_contact",
+                i64::from(i(expected, "result") != 0),
+                i64::from(actual.result),
+            );
+        }
+        expect_eq(
+            &label,
+            case_index,
+            "contact_invocations",
+            i(case, "contact_invocations"),
+            trace.contact_invocations as i64,
+        );
+        expect_rng_state_at(&label, case_index, case, &engine.rng);
+    }
+
     // 16b12. C4Object::DoMovement's rotation walk (C4Movement.cpp:372-436).
     //         Rotation advances one whole degree at a time from an absolute
     //         definition shape, probes each result, restores the last accepted

@@ -986,6 +986,20 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Movement.cpp" > "$gen/do_movement_unattached.inc"
 
+#       The attached branch is the other half of that same `if`, and is lifted
+#       the same way. It is a different walk, not a variant of the unattached
+#       one: every step re-runs Shape.Attach, an attachment that moves ctx/cty
+#       overrides the momentum target and zeroes that axis' velocity, and a
+#       contact aborts the walk by snapping the target back to the current
+#       position. Stopping at the rotation comment keeps the lift to the
+#       movement half.
+awk '
+  /^\tif \(Action.t_attach\) \/\/ Attached movement$/ { p = 1 }
+  p && /^\t\/\/ Rotation$/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/do_movement_attached.inc"
+
 # The immediately following rotation block is a second one-degree-at-a-time
 # collision walk. Keep it mechanically lifted through the circle-bound tail;
 # the scaffold supplies the DoMovement locals and an absolute UpdateShape.
