@@ -1429,3 +1429,36 @@ fn section_without_landscape_or_components_retains_pxs_and_movers() {
         Some((2, 3))
     );
 }
+
+/// C4S_KEEP_EFFECTS is inert in C++, so the port must ignore it too.
+/// C4Game::LoadScenarioSection gates the global ClearAll on
+/// `if (~dwFlags | C4S_KEEP_EFFECTS)` (oracle-src-pinned src/C4Game.cpp:4203).
+/// That is a bitwise OR against the nonzero constant 4 (src/C4Scenario.h:53),
+/// never the `&` the name implies, so the condition cannot evaluate to zero
+/// and the clear runs whatever the caller passes. Honoring the flag would keep
+/// effects C++ discards, and global effects are synchronized state, so the
+/// divergence would desync rather than merely differ.
+#[test]
+fn scenario_section_clear_ignores_the_keep_effects_flag() {
+    let mut engine = Engine::with_seed(17);
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+
+    let mut low = EffectState::new("SectionLow").with_priority(100);
+    low.number = 1;
+    let mut high = EffectState::new("SectionHigh").with_priority(200);
+    high.number = 2;
+    engine.global_effects = vec![low, high];
+
+    assert!(engine.load_test_section("next", 4, Vec::new()));
+
+    assert_eq!(
+        engine
+            .global_effects()
+            .iter()
+            .map(|effect| (effect.name.as_str(), effect.number, effect.priority))
+            .collect::<Vec<_>>(),
+        vec![("SectionLow", 1, 0), ("SectionHigh", 2, 0)],
+        "C4S_KEEP_EFFECTS must not spare the global effects from ClearAll"
+    );
+}
