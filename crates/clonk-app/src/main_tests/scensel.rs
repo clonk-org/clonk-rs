@@ -3644,3 +3644,47 @@ fn definition_pack_graphics_sits_below_scenario_folders_and_extra_but_above_base
     main_assert_eq!(winner("PackWins.png") => first_graphics);
     main_assert_eq!(winner("PackTie.png") => first_pack.join("Graphics.c4g"), "RegisterMainGroups' second reversal makes the first selected definition pack win");
 }
+
+// clonk-org/clonk-rs#392: the platform bridge is handed a description only
+// while the scenario selector is the screen on show. Elsewhere the window has
+// nothing to announce, and a reader must not keep finding a search field that
+// is no longer drawn.
+#[test]
+fn scensel_accessibility_describes_the_search_field_only_while_the_selector_shows() {
+    let mut app = new_menu_app(800, 600);
+    main_assert!(app.scen_sel_accessibility().nodes.is_empty());
+
+    app.open_scenario_browser();
+    app.menu_state.set_search_text("Crystal");
+    app.menu_state.set_search_focused(true);
+
+    let semantics = app.scen_sel_accessibility();
+    let field = semantics
+        .node(clonk_frontend::accessibility::Role::TextInput)
+        .test_value();
+    main_assert_eq!(field.name.as_str() => "Scenario search");
+    main_assert_eq!(field.value.as_deref() => Some("Crystal"));
+    main_assert!(field.focused);
+
+    app.close_scenario_browser();
+    main_assert!(app.scen_sel_accessibility().nodes.is_empty());
+}
+
+// The count and the no-result guidance are drawn together and are announced
+// together (clonk-org/clonk-rs#392); the bridge reads them from the same
+// enhanced-search presentation the screen itself draws.
+#[test]
+fn scensel_accessibility_announces_the_enhanced_search_result_status() {
+    let mut app = new_menu_app(800, 600);
+    app.open_scenario_browser();
+    app.menu_state.set_search_text("zzzznomatch");
+    app.menu_state.apply_enhanced_search();
+
+    let caption = app.menu_state.enhanced_search_caption().test_value();
+    let guidance = app.menu_state.enhanced_search_empty_message().test_value();
+    let semantics = app.scen_sel_accessibility();
+    let status = semantics
+        .node(clonk_frontend::accessibility::Role::Status)
+        .test_value();
+    main_assert_eq!(status.value.clone() => Some(format!("{caption} {guidance}")));
+}

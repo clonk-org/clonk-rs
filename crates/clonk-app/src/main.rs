@@ -20,6 +20,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod accessibility;
 mod advanced_config;
 mod classic_record_stream;
 mod compat_readiness;
@@ -843,6 +844,11 @@ fn run() -> Result<()> {
                 ))
                 .context("failed to create application window")?,
         );
+        // Before the window is shown, which is AccessKit's own requirement:
+        // an adapter attached to a visible window panics. Everything after
+        // this sees the same window a visible-at-creation one would have been.
+        let mut accessibility = accessibility::WindowAccessibility::attach(event_target, &window);
+        window.set_visible(true);
         // Past this point a failure is no longer a startup failure, so it is
         // reported by the running application rather than a native dialog.
         clonk_platform::startup_dialog::note_window_created();
@@ -1258,6 +1264,23 @@ fn run() -> Result<()> {
                 .expect("the console shell record lives for the whole process")
                 .as_shell_mut()
                 .expect("the reserved shell key holds the shell host");
+            // AccessKit tracks the window's focus, position and scale from the
+            // same events the application acts on, and its adapter documents
+            // that it must see them first.
+            if let Event::WindowEvent {
+                window_id,
+                event: window_event,
+            } = &event
+            {
+                if *window_id == window.id() {
+                    accessibility.process_event(window, window_event);
+                }
+            }
+            // Once per turn, because the description is derived from state the
+            // turn may have changed and is published only when it differs.
+            if matches!(event, Event::AboutToWait) {
+                accessibility.describe(window, app.scen_sel_accessibility());
+            }
             match event {
                 Event::Resumed => {
                     if reconcile_deferred_fullscreen(window, display_options.mode) {
