@@ -59,7 +59,7 @@
         unit_assert!(sectors.shape_ids(sector::SectorKey::Inside { x: 2, y: 0 }).is_empty());
         let area = sectors.area(DefinitionRect::new(0, 0, 100, 50));
         unit_assert_eq!(sectors.shape_ids_in_area(&area) => vec![id]);
-        unit_assert_eq!(sectors.shape_sum() => 2);
+        unit_assert_eq!(sectors.shape_sum(|_| true) => 2);
     }
 
     #[test]

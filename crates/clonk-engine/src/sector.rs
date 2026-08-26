@@ -335,11 +335,23 @@ impl SectorMap {
 
     /// `C4LSectors::getShapeSum` (C4Sector.cpp:197-203): the sum of the
     /// per-sector shape-list object counts — part of the sync-check digest.
+    ///
+    /// It sums `ObjectShapes.ObjectCount()`, and `C4ObjectList::ObjectCount`
+    /// counts only links whose object still has a `Status`
+    /// (C4ObjectList.cpp:320-330). `is_counted` supplies that test; the raw
+    /// list length would also count an object that has been removed but is
+    /// still linked into a sector.
     #[doc(hidden)]
-    pub fn shape_sum(&self) -> usize {
+    pub fn shape_sum(&self, mut is_counted: impl FnMut(ObjectId) -> bool) -> usize {
         self.sectors
             .iter()
-            .map(|sector| sector.object_shapes.len())
+            .map(|sector| {
+                sector
+                    .object_shapes
+                    .iter()
+                    .filter(|id| is_counted(**id))
+                    .count()
+            })
             .sum()
     }
 
@@ -786,6 +798,39 @@ mod tests {
     }
 
     #[test]
+    fn shape_sum_skips_objects_the_predicate_rejects() {
+        // `C4LSectors::getShapeSum` sums `ObjectShapes.ObjectCount()`
+        // (C4Sector.cpp:197-203), and `C4ObjectList::ObjectCount` counts only
+        // entries whose object still has a `Status` (C4ObjectList.cpp:320-330).
+        // Summing the raw list length instead counts a removed object that is
+        // still linked into a sector's shape list, which showed up as a
+        // one-unit `sector_shape_sum` divergence in a mixed netgame
+        // (clonk-org/clonk-rs#586).
+        let mut sectors = SectorMap::new(120, 120);
+        let live = ObjectId::new(1);
+        let dead = ObjectId::new(2);
+        for id in [live, dead] {
+            sectors.add(SectorObject {
+                id,
+                position: Vector2::new(10, 10),
+                shape_rect: DefinitionRect::new(5, 5, 10, 10),
+            });
+        }
+
+        assert_eq!(
+            sectors.shape_sum(|_| true),
+            2,
+            "both shapes are linked into the sector"
+        );
+        assert_eq!(
+            sectors.shape_sum(|id| id == live),
+            1,
+            "an object without Status must not be counted, exactly as \
+             C4ObjectList::ObjectCount skips it"
+        );
+    }
+
+    #[test]
     fn update_moves_point_and_shape_memberships() {
         let mut sectors = SectorMap::new(120, 120);
         let id = ObjectId::new(1);
@@ -796,7 +841,7 @@ mod tests {
         });
 
         assert_eq!(sectors.object_ids(SectorKey::Inside { x: 0, y: 0 }), &[id]);
-        assert_eq!(sectors.shape_sum(), 1);
+        assert_eq!(sectors.shape_sum(|_| true), 1);
 
         sectors.update(SectorObject {
             id,
