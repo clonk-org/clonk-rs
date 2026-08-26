@@ -21,7 +21,7 @@
   },
   "promise": {
     "simulation": {
-      "statement": "With a fixed seed and a fixed frame-counted control sequence, engine state is bit-identical to the pinned C++ oracle in every raw C4Fixed value, the Random/RandomCount/FRnd3 ledgers, landscape and material state, PXS execution, and C4Script VM semantics, except at the two accepted safety boundaries (sim-pxs-syncclearance, sim-s2-terminal-params). No intentional simulation divergence is retained by the profile, and every residual open gap blocks profile readiness until closed or proven unreachable.",
+      "statement": "With a fixed seed and a fixed frame-counted control sequence, engine state is bit-identical to the pinned C++ oracle in every raw C4Fixed value, the Random/RandomCount/FRnd3 ledgers, landscape and material state, weather and environment state, PXS execution, and C4Script VM semantics, except at the two accepted safety boundaries (sim-pxs-syncclearance, sim-s2-terminal-params). No intentional simulation divergence is retained by the profile, and every residual open gap blocks profile readiness until closed or proven unreachable.",
       "evidence": [
         {
           "kind": "command",
@@ -36,10 +36,34 @@
           "note": "Rust self-consistency of the synthetic scenario snapshots."
         },
         {
+          "kind": "document",
+          "value": "parity/bridge/README.md",
+          "status": "held",
+          "note": "The current-tree full-scenario C++ shadow-diff bridge is operational (clonk-org/clonk-rs#585). It compares the fields its ABI carries; it does not claim weather or live-landscape coverage."
+        },
+        {
           "kind": "issue",
-          "value": "clonk-org/clonk-rs#585",
+          "value": "clonk-org/clonk-rs#1261",
           "status": "pending",
-          "note": "A current-tree full-scenario C++ shadow diff is required. The historical Goldrush 15,000-frame report is scoped to its bundled Rust revision and does not satisfy this."
+          "note": "The live shadow diff does not carry or compare independently evolving weather and environment state."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#1240",
+          "status": "pending",
+          "note": "The normal non-authoritative live loop does not compare independently evolving landscape and material planes."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#516",
+          "status": "pending",
+          "note": "Attached DoMovement still lacks the required raw-state C++ differential matrix for attachment search, friction, contact response, and callback ordering."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#1243",
+          "status": "pending",
+          "note": "Landscape-aware LineConnect routing and its immediate DFA_CONNECT lifecycle handoff lack oracle-backed differential coverage."
         },
         {
           "kind": "document",
@@ -150,6 +174,12 @@
           "value": "clonk-org/clonk-rs#587",
           "status": "pending",
           "note": "C++/Rust presentation capture diffs for the profile; compat/presentation_captures.json enumerates the screens, the shared capture geometry, the comparison tolerances and the approved masks."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#1241",
+          "status": "pending",
+          "note": "The shipped event loop lacks live platform evidence for complete retained-GPU device-loss recovery and the first correct post-rebuild presentation."
         }
       ]
     },
@@ -178,7 +208,7 @@
           "kind": "issue",
           "value": "clonk-org/clonk-rs#527",
           "status": "pending",
-          "note": "Differential check of resync and post-mortem recovery."
+          "note": "The component tests do not yet differentially compare the complete checkpoint decision, post-mortem transcript, client attribution, recovery state, and subsequent tick against C++."
         }
       ]
     }

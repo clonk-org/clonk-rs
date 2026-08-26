@@ -908,9 +908,9 @@ pub(crate) fn framebuffer_attempts(requested: Option<wgpu::Backends>) -> Vec<Fra
 ///
 /// Note what this cannot fix: wgpu-hal's GLES backend rejects any context
 /// below GLES 3.0 (wgpu-hal-29.0.4 src/gles/egl.rs:473-474), so VideoCore
-/// IV boards (Pi 0-3) still produce no adapter on any backend. There is no CPU
-/// presentation fallback either — `pixels` needs a wgpu device even to blit a
-/// CPU buffer — so those boards fail here with the diagnostic below.
+/// IV boards (Pi 0-3) still produce no adapter on any backend. This function
+/// reports that GPU-path failure; `build_primary_presentation` then tries the
+/// wgpu-free software presenter.
 pub(crate) fn build_framebuffer(
     window: &Arc<Window>,
     size: PhysicalSize<u32>,
@@ -973,9 +973,9 @@ pub(crate) fn build_framebuffer(
         anyhow::Error::from,
     ))
     .context(
-        "failed to create pixel framebuffer: no GPU adapter on any backend \
-         (GLES 2.0-only hardware such as Raspberry Pi 0-3 cannot be supported \
-         by this renderer; it requires GLES 3.0 or a Vulkan/Metal/DX12 driver)",
+        "failed to create GPU pixel framebuffer: no usable adapter on any \
+         backend (the retained renderer requires GLES 3.0 or a \
+         Vulkan/Metal/DX12 driver)",
     )
 }
 

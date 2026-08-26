@@ -81,10 +81,9 @@ mod viewport_window_host;
 mod voice_chat;
 mod window_icon;
 
-// Step 6a of the decomposition campaign (rust/REFACTOR_PLAN.md): per-area
-// extension files of the `impl GameApp` block. Each file holds
-// `use super::*;` plus its own `impl GameApp { ... }` with methods moved
-// verbatim from the root block below.
+// `GameApp` methods are partitioned into per-area extension modules. They stay
+// in this binary crate and import the root's private application state through
+// `use super::*;`; each module header tracks its independent state boundary.
 #[path = "game_app/chat.rs"]
 mod game_app_chat;
 #[path = "game_app/config.rs"]

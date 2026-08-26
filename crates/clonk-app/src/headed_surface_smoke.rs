@@ -195,7 +195,7 @@ impl HeadedSurfaceSmoke {
             let pixels = shell.pixels.as_ref().context(
                 "the headed surface probe validates GPU adapter and driver teardown, so it \
                  cannot run against software presentation; unset LC_SOFTWARE_PRESENTATION \
-                 (clonk-org/clonk-rs#299 tracks a probe for the software presenter)",
+                 or run the separate --software-present-smoke probe",
             )?;
             shell.window.set_visible(true);
             shell.window.focus_window();

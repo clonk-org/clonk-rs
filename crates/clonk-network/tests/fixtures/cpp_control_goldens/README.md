@@ -41,7 +41,7 @@ byte-for-byte before being checked in.
 
 ## Inputs and commands
 
-Run these from `rust/crates/clonk-network/tests/fixtures`, replacing `<oracle>`
+Run these from `crates/clonk-network/tests/fixtures`, replacing `<oracle>`
 with an executable built from the generator revision and `<out>` with the
 destination directory.
 

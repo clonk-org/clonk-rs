@@ -1,7 +1,7 @@
 //! Host packet dispatch: client messages, forwarding, control ingest/resync, broadcasts, membership.
 //!
-//! Moved byte-verbatim from `session.rs` (wave 2 of the decomposition
-//! campaign, see REFACTOR_PLAN.md). Structural only.
+//! This child module shares the parent session's private protocol machinery;
+//! `session.rs` re-exports its crate-facing surface under the original paths.
 
 use super::*;
 

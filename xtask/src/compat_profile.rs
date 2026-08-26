@@ -1037,9 +1037,8 @@ mod tests {
     #[test]
     fn readiness_counts_pending_evidence_and_blocked_divergences() {
         let (pending, blocked) = readiness(&shipped_manifest()).expect("readiness");
-        // The contract is defined before its proof children land: clonk-org/clonk-rs#585,
-        // #586, #587, #583, #471, #524 and #527 are all still open, so the
-        // manifest must currently report the profile as not advertisable.
+        // The shipped contract deliberately carries pending issue evidence,
+        // so it must currently report the profile as not advertisable.
         assert!(pending > 0, "pending evidence entries must be counted");
         // Every open gap is now closed or accepted (clonk-org/clonk-rs#1094), so
         // the shipped manifest reports none. That is the goal, not a broken

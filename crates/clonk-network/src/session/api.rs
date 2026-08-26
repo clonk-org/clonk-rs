@@ -1,7 +1,7 @@
 //! Session config & public API: configs, handles, events, commands, errors.
 //!
-//! Moved byte-verbatim from `session.rs` (wave 2 of the decomposition
-//! campaign, see REFACTOR_PLAN.md). Structural only.
+//! This child module is re-exported by `session.rs`, preserving the original
+//! public paths while keeping session configuration separate from its loops.
 
 use super::*;
 

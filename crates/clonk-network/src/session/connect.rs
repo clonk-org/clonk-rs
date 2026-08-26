@@ -1,7 +1,7 @@
 //! Connection establishment: host binding & start entry points, client dial races, mesh routes.
 //!
-//! Moved byte-verbatim from `session.rs` (wave 2 of the decomposition
-//! campaign, see REFACTOR_PLAN.md). Structural only.
+//! This child module shares the parent session's private protocol machinery;
+//! `session.rs` re-exports its public entry points under the original paths.
 
 use super::*;
 

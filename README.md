@@ -25,8 +25,9 @@ Download the release for your platform from the
 Each download already contains the game data; no separate content install is
 needed.
 
-[docs/GRAPHICS_SUPPORT.md](docs/GRAPHICS_SUPPORT.md) lists what a machine needs
-to run the game, including which Raspberry Pi generations are supported.
+[docs/GRAPHICS_SUPPORT.md](docs/GRAPHICS_SUPPORT.md) documents the GPU floor,
+the wgpu-free software fallback, and the qualification status of lower-tier
+hardware.
 
 ## Playing
 

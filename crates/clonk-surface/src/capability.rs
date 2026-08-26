@@ -1,5 +1,6 @@
-//! The graphics floor: what an adapter must offer before interactive play can
-//! start, checked in one pass.
+//! The graphics floor: what an adapter must offer before retained GPU
+//! presentation can start, checked in one pass. The primary window may still
+//! start through the wgpu-free software presenter when this probe fails.
 //!
 //! Discovery previously failed at the first unmet requirement and, for the
 //! surface format, did not fail at all — it fell back to `Bgra8UnormSrgb`
@@ -89,7 +90,7 @@ impl std::fmt::Display for CapabilityReport {
         if self.missing.is_empty() {
             return formatter.write_str("the adapter meets the graphics floor");
         }
-        formatter.write_str("this GPU cannot run interactive play: ")?;
+        formatter.write_str("this GPU cannot run retained GPU presentation: ")?;
         for (index, missing) in self.missing.iter().enumerate() {
             if index > 0 {
                 formatter.write_str("; ")?;

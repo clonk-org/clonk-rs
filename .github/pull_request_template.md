@@ -16,10 +16,11 @@ differential evidence. For structural-only changes, write "Not applicable."
 - [ ] `cargo fmt --all -- --check`
 - [ ] `python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py'`
 - [ ] `cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked`
-- [ ] `cargo test --workspace --locked`
+- [ ] `cargo nextest run --workspace --no-fail-fast`
 - [ ] `cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings`
 - [ ] `cargo xtask engine-snapshots verify`
 - [ ] `cargo xtask parity verify`
+- [ ] `cargo xtask compat verify`
 - [ ] Additional scenario/parity checks, or an explanation of why none apply
 
 ## Change classification

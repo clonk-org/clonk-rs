@@ -10381,9 +10381,9 @@ impl Default for Engine {
     }
 }
 
-// `impl Engine` is split across these area files; each mounts under the
-// crate root with `use super::*;` and its own `impl Engine { .. }` block,
-// methods moved verbatim (see REFACTOR_PLAN.md, wave 2).
+// `impl Engine` is partitioned across these area modules. Each mounts under
+// the crate root, imports the root's private state through `use super::*;`,
+// and contributes its own `impl Engine { .. }` block.
 #[path = "engine/command_results.rs"]
 mod engine_command_results;
 #[path = "engine/config.rs"]

@@ -7,7 +7,9 @@ commit `7d43b47b7d789b533f32d005e64596e0a07019cd`
 versioned next to the implementation instead of living only in a C++ checkout —
 `crates/clonk-engine/src/ffi.rs` (feature `ffi`) is what satisfies it.
 
-This is Phase 2 of the parity harness, clonk-org/clonk-rs#585.
+This bridge complements the committed primitive golden in
+[`../README.md`](../README.md) by running the current Rust engine beside a real
+C++ scenario.
 
 ## Building the artifacts
 
@@ -65,30 +67,14 @@ LC_RUST_ENGINE_RECORD=<path> ./clonk    # C++ snapshots as JSON, for triage
 
 Divergences are reported as `Rust runtime parity mismatch: ...`.
 
-### Counting events across a run — the two engines do not run equally long
+### Counting events across a run
 
-The harness **stops stepping the Rust engine at its first divergence**; C++ is
-the host and carries on to the end of the run. So any statistic gathered by
-instrumenting both sides and counting events over a whole run measures *how long
-each engine ran*, not how often it did something.
-
-Measured on `Massif` with a per-frame probe on each side:
-
-```
-CPPCOM   distinct frames=60   last frame=60   events=360
-RUSTCOM  distinct frames=1    last frame=1    events=6
-```
-
-That run diverged at frame 1, so the Rust engine executed one frame against
-C++'s sixty. A 60:1 ratio in the raw counts is the harness, not the engine.
-This produced a published-then-retracted "the port turns animals 5-10x less
-often" finding (clonk-org/clonk-rs#1123) — the shape of the error is a ratio
-extreme enough that it should prompt a check of the frame spans first.
-
-To count anything across a run, either:
+The harness stops stepping Rust at the first divergence while C++ remains the
+host and may continue. Whole-run event totals therefore measure different frame
+spans after a mismatch. To compare counts, either:
 
 - use a scenario that reports **no** divergence, so both engines execute the
-  same frames — the tutorials qualify; or
+  same frames; or
 - log each side's frame number and truncate the C++ series to the Rust
   engine's last stepped frame before comparing.
 
@@ -108,8 +94,9 @@ relative to the same landmark.
 ### Passing the scenario — both engines must load the same `System.c4g`
 
 The port resolves its install root by walking the **ancestors of the scenario
-path** for `planet/System.c4g` (`crates/clonk-engine/src/ffi.rs:2609`), while
-C++ resolves it from its own working directory. Pass an absolute scenario path
+path** for `planet/System.c4g`
+(`crates/clonk-engine/src/ffi.rs`, `load_scenario_into_runtime`), while C++
+resolves it from its own working directory. Pass an absolute scenario path
 inside this repository and the two engines silently load **different** system
 groups: the port picks up `planet/System.c4g` from the checkout, whose
 port-authored `#appendto` scripts (`BirdFlight.c`, `EkeAirbikeSteering.c`,
@@ -117,16 +104,9 @@ port-authored `#appendto` scripts (`BirdFlight.c`, `EkeAirbikeSteering.c`,
 withholds, `crates/clonk-app/src/compat_readiness.rs`) never run under the
 oracle.
 
-The diff then reports content that only one side was given. It looks like a
-port defect and is not one: on `Races.c4f/Goldrace.c4s` it surfaced as
-
-```
-frame 1: ... effects rust [BirdFlight(prio 1 int 1 t 1)], cpp []
-```
-
-with the velocity and command-direction differences that `BirdFlight.c`'s own
-`SetXDir`/`SetCommand` calls produce. Scenarios that pull in no port append
-(the tutorials) are unaffected, so a sweep can be half valid.
+The diff then reports content that only one side was given. Because scenarios
+that do not load a port-authored append can still agree, mixing path forms can
+invalidate only part of a batch without producing an obvious harness failure.
 
 Pass the scenario **through the build tree** instead, so the ancestor walk finds
 the group C++ is using:
@@ -140,75 +120,55 @@ printf '/open %s/Races.c4f/Goldrace.c4s %s/Tyler.c4p\n' "$PWD" "$PWD" \
 Comparing an install-root-sensitive scenario any other way is not a parity
 result.
 
-## What is and is not wired
+## Comparison boundary
 
-The loop runs. On Tutorial01 with a fresh player it reports exactly one
-divergence, reproducible byte-for-byte:
+The normal loop compares the frame number, synchronized RNG ledger, ordered
+live-object snapshots and definition histogram, global effects, particles,
+crew selection and roles, eliminated/known crew ownership, per-player HUD core,
+controls, and network-packet snapshots. Object comparison includes raw fixed
+position, velocity, and rotation state; do not replace those fields with their
+whole-pixel mirrors.
 
-```
-frame 1: object 90 energy rust 55000, cpp 50000
-```
+Two determinism-critical planes are not transmitted into the normal comparison:
 
-That one is **not** a simulation defect — it is clonk-org/clonk-rs#1049, the
-bridge having no field for the C++ fair-crew game parameters, so the Rust
-runtime keeps its own defaults and promotes a rank-0 crew member to rank 1.
-Aligning the parameter drops the count to zero, so the port matches C++ across
-every object, effect, particle, crew and control the bridge compares, for the
-whole scenario. Any C++ game parameter absent from the header is a false
-positive of exactly this shape; check the header before blaming the port.
+- **Weather/environment state:** `lc_engine_runtime_compare_snapshot` has no
+  environment parameter. `lc_engine_runtime_export_environment` only reads the
+  Rust state for authoritative mode; it does not provide the independently
+  executing C++ values. A clean run says nothing about weather until
+  clonk-org/clonk-rs#1261 is complete.
+- **Landscape/material state:** each engine generates and mutates its own
+  landscape in a normal run, but `runtime_snapshot_mismatch` has no landscape
+  checksum or byte-plane comparison. `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE`
+  pushes Rust's landscape into C++ and therefore cannot prove independent
+  agreement. This is tracked by clonk-org/clonk-rs#1240.
 
-Still open:
+Render-surface equivalence is outside this engine-state ABI. Rendering has its
+own contract in
+[`../../docs/RENDERING_PARITY.md`](../../docs/RENDERING_PARITY.md).
 
-- **No gate runs this.** It needs an oracle checkout and builds only where the
-  oracle builds, so it is a local investigation tool, not CI coverage.
-- All four scenario classes clonk-org/clonk-rs#585 asks for have now been swept
-  — movement (`Goldrace`, `Skyrace`), landscape (`Greed`, `Canyon`, `Massif`),
-  script/effect (`Tutorial03/05/07/09/10`) and network-record (see below). Each
-  starts and reports a first divergence.
-- **Weather is not compared, and cannot be**
-  (clonk-org/clonk-rs#1083). `lc_engine_runtime_compare_snapshot` takes no
-  environment parameters, so wind, season and climate never reach the
-  comparison; the header carries `LcEngineRuntimeEnvironmentState` only for
-  `lc_engine_runtime_export_environment`, which reads state *out of* the Rust
-  runtime. Extending the compared set does not help — the values never arrive,
-  and adding a parameter would break link compatibility with the bridge the
-  oracle builds. **A clean diff says nothing about weather**, which is on the
-  determinism-critical list; a weather divergence reaches the report only if
-  some object script happens to branch on it, as in
-  clonk-org/clonk-rs#1077. The same structural gap as
-  clonk-org/clonk-rs#1049.
-- **The landscape is not compared either, and both engines build their own.**
-  `runtime_snapshot_mismatch` (`ffi.rs`) diffs the frame, the object count and
-  histogram, and per-object fields — there is no landscape checksum anywhere in
-  it. The bridge *can* hand the port's landscape to C++
-  (`ApplyAuthoritativeLandscapeState`), but only under
-  `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE`; in an ordinary
-  `LC_RUST_ENGINE_RUNTIME=1` run each engine generates its own from the seed and
-  nothing ever compares them. **A clean diff says nothing about the landscape**,
-  which matters more than it looks: three of the swept scenarios above are the
-  *landscape* class, and a pure material divergence reaches the report only once
-  it perturbs an object.
+### Separate oracle validation bridges
 
-  This is not hypothetical. On `Massif` with the mass-mover work landed, all six
-  pinned seeds run clean to frame 500 while the two engines still transfer mass
-  at partly different pixels (95 shared, 7 port-only, 5 C++-only in one measured
-  frame) — invisible to the comparison because only the landscape records it.
-  Same structural gap as the weather one above.
-- The other bridges (`USE_RUST_CONFIG`, `USE_RUST_GROUP_VALIDATION`,
-  `USE_RUST_GUI_VALIDATION`, `USE_RUST_PLATFORM_PATHS`) link their own `lc_*`
-  libraries and need the `ffi` modules of the other crates, which are not
-  restored. They are off by default, so engine validation does not wait on them.
+The pinned oracle also defines validation bridges that this engine-state ABI
+does not exercise. Their Rust implementations are not present in the current
+tree, so an engine shadow-diff result must not be treated as evidence for them:
 
-So `parity verify` remains the primitive-section differential, and a green run
-of it is still not evidence of full-scenario parity.
+- `USE_RUST_CONFIG`: clonk-org/clonk-rs#1264
+- `USE_RUST_GROUP_VALIDATION`: clonk-org/clonk-rs#1265
+- `USE_RUST_GUI_VALIDATION`: clonk-org/clonk-rs#1266
+- `USE_RUST_PLATFORM_PATHS`: clonk-org/clonk-rs#1267
+
+No required gate runs the live bridge: it needs a separately built oracle
+checkout and is intentionally an opt-in investigation tool. `cargo xtask parity
+verify` remains the reproducible primitive differential. A green result from
+either harness is evidence only for the fields that harness actually compares.
 
 ## Replaying a record
 
-The network-record class needs a record to replay, and nothing in the tree
-produces one. The engine records only when `Config.General.Record` is set, and
-that lives in a config file the engine writes itself — so seed it rather than
-hand-authoring one, because the key is `Record=false` inside `[General]` and a
-guessed path is silently ignored (on macOS the default is
+To exercise the network-record path, first have the C++ engine produce a record.
+Recording is enabled only when `Config.General.Record` is set, and that lives in
+a config file the engine writes itself — so seed it rather than hand-authoring
+one, because the key is `Record=false` inside `[General]` and a guessed path is
+silently ignored (on macOS the default is
 `$HOME/Library/Preferences/legacyclonk.config`, which a `HOME` override does not
 create on its own).
 
@@ -236,31 +196,18 @@ that `C4Game::Execute` skips recording for a replay (`C4Game.cpp:2935`,
 gain one, the record was opened as an ordinary scenario and the run says nothing
 about control or record.
 
-On `001-Tutorial` the replay reports one divergence, byte-identical across
-repeated runs:
-
-```
-frame 1: synced RNG ledger diverged:
-  rust hold 2460695438 count 501, cpp hold 3481787565 count 506
-```
-
-Unlike the landscape sweeps, this one is stable rather than intermittent, which
-makes it the better starting point for the frame-1 draw-count family
-(clonk-org/clonk-rs#1139 is the other member).
-
 ## Faithfulness
 
-`ffi.rs` is a port-forward of the pinned implementation rather than a rewrite,
-deliberately: `OnFrame` hands the Rust side a complete `SnapshotBuffer`
-collected from `C4Game`, and the Rust side decides what counts as a divergence,
-so the comparison semantics are only correct if they match the ones the bridge
-was written against. Reconciling drift against the current engine took two
-changes:
+`ffi.rs` is a port-forward of the pinned implementation rather than a rewrite.
+`OnFrame` hands the Rust side a `SnapshotBuffer` collected from `C4Game`, and
+the Rust side decides what counts as a divergence, so the ABI and normalization
+rules must remain aligned with the bridge at the pinned commit. In particular:
 
-- `ObjectSnapshot::components` is a `ComponentList` now (`C4IDList` ordering)
-  rather than a `HashMap`.
+- `ObjectSnapshot::components` uses `ComponentList` so the ABI preserves
+  `C4IDList` ordering; a `HashMap` is not equivalent.
 - `tracing-subscriber` is an optional dependency behind the `ffi` feature; the
   pinned tree took it the same way.
 
-Keep it that way. A divergence introduced here is indistinguishable from an
-engine divergence when the loop finally runs.
+Do not silently widen, reorder, or normalize the ABI to fit current Rust types.
+A bridge-translation divergence is indistinguishable from an engine divergence
+once the loop runs.
