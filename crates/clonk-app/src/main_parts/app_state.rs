@@ -2146,7 +2146,6 @@ pub(crate) enum ClassicIngameMenuChild {
     ClientDisconnect,
     GoalInfo(String),
     RuleInfo(String),
-    JoinPlayer { file: String, detail: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2711,10 +2710,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::ScriptMenuPointerResources { detail } => write!(
                 f,
                 "classic script-menu pointer resources are unavailable: {detail}; refusing world-pointer fallthrough"
-            ),
-            Self::IngameMenuChild(ClassicIngameMenuChild::JoinPlayer { file, detail }) => write!(
-                f,
-                "classic offline in-game player join failed for `{file}`: {detail}; refusing status-text fallback"
             ),
             Self::IngameMenuChild(child) => write!(
                 f,
