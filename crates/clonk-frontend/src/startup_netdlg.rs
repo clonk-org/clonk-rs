@@ -1345,6 +1345,8 @@ pub struct NetDlgController {
     scrollbar_dragging: bool,
     /// A held `C4GUI::ScrollBar` pin on the IRC transcript.
     chat_transcript_scrollbar_dragging: bool,
+    /// Pointer capture for the nick pane's scrollbar pin.
+    chat_users_scrollbar_dragging: bool,
     scrollbar_arrow_captured: bool,
     scrollbar_arrow: i8,
 }
@@ -1366,6 +1368,12 @@ enum NetDlgChatHit {
     TranscriptScrollDown,
     TranscriptScrollPin,
     TranscriptScrollTrack,
+    /// The nick pane's own `ScrollBar`, which exists only while the list
+    /// overflows.
+    UsersScrollUp,
+    UsersScrollDown,
+    UsersScrollPin,
+    UsersScrollTrack,
     User(usize),
 }
 
@@ -1392,6 +1400,12 @@ struct NetDlgChatLayout {
     transcript_viewport: IntRect,
     transcript_scrollbar: IntRect,
     users: Option<IntRect>,
+    /// The nick rows' client area — `users` less the scrollbar when one is
+    /// shown, which is how `ScrollWindow` sizes its client.
+    users_viewport: Option<IntRect>,
+    /// Present only while the nick list overflows, as `ListBox` shows no bar
+    /// otherwise.
+    users_scrollbar: Option<IntRect>,
     input_label: Option<IntRect>,
     input: IntRect,
 }
@@ -1484,6 +1498,7 @@ impl NetDlgController {
             list_scroll_pin: 0,
             scrollbar_dragging: false,
             chat_transcript_scrollbar_dragging: false,
+            chat_users_scrollbar_dragging: false,
             scrollbar_arrow_captured: false,
             scrollbar_arrow: 0,
         }
@@ -2657,6 +2672,10 @@ impl NetDlgController {
             self.set_chat_transcript_scroll_from_pointer(position);
             return Vec::new();
         }
+        if self.chat_users_scrollbar_dragging {
+            self.set_chat_users_scroll_from_pointer(position);
+            return Vec::new();
+        }
         if self.scrollbar_dragging {
             self.set_scroll_from_pointer(position, &layout);
         } else if self.scrollbar_arrow_captured {
@@ -2737,6 +2756,19 @@ impl NetDlgController {
                     NetDlgChatHit::TranscriptScrollTrack => {
                         self.set_chat_transcript_scroll_from_pointer(position);
                         self.chat_transcript_scrollbar_dragging = true;
+                    }
+                    NetDlgChatHit::UsersScrollUp => {
+                        self.scroll_active_chat_users_by(-self.metrics.text_line_height.max(1));
+                    }
+                    NetDlgChatHit::UsersScrollDown => {
+                        self.scroll_active_chat_users_by(self.metrics.text_line_height.max(1));
+                    }
+                    NetDlgChatHit::UsersScrollPin => {
+                        self.chat_users_scrollbar_dragging = true;
+                    }
+                    NetDlgChatHit::UsersScrollTrack => {
+                        self.set_chat_users_scroll_from_pointer(position);
+                        self.chat_users_scrollbar_dragging = true;
                     }
                     NetDlgChatHit::DialogClose
                     | NetDlgChatHit::DialogCaption
@@ -2821,6 +2853,10 @@ impl NetDlgController {
                         | NetDlgChatHit::TranscriptScrollDown
                         | NetDlgChatHit::TranscriptScrollPin
                         | NetDlgChatHit::TranscriptScrollTrack
+                        | NetDlgChatHit::UsersScrollUp
+                        | NetDlgChatHit::UsersScrollDown
+                        | NetDlgChatHit::UsersScrollPin
+                        | NetDlgChatHit::UsersScrollTrack
                         | NetDlgChatHit::User(_) => Vec::new(),
                     };
                 }
@@ -2829,6 +2865,11 @@ impl NetDlgController {
         if self.chat_transcript_scrollbar_dragging {
             self.set_chat_transcript_scroll_from_pointer(position);
             self.chat_transcript_scrollbar_dragging = false;
+            return Vec::new();
+        }
+        if self.chat_users_scrollbar_dragging {
+            self.set_chat_users_scroll_from_pointer(position);
+            self.chat_users_scrollbar_dragging = false;
             return Vec::new();
         }
         if self.scrollbar_dragging {
@@ -3585,6 +3626,20 @@ impl NetDlgController {
             users_w,
             (inner.h - tab_h - input_h).max(0),
         ));
+        // `C4GUI::ListBox` is a `ScrollWindow`, which shows its bar only while
+        // the content overflows and takes the bar's width out of the client
+        // area rather than drawing over the rows
+        // (src/C4ChatDlg.cpp:226-238; src/C4GuiContainers.cpp:477-623).
+        let users_scrollbar = users
+            .filter(|rect| self.chat_users_overflow(rect.h))
+            .map(|rect| {
+                let bar_w = SCROLLBAR_WIDTH.min(rect.w.max(0));
+                IntRect::new(rect.x + rect.w - bar_w, rect.y, bar_w, rect.h)
+            });
+        let users_viewport = users.map(|rect| {
+            let bar_w = users_scrollbar.map_or(0, |bar| bar.w);
+            IntRect::new(rect.x, rect.y, (rect.w - bar_w).max(0), rect.h)
+        });
         let input_label = (active_kind != Some(NetDlgChatSheetKind::Server))
             .then_some(IntRect::new(input_row.x, input_row.y, 40, input_row.h));
         let label_w = input_label.map_or(0, |label| label.w);
@@ -3615,6 +3670,8 @@ impl NetDlgController {
                 transcript.h,
             ),
             users,
+            users_viewport,
+            users_scrollbar,
             input_label,
             input: IntRect::new(
                 input_row.x + label_w,
@@ -3707,6 +3764,90 @@ impl NetDlgController {
             .unwrap_or(i32::MAX)
             .saturating_mul(line_height.max(1));
         (content - users.h).max(0)
+    }
+
+    /// Whether the active sheet's nick rows exceed `height`. Takes the height
+    /// directly rather than reading the layout, because the layout itself asks
+    /// this while deciding whether to reserve the bar.
+    fn chat_users_overflow(&self, height: i32) -> bool {
+        let line_height = self.metrics.text_line_height.max(1);
+        self.chat_sheets
+            .get(self.chat_active_sheet)
+            .is_some_and(|sheet| {
+                i32::try_from(sheet.users.len())
+                    .unwrap_or(i32::MAX)
+                    .saturating_mul(line_height)
+                    > height
+            })
+    }
+
+    /// `C4GUI::ScrollBar`'s pointer regions for the nick pane: the two arrow
+    /// buttons and, between them, a draggable pin over a pageable track
+    /// (src/C4GuiContainers.cpp:477-623). Like the transcript's, the bar
+    /// exists only while the list overflows.
+    fn chat_users_scrollbar_hit(
+        &self,
+        layout: &NetDlgChatLayout,
+        point: GuiPoint,
+    ) -> Option<NetDlgChatHit> {
+        let bar = layout.users_scrollbar?;
+        let max_scroll = self.chat_users_max_scroll(self.metrics.text_line_height.max(1));
+        if max_scroll <= 0 || !contains(bar, point) {
+            return None;
+        }
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let y = point.y.floor() as i32;
+        if y < bar.y + arrow {
+            return Some(NetDlgChatHit::UsersScrollUp);
+        }
+        if y >= bar.y + bar.h - arrow {
+            return Some(NetDlgChatHit::UsersScrollDown);
+        }
+        Some(
+            if contains(self.chat_users_pin_rect(layout, max_scroll), point) {
+                NetDlgChatHit::UsersScrollPin
+            } else {
+                NetDlgChatHit::UsersScrollTrack
+            },
+        )
+    }
+
+    fn chat_users_pin_rect(&self, layout: &NetDlgChatLayout, max_scroll: i32) -> IntRect {
+        let Some(bar) = layout.users_scrollbar else {
+            return IntRect::new(0, 0, 0, 0);
+        };
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let travel = (bar.h - 3 * arrow).max(0);
+        let scroll = self
+            .chat_sheets
+            .get(self.chat_active_sheet)
+            .map_or(0, |sheet| sheet.user_scroll);
+        let offset = if max_scroll > 0 && travel > 0 {
+            (i64::from(scroll) * i64::from(travel) / i64::from(max_scroll)) as i32
+        } else {
+            0
+        };
+        IntRect::new(bar.x, bar.y + arrow + offset, bar.w, arrow)
+    }
+
+    /// `ScrollBar::MouseInput`'s drag/page for the nick pane: centre the pin
+    /// under the pointer and map that back to a row offset.
+    fn set_chat_users_scroll_from_pointer(&mut self, point: GuiPoint) {
+        let layout = self.chat_layout();
+        let Some(bar) = layout.users_scrollbar else {
+            return;
+        };
+        let max_scroll = self.chat_users_max_scroll(self.metrics.text_line_height.max(1));
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let travel = (bar.h - 3 * arrow).max(0);
+        if max_scroll <= 0 || travel <= 0 {
+            return;
+        }
+        let position = (point.y.floor() as i32 - bar.y - arrow - arrow / 2).clamp(0, travel);
+        let scroll = (i64::from(position) * i64::from(max_scroll) / i64::from(travel)) as i32;
+        if let Some(sheet) = self.chat_sheets.get_mut(self.chat_active_sheet) {
+            sheet.user_scroll = scroll.clamp(0, max_scroll);
+        }
     }
 
     fn scroll_active_chat_users_by(&mut self, delta: i32) {
@@ -3852,8 +3993,11 @@ impl NetDlgController {
                 .or_else(|| {
                     contains(layout.transcript_viewport, point).then_some(NetDlgChatHit::Transcript)
                 })
+                .or_else(|| self.chat_users_scrollbar_hit(&layout, point))
                 .or_else(|| {
-                    let users = layout.users?;
+                    // Rows are hit against the client area, so a click on the
+                    // bar never selects the nick behind it.
+                    let users = layout.users_viewport.or(layout.users)?;
                     if !contains(users, point) {
                         return None;
                     }
@@ -5974,7 +6118,7 @@ impl NetDlgScreen {
                     gamma,
                 );
             }
-            if let Some(users) = chat_layout.users {
+            if let Some(users) = chat_layout.users_viewport.or(chat_layout.users) {
                 draw_engine_box(
                     surface,
                     users.x,
@@ -6026,6 +6170,23 @@ impl NetDlgScreen {
                     );
                 }
                 draw_3d_frame(surface, users, gamma);
+                // `ScrollWindow` draws its bar beside the client area, so the
+                // nick rows above were laid out against the viewport rather
+                // than the full pane.
+                if let Some(bar) = chat_layout.users_scrollbar {
+                    let users_max_scroll =
+                        controller.chat_users_max_scroll(fonts.text.line_height.max(1));
+                    if users_max_scroll > 0 {
+                        Self::draw_chat_scrollbar(
+                            surface,
+                            assets,
+                            bar,
+                            sheet.user_scroll,
+                            users_max_scroll,
+                            gamma,
+                        );
+                    }
+                }
             }
         }
         draw_3d_frame(surface, chat_layout.transcript, gamma);
@@ -8131,6 +8292,110 @@ mod tests {
             controller.handle_wheel(inside, -60);
         }
         assert_same!(controller.chat_sheets()[channel_index].user_scroll => max_scroll, "the offset is bounded by the overflow");
+    }
+
+    // The channel nick pane is a `C4GUI::ListBox`, which is a `ScrollWindow`:
+    // it shows a `ScrollBar` only while its content overflows, takes the bar's
+    // width out of the client area instead of drawing over the rows, and gives
+    // that bar the same arrow/pin/track regions as any other
+    // (src/C4ChatDlg.cpp:226-238; src/C4GuiContainers.cpp:477-623).
+    #[test]
+    fn irc_nick_list_scrollbar_appears_only_on_overflow_and_scrolls_like_cpp() {
+        let users_for = |count: usize| {
+            (0..count)
+                .map(|index| NetDlgChatUser {
+                    prefix: String::new(),
+                    name: format!("User{index:02}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let controller_with = |count: usize| {
+            let mut controller = self::controller();
+            let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+            snapshot.channels[0].users = users_for(count);
+            controller.sync_chat_snapshot(snapshot);
+            let channel =
+                chat_sheet_index(&controller, NetDlgChatSheetKind::Channel, "channel tab");
+            controller.select_chat_sheet(channel);
+            controller.force_chat_mode_and_focus();
+            (controller, channel)
+        };
+
+        // No overflow: no bar, and the rows keep the whole pane.
+        let (controller, _) = controller_with(2);
+        let layout = controller.chat_layout();
+        let users = layout.users.expect("channel nick pane");
+        assert_eq!(
+            layout.users_scrollbar, None,
+            "ListBox shows no bar without overflow"
+        );
+        assert_same!(
+            layout.users_viewport => Some(users),
+            "the client area is the whole pane while no bar is shown"
+        );
+
+        // Overflow: the bar appears and its width leaves the client area.
+        let (mut controller, channel_index) = controller_with(500);
+        let line_height = metrics().text_line_height.max(1);
+        let max_scroll = controller.chat_users_max_scroll(line_height);
+        assert!(max_scroll > 0, "500 users overflow the nick pane");
+        let layout = controller.chat_layout();
+        let users = layout.users.expect("channel nick pane");
+        let bar = layout.users_scrollbar.expect("overflow shows the bar");
+        let viewport = layout.users_viewport.expect("channel nick client area");
+        assert_eq!(
+            bar.x + bar.w,
+            users.x + users.w,
+            "the bar sits at the right"
+        );
+        assert_eq!(
+            viewport.w + bar.w,
+            users.w,
+            "the bar's width is removed from the nick viewport"
+        );
+
+        let at = |y: i32| GuiPoint::new((bar.x + bar.w / 2) as f32, y as f32);
+        // The down arrow steps one row.
+        controller.handle_pointer_down(at(bar.y + bar.h - 2), text_font());
+        controller.handle_pointer_up(at(bar.y + bar.h - 2), text_font());
+        assert_same!(
+            controller.chat_sheets()[channel_index].user_scroll => line_height,
+            "the arrow steps one row"
+        );
+        // The up arrow steps back.
+        controller.handle_pointer_down(at(bar.y + 2), text_font());
+        controller.handle_pointer_up(at(bar.y + 2), text_font());
+        assert_eq!(controller.chat_sheets()[channel_index].user_scroll, 0);
+
+        // The bare track pages, and the pin then drags under capture.
+        controller.handle_pointer_down(at(bar.y + bar.h / 2), text_font());
+        let paged = controller.chat_sheets()[channel_index].user_scroll;
+        assert!(paged > 0 && paged < max_scroll, "paged to {paged}");
+        controller.handle_pointer_move(at(bar.y + CHAT_SCROLL_ARROW_EXTENT), text_font());
+        assert_eq!(
+            controller.chat_sheets()[channel_index].user_scroll,
+            0,
+            "the pin follows the pointer while captured"
+        );
+        controller.handle_pointer_up(at(bar.y + bar.h), text_font());
+        assert_same!(
+            controller.chat_sheets()[channel_index].user_scroll => max_scroll,
+            "the release position is applied before the drag ends"
+        );
+
+        // The wheel and the bar share one offset.
+        let inside = GuiPoint::new(
+            (viewport.x + viewport.w / 2) as f32,
+            (viewport.y + viewport.h / 2) as f32,
+        );
+        controller.handle_wheel(inside, 60);
+        let wheeled = controller.chat_sheets()[channel_index].user_scroll;
+        assert!(wheeled < max_scroll, "the wheel moves the same offset");
+        let pin = controller.chat_users_pin_rect(&controller.chat_layout(), max_scroll);
+        assert!(
+            pin.y >= bar.y && pin.y + pin.h <= bar.y + bar.h,
+            "the pin stays inside the bar after a wheel"
+        );
     }
 
     // `AppendLines` word-wraps a message at the width in force and hands every
