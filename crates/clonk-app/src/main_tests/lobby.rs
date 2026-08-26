@@ -8148,6 +8148,144 @@ fn declining_ready_check_keeps_local_unready_and_submits_cpp_reply() {
     assert_ready_checks(&mut commands, 7, clonk_network::ReadyCheckData::NotReady);
 }
 
+/// `ReadyCheckDialog::OnAction` closes the modal with the answer the toast
+/// button carries, and `ShowModalDlg`'s single return value is what gets
+/// broadcast (src/C4Network2.cpp:190-193,1673-1695). So a notification answer
+/// is the *same* answer the dialog would have given — one packet, and the
+/// prompt is gone.
+#[test]
+fn ready_check_notification_actions_submit_the_answer_and_close_the_prompt() {
+    use crate::ready_check_notification::{NotificationAction, NotificationActivation};
+
+    for (action, expected) in [
+        (NotificationAction::Yes, clonk_network::ReadyCheckData::Ready),
+        (NotificationAction::No, clonk_network::ReadyCheckData::NotReady),
+    ] {
+        let (mut app, event_tx, mut commands) = networked_client_lobby_with_commands(
+            new_menu_app(320, 200),
+            "Client",
+            client_lobby_state(),
+        );
+        send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
+        app.test_network_events();
+        main_assert!(!app.message_dialogs.is_empty());
+
+        let continuation = app.lobby_ready_check_continuation.clone().test_value();
+        main_assert!(continuation.activate(
+            NotificationActivation::Chosen(action),
+            app.lobby_ready_check_sink.as_ref()
+        ));
+        app.poll_lobby_ready_check_notification().test_value();
+
+        main_assert!(app.message_dialogs.is_empty());
+        main_assert_eq!(
+            app_lobby(&app).local_ready() => matches!(action, NotificationAction::Yes)
+        );
+        assert_ready_checks(&mut commands, 7, expected);
+
+        // A second activation, a late dialog answer and a repeated poll are
+        // all inert: the continuation is claimed exactly once.
+        main_assert!(!continuation.activate(
+            NotificationActivation::Chosen(NotificationAction::No),
+            app.lobby_ready_check_sink.as_ref()
+        ));
+        app.poll_lobby_ready_check_notification().test_value();
+        app.complete_lobby_ready_check_response(false).test_value();
+        main_assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+}
+
+/// Clicking the toast body is not an answer. C++ disagrees with itself across
+/// platforms — libnotify's `default` action reaches `Activated()` and closes
+/// the dialog *true*, while a WinRT body click arrives as `OnAction("")` and
+/// closes it *false* (src/C4ToastLibNotify.cpp:45,107-128;
+/// src/C4ToastWinRT.cpp:110-143). The port refuses to pick one: a default
+/// activation resolves the prompt without broadcasting either answer.
+#[test]
+fn a_ready_check_notification_body_click_answers_neither_way() {
+    use crate::ready_check_notification::NotificationActivation;
+
+    let (mut app, event_tx, mut commands) = networked_client_lobby_with_commands(
+        new_menu_app(320, 200),
+        "Client",
+        client_lobby_state(),
+    );
+    send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
+    app.test_network_events();
+
+    let continuation = app.lobby_ready_check_continuation.clone().test_value();
+    main_assert!(
+        continuation.activate(NotificationActivation::Default, app.lobby_ready_check_sink.as_ref())
+    );
+    app.poll_lobby_ready_check_notification().test_value();
+
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(commands.take_submitted_ready_checks().is_empty());
+}
+
+/// The countdown and the toast race every second. `TimedDialog::OnSec1Timer`
+/// closes the prompt false on the fifteenth tick
+/// (src/C4GuiDialogs.cpp:1279-1299), so whichever of the two resolves first
+/// owns the answer and the other becomes inert.
+#[test]
+fn a_ready_check_timeout_and_a_notification_answer_cannot_both_submit() {
+    use crate::ready_check_notification::{NotificationAction, NotificationActivation};
+
+    let (mut app, event_tx, mut commands) = networked_client_lobby_with_commands(
+        new_menu_app(320, 200),
+        "Client",
+        client_lobby_state(),
+    );
+    send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
+    app.test_network_events();
+
+    let continuation = app.lobby_ready_check_continuation.clone().test_value();
+    main_assert!(continuation.activate(
+        NotificationActivation::Chosen(NotificationAction::Yes),
+        app.lobby_ready_check_sink.as_ref()
+    ));
+
+    // The timer fires before the loop has polled the notification.
+    for _ in 0..LOBBY_READY_CHECK_PROMPT_SECONDS {
+        app.tick_lobby_ready_check_prompt();
+    }
+    app.poll_lobby_ready_check_notification().test_value();
+
+    main_assert!(app.message_dialogs.is_empty());
+    assert_ready_checks(&mut commands, 7, clonk_network::ReadyCheckData::Ready);
+}
+
+/// `close_lobby_child_dialogs_silently` drops the prompt without running its
+/// continuation, which is how C++'s `DoLobby` deletes the lobby on GS_Go. The
+/// toast must go with it — `ReadyCheckDialog::OnClosed` detaches the handler
+/// and hides it (src/C4Network2.cpp:176-178) — and a later activation must not
+/// answer a check that no longer exists.
+#[test]
+fn lobby_teardown_closes_the_ready_check_notification_and_makes_it_inert() {
+    use crate::ready_check_notification::{NotificationAction, NotificationActivation};
+
+    let (mut app, event_tx, mut commands) = networked_client_lobby_with_commands(
+        new_menu_app(320, 200),
+        "Client",
+        client_lobby_state(),
+    );
+    send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
+    app.test_network_events();
+    let continuation = app.lobby_ready_check_continuation.clone().test_value();
+
+    app.close_lobby_child_dialogs_silently();
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.lobby_ready_check_continuation.is_none());
+    main_assert!(continuation.resolved());
+
+    main_assert!(!continuation.activate(
+        NotificationActivation::Chosen(NotificationAction::Yes),
+        app.lobby_ready_check_sink.as_ref()
+    ));
+    app.poll_lobby_ready_check_notification().test_value();
+    main_assert!(commands.take_submitted_ready_checks().is_empty());
+}
+
 #[test]
 fn ready_check_prompt_sends_no_reply_after_lobby_ends() {
     // The modal loop may outlive the lobby. C++ rechecks

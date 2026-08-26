@@ -1521,6 +1521,12 @@ fn run() -> Result<()> {
                             .as_ref()
                             .map_or(Ok(()), |notifier| notifier.show(notification))
                     });
+                    // A toast button resolves the ready check on the backend's
+                    // own thread, which can neither touch the lobby state nor
+                    // call the blocking submit. Drain it here instead.
+                    if let Err(error) = app.poll_lobby_ready_check_notification() {
+                        tracing::error!(%error, "failed to submit a ready check answered from a notification");
+                    }
                     let graphics_now = Instant::now();
                     if frame_schedule != previous_frame_schedule {
                         // SetGameTickDelay replaces the application timer. Anchor
@@ -2766,6 +2772,8 @@ impl GameApp {
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
             ready_check_toasts_enabled: load_ready_check_toasts_enabled(paths),
             pending_desktop_notifications: VecDeque::new(),
+            lobby_ready_check_continuation: None,
+            lobby_ready_check_sink: std::sync::Arc::new(ready_check_notification::SilentSink),
             control_messages,
             league_votes: LeagueVoteState::default(),
             startup_network_connection: None,
