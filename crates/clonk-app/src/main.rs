@@ -186,9 +186,9 @@ use clonk_app_menus::object_menu::{
     engine_script_menu_pointer_target_with_presentation, engine_script_menu_presentation_geometry,
     engine_script_menu_presentation_geometry_with_free_anchor,
     render_engine_script_menu_with_gamma, resolve_engine_script_menu_footer,
-    validate_menu_decoration_for_area, EngineScriptMenuLayout, EngineScriptMenuPointerTarget,
-    EngineScriptMenuPresentationGeometry, MenuMode as AppObjectMenuMode, ObjectMenuAction,
-    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
+    EngineScriptMenuLayout, EngineScriptMenuPointerTarget, EngineScriptMenuPresentationGeometry,
+    MenuMode as AppObjectMenuMode, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
+    ObjectMenuState,
 };
 use clonk_app_netplay::control_message::{mentions_nick, ControlMessageState};
 use clonk_app_netplay::network::{
