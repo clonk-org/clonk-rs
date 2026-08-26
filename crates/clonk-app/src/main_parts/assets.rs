@@ -2093,13 +2093,13 @@ fn effective_loader_definition_modules(
     head: &ScenarioLoaderHead,
     definition_load: &ScenarioDefinitionLoad,
 ) -> Result<Vec<String>> {
-    anyhow::ensure!(
-        matches!(
-            head.savegame_definition_override(),
-            clonk_engine::scenario::ScenarioSavegameDefinitionOverride::None
-        ),
-        "classic loader cannot establish the old-save Game.txt DefinitionFiles override"
-    );
+    // `DefinitionFilenamesFromSaveGame` replaces the whole vector — preset,
+    // DefinitionPath expansion and folder-local scan alike — before the
+    // resource list and the graphics/material load ever read it
+    // (C4Game.cpp:180-227).
+    if let Some(modules) = head.savegame_definition_override().effective_modules() {
+        return Ok(modules);
+    }
     Ok(match definition_load {
         ScenarioDefinitionLoad::Fixed { modules, .. } => modules.clone(),
         ScenarioDefinitionLoad::Seed { modules, .. }

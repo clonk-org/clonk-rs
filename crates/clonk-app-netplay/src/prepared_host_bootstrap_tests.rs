@@ -931,9 +931,27 @@ LastPlayerID=9\n\
     );
 }
 
+/// `DefinitionFilenamesFromSaveGame` replaces the whole vector before
+/// `Parameters.Load` builds the resource list (src/C4Game.cpp:222-230), so a
+/// prepared host publishes the *replaced* modules and resources — and the
+/// name it publishes is `line.substr(1)`, the precedence bug at
+/// src/C4Game.cpp:3643 (clonk-org/clonk-rs#1173).
 #[test]
-fn old_save_definition_files_override_remains_a_typed_host_boundary() {
-    let fixture = minimal_install(Some(b"[DefinitionFiles]\nDefinition1=Historical.c4d\n"));
+fn old_save_definition_files_override_replaces_what_a_host_publishes() {
+    let mut fixture = minimal_install(Some(b"[DefinitionFiles]\nDefinition1=Historical.c4d\n"));
+    let overridden = fixture.install_roots[0].join("efinition1=Historical.c4d");
+    let definition = overridden.join("Good.c4d");
+    fs::create_dir_all(&definition).unwrap();
+    fs::write(
+        definition.join("DefCore.txt"),
+        b"[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+    )
+    .unwrap();
+    fs::write(definition.join("Script.c"), b"// fixture\n").unwrap();
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+        .save(definition.join("Graphics.png"))
+        .unwrap();
+    fixture.definition_modules = vec!["efinition1=Historical.c4d".to_owned()];
     fs::write(
         fixture.scenario_path.join("Scenario.txt"),
         fixture
@@ -942,11 +960,27 @@ fn old_save_definition_files_override_remains_a_typed_host_boundary() {
     )
     .unwrap();
 
-    let error = prepare(&fixture, &[]).expect_err("old DefinitionFiles must not publish raw defs");
-    assert!(matches!(
-        error,
-        PrepareHostBootstrapError::SavegameDefinitionOverrideUnsupported
-    ));
+    let prepared = prepare(&fixture, &[]).expect("the override publishes its own vector");
+    let published = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters
+        .game_resources
+        .iter()
+        .map(|core| core.filename.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        published
+            .iter()
+            .any(|name| name.contains("efinition1=Historical.c4d")),
+        "the replacement vector is what reaches JoinData: {published:?}"
+    );
+    assert!(
+        !published.iter().any(|name| name.contains("Defs.c4d")),
+        "the preset the override cleared must not leak into publication: {published:?}"
+    );
 }
 
 #[test]
@@ -1979,8 +2013,11 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
         fixture.scenario_path.join("Teams.txt"),
     )
     .unwrap();
-    let definition_resource_paths = vec![fixture.install_roots[0].join("Defs.c4d")];
-    let effective_definition_modules = vec!["Defs.c4d".to_owned()];
+    let effective_definition_modules = fixture.definition_modules.clone();
+    let definition_resource_paths = effective_definition_modules
+        .iter()
+        .map(|module| fixture.install_roots[0].join(module))
+        .collect::<Vec<_>>();
     let definition_resources = freeze_host_definition_resource_sources(
         &definition_resource_paths,
         &fixture.scenario_path,
@@ -2463,8 +2500,11 @@ fn prepare_typed_with_names_and_league_impl(
 ) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = LanguagePacks::default();
-    let definition_resource_paths = vec![fixture.install_roots[0].join("Defs.c4d")];
-    let effective_definition_modules = vec!["Defs.c4d".to_owned()];
+    let effective_definition_modules = fixture.definition_modules.clone();
+    let definition_resource_paths = effective_definition_modules
+        .iter()
+        .map(|module| fixture.install_roots[0].join(module))
+        .collect::<Vec<_>>();
     let definition_resources = freeze_host_definition_resource_sources(
         &definition_resource_paths,
         &fixture.scenario_path,
@@ -2535,6 +2575,9 @@ struct MinimalInstall {
     scenario_path: PathBuf,
     install_roots: Vec<PathBuf>,
     scenario_text: String,
+    /// What the selector staged for this round. An old-save `[DefinitionFiles]`
+    /// section replaces it, so the fixture has to say which vector it expects.
+    definition_modules: Vec<String>,
 }
 
 fn minimal_install(game: Option<&[u8]>) -> MinimalInstall {
@@ -2569,6 +2612,7 @@ fn minimal_install(game: Option<&[u8]>) -> MinimalInstall {
         scenario_path,
         install_roots: vec![content, planet],
         scenario_text,
+        definition_modules: vec!["Defs.c4d".to_owned()],
     }
 }
 
