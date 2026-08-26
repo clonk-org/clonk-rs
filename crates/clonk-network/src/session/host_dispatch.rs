@@ -64,6 +64,24 @@ pub(crate) async fn handle_client_message(
     // transport task's `ConnectionPing` messages instead.
     match message {
         ControlMessage::PortCapabilities(capabilities) => {
+            // A port peer that announced a different compatibility profile
+            // cannot share this session: the two engines would diverge as soon
+            // as any profile-gated behaviour ran. Refuse it here, before lobby
+            // or game state exists. Silence is the legacy case and is admitted
+            // by `compat_profile_admits` (clonk-org/clonk-rs#583).
+            if !host_profile_announcement(state).compat_profile_admits(capabilities) {
+                handle_client_disconnected(
+                    connection_id,
+                    client_id,
+                    0,
+                    0,
+                    None,
+                    Some("incompatible compatibility profile".to_string()),
+                    state,
+                )
+                .await;
+                return;
+            }
             // Record what this peer can do, and answer so it learns the same
             // about us. A stock C++ peer never sends this and never replies, so
             // it simply stays absent from the registry and keeps the
@@ -636,6 +654,19 @@ async fn handle_received_host_address(
         ControlMessage::Address(packet),
         None,
     );
+}
+
+/// What this host announces about its own compatibility profile.
+///
+/// Always carries [`crate::PortCapabilities::COMPAT_PROFILE_ANNOUNCED`]: this
+/// build knows about profiles, so its silence would otherwise be read as the
+/// legacy case and admit a peer it should refuse.
+pub(crate) fn host_profile_announcement(state: &HostState) -> crate::PortCapabilities {
+    let mut bits = crate::PortCapabilities::COMPAT_PROFILE_ANNOUNCED;
+    if state.config.compat_profile_legacy {
+        bits |= crate::PortCapabilities::COMPAT_PROFILE_LEGACY_CLONK;
+    }
+    crate::PortCapabilities::from_bits(bits)
 }
 
 pub(crate) async fn handle_client_disconnected(

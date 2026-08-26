@@ -88,9 +88,37 @@ impl PortCapabilities {
     /// connection the host has already repurposed.
     pub const ROUND_RESTART_V2: u32 = 1 << 6;
 
+    /// This peer knows what a compatibility profile is and has said which one
+    /// it runs. A peer *without* this bit is the silent legacy case — a stock
+    /// C++ engine, or a port from before profiles were negotiated — and is
+    /// always admissible, because refusing it would break every mixed
+    /// session (clonk-org/clonk-rs#583).
+    ///
+    /// It is deliberately separate from the profile bit below: "Normal" and
+    /// "did not say" must be distinguishable, or a `LegacyClonk` host cannot
+    /// tell a stock peer it must accept from a `Normal` port peer it must not.
+    pub const COMPAT_PROFILE_ANNOUNCED: u32 = 1 << 7;
+    /// Set alongside [`Self::COMPAT_PROFILE_ANNOUNCED`] when the announced
+    /// profile is `LegacyClonk`; its absence means `Normal`. Two bits cover
+    /// the whole `CompatProfile` enum, so the announcement needs no payload
+    /// and the wire layout is unchanged.
+    pub const COMPAT_PROFILE_LEGACY_CLONK: u32 = 1 << 8;
+
     /// Everything this build knows how to do.
     pub fn supported() -> Self {
         Self::from_bits(Self::ROUND_RESTART_V2 | Self::VOICE_CHAT | Self::CONTROL_WAIT_ATTRIBUTION)
+    }
+
+    /// Whether a peer announcing `peer` may join a host announcing `self`.
+    ///
+    /// Only a disagreement *both sides stated* is a refusal. Silence is
+    /// legacy and always admitted, which is the `PortCapabilities`
+    /// silent-peer policy applied to profiles.
+    pub fn compat_profile_admits(self, peer: Self) -> bool {
+        if !self.has(Self::COMPAT_PROFILE_ANNOUNCED) || !peer.has(Self::COMPAT_PROFILE_ANNOUNCED) {
+            return true;
+        }
+        self.has(Self::COMPAT_PROFILE_LEGACY_CLONK) == peer.has(Self::COMPAT_PROFILE_LEGACY_CLONK)
     }
 
     /// Capabilities every port route can advertise without a voice media
@@ -260,6 +288,67 @@ impl PeerCapabilityRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A peer that announces no profile at all is the silent legacy case: a
+    /// stock C++ engine, or a port built before profiles were negotiated.
+    /// Rejecting it would break every mixed session, so it is always admitted
+    /// (clonk-org/clonk-rs#583).
+    #[test]
+    fn a_peer_announcing_no_profile_is_admitted_by_any_host() {
+        let stock = PortCapabilities::from_bits(0);
+        for host in [
+            PortCapabilities::from_bits(PortCapabilities::COMPAT_PROFILE_ANNOUNCED),
+            PortCapabilities::from_bits(
+                PortCapabilities::COMPAT_PROFILE_ANNOUNCED
+                    | PortCapabilities::COMPAT_PROFILE_LEGACY_CLONK,
+            ),
+        ] {
+            assert!(
+                host.compat_profile_admits(stock),
+                "a peer that does not announce a profile must stay admissible"
+            );
+        }
+    }
+
+    /// Two port peers that both announce, and agree, are compatible.
+    #[test]
+    fn matching_announced_profiles_are_admitted() {
+        let normal = PortCapabilities::from_bits(PortCapabilities::COMPAT_PROFILE_ANNOUNCED);
+        let legacy = PortCapabilities::from_bits(
+            PortCapabilities::COMPAT_PROFILE_ANNOUNCED
+                | PortCapabilities::COMPAT_PROFILE_LEGACY_CLONK,
+        );
+        assert!(normal.compat_profile_admits(normal));
+        assert!(legacy.compat_profile_admits(legacy));
+    }
+
+    /// Two port peers that both announce and disagree must be rejected before
+    /// lobby or game state can diverge — this is the case the silent-legacy
+    /// rule cannot cover, because both sides have said what they are.
+    #[test]
+    fn mismatched_announced_profiles_are_rejected() {
+        let normal = PortCapabilities::from_bits(PortCapabilities::COMPAT_PROFILE_ANNOUNCED);
+        let legacy = PortCapabilities::from_bits(
+            PortCapabilities::COMPAT_PROFILE_ANNOUNCED
+                | PortCapabilities::COMPAT_PROFILE_LEGACY_CLONK,
+        );
+        assert!(!legacy.compat_profile_admits(normal));
+        assert!(!normal.compat_profile_admits(legacy));
+    }
+
+    /// The announcement survives the wire, so the host decides on what the
+    /// peer actually said rather than on a local default.
+    #[test]
+    fn the_profile_announcement_round_trips_through_the_wire() {
+        let announced = PortCapabilities::from_bits(
+            PortCapabilities::COMPAT_PROFILE_ANNOUNCED
+                | PortCapabilities::COMPAT_PROFILE_LEGACY_CLONK,
+        );
+        let wire = encode_port_capabilities(announced);
+        let decoded = decode_port_capabilities(&wire).expect("announcement decodes");
+        assert!(decoded.has(PortCapabilities::COMPAT_PROFILE_ANNOUNCED));
+        assert!(decoded.has(PortCapabilities::COMPAT_PROFILE_LEGACY_CLONK));
+    }
 
     #[test]
     fn an_announcement_round_trips() {

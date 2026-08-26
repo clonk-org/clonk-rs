@@ -305,6 +305,15 @@ pub(crate) fn runtime_connection_usage(message: bool, data: bool) -> Option<Stri
 /// Configuration options for the multiplayer host.
 #[derive(Debug, Clone)]
 pub struct HostConfig {
+    /// Whether this host runs the `LegacyClonk` compatibility profile.
+    ///
+    /// Announced to port peers as
+    /// [`crate::PortCapabilities::COMPAT_PROFILE_LEGACY_CLONK`] alongside
+    /// [`crate::PortCapabilities::COMPAT_PROFILE_ANNOUNCED`], so a port peer
+    /// running a different profile is refused before it reaches lobby or game
+    /// state. A stock C++ peer announces nothing and is unaffected
+    /// (clonk-org/clonk-rs#583).
+    pub compat_profile_legacy: bool,
     pub backlog_limit: usize,
     pub resync_interval: Duration,
     pub resync_cooldown: Duration,
@@ -399,6 +408,7 @@ impl Default for HostConfig {
             lobby_ready: false,
         };
         Self {
+            compat_profile_legacy: false,
             backlog_limit: 256,
             resync_interval: Duration::from_millis(200),
             resync_cooldown: Duration::from_secs(2),
