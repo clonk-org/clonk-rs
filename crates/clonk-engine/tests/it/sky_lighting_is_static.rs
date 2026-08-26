@@ -15,6 +15,14 @@ use crate::support::real_scenario::load_installed_scenario;
 /// No shipped scenario runs the engine clock, so its sky lighting factor is a
 /// constant and the lit-sky cache never misses after the first frame.
 ///
+/// Scoped to the four base-pack scenarios named below. It was a claim about the
+/// whole shipped corpus when that corpus was 112 first-party scenarios; the
+/// Ultimate Clonk Compilation brought it to 472, and no one has surveyed the
+/// third-party ones. Enumerating them all here would make this an O(corpus)
+/// test for a property the cache only needs to hold on the scenarios the
+/// rendering benchmarks actually use, so the list stays a sample — but it is a
+/// sample now, not a census.
+///
 /// This is a behavioural check rather than a scan of `Scenario.txt` for
 /// `Time=`/`TimeSpeed`, because the clock has two independent-looking drivers
 /// and only one of them is the engine's. `Objects.c4d/Environment.c4d/Time.c4d`

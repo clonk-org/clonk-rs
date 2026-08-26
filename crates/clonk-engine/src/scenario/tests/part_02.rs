@@ -2125,6 +2125,7 @@
 
         let mut files_with_icons = 0;
         let mut icon_count = 0;
+        let mut unparsed: Vec<String> = Vec::new();
         for path in team_files {
             let bytes = std::fs::read(&path).test_value();
             let source = decode_legacy_script_text(&bytes);
@@ -2138,16 +2139,39 @@
                 files_with_icons += 1;
             }
             for icon in icons {
-                assert!(
-                    crate::text_spec::parse_text_spec(icon).is_some(),
-                    "{} retained invalid IconSpec `{icon}`",
-                    path.display()
-                );
+                if crate::text_spec::parse_text_spec(icon).is_none() {
+                    let relative = path
+                        .strip_prefix(&repository)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    unparsed.push(format!("{relative} :: {icon}"));
+                }
                 icon_count += 1;
             }
         }
-        assert_eq!(files_with_icons, 19, "recursive team-file census changed");
-        assert_eq!(icon_count, 39, "recursive IconSpec census changed");
+        // Sorted so the assertion pins the set, not the order teams happen to
+        // appear in within a file.
+        unparsed.sort();
+        // Two specs in one third-party scenario use a single colon where the
+        // portrait grammar wants two. C++ refuses them as well:
+        // `C4Portrait::EvaluatePortraitString` (C4DefGraphics.cpp:578-603) falls
+        // into its bare-name `else` branch and hands back the default ID, and
+        // `C4Game::DrawTextSpecImage` was passed `C4ID_None` as that default, so
+        // it bails at `if (idPortrait == C4ID_None) return false`
+        // (C4Game.cpp:4314-4315). The icon draws in neither engine. Pinned by
+        // path rather than tolerated by count, so a *new* unparseable spec —
+        // which would mean the parser regressed — still fails here.
+        assert_eq!(
+            unparsed,
+            vec![
+                "content/Collection.c4f/Settling.c4f/RufDerWipfeRE.c4f/Others.c4f/ModernBattle.c4s/Teams.txt :: Portrait:CLN2:Soldier1",
+                "content/Collection.c4f/Settling.c4f/RufDerWipfeRE.c4f/Others.c4f/ModernBattle.c4s/Teams.txt :: Portrait:CLN2:Soldier2",
+            ],
+            "the set of IconSpecs neither engine can draw changed"
+        );
+        assert_eq!(files_with_icons, 51, "recursive team-file census changed");
+        assert_eq!(icon_count, 103, "recursive IconSpec census changed");
     }
 
     #[test]

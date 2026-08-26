@@ -460,7 +460,17 @@ fn explode(group: &mut Option<clonk_resources::Group>, path: &str) -> bool {
             continue;
         }
         // Only a readable group explodes further; anything else is a plain file.
-        let Ok(opened) = clonk_resources::Group::open(&child) else {
+        // A child unpacked out of its parent is stored uncompressed and in
+        // place, so it carries no gzip envelope and `Group::open` — which
+        // enforces the top-level one — refuses it. Read it the way
+        // `C4Group::OpenAsChild` does before treating it as a plain file, or
+        // the recursion silently stops at the first nested group and leaves an
+        // image on disk that neither this tool nor the engine can read back.
+        let Some(opened) = clonk_resources::Group::open(&child).ok().or_else(|| {
+            std::fs::read(&child).ok().and_then(|bytes| {
+                clonk_resources::Group::from_raw_memory(child.clone(), bytes).ok()
+            })
+        }) else {
             continue;
         };
         let mut opened = Some(opened);
@@ -662,4 +672,58 @@ fn command_name(command: &Command) -> &'static str {
 
 fn print_usage() {
     println!("c4group [options] group(s) [command(s)]");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clonk_resources::compress_c4group_image;
+    use clonk_resources::group_writer::MutableGroup;
+
+    /// A compressed top-level group holding one plain file and one nested child
+    /// group. C4Group stores a child uncompressed and in place, so the child is
+    /// exactly the shape `C4Group::OpenAsChild` reads and `Group::open` refuses.
+    fn nested_fixture(directory: &std::path::Path) -> std::path::PathBuf {
+        let mut child = MutableGroup::new("Child.c4g");
+        child
+            .add_file("Inner.txt", b"inner".to_vec())
+            .expect("add inner");
+        let mut group = MutableGroup::new("Fixture.c4g");
+        group
+            .add_file("Alpha.txt", b"alpha".to_vec())
+            .expect("add alpha");
+        group.add_child("Child.c4g", child).expect("add child");
+        let image = group.pack_raw().expect("pack");
+        let path = directory.join("Fixture.c4g");
+        std::fs::write(&path, compress_c4group_image(&image).expect("compress"))
+            .expect("write fixture");
+        path
+    }
+
+    // `-x` promises a fully exploded tree. It recursed by reopening each child
+    // with `Group::open`, which enforces the top-level gzip envelope, so an
+    // uncompressed nested child failed to open and was skipped — leaving a raw
+    // image on disk that neither this tool nor the engine can read back.
+    #[test]
+    fn explode_recurses_into_nested_child_groups() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = nested_fixture(directory.path());
+
+        let mut group = Some(clonk_resources::Group::open(&path).expect("open fixture"));
+        assert!(
+            explode(&mut group, path.to_str().expect("utf-8 path")),
+            "explode reports success"
+        );
+
+        let child = path.join("Child.c4g");
+        assert!(
+            child.is_dir(),
+            "a nested child group must explode into a directory, not a raw image"
+        );
+        assert_eq!(
+            std::fs::read(child.join("Inner.txt")).expect("read exploded inner file"),
+            b"inner",
+            "the nested payload survives the explode"
+        );
+    }
 }
