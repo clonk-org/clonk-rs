@@ -15,37 +15,61 @@
       "id": "startup-main",
       "area": "startup",
       "description": "Startup root menu.",
-      "status": "pending"
+      "status": "pending",
+      "blocker": {
+        "summary": "Compared 2026-08-26 against the pinned oracle: 95.94% bit-identical. Every remaining pixel is the port's own branding - its Logo.png, its version string and its footer line - plus the mouse cursor the C++ F9 capture bakes in. Excluding those four regions, 823144 pixels are 99.93% bit-identical, 100.00% within one channel step, and no pixel differs by more than one. The renderer already meets the GPU term; the product identity is what a comparison cannot pass.",
+        "issue": "clonk-org/clonk-rs#1298"
+      }
     },
     {
       "id": "startup-scenario-selection",
       "area": "startup",
       "description": "Scenario selection subtree, including the folder listing and the selected-scenario panel.",
-      "status": "pending"
+      "status": "pending",
+      "blocker": {
+        "summary": "Compared 2026-08-26 against the pinned oracle: 2.06% bit-identical. The widgets match; the background does not, because planet/Graphics.c4g StartupScenSelBG.png is 2400x1800 in the port and 800x600 at the pin (commit d239bbb9d, 'super-resolve the stretched startup menu art'). Different source art cannot meet a zero-delta term at any resolution.",
+        "issue": "clonk-org/clonk-rs#1298"
+      }
     },
     {
       "id": "startup-network-browser",
       "area": "startup",
       "description": "Network game browser.",
-      "status": "pending"
+      "status": "pending",
+      "blocker": {
+        "summary": "Compared 2026-08-26 against the pinned oracle: 5.90% bit-identical, same cause as startup-scenario-selection - StartupNetworkBG.png is 2400x1800 in the port and 800x600 at the pin. This screen additionally lists live master-server games, so its content is not reproducible without a pinned server list.",
+        "issue": "clonk-org/clonk-rs#1298"
+      }
     },
     {
       "id": "startup-player-selection",
       "area": "startup",
       "description": "Player selection subtree.",
-      "status": "pending"
+      "status": "pending",
+      "blocker": {
+        "summary": "Compared 2026-08-26 against the pinned oracle: 3.96% bit-identical, same cause as startup-scenario-selection - StartupPlrSelBG.png is 2400x1800 in the port and 800x600 at the pin. The button row and the player entry match exactly; the difference is the background texture throughout.",
+        "issue": "clonk-org/clonk-rs#1298"
+      }
     },
     {
       "id": "startup-options",
       "area": "startup",
       "description": "Options sheets.",
-      "status": "pending"
+      "status": "pending",
+      "blocker": {
+        "summary": "Compared 2026-08-26 against the pinned oracle: 63.08% bit-identical. The paper sheet the options rows sit on is StartupDlgPaper.png, 1884x1449 in the port and 628x483 at the pin.",
+        "issue": "clonk-org/clonk-rs#1298"
+      }
     },
     {
       "id": "startup-about",
       "area": "startup",
       "description": "About/update subtree.",
-      "status": "pending"
+      "status": "pending",
+      "blocker": {
+        "summary": "Compared 2026-08-26 against the pinned oracle: 81.44% bit-identical. Same StartupDlgPaper.png divergence as startup-options, over a smaller sheet area, plus the port's own credits text.",
+        "issue": "clonk-org/clonk-rs#1298"
+      }
     },
     {
       "id": "network-lobby",

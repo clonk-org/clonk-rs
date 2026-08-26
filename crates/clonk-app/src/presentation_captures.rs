@@ -34,6 +34,23 @@ pub struct CaptureScreen {
     /// The C++ and Rust capture pair, once there is one.
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// Why a comparison that has already been run cannot pass.
+    ///
+    /// A screen with no blocker is pending because nobody has captured it. A
+    /// screen with one has been captured and measured, and the reason it still
+    /// cannot be `captured` is written down rather than left to be
+    /// rediscovered.
+    #[serde(default)]
+    pub blocker: Option<CaptureBlocker>,
+}
+
+/// A measured reason a screen's comparison cannot pass on the current terms.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CaptureBlocker {
+    /// What was measured and what explains the difference.
+    pub summary: String,
+    /// Where the decision that would unblock it is tracked.
+    pub issue: String,
 }
 
 /// A region a comparison is allowed to ignore.
@@ -109,6 +126,17 @@ pub fn pending_screens() -> Vec<&'static CaptureScreen> {
     screens()
         .iter()
         .filter(|screen| screen.status == "pending")
+        .collect()
+}
+
+/// The screens whose comparison has been run and cannot pass as specified.
+///
+/// These are a subset of [`pending_screens`] — a measured blocker never lets a
+/// screen count towards the presentation promise, it only says why.
+pub fn blocked_screens() -> Vec<&'static CaptureScreen> {
+    screens()
+        .iter()
+        .filter(|screen| screen.blocker.is_some())
         .collect()
 }
 
@@ -342,6 +370,32 @@ mod tests {
             assert!(
                 screen.evidence.len() >= 2,
                 "{}: claims a capture without naming a C++ and a Rust capture",
+                screen.id
+            );
+        }
+    }
+
+    /// A blocker is the record of a comparison that was run and did not pass.
+    /// Without a measurement and a place the decision lives it degrades into
+    /// an excuse, which is worse than a bare `pending`.
+    #[test]
+    fn a_blocked_screen_says_what_was_measured_and_where_it_is_decided() {
+        for screen in blocked_screens() {
+            let blocker = screen.blocker.as_ref().expect("filtered on Some");
+            assert!(
+                blocker.summary.contains('%'),
+                "{}: blocker states no measured result",
+                screen.id
+            );
+            assert!(
+                blocker.issue.starts_with("clonk-org/clonk-rs#"),
+                "{}: blocker issue `{}` is not a qualified reference",
+                screen.id,
+                blocker.issue
+            );
+            assert_eq!(
+                screen.status, "pending",
+                "{}: a measured blocker cannot sit on a screen that claims to be captured",
                 screen.id
             );
         }

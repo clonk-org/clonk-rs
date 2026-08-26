@@ -1575,6 +1575,72 @@ fn menu_dump_writes_main_menu_png_at_1280x720() {
     main_assert_eq!((width, height) => (1280, 720));
 }
 
+/// `compat/presentation_captures.json` sets `cpu_max_channel_delta` to 0, which
+/// is only a usable term if the Rust half of a pair is reproducible — otherwise
+/// the gate would flake against itself before ever disagreeing with the oracle.
+///
+/// Reproducible needs the capture procedure the manifest documents, and this
+/// test is where that procedure is pinned. A user path with **no** player file
+/// makes `C4StartupMainDlg::OnShown` open the new-player form over the menu,
+/// and that form picks its colour from `SafeRandom`, so consecutive dumps
+/// disagree over the whole dialog — measured 99.74% identical with the
+/// difference confined to the flag and the two Clonk figures
+/// (clonk-org/clonk-rs#587). With the player the procedure requires, the render
+/// path carries no state between dumps at all.
+///
+/// The geometry is read from the manifest rather than restated, so a capture
+/// and the terms it is compared on cannot drift apart.
+#[test]
+fn two_menu_dumps_are_byte_identical_once_the_capture_procedure_has_a_player() {
+    clonk_logging::init();
+
+    let dir = tempdir();
+    let repository = test_repository_root();
+    let _guard = test_env_guard(repository, dir.path());
+    let app_paths = Arc::new(test_app_paths());
+
+    // A player group is a directory holding Player.txt; the startup list needs
+    // one to exist, not to be participating.
+    let players = dir.path().join("Players");
+    let player = players.join("Capture.c4p");
+    fs::create_dir_all(&player).test_value();
+    fs::write(
+        player.join("Player.txt"),
+        b"[Player]\nName=Capture\nComment=\nScore=0\nRounds=0\n\n[Preferences]\nColorDw=1118481\n".as_slice(),
+    )
+    .test_value();
+    let mut config = Config::new();
+    config.set_in(Some("General"), "PlayerPath", players.to_string_lossy());
+    fs::create_dir_all(app_paths.config_file().parent().test_value()).test_value();
+    config.save(app_paths.config_file()).test_value();
+
+    let mut dumps = Vec::new();
+    for name in ["first.png", "second.png"] {
+        let path = dir.path().join(name);
+        run_menu_dump(
+            &path,
+            "main",
+            Some(&app_paths),
+            test_runtime_config_with("Player", false),
+        )
+        .test_value();
+        dumps.push(fs::read(&path).test_value());
+    }
+
+    let geometry = crate::presentation_captures::geometry();
+    let width = u32::from_be_bytes(dumps[0][16..20].try_into().test_value());
+    let height = u32::from_be_bytes(dumps[0][20..24].try_into().test_value());
+    main_assert_eq!(
+        format!("{width}x{height}") => geometry.resolution.clone(),
+        "the menu dump is not the geometry every capture pair shares"
+    );
+    main_assert_eq!(geometry.scale => 100);
+    main_assert!(
+        dumps[0] == dumps[1],
+        "two dumps of the same startup view differ, so a zero-delta CPU comparison would flake against itself"
+    );
+}
+
 #[test]
 fn player_properties_save_refreshes_selection_and_renamed_participant() {
     let _lock = env_lock().lock();
