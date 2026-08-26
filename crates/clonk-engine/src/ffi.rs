@@ -2256,6 +2256,35 @@ fn runtime_snapshot_mismatch(
                 // never assigns it, so the C++ side is always zero and every
                 // fully-built object would read as a divergence. See
                 // `runtime_mismatch_does_not_report_construction_the_bridge_never_collects`.
+                // Category gates movement itself: `Category & C4D_StaticBack`
+                // short-circuits ExecMovement (C4Movement.cpp:569) and the
+                // contact checks (:190,:204). A disagreement here changes
+                // which branch each engine runs while every printed field
+                // still matches.
+                if expected_object.category != actual_object.category {
+                    problems.push(format!(
+                        "object {} category rust {}, cpp {}",
+                        id, expected_object.category, actual_object.category
+                    ));
+                }
+                if expected_object.damage != actual_object.damage {
+                    problems.push(format!(
+                        "object {} damage rust {}, cpp {}",
+                        id, expected_object.damage, actual_object.damage
+                    ));
+                }
+                if expected_object.magic_energy != actual_object.magic_energy {
+                    problems.push(format!(
+                        "object {} magic energy rust {}, cpp {}",
+                        id, expected_object.magic_energy, actual_object.magic_energy
+                    ));
+                }
+                if expected_object.magic_capacity != actual_object.magic_capacity {
+                    problems.push(format!(
+                        "object {} magic capacity rust {}, cpp {}",
+                        id, expected_object.magic_capacity, actual_object.magic_capacity
+                    ));
+                }
                 // InLiquid drives the DFA_SWIM out-of-liquid branch
                 // (C4Object.cpp:4967-4973): paddle back down, or
                 // `ObjectActionWalk(this); return;`. Diff it so a
@@ -5049,7 +5078,7 @@ global func Step(state, frame, random)
     /// only on the *inbound* path, where Rust state is applied to a C4Object.
     ///
     /// Diffing it therefore reported every fully-built object as a
-    /// divergence — `construction rust 100000, cpp 0` — which stopped the
+    /// divergence -- `construction rust 100000, cpp 0` -- which stopped the
     /// port at frame 1 and hid whatever the run was meant to find.
     /// clonk-org/clonk-rs#1160 added that diff on the stated premise that
     /// "the bridge collects it from both engines"; that premise was wrong.
@@ -5058,19 +5087,72 @@ global func Step(state, frame, random)
     /// side landing first. `need_energy` is held out for the same reason.
     #[test]
     fn runtime_mismatch_does_not_report_construction_the_bridge_never_collects() {
-        let object = || -> ObjectSnapshot {
-            serde_json::from_value(serde_json::json!({
-                "id": 1,
-                "definition_id": "FISH",
-                "position": {"x": 0, "y": 0},
-                "velocity": {"x": 0, "y": 0},
-                "rotation": 0,
-                "energy": 0,
-                "construction": 100_000,
-            }))
-            .expect("object snapshot deserializes")
-        };
-        let baseline = unsafe {
+        let mut expected = abi_field_snapshot_baseline();
+        expected.objects = vec![abi_field_test_object(100_000)];
+        let mut actual = expected.clone();
+        // The shape the bridge actually produces: the port fully built, the
+        // C++ side left at its initialised zero.
+        actual.objects[0].construction = 0;
+
+        assert!(
+            runtime_snapshot_mismatch(&expected, &actual).is_none(),
+            "a construction-only difference must not be reported: the bridge \
+             never collects Con from C++, so every built object would diverge"
+        );
+    }
+
+    /// Four more fields the C ABI carries from the oracle that the
+    /// comparator never diffed. `category` is the determinism-critical one:
+    /// `Category & C4D_StaticBack` decides whether an object executes
+    /// movement at all (`C4Movement.cpp:569`, and the contact checks at
+    /// `:190,:204`), so a category disagreement changes which branch each
+    /// engine takes while looking identical in every field the diff printed.
+    /// Found by auditing the comparator against the fields the bridge
+    /// populates from `entry` (clonk-org/clonk-rs#1157).
+    #[test]
+    fn runtime_mismatch_reports_abi_carried_object_fields() {
+        let mut expected = abi_field_snapshot_baseline();
+        expected.objects = vec![abi_field_test_object(0)];
+
+        let cases: [(&str, fn(&mut ObjectSnapshot)); 4] = [
+            ("category rust", |snapshot: &mut ObjectSnapshot| {
+                snapshot.category ^= 1
+            }),
+            ("damage rust", |snapshot: &mut ObjectSnapshot| {
+                snapshot.damage += 7
+            }),
+            ("magic energy rust", |snapshot: &mut ObjectSnapshot| {
+                snapshot.magic_energy += 11
+            }),
+            ("magic capacity rust", |snapshot: &mut ObjectSnapshot| {
+                snapshot.magic_capacity += 13
+            }),
+        ];
+        for (label, mutate) in cases {
+            let mut actual = expected.clone();
+            mutate(&mut actual.objects[0]);
+            let detail = runtime_snapshot_mismatch(&expected, &actual)
+                .unwrap_or_else(|| panic!("{label} difference is reported"));
+            assert!(detail.contains(label), "missing {label} in {detail}");
+        }
+    }
+
+    /// Shared fixture for the two comparator tests above.
+    fn abi_field_test_object(construction: i32) -> ObjectSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "definition_id": "FISH",
+            "position": {"x": 0, "y": 0},
+            "velocity": {"x": 0, "y": 0},
+            "rotation": 0,
+            "energy": 0,
+            "construction": construction,
+        }))
+        .expect("object snapshot deserializes")
+    }
+
+    fn abi_field_snapshot_baseline() -> SimulationSnapshot {
+        unsafe {
             call_make_snapshot(
                 1,
                 ptr::null(),
@@ -5092,21 +5174,7 @@ global func Step(state, frame, random)
                 ptr::null(),
                 0,
             )
-        };
-        let mut expected = baseline;
-        expected.objects = vec![object()];
-        let mut actual = expected.clone();
-        actual.objects[0].construction = 50_000;
-
-        // The shape the bridge actually produces: the port fully built, the
-        // C++ side left at its initialised zero.
-        actual.objects[0].construction = 0;
-
-        assert!(
-            runtime_snapshot_mismatch(&expected, &actual).is_none(),
-            "a construction-only difference must not be reported: the bridge \
-             never collects Con from C++, so every built object would diverge"
-        );
+        }
     }
 
     /// `InLiquid` decides the DFA_SWIM out-of-liquid branch
