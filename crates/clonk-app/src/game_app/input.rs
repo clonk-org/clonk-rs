@@ -3276,6 +3276,42 @@ impl GameApp {
         {
             return None;
         }
+        // The globals block, in `C4Game::InitKeyboard`'s own order
+        // (C4Game.cpp:3370-3377). `NetClientListDlgToggle` and the debug
+        // toggles sit between these and the speed pair; they are tracked
+        // separately and deliberately not claimed here, so the actions around
+        // them keep their registration order.
+        for (name, action) in [
+            ("MusicToggle", RuntimeCustomGamepadAction::Music),
+            ("SoundToggle", RuntimeCustomGamepadAction::Sound),
+            (
+                "Screenshot",
+                RuntimeCustomGamepadAction::Screenshot {
+                    full_landscape: false,
+                },
+            ),
+            (
+                "ScreenshotEx",
+                RuntimeCustomGamepadAction::Screenshot {
+                    full_landscape: true,
+                },
+            ),
+            ("ToggleChat", RuntimeCustomGamepadAction::ToggleChat),
+            ("ToggleShowHelp", RuntimeCustomGamepadAction::Help),
+        ] {
+            if matches(name) {
+                return Some(action);
+            }
+        }
+        // The message board yields to an exclusive default dialog exactly as
+        // the keyboard route does.
+        if !self.runtime_top_default_dialog_is_exclusive() {
+            for (name, up) in [("MsgBoardScrollUp", true), ("MsgBoardScrollDown", false)] {
+                if matches(name) {
+                    return Some(RuntimeCustomGamepadAction::MessageBoardScroll { up });
+                }
+            }
+        }
         if matches("GameSpeedUp") {
             return Some(RuntimeCustomGamepadAction::SpeedUp);
         }
@@ -3298,6 +3334,15 @@ impl GameApp {
         } else if self.primary_physical_viewport_is_no_owner() && matches("FullscreenMenuOpen") {
             return Some(RuntimeCustomGamepadAction::MenuOpen);
         }
+        // KEYSCOPE_FilmView (C4Game.cpp:3415) — and `ViewportNextPlayer`
+        // needs a physical viewport to advance.
+        if self.engine.film_replay()
+            && self.viewport_cycle_scope_available()
+            && !self.physical_viewports.is_empty()
+            && matches("FilmNextPlayer")
+        {
+            return Some(RuntimeCustomGamepadAction::FilmNextPlayer);
+        }
         for (name, mode) in [
             ("ChatOpen", RunningChatMode::All),
             ("ChatOpen2Allies", RunningChatMode::Allies),
@@ -3305,6 +3350,23 @@ impl GameApp {
         ] {
             if matches(name) {
                 return Some(RuntimeCustomGamepadAction::Chat(mode));
+            }
+        }
+        // KEYSCOPE_FreeView (C4Game.cpp:3423-3426): only an ownerless primary
+        // viewport is free to scroll, and film view owns these keys instead.
+        if !self.engine.film_replay()
+            && self.primary_physical_viewport_is_no_owner()
+            && self.viewport_cycle_scope_available()
+        {
+            for (name, delta) in [
+                ("FreeViewScrollLeft", Vector2::new(-5, 0)),
+                ("FreeViewScrollRight", Vector2::new(5, 0)),
+                ("FreeViewScrollUp", Vector2::new(0, -5)),
+                ("FreeViewScrollDown", Vector2::new(0, 5)),
+            ] {
+                if matches(name) {
+                    return Some(RuntimeCustomGamepadAction::FreeViewScroll(delta));
+                }
             }
         }
         if matches("ScoreboardToggle") {
@@ -3325,7 +3387,14 @@ impl GameApp {
         }) {
             return Some(RuntimeCustomGamepadAction::Pause);
         }
-        matches("ChartToggle").then_some(RuntimeCustomGamepadAction::Chart)
+        if matches("ChartToggle") {
+            return Some(RuntimeCustomGamepadAction::Chart);
+        }
+        // `StatsToggle` registers after every C++ action and yields its chord
+        // to all of them, so it is offered last and only when neither of the
+        // two actions it shadows claims the same code.
+        (matches("StatsToggle") && !matches("ChartToggle") && !matches("NetStatsToggle"))
+            .then_some(RuntimeCustomGamepadAction::StatsToggle)
     }
 
     fn execute_runtime_custom_gamepad_action(
@@ -3363,6 +3432,48 @@ impl GameApp {
                 }
             }
             RuntimeCustomGamepadAction::Pause => self.toggle_runtime_pause(),
+            RuntimeCustomGamepadAction::Music => self.toggle_runtime_music_playback()?,
+            RuntimeCustomGamepadAction::Sound => self.toggle_sound_option()?,
+            RuntimeCustomGamepadAction::Screenshot { full_landscape } => {
+                let kind = if full_landscape {
+                    ScreenshotKind::FullLandscape
+                } else {
+                    ScreenshotKind::PresentedFrame
+                };
+                let gamma = self
+                    .graphics
+                    .active_gamma_ramp(&self.snapshot.environment.gamma);
+                self.pending_screenshots
+                    .push_back(ScreenshotRequest { kind, gamma });
+            }
+            RuntimeCustomGamepadAction::ToggleChat => self.toggle_external_irc_dialog()?,
+            RuntimeCustomGamepadAction::Help => {
+                if self.runtime_help_visible {
+                    self.runtime_help_visible = false;
+                } else {
+                    self.runtime_help_resources().map_err(|error| {
+                        classic_parity_engine_error(report_classic_parity_boundary(
+                            ClassicParityBoundary::RuntimeHelpResources {
+                                detail: error.to_string(),
+                            },
+                        ))
+                    })?;
+                    self.runtime_help_visible = true;
+                }
+            }
+            RuntimeCustomGamepadAction::MessageBoardScroll { up } => self.scroll_message_board(up),
+            RuntimeCustomGamepadAction::FilmNextPlayer => {
+                self.cycle_primary_viewport_player(true);
+            }
+            RuntimeCustomGamepadAction::FreeViewScroll(delta) => {
+                let applied = self.free_view_scroll_momentum.apply(delta, Instant::now());
+                if !self.graphics.scroll_observer_viewport(0, applied) {
+                    self.graphics.queue_primary_observer_scroll(applied);
+                }
+            }
+            RuntimeCustomGamepadAction::StatsToggle => {
+                self.display_flags.show_stats = !self.display_flags.show_stats;
+            }
             RuntimeCustomGamepadAction::Chart => self.toggle_network_chart(),
             RuntimeCustomGamepadAction::SpeedUp => self.step_runtime_speed(true)?,
             RuntimeCustomGamepadAction::SpeedDown => self.step_runtime_speed(false)?,
