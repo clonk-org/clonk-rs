@@ -5146,16 +5146,13 @@ impl GameApp {
                         .definition_sprite_image(&decoration.source_definition, None)
                         .map(default_owner_definition_sprite)
                 });
-                if let Some(decoration) = menu.decoration.as_ref() {
-                    if let Err(error) = validate_menu_decoration_for_area(area, decoration) {
-                        tracing::error!(
-                            decoration = ?menu.decoration,
-                            %error,
-                            "classic menu decoration preflight failed"
-                        );
-                        anyhow::bail!("invalid classic menu frame decoration: {error}");
-                    }
-                }
+                // No preflight: `FrameDecoration` stores whatever the
+                // definition's callbacks returned and `Draw` works with it as
+                // it is — the background box is unconditional, the edge
+                // helpers return on an empty facet, a border wider than the
+                // frame makes their loop condition false immediately, and the
+                // corners are clipped by `C4Facet::Draw`
+                // (C4GuiDialogs.cpp:110-135, 150-196).
                 {
                     let show_commands = self.display_flags.show_commands;
                     let show_command_keys = self.display_flags.show_command_keys;

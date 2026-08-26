@@ -2057,67 +2057,6 @@ fn draw_decoration_facet(
     );
 }
 
-/// Preflight for a frame decoration.
-///
-/// Deliberately says nothing about whether the source sprite sheet resolved:
-/// `SetByDef` ignores every `SetFacetByAction` return value, so an action the
-/// definition does not declare — or a definition with no bitmap at all —
-/// leaves that facet `Default()`, and `C4Facet::Draw` no-ops on it. The
-/// background box is drawn either way (`C4GuiDialogs.cpp:95-108, 150-196`).
-pub fn validate_menu_decoration_for_area(
-    area: Rect,
-    decoration: &clonk_engine::ObjectMenuFrameDecoration,
-) -> Result<(), String> {
-    let borders = [
-        ("top", decoration.border_top),
-        ("left", decoration.border_left),
-        ("right", decoration.border_right),
-        ("bottom", decoration.border_bottom),
-    ];
-    if let Some((name, value)) = borders.into_iter().find(|(_, value)| *value < 0) {
-        return Err(format!("negative {name} border {value}"));
-    }
-    let horizontal = i64::from(decoration.border_left) + i64::from(decoration.border_right);
-    let vertical = i64::from(decoration.border_top) + i64::from(decoration.border_bottom);
-    if horizontal > i64::from(area.width) || vertical > i64::from(area.height) {
-        return Err(format!(
-            "borders {horizontal}x{vertical} exceed menu area {}x{}",
-            area.width, area.height
-        ));
-    }
-
-    let facets = [
-        ("top", decoration.top.as_ref()),
-        ("top-right", decoration.top_right.as_ref()),
-        ("right", decoration.right.as_ref()),
-        ("bottom-right", decoration.bottom_right.as_ref()),
-        ("bottom", decoration.bottom.as_ref()),
-        ("bottom-left", decoration.bottom_left.as_ref()),
-        ("left", decoration.left.as_ref()),
-        ("top-left", decoration.top_left.as_ref()),
-    ];
-    let drawable = facets
-        .iter()
-        .filter_map(|(name, facet)| facet.map(|facet| (*name, facet)))
-        .filter(|(_, facet)| facet.width > 0 && facet.height > 0)
-        .collect::<Vec<_>>();
-    for (name, facet) in drawable {
-        let target_x = i64::from(facet.target_x);
-        let target_y = i64::from(facet.target_y);
-        if target_x < -i64::from(area.width)
-            || target_x > i64::from(area.width)
-            || target_y < -i64::from(area.height)
-            || target_y > i64::from(area.height)
-        {
-            return Err(format!(
-                "{name} facet target ({}, {}) exceeds menu area {}x{}",
-                facet.target_x, facet.target_y, area.width, area.height
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub fn draw_menu_decoration(
     surface: &mut Surface,
     bounds: Rect,
@@ -6298,18 +6237,87 @@ mod tests {
             ),
             Some(EngineScriptMenuPointerTarget::Item(0))
         );
+    }
 
-        assert!(validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            menu.decoration.as_ref().expect("decoration"),
-        )
-        .is_ok());
-        menu.decoration.as_mut().expect("decoration").border_left = -1;
-        assert!(validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            menu.decoration.as_ref().expect("decoration"),
-        )
-        .is_err());
+    /// `FrameDecoration::Draw` keeps whatever `SetByDef` read from the
+    /// definition's callbacks and draws with it: the background box first, the
+    /// edge helpers returning only on `Wdt <= 0` / `Hgt <= 0`, and the four
+    /// corners handed straight to `C4Facet::Draw`
+    /// (src/C4GuiDialogs.cpp:150-196). No border or target value is rejected
+    /// — a negative border simply starts the edge loop outside the frame, and
+    /// borders wider than the frame make `x < rcBounds.Wdt - iBorderRight`
+    /// false immediately (clonk-org/clonk-rs#1207).
+    #[test]
+    fn out_of_range_decoration_geometry_draws_instead_of_refusing() {
+        use clonk_engine::{DefinitionActionFacet, ObjectMenuFrameDecoration};
+
+        let bounds = Rect::new(8, 8, 32, 24);
+        let sheet = ImageData::new(8, 8, vec![255_u8; 8 * 8 * 4]);
+        let facet = |target_x: i32, target_y: i32| {
+            Some(DefinitionActionFacet {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+                target_x,
+                target_y,
+            })
+        };
+        let decoration = |borders: [i32; 4], target: i32| ObjectMenuFrameDecoration {
+            source_definition: "DECO".to_string(),
+            background_color: 0x0011_2233,
+            border_top: borders[0],
+            border_left: borders[1],
+            border_right: borders[2],
+            border_bottom: borders[3],
+            top: facet(target, target),
+            top_right: facet(target, target),
+            right: facet(target, target),
+            bottom_right: facet(target, target),
+            bottom: facet(target, target),
+            bottom_left: facet(target, target),
+            left: facet(target, target),
+            top_left: facet(target, target),
+        };
+        let paint = |decoration: &ObjectMenuFrameDecoration| {
+            let mut surface = Surface::new(64, 48, PixelFormat::Rgba8888);
+            surface.fill(Color::opaque(0, 0, 0));
+            draw_menu_decoration(&mut surface, bounds, decoration, Some(&sheet), None);
+            surface
+        };
+
+        for (label, borders, target) in [
+            ("negative borders", [-6, -6, -6, -6], 0),
+            ("borders wider than the frame", [40, 40, 40, 40], 0),
+            ("targets far outside the frame", [4, 4, 4, 4], -500),
+            ("targets far past the frame", [4, 4, 4, 4], 500),
+            ("mixed signs", [-3, 40, -3, 40], -20),
+        ] {
+            let decoration = decoration(borders, target);
+            // Drawing it is well defined and clipped to the surface.
+            let surface = paint(&decoration);
+            let inside = surface
+                .get_pixel(bounds.x as u32 + 1, bounds.y as u32 + 1)
+                .expect("a pixel inside the frame");
+            assert!(
+                (inside.r, inside.g, inside.b) == (0x11, 0x22, 0x33)
+                    || (inside.r, inside.g, inside.b) == (255, 255, 255),
+                "{label}: the frame holds either its background or a facet, not {inside:?}"
+            );
+        }
+
+        // Borders wider than the frame make every edge loop skip, so only the
+        // background box and the four unconditional corners can appear.
+        let wide = decoration([40, 40, 40, 40], 0);
+        let narrow_edges = paint(&wide);
+        let inside = narrow_edges
+            .get_pixel(bounds.x as u32 + 8, bounds.y as u32 + 8)
+            .expect("a pixel inside the frame");
+        assert_eq!(
+            (inside.r, inside.g, inside.b),
+            (0x11, 0x22, 0x33),
+            "no edge run reaches the middle of the frame"
+        );
     }
 
     /// `SetByDef` ignores every `SetFacetByAction` result, so a facet whose
@@ -6382,10 +6390,6 @@ mod tests {
                 "left" => decoration.left = facet(),
                 _ => decoration.top_left = facet(),
             }
-            assert!(
-                validate_menu_decoration_for_area(bounds, &decoration).is_ok(),
-                "an unresolvable {name} facet is not a preflight failure"
-            );
             assert_eq!(
                 paint(&decoration),
                 background_only,
@@ -6557,9 +6561,6 @@ mod tests {
             decoration_image.height(),
             decoration_image.into_pixels(),
         );
-        validate_menu_decoration_for_area(Rect::new(0, 0, 640, 480), decoration)
-            .expect("real MD69 geometry validates");
-
         let font_bytes = std::fs::read(repository.join("planet/System.c4g/Endeavour.ttf"))
             .expect("Endeavour.ttf reads");
         let fonts = clonk_frontend::clonk_fonts::build_font_set(&font_bytes)
