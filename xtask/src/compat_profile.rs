@@ -717,17 +717,43 @@ mod tests {
     /// closes that gap: clonk-org/clonk-rs#1092 repointed two of them onto
     /// `sim-findobject-layer-bbox` days before clonk-org/clonk-rs#1095 removed
     /// it, and the collision only surfaced in the merge queue.
-    fn some_open_gap_id() -> String {
-        let value: serde_json::Value =
-            serde_json::from_str(&shipped_manifest()).expect("parsing the shipped manifest");
-        value["divergences"]
-            .as_array()
-            .expect("divergences is an array")
-            .iter()
-            .find(|divergence| divergence["disposition"] == "open-gap")
-            .and_then(|divergence| divergence["id"].as_str())
-            .expect("the manifest still records at least one open gap")
-            .to_string()
+    const SYNTHETIC_OPEN_GAP_ID: &str = "test-synthetic-open-gap";
+
+    /// A well-formed open gap for the tamper cases to mutate.
+    ///
+    /// These cases care that the rule fires, not which entry it fires on. They
+    /// used to *find* an open gap in the shipped manifest, which made every one
+    /// of them a landmine for whoever closed that gap -- and closing the last
+    /// one (clonk-org/clonk-rs#1094) tripped exactly that. The shipped manifest
+    /// now records **no** open gap: every divergence is closed or accepted.
+    ///
+    /// So synthesize one. The contract must not have to keep a defect on the
+    /// books for its own tests' benefit, and a rule about open gaps is worth
+    /// testing whether or not one currently exists.
+    fn synthetic_open_gap() -> serde_json::Value {
+        serde_json::json!({
+            "id": SYNTHETIC_OPEN_GAP_ID,
+            "area": "simulation",
+            "summary": "A synthetic open gap injected by the tamper tests.",
+            "cited_in": ["xtask/src/compat_profile.rs"],
+            "cpp_reference": "C4Game.cpp:1",
+            "disposition": "open-gap",
+            "profile_action": "blocked",
+            "determinism_critical": true,
+            "owner": "clonk-org/clonk-rs#1094"
+        })
+    }
+
+    /// `synthetic_open_gap`, mutated and appended to the shipped manifest.
+    fn tampered_with_open_gap(mutate: impl FnOnce(&mut serde_json::Value)) -> String {
+        tampered(|value| {
+            let mut gap = synthetic_open_gap();
+            mutate(&mut gap);
+            value["divergences"]
+                .as_array_mut()
+                .expect("divergences is an array")
+                .push(gap);
+        })
     }
 
     fn tampered(mutate: impl FnOnce(&mut serde_json::Value)) -> String {
@@ -866,19 +892,15 @@ mod tests {
 
     #[test]
     fn an_open_gap_may_not_be_part_of_the_promise() {
-        let target = some_open_gap_id();
-        let tampered = tampered(|value| {
-            for divergence in value["divergences"].as_array_mut().unwrap() {
-                if divergence["id"] == target.as_str() {
-                    divergence["profile_action"] = "kept".into();
-                }
-            }
+        let tampered = tampered_with_open_gap(|gap| {
+            gap["profile_action"] = "kept".into();
         });
         let issues = validate(&tampered, None);
         assert!(
             issues
                 .iter()
-                .any(|issue| issue.contains(&target) && issue.contains("must be `blocked`")),
+                .any(|issue| issue.contains(SYNTHETIC_OPEN_GAP_ID)
+                    && issue.contains("must be `blocked`")),
             "an open-gap divergence marked `kept` must fail, got: {issues:?}"
         );
     }
@@ -938,13 +960,8 @@ mod tests {
 
     #[test]
     fn owners_must_cite_issues_qualified() {
-        let target = some_open_gap_id();
-        let tampered = tampered(|value| {
-            for divergence in value["divergences"].as_array_mut().unwrap() {
-                if divergence["id"] == target.as_str() {
-                    divergence["owner"] = "#384".into();
-                }
-            }
+        let tampered = tampered_with_open_gap(|gap| {
+            gap["owner"] = "#384".into();
         });
         let issues = validate(&tampered, None);
         assert!(
@@ -1024,7 +1041,14 @@ mod tests {
         // #586, #587, #583, #471, #524 and #527 are all still open, so the
         // manifest must currently report the profile as not advertisable.
         assert!(pending > 0, "pending evidence entries must be counted");
-        assert!(blocked > 0, "blocked open-gap divergences must be counted");
+        // Every open gap is now closed or accepted (clonk-org/clonk-rs#1094), so
+        // the shipped manifest reports none. That is the goal, not a broken
+        // fixture -- but the counting still has to work, so prove it on a
+        // manifest that does carry one rather than requiring the contract to.
+        assert_eq!(blocked, 0, "the shipped manifest records no open gap");
+        let (_, injected) =
+            readiness(&tampered_with_open_gap(|_| {})).expect("readiness of the tampered manifest");
+        assert_eq!(injected, 1, "blocked open-gap divergences must be counted");
     }
 
     #[test]

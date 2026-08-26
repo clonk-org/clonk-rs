@@ -89,6 +89,10 @@ struct Divergence {
     id: String,
     area: String,
     summary: String,
+    /// Read by the readiness tests, which hold accepted entries in the
+    /// manifest so an accepted limitation cannot silently become a claim.
+    #[cfg_attr(not(test), allow(dead_code))]
+    disposition: String,
     profile_action: String,
     #[serde(default)]
     cited_in: Vec<String>,
@@ -264,23 +268,47 @@ mod tests {
     /// `planet/System.c4g` that stock LegacyClonk does not, which changes that
     /// CRC. Disabling the appends does not close it: the profile turns the
     /// scripts off, and the check compares bytes.
+    ///
+    /// Accepted as permanent by product decision (clonk-org/clonk-rs#1094), so
+    /// it is no longer a blocker: nothing the port can *compute* differently
+    /// changes the CRC, and only shipping a byte-identical group would -- which
+    /// means not shipping the port's own content. It stays in the manifest, and
+    /// this test holds it there: the limitation must remain stated where the
+    /// contract is read, and it must not silently become a claim of
+    /// compatibility.
     #[test]
-    fn the_contract_blocks_on_the_system_group_a_stock_peer_would_refuse() {
-        let blocker = blockers()
-            .into_iter()
-            .find(|blocker| blocker.id == "content-system-group-identity")
-            .expect("the contract records the System.c4g identity gap as a blocker");
+    fn the_contract_keeps_the_system_group_a_stock_peer_would_refuse() {
+        let divergence = manifest()
+            .divergences
+            .iter()
+            .find(|divergence| divergence.id == "content-system-group-identity")
+            .expect("the contract still records the System.c4g identity gap");
 
-        assert_eq!(blocker.area, "content");
-        assert!(
-            blocker.reason.contains("System.c4g"),
-            "the blocker names the group a peer compares: {}",
-            blocker.reason
+        assert_eq!(divergence.area, "content");
+        assert_eq!(
+            divergence.disposition, "accepted",
+            "the gap is accepted, not an unfixed open gap"
+        );
+        assert_eq!(
+            divergence.profile_action, "kept",
+            "nothing the port computes can change the group's CRC, so there is \
+             nothing to revert"
         );
         assert!(
-            blocker.recovery.starts_with("clonk-org/clonk-rs#"),
-            "the blocker names what closes it: {}",
-            blocker.recovery
+            divergence.summary.contains("System.c4g"),
+            "the entry names the group a peer compares: {}",
+            divergence.summary
+        );
+        assert!(
+            divergence.summary.contains("out of scope"),
+            "the entry states the limitation it accepts: {}",
+            divergence.summary
+        );
+        assert!(
+            !blockers()
+                .iter()
+                .any(|blocker| blocker.id == "content-system-group-identity"),
+            "an accepted divergence is not a readiness blocker"
         );
     }
 
@@ -426,7 +454,30 @@ mod tests {
         // Both kinds count, and neither is allowed to mask the other: an open
         // gap and an unproven promise are different failures with different
         // fixes, which is why the contract keeps their dispositions apart.
-        assert!(blocked > 0 && pending > 0, "the fixture is worth having");
+        //
+        // `blocked` is zero today -- every open gap has been closed or
+        // accepted -- so this deliberately does NOT require one to exist.
+        // Reaching zero is the goal, not a broken fixture. The sum still pins
+        // that both kinds are summed, and the per-kind checks below pin the
+        // mapping itself, so a blocked divergence added later cannot go
+        // unreported.
+        assert!(pending > 0, "an unproven promise is still outstanding");
         assert_eq!(blockers().len(), blocked + pending);
+
+        let reported = blockers()
+            .into_iter()
+            .map(|blocker| blocker.id)
+            .collect::<Vec<_>>();
+        for divergence in manifest
+            .divergences
+            .iter()
+            .filter(|divergence| divergence.profile_action == "blocked")
+        {
+            assert!(
+                reported.contains(&divergence.id),
+                "a blocked divergence must reach the readiness report: {}",
+                divergence.id
+            );
+        }
     }
 }
