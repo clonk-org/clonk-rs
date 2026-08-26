@@ -1636,13 +1636,15 @@ impl GameApp {
                         }
                     }
                 } else if let Err(error) = self.submit_runtime_offline_player(&file) {
+                    // `MenuCommand` ignores what `CtrlJoinLocalNoNetwork`
+                    // returns and answers `true` regardless
+                    // (C4MainMenu.cpp:766-771). A file that does not exist is
+                    // refused by that call's own `ItemExists` guard, and one
+                    // that cannot be read fails inside
+                    // `DoLocalNonNetworkPlayerJoin`; neither reaches the
+                    // caller, writes a status or touches player state
+                    // (C4PlayerList.cpp:320-329).
                     tracing::warn!(%file, %error, "runtime offline player join failed");
-                    return Err(classic_ingame_menu_child_error(
-                        ClassicIngameMenuChild::JoinPlayer {
-                            file,
-                            detail: error,
-                        },
-                    ));
                 }
             }
             MenuAction::SelectTeam(team) => {

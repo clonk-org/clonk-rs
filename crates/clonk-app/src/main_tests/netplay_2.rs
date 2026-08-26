@@ -6702,26 +6702,28 @@ fn offline_runtime_join_player_local_no_network() {
         )
     }));
 
+    // `MenuCommand`'s `JoinPlayer:` branch ignores what
+    // `CtrlJoinLocalNoNetwork` returns and answers `true` regardless
+    // (src/C4MainMenu.cpp:761-771). A file that does not exist is refused by
+    // that call's own `if (!ItemExists(szFilename)) return false`, and one
+    // that cannot be read fails inside `DoLocalNonNetworkPlayerJoin` — neither
+    // reaches the caller (src/C4PlayerList.cpp:320-329;
+    // clonk-org/clonk-rs#1202).
     let malformed_directory = tempdir();
     let malformed = malformed_directory.path().join("Malformed.c4p");
     fs::write(&malformed, b"not a packed player group").test_value();
-    let before_failure_players = app.engine.snapshot().players;
-    let before_failure_infos = app.control_player_infos.retained_rows_snapshot();
-    let error = app
-        .apply_ingame_menu_action(MenuAction::JoinPlayer(
-            malformed.to_string_lossy().into_owned(),
-        ))
-        .expect_err("malformed offline player returns a typed boundary");
-    let detail = match error {
-        EngineError::ClassicMenuParityBoundary { detail } => detail,
-        other => panic!("offline failure returned the wrong error: {other}"),
-    };
-    main_assert!(detail.contains("classic offline in-game player join failed"));
-    main_assert!(detail.contains("failed to load"));
-    main_assert!(detail.contains(&malformed.to_string_lossy().into_owned()));
-    main_assert_eq!(app.status_text => "offline join sentinel");
-    main_assert_eq!(app.engine.snapshot().players => before_failure_players);
-    main_assert_eq!(app.control_player_infos.retained_rows_snapshot() => before_failure_infos);
+    let missing = malformed_directory.path().join("Missing.c4p");
+    for path in [&malformed, &missing] {
+        let before_failure_players = app.engine.snapshot().players;
+        let before_failure_infos = app.control_player_infos.retained_rows_snapshot();
+        app.apply_ingame_menu_action(MenuAction::JoinPlayer(path.to_string_lossy().into_owned()))
+            .unwrap_or_else(|error| {
+                panic!("an unreadable offline player is not a failure: {error:?}")
+            });
+        main_assert_eq!(app.status_text => "offline join sentinel", "{path:?} writes no status");
+        main_assert_eq!(app.engine.snapshot().players => before_failure_players, "{path:?} joins nobody");
+        main_assert_eq!(app.control_player_infos.retained_rows_snapshot() => before_failure_infos, "{path:?} admits nothing");
+    }
 }
 
 #[test]
