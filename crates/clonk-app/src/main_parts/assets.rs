@@ -5587,6 +5587,7 @@ pub(crate) struct PendingRuntimeDynamicRequest {
     pub(crate) requested_control_tick: Tick,
     pub(crate) synchronize_queued: bool,
     pub(crate) synchronized_control_tick: Option<Tick>,
+    pub(crate) save_generation: Option<u64>,
 }
 
 impl PendingRuntimeDynamicRequest {
@@ -5596,6 +5597,7 @@ impl PendingRuntimeDynamicRequest {
             requested_control_tick,
             synchronize_queued: false,
             synchronized_control_tick: None,
+            save_generation: None,
         }
     }
 
@@ -5607,6 +5609,7 @@ impl PendingRuntimeDynamicRequest {
             .is_some_and(|tick| tick < self.requested_control_tick)
         {
             self.synchronized_control_tick = None;
+            self.save_generation = None;
         }
     }
 

@@ -9,6 +9,18 @@ use crate::game_app_scenario::remove_unassociated_savegame_player_objects_with_l
 
 type OfflineSavegameRestore = (Vec<i32>, Vec<PathBuf>, Vec<(i32, Vec<u8>)>);
 
+#[derive(Clone, Copy)]
+enum NativeSavePersistence {
+    Immediate,
+    Prepared,
+}
+
+enum NativeSaveOutcome {
+    Rejected,
+    Persisted,
+    Prepared(save_worker::PreparedNativeSave),
+}
+
 impl GameApp {
     pub(crate) fn developer_console_player_save_options(&self) -> (bool, bool, String) {
         let graphics = load_options_graphics_state(self.app_paths.as_ref());
@@ -247,6 +259,55 @@ impl GameApp {
         retarget_active_scenario: bool,
         title_png: Option<&[u8]>,
     ) -> Result<bool> {
+        Ok(
+            match self.save_native_c4_game_with_persistence(
+                kind,
+                requested_target,
+                retarget_active_scenario,
+                title_png,
+                NativeSavePersistence::Immediate,
+            )? {
+                NativeSaveOutcome::Rejected => false,
+                NativeSaveOutcome::Persisted => true,
+                NativeSaveOutcome::Prepared(_) => {
+                    unreachable!("immediate native save returned a prepared job")
+                }
+            },
+        )
+    }
+
+    pub(crate) fn prepare_native_c4_game(
+        &mut self,
+        kind: ConsoleSaveKind,
+        requested_target: Option<&Path>,
+        retarget_active_scenario: bool,
+        title_png: Option<&[u8]>,
+    ) -> Result<Option<save_worker::PreparedNativeSave>> {
+        Ok(
+            match self.save_native_c4_game_with_persistence(
+                kind,
+                requested_target,
+                retarget_active_scenario,
+                title_png,
+                NativeSavePersistence::Prepared,
+            )? {
+                NativeSaveOutcome::Rejected => None,
+                NativeSaveOutcome::Prepared(prepared) => Some(prepared),
+                NativeSaveOutcome::Persisted => {
+                    unreachable!("prepared native save persisted synchronously")
+                }
+            },
+        )
+    }
+
+    fn save_native_c4_game_with_persistence(
+        &mut self,
+        kind: ConsoleSaveKind,
+        requested_target: Option<&Path>,
+        retarget_active_scenario: bool,
+        title_png: Option<&[u8]>,
+        persistence: NativeSavePersistence,
+    ) -> Result<NativeSaveOutcome> {
         anyhow::ensure!(
             self.mode == AppMode::Running,
             "cannot save while no game is running"
@@ -311,7 +372,7 @@ impl GameApp {
                     ),
                     None,
                 )?;
-                return Ok(false);
+                return Ok(NativeSaveOutcome::Rejected);
             }
         }
 
@@ -321,6 +382,16 @@ impl GameApp {
         if requested_target.is_some() && destination.extension().is_none() {
             destination.set_extension("c4s");
         }
+        // QuickSave's observable result is one packed destination generation.
+        // Once finalization is backgrounded, materialize that generation from
+        // the source group directly: persisting the native FileSaveAs copy
+        // first would still perform a complete main-thread pack/compression,
+        // then reopen and compress the same group a second time. Developer
+        // Save As retains the native intermediate-copy and retargeting rules.
+        let prepare_direct_to_packed_target =
+            matches!(persistence, NativeSavePersistence::Prepared)
+                && requested_target.is_some()
+                && !retarget_active_scenario;
 
         if requested_target.is_some() {
             if !retarget_active_scenario && cpp_loader_items_identical(&source_path, &destination)?
@@ -330,7 +401,7 @@ impl GameApp {
                     destination.display()
                 );
             }
-            if !retarget_active_scenario {
+            if !retarget_active_scenario && !prepare_direct_to_packed_target {
                 match fs::symlink_metadata(&destination) {
                     Ok(_) => remove_file_or_directory(&destination).with_context(|| {
                         format!("erase previous quick-save slot {}", destination.display())
@@ -363,35 +434,40 @@ impl GameApp {
                 }
                 self.classic_command_line.scenario = Some(destination.clone());
             }
-            let copy_result = (|| -> Result<()> {
-                let source = open_group_path_for_folder_map(&source_path)
-                    .with_context(|| format!("open source scenario {}", source_path.display()))?;
-                let copy = MutableGroup::from_group(&source)
-                    .with_context(|| format!("copy source scenario {}", source_path.display()))?;
-                persist_console_save_group(
-                    &copy,
-                    &destination,
-                    retarget_active_scenario && source_path.is_dir(),
-                )
-                .with_context(|| format!("copy scenario to {}", destination.display()))
-            })();
-            if let Err(error) = copy_result {
-                tracing::error!(%error, target = %destination.display(), "native C4Group save copy failed");
-                if !retarget_active_scenario {
-                    return Err(error);
+            if !prepare_direct_to_packed_target {
+                let copy_result = (|| -> Result<()> {
+                    let source =
+                        open_group_path_for_folder_map(&source_path).with_context(|| {
+                            format!("open source scenario {}", source_path.display())
+                        })?;
+                    let copy = MutableGroup::from_group(&source).with_context(|| {
+                        format!("copy source scenario {}", source_path.display())
+                    })?;
+                    persist_console_save_group(
+                        &copy,
+                        &destination,
+                        retarget_active_scenario && source_path.is_dir(),
+                    )
+                    .with_context(|| format!("copy scenario to {}", destination.display()))
+                })();
+                if let Err(error) = copy_result {
+                    tracing::error!(%error, target = %destination.display(), "native C4Group save copy failed");
+                    if !retarget_active_scenario {
+                        return Err(error);
+                    }
+                    let target = destination.to_string_lossy();
+                    let message = format_resource_string(
+                        self.runtime_resource_text(
+                            "IDS_CNS_SAVEASERROR",
+                            "Error while saving the scenario to %s.",
+                        ),
+                        &[&target],
+                    );
+                    self.show_developer_console_message(message, None)?;
+                    return Ok(NativeSaveOutcome::Rejected);
                 }
-                let target = destination.to_string_lossy();
-                let message = format_resource_string(
-                    self.runtime_resource_text(
-                        "IDS_CNS_SAVEASERROR",
-                        "Error while saving the scenario to %s.",
-                    ),
-                    &[&target],
-                );
-                self.show_developer_console_message(message, None)?;
-                return Ok(false);
+                source_path = destination.clone();
             }
-            source_path = destination.clone();
         }
 
         if self.network.is_some() && !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
@@ -402,7 +478,7 @@ impl GameApp {
                 ),
                 None,
             )?;
-            return Ok(false);
+            return Ok(NativeSaveOutcome::Rejected);
         }
         if requested_target.is_none() {
             let (_, children) = scenario_logical_storage(&source_path)?;
@@ -419,7 +495,7 @@ impl GameApp {
                     &[&filename],
                 );
                 self.show_developer_console_message(message, None)?;
-                return Ok(false);
+                return Ok(NativeSaveOutcome::Rejected);
             }
         }
         let source = open_group_path_for_folder_map(&source_path)
@@ -438,23 +514,15 @@ impl GameApp {
         } else {
             Vec::new()
         };
-        let mut group = MutableGroup::from_group(&source)
-            .with_context(|| format!("copy source scenario {}", source_path.display()))?;
-        let preserve_folder_group = source_path.is_dir();
+        let preserve_folder_group = !prepare_direct_to_packed_target && source_path.is_dir();
         let mut folder_save_journal = if preserve_folder_group {
             developer_console_save::FolderSaveJournal::default()
         } else {
             developer_console_save::FolderSaveJournal::disabled()
         };
-        if !self.process_group_maker.is_empty() {
-            // Closing an owned C4Group stamps the process-global maker on
-            // the root header even when the save later reports failure.
-            group.set_maker_bytes(self.process_group_maker.as_bytes());
-        }
-        let copied_material_group_is_file = matches!(
-            group.entry_kind("Material.c4g"),
-            Some(MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup)
-        );
+        let copied_material_group_is_file = source.entries()?.iter().any(|entry| {
+            !entry.is_directory && entry.name_bytes.eq_ignore_ascii_case(b"Material.c4g")
+        });
 
         if kind == ConsoleSaveKind::Savegame {
             if let Some(network) = self.network.as_ref() {
@@ -529,14 +597,189 @@ impl GameApp {
                 target_group_name: &destination_name,
             },
         };
-        // Exact SaveCore writes Parameters.txt before Scenario.txt.
-        if kind == ConsoleSaveKind::Savegame {
+        // Exact SaveCore writes Parameters.txt before Scenario.txt. Record the
+        // folder mutation now, but let prepared saves add the bytes only after
+        // their source group is materialized on the worker.
+        let parameters = if kind == ConsoleSaveKind::Savegame {
             let parameters = self.developer_console_save_parameters()?;
             folder_save_journal.put_file(
                 "Parameters.txt",
                 &parameters,
                 developer_console_save::FolderSaveAddFailure::Fatal,
             );
+            Some(parameters)
+        } else {
+            None
+        };
+        if matches!(persistence, NativeSavePersistence::Prepared) {
+            let live_state_capture_started = std::time::Instant::now();
+            let capture = match self.engine.capture_live_c4_save_with_policy(
+                clonk_engine::LiveC4SaveSpec {
+                    title: &title,
+                    definition_modules: &definition_modules,
+                    definition_executable_path: &definition_executable_path,
+                    definition_path: &definition_path,
+                    origin: &origin,
+                    music_enabled: self.runtime_music_enabled,
+                    copied_material_group_is_file,
+                    title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                    info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                    script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                },
+                policy,
+            ) {
+                Ok(capture) => capture,
+                Err(error) => {
+                    if let Some(partial) = error.pre_landscape_components() {
+                        // A failed capture retains the native partial-save
+                        // behavior. Materialization is synchronous only on
+                        // this exceptional path because no job can be queued.
+                        let mut group = MutableGroup::from_group(&source).with_context(|| {
+                            format!("copy source scenario {}", source_path.display())
+                        })?;
+                        if !self.process_group_maker.is_empty() {
+                            group.set_maker_bytes(self.process_group_maker.as_bytes());
+                        }
+                        if let Some(parameters) = parameters.as_ref() {
+                            group
+                                .add_file("Parameters.txt", parameters.clone())
+                                .context("write live save Parameters.txt")?;
+                        }
+                        let apply_result =
+                            developer_console_save::apply_live_save_pre_landscape_to_group_recorded(
+                                &mut group,
+                                policy,
+                                partial,
+                                &mut folder_save_journal,
+                            );
+                        if !self.process_group_maker.is_empty() {
+                            group.set_maker_bytes_recursively(self.process_group_maker.as_bytes());
+                        }
+                        let persist_result = persist_live_console_save_group(
+                            &group,
+                            &destination,
+                            preserve_folder_group,
+                            &folder_save_journal,
+                            self.process_group_maker.as_bytes(),
+                        );
+                        apply_result?;
+                        persist_result?;
+                    }
+                    return Err(error).context("capture live C4 scenario state");
+                }
+            };
+            let live_state_capture = live_state_capture_started.elapsed();
+            let value_enumeration = capture.value_enumeration();
+            let save_player_infos = (!restore_plan.restore_infos.clients.is_empty())
+                .then(|| {
+                    clonk_network::encode_player_info_list_ini(&restore_plan.restore_infos)
+                        .context("serialize SavePlayerInfos.txt")
+                })
+                .transpose()?;
+            let maker = self.process_group_maker.as_bytes().to_vec();
+            let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
+                self.developer_console_player_save_options();
+            let player_options = clonk_engine::LiveC4PlayerSaveOptions {
+                savegame: true,
+                store_tiny: false,
+                add_new_crew_portraits,
+                save_default_portraits,
+                player_rank_name_default: &player_rank_name_default,
+            };
+            let runtime_players = self
+                .engine
+                .players()
+                .map(|player| (player.id(), player.player_info_id()))
+                .collect::<Vec<_>>();
+            let embedded_player_capture_started = std::time::Instant::now();
+            let mut remaining_targets = restore_plan.player_groups;
+            let mut player_groups = Vec::with_capacity(remaining_targets.len());
+            for (game_number, player_info_id) in runtime_players {
+                let Some(index) = remaining_targets
+                    .iter()
+                    .position(|target| target.player_info_id == player_info_id)
+                else {
+                    continue;
+                };
+                let target = remaining_targets.remove(index);
+                let player_group =
+                    clonk_engine::serialize_live_c4_player_with_options_and_enumeration(
+                        &self.engine,
+                        game_number,
+                        target.filename.as_bytes(),
+                        &maker,
+                        player_options,
+                        &value_enumeration,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "serialize player info {} (game player {})",
+                            target.player_info_id, game_number
+                        )
+                    })?;
+                player_groups.push(runtime_join_save::SerializedRuntimeJoinPlayerGroup {
+                    filename: target.filename,
+                    group: player_group,
+                });
+            }
+            let embedded_player_capture = embedded_player_capture_started.elapsed();
+            let description = (kind == ConsoleSaveKind::Savegame).then(|| {
+                self.developer_console_savegame_description(&title, &description_definition_modules)
+            });
+            let component_mutations = developer_console_save::component_save_mutations(
+                self.developer_component_hosts
+                    .iter()
+                    .map(clonk_engine::developer_components::ComponentHost::save_action),
+            );
+            let source_group_copy_started = std::time::Instant::now();
+            let (source_group, source_group_copy) = if source.is_directory() {
+                let group = MutableGroup::from_group(&source)
+                    .with_context(|| format!("copy source scenario {}", source_path.display()))?;
+                (
+                    save_worker::PreparedNativeSaveSource::Materialized(group),
+                    source_group_copy_started.elapsed(),
+                )
+            } else {
+                (
+                    save_worker::PreparedNativeSaveSource::Opened(source),
+                    std::time::Duration::ZERO,
+                )
+            };
+            return Ok(NativeSaveOutcome::Prepared(
+                save_worker::PreparedNativeSave {
+                    source_group,
+                    destination,
+                    preserve_folder_group,
+                    folder_journal: folder_save_journal,
+                    maker,
+                    parameters,
+                    timings: save_worker::NativeSaveTimings {
+                        source_group_copy,
+                        live_state_capture,
+                        embedded_player_capture,
+                        ..save_worker::NativeSaveTimings::default()
+                    },
+                    live_capture: Some(save_worker::PreparedLiveNativeCapture {
+                        capture,
+                        policy: save_worker::OwnedLiveC4SavePolicy::from_policy(policy),
+                        landscape_is_static,
+                        save_player_infos,
+                        player_groups,
+                        description,
+                        title_components: save_title_components,
+                        component_mutations,
+                    }),
+                },
+            ));
+        }
+        let mut group = MutableGroup::from_group(&source)
+            .with_context(|| format!("copy source scenario {}", source_path.display()))?;
+        if !self.process_group_maker.is_empty() {
+            // Closing an owned C4Group stamps the process-global maker on
+            // the root header even when the save later reports failure.
+            group.set_maker_bytes(self.process_group_maker.as_bytes());
+        }
+        if let Some(parameters) = parameters {
             group
                 .add_file("Parameters.txt", parameters)
                 .context("write live save Parameters.txt")?;
@@ -759,7 +1002,7 @@ impl GameApp {
             };
             self.developer_console.out(&success);
         }
-        Ok(true)
+        Ok(NativeSaveOutcome::Persisted)
     }
 
     /// `C4Game::CanQuickSave` (C4Game.cpp:2205-2223): network hosts only, and
@@ -844,26 +1087,11 @@ impl GameApp {
         } else {
             None
         };
-        let saved_path = self.save_to_slot_with_title_png(slot, title_png.as_deref());
-        if capture_title && self.retained_gpu_presentation_active {
-            if let Some(path) = saved_path {
-                match fs::read(&path) {
-                    Ok(packed_group) => {
-                        self.pending_native_save_thumbnails
-                            .retain(|request| request.path != path);
-                        self.pending_native_save_thumbnails
-                            .push_back(PendingNativeSaveThumbnail { path, packed_group });
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            ?error,
-                            "failed to retain native save generation for GPU thumbnail"
-                        );
-                    }
-                }
-            }
-        }
+        self.save_to_slot_with_title_png(
+            slot,
+            title_png.as_deref(),
+            capture_title && self.retained_gpu_presentation_active,
+        );
     }
 
     fn generate_default_save_label(&self) -> String {
@@ -921,6 +1149,7 @@ impl GameApp {
         &mut self,
         slot: u8,
         title_png: Option<&[u8]>,
+        request_gpu_thumbnail: bool,
     ) -> Option<PathBuf> {
         let result = (|| -> Result<PathBuf> {
             anyhow::ensure!((1..=10).contains(&slot), "invalid savegame slot {slot}");
@@ -960,13 +1189,15 @@ impl GameApp {
             tracing::info!(slot, "{saving}");
             let line = self.timestamp_log_line(saving);
             self.enqueue_control_message_board_line(line);
-            let saved = self.save_main_menu_slot_game(&path, title_png)?;
-            anyhow::ensure!(saved, "native savegame write was rejected");
-            self.status_text = format!("Saved {status_label}");
-            let message = self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.");
-            tracing::info!(slot, "{message}");
-            let line = self.timestamp_log_line(message);
-            self.enqueue_control_message_board_line(line);
+            let prepared = self
+                .prepare_main_menu_slot_game(&path, title_png)?
+                .context("native savegame write was rejected")?;
+            self.enqueue_native_slot_save(save_worker::NativeSlotSaveRequest {
+                slot,
+                status_label,
+                request_gpu_thumbnail,
+                prepared,
+            })?;
             Ok(path)
         })();
 
@@ -980,6 +1211,173 @@ impl GameApp {
             self.enqueue_control_message_board_line(line);
         }
         result.ok()
+    }
+
+    fn enqueue_native_slot_save(
+        &mut self,
+        request: save_worker::NativeSlotSaveRequest,
+    ) -> Result<()> {
+        self.submit_background_save_job(save_worker::native_slot_save_job(request))
+    }
+
+    pub(crate) fn submit_background_save_job(
+        &mut self,
+        job: save_worker::BackgroundSaveJob<save_worker::BackgroundSaveCompletion>,
+    ) -> Result<()> {
+        if self.background_save_worker.is_none() {
+            self.background_save_worker = Some(save_worker::new_app_save_worker()?);
+        }
+        let worker = self
+            .background_save_worker
+            .as_ref()
+            .context("background save worker is unavailable")?;
+        worker.try_submit(job).map_err(|error| match error {
+            save_worker::BackgroundSaveSubmitError::Full => {
+                anyhow!("too many saves are already pending")
+            }
+            save_worker::BackgroundSaveSubmitError::Disconnected => {
+                anyhow!("background save worker stopped unexpectedly")
+            }
+        })
+    }
+
+    pub(crate) fn poll_background_save_jobs(&mut self) {
+        loop {
+            let completion = self
+                .background_save_worker
+                .as_ref()
+                .and_then(save_worker::BackgroundSaveWorker::try_recv);
+            let Some(completion) = completion else {
+                break;
+            };
+            self.apply_background_save_completion(completion);
+        }
+    }
+
+    pub(crate) fn finish_background_save_jobs(&mut self) {
+        let completions = self
+            .background_save_worker
+            .take()
+            .map(|mut worker| worker.finish())
+            .unwrap_or_default();
+        for completion in completions {
+            self.apply_background_save_completion(completion);
+        }
+    }
+
+    fn apply_background_save_completion(
+        &mut self,
+        completion: save_worker::BackgroundSaveCompletion,
+    ) {
+        match completion {
+            save_worker::BackgroundSaveCompletion::NativeSlot(completion) => {
+                match completion.result {
+                    Ok(persisted) => {
+                        tracing::info!(
+                            source_group_copy_us = persisted.timings.source_group_copy.as_micros(),
+                            live_state_capture_us =
+                                persisted.timings.live_state_capture.as_micros(),
+                            embedded_player_capture_us =
+                                persisted.timings.embedded_player_capture.as_micros(),
+                            live_state_encode_us = persisted.timings.live_state_encode.as_micros(),
+                            group_mutation_us = persisted.timings.group_mutation.as_micros(),
+                            pack_compress_us = persisted.timings.pack_compress.as_micros(),
+                            physical_publish_us = persisted.timings.physical_publish.as_micros(),
+                            "native save latency stages"
+                        );
+                        self.last_native_save_timings = Some(persisted.timings);
+                        if let Some(error) = persisted.thumbnail_retention_error {
+                            tracing::warn!(
+                                path = %completion.path.display(),
+                                %error,
+                                "failed to retain native save generation for GPU thumbnail"
+                            );
+                        }
+                        if let Some(packed_group) = persisted.packed_group {
+                            self.pending_native_save_thumbnails
+                                .retain(|request| request.path != completion.path);
+                            self.pending_native_save_thumbnails.push_back(
+                                PendingNativeSaveThumbnail {
+                                    path: completion.path.clone(),
+                                    packed_group,
+                                },
+                            );
+                        }
+                        self.scenario_selector_reload_on_next_show = true;
+                        self.status_text = format!("Saved {}", completion.status_label);
+                        let message =
+                            self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.");
+                        tracing::info!(slot = completion.slot, "{message}");
+                        let line = self.timestamp_log_line(message);
+                        self.enqueue_control_message_board_line(line);
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            error = ?error,
+                            slot = completion.slot,
+                            path = %completion.path.display(),
+                            "slot save failed"
+                        );
+                        self.status_text = format!("Save failed: {error:#}");
+                        let message = self.runtime_resource_text(
+                            "IDS_GAME_FAILSAVEGAME",
+                            "Error while saving the game.",
+                        );
+                        tracing::info!(slot = completion.slot, "{message}");
+                        let line = self.timestamp_log_line(message);
+                        self.enqueue_control_message_board_line(line);
+                    }
+                }
+            }
+            save_worker::BackgroundSaveCompletion::PlayerFile(completion) => {
+                tracing::debug!(
+                    player_number = completion.player_number,
+                    info_id = completion.info_id,
+                    persistence_us = completion.persistence.as_micros(),
+                    "synchronized player-file persistence stage"
+                );
+                match completion.result {
+                    Ok(()) => {
+                        if completion.official_derivation {
+                            if let (Some(network), Some((derivation, ownership))) =
+                                (self.network.as_ref(), completion.derivation)
+                            {
+                                match network.finish_resource_derive(derivation) {
+                                    Ok(core) => {
+                                        self.admission_resources.register_finished_derivation(
+                                            &core,
+                                            completion.path.clone(),
+                                            ownership,
+                                        )
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            player_number = completion.player_number,
+                                            info_id = completion.info_id,
+                                            path = %completion.path.display(),
+                                            %error,
+                                            "failed to publish synchronized player resource derivation"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            player_number = completion.player_number,
+                            info_id = completion.info_id,
+                            path = %completion.path.display(),
+                            %error,
+                            "failed to synchronize player profile"
+                        );
+                    }
+                }
+            }
+            save_worker::BackgroundSaveCompletion::RuntimeDynamic(completion) => {
+                self.finish_runtime_dynamic_save(completion);
+            }
+        }
     }
 
     fn perform_named_save(&mut self, label: &str, target: Option<PathBuf>) -> Result<PathBuf> {

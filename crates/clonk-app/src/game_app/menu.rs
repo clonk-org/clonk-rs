@@ -4800,9 +4800,11 @@ impl GameApp {
         restore_dialog: bool,
         session: NetworkSessionTeardown,
     ) {
-        // The save itself is already durable. If teardown wins the screenshot
-        // readback race, discard its guarded thumbnail update so a later round
-        // can never mutate this save.
+        // An accepted background save must become durable before round state
+        // disappears. If teardown then wins the screenshot readback race,
+        // discard only its guarded thumbnail update so a later round can never
+        // mutate this save.
+        self.finish_background_save_jobs();
         self.finish_pending_native_save_thumbnails(None);
         let last_startup_dialog = self.last_startup_dialog;
         self.abort_restart_pending = false;

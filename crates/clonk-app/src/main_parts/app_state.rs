@@ -132,6 +132,9 @@ pub(crate) struct GameApp {
     pub(crate) retained_native_capture_surface: Option<Surface>,
     pub(crate) pending_gpu_thumbnail_paths: VecDeque<PathBuf>,
     pub(crate) pending_native_save_thumbnails: VecDeque<PendingNativeSaveThumbnail>,
+    pub(crate) background_save_worker:
+        Option<save_worker::BackgroundSaveWorker<save_worker::BackgroundSaveCompletion>>,
+    pub(crate) last_native_save_timings: Option<save_worker::NativeSaveTimings>,
     pub(crate) pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
     /// Current `Config.General.GamepadEnabled` value used by each new
     /// `C4Player::InitControl` analogue.
@@ -715,6 +718,7 @@ pub(crate) struct GameApp {
     /// synchronized runtime dynamic. One queued CID_Synchronize serves every
     /// request observed before that boundary.
     pub(crate) pending_runtime_dynamic_request: Option<PendingRuntimeDynamicRequest>,
+    pub(crate) next_runtime_dynamic_save_generation: u64,
     pub(crate) pending_network_join_data: Option<clonk_network::JoinDataEnvelope>,
     /// Armed after a retained-session restart marker and consumed by the next
     /// JoinData. Initial admission also emits JoinData, so the marker must be

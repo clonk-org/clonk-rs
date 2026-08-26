@@ -4414,10 +4414,38 @@ pub(crate) fn persist_live_console_save_group(
     folder_journal: &developer_console_save::FolderSaveJournal,
     maker: &[u8],
 ) -> Result<()> {
+    persist_live_console_save_group_timed(
+        group,
+        destination,
+        preserve_folder_group,
+        folder_journal,
+        maker,
+    )
+    .map(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ConsoleSavePersistTimings {
+    pub(crate) pack_compress: std::time::Duration,
+    pub(crate) physical_publish: std::time::Duration,
+}
+
+pub(crate) fn persist_live_console_save_group_timed(
+    group: &MutableGroup,
+    destination: &Path,
+    preserve_folder_group: bool,
+    folder_journal: &developer_console_save::FolderSaveJournal,
+    maker: &[u8],
+) -> Result<ConsoleSavePersistTimings> {
     if preserve_folder_group {
-        replay_folder_save_journal(folder_journal, destination, maker)
+        let started = std::time::Instant::now();
+        replay_folder_save_journal(folder_journal, destination, maker)?;
+        Ok(ConsoleSavePersistTimings {
+            physical_publish: started.elapsed(),
+            ..ConsoleSavePersistTimings::default()
+        })
     } else {
-        persist_console_save_group(group, destination, false)
+        persist_console_save_group_timed(group, destination, false)
     }
 }
 
@@ -4426,7 +4454,18 @@ pub(crate) fn persist_console_save_group(
     destination: &Path,
     preserve_folder_group: bool,
 ) -> Result<()> {
+    persist_console_save_group_timed(group, destination, preserve_folder_group).map(|_| ())
+}
+
+fn persist_console_save_group_timed(
+    group: &MutableGroup,
+    destination: &Path,
+    preserve_folder_group: bool,
+) -> Result<ConsoleSavePersistTimings> {
+    let pack_started = std::time::Instant::now();
     let packed = group.pack()?;
+    let pack_compress = pack_started.elapsed();
+    let publish_started = std::time::Instant::now();
     if preserve_folder_group {
         let source = Group::from_memory(destination.to_path_buf(), packed)?;
         let physical_destination = match fs::symlink_metadata(destination) {
@@ -4438,7 +4477,11 @@ pub(crate) fn persist_console_save_group(
             Err(error) if error.kind() == io::ErrorKind::NotFound => destination.to_path_buf(),
             Err(error) => return Err(error.into()),
         };
-        return replace_directory_from_same_parent(&source, &physical_destination);
+        replace_directory_from_same_parent(&source, &physical_destination)?;
+        return Ok(ConsoleSavePersistTimings {
+            pack_compress,
+            physical_publish: publish_started.elapsed(),
+        });
     }
     if let Some(parent) = destination
         .parent()
@@ -4447,7 +4490,11 @@ pub(crate) fn persist_console_save_group(
         fs::create_dir_all(parent)
             .with_context(|| format!("create save parent {}", parent.display()))?;
     }
-    replace_file_from_same_directory(destination, &packed)
+    replace_file_from_same_directory(destination, &packed)?;
+    Ok(ConsoleSavePersistTimings {
+        pack_compress,
+        physical_publish: publish_started.elapsed(),
+    })
 }
 
 pub(crate) fn replace_native_save_title_png_if_unchanged(

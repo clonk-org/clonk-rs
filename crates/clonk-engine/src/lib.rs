@@ -158,11 +158,11 @@ pub use live_c4_player::{
     LiveC4PlayerSaveOptions, LiveC4SynchronizedPlayerGroup,
 };
 pub use live_c4_save::{
-    LiveC4ComponentHost, LiveC4SaveComponentMutation, LiveC4SaveComponentRef, LiveC4SaveComponents,
-    LiveC4SaveEntry, LiveC4SaveEntryKind, LiveC4SaveError, LiveC4SaveLandscapeMutation,
-    LiveC4SaveNamedComponent, LiveC4SavePlayerPolicy, LiveC4SavePolicy,
-    LiveC4SavePreLandscapeComponents, LiveC4SaveScenarioSectionMutation, LiveC4SaveSpec,
-    LiveC4ValueEncodeError, LiveC4ValueEnumeration,
+    LiveC4ComponentHost, LiveC4SaveCapture, LiveC4SaveComponentMutation, LiveC4SaveComponentRef,
+    LiveC4SaveComponents, LiveC4SaveEntry, LiveC4SaveEntryKind, LiveC4SaveError,
+    LiveC4SaveLandscapeMutation, LiveC4SaveNamedComponent, LiveC4SavePlayerPolicy,
+    LiveC4SavePolicy, LiveC4SavePreLandscapeComponents, LiveC4SaveScenarioSectionMutation,
+    LiveC4SaveSpec, LiveC4ValueEncodeError, LiveC4ValueEnumeration,
 };
 pub use local_audio::{
     LocalAudioPlayerView, LocalAudioWorld, LocalSoundStart, SynchronousSoundHost,

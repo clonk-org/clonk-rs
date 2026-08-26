@@ -3193,10 +3193,15 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     );
     app.local_player_profile_paths
         .insert(info_id, profile_path.clone());
+    let (_events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
 
     let synchronize = || NetworkControl::Synchronize(saves_fixture!(synchronize: true, false));
     app.apply_synchronized_controls(0, vec![synchronize()])
         .test_value();
+
+    let pending = PlayerFile::load_from_path(&profile_path).test_value();
+    main_assert_eq!(pending.name => "Stale", "physical persistence runs after the synchronized control returns");
+    app.finish_background_save_jobs();
 
     let saved = PlayerFile::load_from_path(&profile_path).test_value();
     main_assert_eq!(saved.name => "Persistent Player");
@@ -3230,6 +3235,8 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     fs::remove_dir_all(&profile_path).test_value();
     app.apply_synchronized_controls(1, vec![synchronize()])
         .test_value();
+    main_assert!(!profile_path.exists(), "a missing profile remains absent until its worker job finishes");
+    app.finish_background_save_jobs();
     let recreated = PlayerFile::load_from_path(&profile_path).test_value();
     main_assert_eq!(recreated.total_playing_time => 55);
     main_assert_eq!(recreated.crew.iter().find(|crew| crew.name == "Hero").expect("recreated active crew").total_playing_time => 22);

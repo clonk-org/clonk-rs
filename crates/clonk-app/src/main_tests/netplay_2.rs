@@ -2521,6 +2521,34 @@ fn failed_client_connection_reaches_cleanup_and_keeps_classic_lobby_open() {
 }
 
 #[test]
+fn runtime_dynamic_completion_rejects_stale_and_cancelled_generations() {
+    let mut app = new_menu_app(320, 200);
+    let mut pending = PendingRuntimeDynamicRequest::new(7, 3);
+    pending.synchronized_control_tick = Some(4);
+    pending.save_generation = Some(2);
+    app.pending_runtime_dynamic_request = Some(pending);
+
+    app.finish_runtime_dynamic_save(save_worker::RuntimeDynamicSaveCompletion {
+        generation: 1,
+        synchronized_control_tick: 4,
+        dynamic_tick: 4,
+        parameters: clonk_network::JoinGameParametersEnvelope::default(),
+        result: Err(anyhow!("stale worker failure")),
+    });
+    main_assert_eq!(app.pending_runtime_dynamic_request.as_ref().and_then(|request| request.save_generation) => Some(2));
+
+    app.pending_runtime_dynamic_request = None;
+    app.finish_runtime_dynamic_save(save_worker::RuntimeDynamicSaveCompletion {
+        generation: 2,
+        synchronized_control_tick: 4,
+        dynamic_tick: 4,
+        parameters: clonk_network::JoinGameParametersEnvelope::default(),
+        result: Err(anyhow!("cancelled worker failure")),
+    });
+    main_assert!(app.pending_runtime_dynamic_request.is_none());
+}
+
+#[test]
 fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
     // A fatal application-loop failure makes DoLobby clear the network and
     // return false; Game::Init then fails and QuitGame rebuilds startup
@@ -10581,6 +10609,64 @@ fn network_update_uses_join_control_tick_and_cpp_control_rate() {
 }
 
 #[test]
+fn blocked_save_finalizer_does_not_block_two_peer_control_or_input_progress() {
+    let mut host = new_running_sandbox_app();
+    let mut client = new_running_sandbox_app();
+    let (host_events, _host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
+    let (client_events, _client_commands) =
+        install_running_network_stub(&mut client, 7, 0, 1);
+    let host_frame = host.engine.frame();
+    let client_frame = client.engine.frame();
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+
+    host.submit_background_save_job(Box::new(move || {
+        started_tx.send(()).expect("report blocked finalizer");
+        release_rx.recv().expect("release blocked finalizer");
+        save_worker::BackgroundSaveCompletion::PlayerFile(
+            save_worker::PlayerFileSaveCompletion {
+                player_number: 0,
+                info_id: 0,
+                path: Path::new("blocked-save-test.c4p").to_path_buf(),
+                official_derivation: false,
+                derivation: None,
+                result: Ok(()),
+                persistence: Duration::ZERO,
+            },
+        )
+    }))
+    .test_value();
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker reached blocked finalizer");
+
+    n2_send_event(
+        &host_events,
+        n2_fixture!(ready_tick: 0, vec![NetworkControl::Player {
+            owner: host.local_owner,
+            event: ControlEvent::Press(ControlButton::Right),
+        }]),
+    );
+    n2_send_event(
+        &client_events,
+        n2_fixture!(ready_tick: 0, vec![NetworkControl::Player {
+            owner: client.local_owner,
+            event: ControlEvent::Press(ControlButton::Right),
+        }]),
+    );
+    host.test_update();
+    client.test_update();
+
+    main_assert_eq!(host.engine.frame() => host_frame + 1);
+    main_assert_eq!(client.engine.frame() => client_frame + 1);
+    main_assert_ne!(host.engine.player(host.local_owner).expect("host player").control.pressed_coms & (1 << clonk_engine::COM_RIGHT) => 0);
+    main_assert_ne!(client.engine.player(client.local_owner).expect("client player").control.pressed_coms & (1 << clonk_engine::COM_RIGHT) => 0);
+
+    release_tx.send(()).expect("release worker");
+    host.finish_background_save_jobs();
+}
+
+#[test]
 fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     // MainDlg's player list refreshes only from its explicit lobby
     // callbacks or one-second timer (src/C4GameLobby.cpp:669-680,
@@ -14056,8 +14142,15 @@ fn save_to_slot_writes_native_c4group_savegame() {
     app.clear_message_board_log();
     app.save_to_slot(10);
 
-    // QuickSave announces the write and its successful outcome through the
-    // in-game message board (src/C4Game.cpp:2270-2285).
+    // QuickSave announces the request immediately, but the successful outcome
+    // only after its background finalizer publishes the slot.
+    main_assert_eq!(message_board_logical_entries(&app) => vec!["Saving game...".to_string()]);
+    let old_slot = Group::open(&slot).test_value();
+    main_assert!(old_slot.exists("Stale.txt"));
+    main_assert!(!old_slot.exists("Game.txt"));
+
+    app.finish_background_save_jobs();
+
     main_assert_eq!(
         message_board_logical_entries(&app) =>
         vec!["Saving game...".to_string(), "Game saved.".to_string()]
@@ -14107,9 +14200,11 @@ fn save_to_slot_writes_native_c4group_savegame() {
     app.retained_gpu_presentation_active = true;
     let gpu_slot = save_root.join("Missions.c4f").join("Missions9.c4s");
     app.save_to_slot(9);
+    main_assert!(app.pending_native_save_thumbnails.is_empty());
+    app.finish_background_save_jobs();
     main_assert_eq!(app.pending_native_save_thumbnails.len() => 1);
     main_assert_eq!(app.pending_native_save_thumbnails[0].path => gpu_slot);
-    main_assert!(gpu_slot.exists(), "the game state save must remain synchronous");
+    main_assert!(gpu_slot.exists());
     main_assert!(!app.savegame_slots()[8].free);
     let mut later_state = app.engine.capture_state();
     later_state.frame = 91;
@@ -14131,6 +14226,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
 
     let guarded_slot = save_root.join("Missions.c4f").join("Missions8.c4s");
     app.save_to_slot(8);
+    app.finish_background_save_jobs();
     let mut replacement = MutableGroup::new("Missions8.c4s");
     replacement
         .add_file("External.txt", b"new generation".to_vec())
@@ -14141,9 +14237,25 @@ fn save_to_slot_writes_native_c4group_savegame() {
     main_assert!(guarded.exists("External.txt"));
     main_assert!(!guarded.exists("Title.png"));
 
+    let repeated_slot = save_root.join("Missions.c4f").join("Missions6.c4s");
+    let mut first_generation = app.engine.capture_state();
+    first_generation.frame = 101;
+    app.engine.restore_state(&first_generation).test_value();
+    app.save_to_slot(6);
+    let mut second_generation = app.engine.capture_state();
+    second_generation.frame = 102;
+    app.engine.restore_state(&second_generation).test_value();
+    app.save_to_slot(6);
+    app.finish_background_save_jobs();
+    let repeated = Group::open(&repeated_slot).test_value();
+    let repeated_game = clonk_engine::parse_initial_network_game_data(
+        &repeated.read_file("Game.txt").test_value(),
+    );
+    main_assert_eq!(repeated_game.frame => 102, "same-slot save generations must publish in submission order");
+
     let teardown_slot = save_root.join("Missions.c4f").join("Missions7.c4s");
     app.save_to_slot(7);
-    main_assert_eq!(app.pending_native_save_thumbnails.front().map(|request| request.path.as_path()) => Some(teardown_slot.as_path()));
+    main_assert!(app.background_save_worker.is_some());
     app.return_to_menu();
     main_assert!(app.pending_native_save_thumbnails.is_empty());
     main_assert_eq!(
@@ -14153,6 +14265,135 @@ fn save_to_slot_writes_native_c4group_savegame() {
             .expect("read preserved source title") =>
         b"stale png title"
     );
+}
+
+#[test]
+#[ignore = "manual save-latency timing probe"]
+fn network_quicksave_latency_report() {
+    let fixture = tempdir();
+    let user_data = fixture.path().join("user-data");
+    let save_root = fixture.path().join("Savegames.c4f");
+    let (_guard, paths) = exact_loader_test_paths(&user_data, None);
+    persist_config_value(
+        &paths,
+        "General",
+        "SaveGameFolder",
+        save_root.to_string_lossy().into_owned(),
+    )
+    .test_value();
+    persist_config_value(&paths, "General", "Language", "US").test_value();
+
+    let scenario_path = fixture.path().join("Missions.c4f").join("01.c4s");
+    install_record_test_definitions(&fixture.path().join("Missions.c4f"));
+    fs::create_dir_all(&scenario_path).test_value();
+    fs::write(
+        scenario_path.join("Scenario.txt"),
+        b"[Head]\nTitle=Save latency probe\nIcon=4\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+    )
+    .test_value();
+    fs::write(scenario_path.join("Source.bin"), vec![0x5a; 8 * 1024 * 1024]).test_value();
+
+    let frontend = FrontendScenario {
+        identifier: "Missions.c4f/01.c4s".to_string(),
+        title: "Save latency probe".to_string(),
+        path: Some(scenario_path.clone()),
+        source_paths: vec![scenario_path.clone()],
+        ..FrontendScenario::fallback()
+    };
+    let scenario_data =
+        Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
+            .test_value();
+    let mut host = new_running_sandbox_app();
+    host.app_paths = Some(paths);
+    host.active_scenario = Some(frontend.clone());
+    let player_info_id = host.engine.test_player(host.local_owner).player_info_id();
+    host.control_player_infos.apply(netplay_player_info_data(
+        0,
+        vec![n2_fixture!(player {
+            id: player_info_id,
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            game_number: host.local_owner,
+            name: LegacyCString::from_bytes(b"Latency player".to_vec())
+                .expect("latency player name"),
+        })],
+    ));
+    host.prepare_recording_for(&frontend, &scenario_data, None, None, None)
+        .test_value();
+    host.save_description_language = b"US".to_vec();
+    let mut landscape = clonk_engine::Landscape::flat(1024, 512);
+    main_assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
+    landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
+        1024,
+        512,
+        vec![0; 1024 * 512],
+        vec![0; 256],
+        vec![None; 256],
+        vec![None; 256],
+    ));
+    host.engine.set_landscape(landscape);
+    host.snapshot = host.engine.snapshot();
+
+    let mut client = new_running_sandbox_app();
+    let (host_events, _host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
+    let (client_events, _client_commands) =
+        install_running_network_stub(&mut client, 7, 0, 1);
+    let presend_before = host
+        .network_control_clock
+        .expect("host control clock")
+        .control_presend();
+    let slot_path = host.savegame_slot_path(1);
+
+    let save_started = Instant::now();
+    host.save_to_slot(1);
+    let save_call_return = save_started.elapsed();
+    let input_started = Instant::now();
+    n2_send_event(
+        &host_events,
+        n2_fixture!(ready_tick: 0, vec![NetworkControl::Player {
+            owner: host.local_owner,
+            event: ControlEvent::Press(ControlButton::Right),
+        }]),
+    );
+    n2_send_event(
+        &client_events,
+        n2_fixture!(ready_tick: 0, vec![NetworkControl::Player {
+            owner: client.local_owner,
+            event: ControlEvent::Press(ControlButton::Right),
+        }]),
+    );
+    let client_update_started = Instant::now();
+    host.test_update();
+    client.test_update();
+    let client_control_stall = client_update_started.elapsed();
+    let input_press_to_execution = input_started.elapsed();
+    let worker_wait_started = Instant::now();
+    host.finish_background_save_jobs();
+    let worker_finish_wait = worker_wait_started.elapsed();
+    let timings = host.last_native_save_timings.expect("native save timings");
+    let presend_after = host
+        .network_control_clock
+        .expect("host control clock remains")
+        .control_presend();
+    let catch_up_backlog_frames = host.engine.frame().abs_diff(client.engine.frame());
+
+    eprintln!(
+        "SAVE_LATENCY source_group_copy_us={} live_state_capture_us={} embedded_player_capture_us={} live_state_encode_us={} group_mutation_us={} pack_compress_us={} physical_publish_us={} synchronized_player_file_us=see_trace save_call_return_us={} worker_finish_wait_us={} client_control_stall_us={} input_press_to_execution_us={} catch_up_backlog_frames={} presend_before={} presend_after={}",
+        timings.source_group_copy.as_micros(),
+        timings.live_state_capture.as_micros(),
+        timings.embedded_player_capture.as_micros(),
+        timings.live_state_encode.as_micros(),
+        timings.group_mutation.as_micros(),
+        timings.pack_compress.as_micros(),
+        timings.physical_publish.as_micros(),
+        save_call_return.as_micros(),
+        worker_finish_wait.as_micros(),
+        client_control_stall.as_micros(),
+        input_press_to_execution.as_micros(),
+        catch_up_backlog_frames,
+        presend_before,
+        presend_after,
+    );
+    main_assert!(slot_path.is_file());
 }
 
 #[test]

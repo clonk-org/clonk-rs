@@ -545,6 +545,31 @@ near zero. The runner recomputes every report percentile from raw samples and
 checks measured counts, route topology, and both cleanup gates independently
 of the harness's own overall result.
 
+### Network quick-save latency probe
+
+The opt-in quick-save probe builds an 8 MiB source scenario with a 1024x512
+exact landscape, starts host and client control clocks, queues a native slot
+save, and executes one synchronized input on both peers while the save worker
+finishes. Run it on an otherwise idle machine with the revision and build
+profile recorded alongside the result:
+
+```sh
+CARGO_BUILD_JOBS=1 cargo nextest run -p clonk-app \
+  --run-ignored all --no-capture \
+  -E 'test(/^tests::network_quicksave_latency_report$/)'
+```
+
+Its single `SAVE_LATENCY` line reports source-group materialization, immutable
+live-state capture, embedded-player capture, worker-side live-state encoding,
+group mutation, C4Group pack/compression, atomic physical publication, the
+save call's return time, remaining worker wait, client control stall, input
+press-to-execution time, catch-up backlog, and PreSend before/after. Executed
+synchronized player-file writes emit a separate
+`synchronized player-file persistence stage` trace because each peer owns a
+different physical profile. These wall-clock values are diagnostic and carry
+no ordinary-CI threshold; the non-ignored blocked-finalizer regression is the
+deterministic assertion that host/client control and input progress continue.
+
 ## Reproducing render measurements
 
 Render one explicit replay snapshot:
