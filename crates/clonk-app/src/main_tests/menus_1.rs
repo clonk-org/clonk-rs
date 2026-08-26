@@ -562,28 +562,76 @@ fn audio_context_selects_configured_linear_resampling() {
     main_assert_eq!(audio.system.resampling_mode() => ResamplingMode::Linear);
 }
 
+/// `CStdFont::DrawText` consumes `{{id}}` markup before resolving it and
+/// ignores a spec it cannot resolve — "image renderer not hooked or ID not
+/// found, or surface not present: just ignore it"
+/// (src/StdFont.cpp:869-890) — so an unresolvable inline image draws as zero
+/// pixels with zero advance and the row keeps drawing. Every script-menu
+/// style shares one text path, so none of them may refuse the menu.
 #[test]
-fn info_menu_preflight_rejects_unresolved_text_images() {
-    let script = r#"
+fn unresolved_menu_text_images_are_consumed_in_every_style() {
+    for (style, name) in [(0, "Normal"), (1, "Context"), (2, "Info"), (3, "Dialog")] {
+        let script = format!(
+            r#"
         func Initialize()
-        {
-            CreateMenu(MENU, this(), this(), 0, "Info", 0, 2);
-            AddMenuItem("", "", MENU, this(), 0, 0, "{{MISS}} unavailable");
-        }
-        "#;
-    let mut engine = Engine::new();
-    engine
-        .register_script_definition("MENU", "Menu", script)
-        .test_value();
-    let object = engine.spawn_test_object(SpawnConfig::new("MENU"));
-    let menu = engine
-        .debug_object_menu(object.as_u64())
-        .expect("menu object exists")
-        .test_value();
+        {{
+            CreateMenu(MENU, this(), this(), 0, "Menu", 0, {style});
+            AddMenuItem("", "", MENU, this(), 0, 0, "before {{{{MISS}}}} after");
+        }}
+        "#
+        );
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("MENU", "Menu", &script)
+            .test_value();
+        let object = engine.spawn_test_object(SpawnConfig::new("MENU"));
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("menu object exists")
+            .test_value();
 
-    let error = resolve_script_menu_font_images(&engine, &menu, ScriptTextSpecResources::default())
-        .expect_err("missing text image must fail before rendering");
-    main_assert!(error.to_string().contains("{{MISS}}"));
+        let images =
+            resolve_script_menu_font_images(&engine, &menu, ScriptTextSpecResources::default());
+        main_assert!(
+            images.is_empty(),
+            "{name}: an unresolvable spec contributes no image instead of refusing the menu"
+        );
+    }
+}
+
+/// The row keeps drawing around the consumed markup, so rendering a menu whose
+/// inline image is missing must succeed (src/StdFont.cpp:869-890).
+/// `test_render` unwraps the render result, so a refusal fails this test.
+#[test]
+fn a_menu_row_with_an_unresolved_inline_image_still_renders_in_every_style() {
+    for (style, name) in [(0, "Normal"), (1, "Context"), (2, "Info"), (3, "Dialog")] {
+        let mut app = new_synthetic_running_sandbox_app();
+        install_classic_test_assets(&mut app);
+        let cursor = app.engine.test_crew_cursor(app.local_owner);
+        let mut menu = two_item_script_menu(cursor);
+        menu.style = style;
+        menu.items[0].caption = "before {{MISS}} after".to_string();
+        menu.items[0].info_caption = "info {{MISS}} tail".to_string();
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .test_value();
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.test_render(&mut frame);
+        main_assert!(
+            app.engine
+                .debug_object_menu(cursor.as_u64())
+                .expect("cursor exists")
+                .is_some(),
+            "{name}: the menu survives a frame whose inline image never resolved"
+        );
+    }
 }
 
 #[test]

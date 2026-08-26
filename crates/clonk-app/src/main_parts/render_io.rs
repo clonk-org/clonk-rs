@@ -1973,17 +1973,22 @@ pub(crate) fn resolve_message_font_images(
     resolve_font_images_in_texts(engine, message.lines.iter().map(String::as_str), resources)
 }
 
+/// `CStdFont::DrawText` consumes `{{id}}` markup *before* it looks the image
+/// up — `szText += iImgLgt + 3` — and then skips a spec it cannot resolve:
+/// "image renderer not hooked or ID not found, or surface not present: just
+/// ignore it" (oracle-src-pinned src/StdFont.cpp:869-890). An unresolved
+/// inline image is therefore drawn as zero pixels with zero advance and the
+/// row keeps drawing, so an unresolvable spec is simply absent from this map
+/// rather than a refusal to draw the menu at all.
 pub(crate) fn resolve_script_menu_font_images(
     engine: &Engine,
     menu: &clonk_engine::ObjectMenuState,
     resources: ScriptTextSpecResources<'_>,
-) -> Result<HashMap<String, ImageData>> {
+) -> HashMap<String, ImageData> {
     engine_script_menu_inline_image_specs(menu)
         .into_iter()
-        .map(|spec| {
-            resolve_script_font_image(engine, &spec, 0xff, resources)
-                .map(|image| (spec.clone(), image))
-                .ok_or_else(|| anyhow!("unresolved classic menu text image '{{{{{spec}}}}}'"))
+        .filter_map(|spec| {
+            resolve_script_font_image(engine, &spec, 0xff, resources).map(|image| (spec, image))
         })
         .collect()
 }
