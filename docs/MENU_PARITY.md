@@ -14,14 +14,15 @@ both of which move with the code:
 
 - **the tests** — a behaviour that is covered names its test here, and the test
   either passes on `main` or the gates are red;
-- **the tracker issues** — clonk-org/clonk-rs#381 owns recursive menu parity
-  and clonk-org/clonk-rs#383 owns tutorial and UI parity. Remaining work belongs
-  there, where it can be assigned, prioritised and closed.
+- **the issue tracker** — clonk-org/clonk-rs#381 (recursive menu parity) and
+  clonk-org/clonk-rs#383 (tutorial and UI parity) tracked this work and are now
+  closed, every child with them. A gap found from here is a **new issue**, where
+  it can be assigned, prioritised and closed.
 
 **Do not add a status column, a completion percentage, or a dated audit
 snapshot to this file.** `scripts/tests/test_menu_parity_doc.py` fails if one
-reappears. If you need to record that something is missing, open an issue under
-the tracker above and let this file describe what C++ does.
+reappears. If you need to record that something is missing, open an issue and
+let this file describe what C++ does.
 
 The C++ source and the shipped `content/`/`planet/` data are read-only oracle
 material. Implementations belong under the repo root; never edit the oracle to
