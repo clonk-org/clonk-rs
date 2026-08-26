@@ -2252,6 +2252,18 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.mobile, actual_object.mobile
                     ));
                 }
+                // Con scales the float line every liquid probe samples
+                // (`Def->Float * Con / FullCon`, C4Object.cpp:5634 and the
+                // DFA_SWIM probes at :4970,:4980) and drives shape, mass and
+                // OCF besides. Diff it so a Con disagreement is reported
+                // where it happens rather than as a liquid or contact
+                // difference further downstream.
+                if expected_object.construction != actual_object.construction {
+                    problems.push(format!(
+                        "object {} construction rust {}, cpp {}",
+                        id, expected_object.construction, actual_object.construction
+                    ));
+                }
                 // InLiquid drives the DFA_SWIM out-of-liquid branch
                 // (C4Object.cpp:4967-4973): paddle back down, or
                 // `ObjectActionWalk(this); return;`. Diff it so a
@@ -5032,6 +5044,63 @@ global func Step(state, frame, random)
                 .expect("rotation difference is reported");
             assert!(detail.contains(label), "missing {label} in {detail}");
         }
+    }
+
+    /// `Con` scales the float line every liquid probe is taken at —
+    /// `Def->Float * Con / FullCon` appears in `IsInLiquidCheck`
+    /// (`C4Object.cpp:5634`) and in both DFA_SWIM probes (`:4970`, `:4980`) —
+    /// as well as driving shape, mass and OCF. The bridge collects it from
+    /// both engines and never diffed it, so a `Con` disagreement could only
+    /// ever surface downstream, as a liquid or contact difference at a pixel
+    /// the two engines never agreed to sample (clonk-org/clonk-rs#1157).
+    #[test]
+    fn runtime_mismatch_reports_construction() {
+        let object = || -> ObjectSnapshot {
+            serde_json::from_value(serde_json::json!({
+                "id": 1,
+                "definition_id": "FISH",
+                "position": {"x": 0, "y": 0},
+                "velocity": {"x": 0, "y": 0},
+                "rotation": 0,
+                "energy": 0,
+                "construction": 100_000,
+            }))
+            .expect("object snapshot deserializes")
+        };
+        let baseline = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+        let mut expected = baseline;
+        expected.objects = vec![object()];
+        let mut actual = expected.clone();
+        actual.objects[0].construction = 50_000;
+
+        let detail = runtime_snapshot_mismatch(&expected, &actual)
+            .expect("a construction difference is reported");
+        assert!(
+            detail.contains("construction rust 100000, cpp 50000"),
+            "detail did not name the construction difference: {detail}"
+        );
     }
 
     /// `InLiquid` decides the DFA_SWIM out-of-liquid branch
