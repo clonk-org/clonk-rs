@@ -11062,6 +11062,109 @@ impl Engine {
         self.register_definition(definition).is_ok()
     }
 
+    /// One `FrameDecoration*` callback of a definition's own script, with a
+    /// missing or failing callback reading as zero exactly as
+    /// `FrameDecoration::SetByDef`'s `C4Def::Call` results do
+    /// (C4GuiDialogs.cpp:116-124).
+    fn frame_decoration_callback_value(&mut self, id: &str, suffix: &str) -> i32 {
+        let function = format!("FrameDecoration{suffix}");
+        let Some(script) = self
+            .definition(id)
+            .map(Definition::script_arc)
+            .filter(|script| script.has_local_function(&function))
+        else {
+            return 0;
+        };
+        let world = self.host_world_context();
+        let (value, _final_args, batch, audio_state, rng, script_error) =
+            ScenarioScript::call_value_for_script(
+                id,
+                script.as_ref(),
+                None,
+                &function,
+                &[],
+                world,
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+            );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        if let Err(error) = self.apply_scenario_batch(batch) {
+            tracing::warn!(definition = %id, function, %error, "frame-decoration callback batch failed");
+        }
+        if script_error.is_some() {
+            return 0;
+        }
+        value.and_then(|value| value.as_c4_int()).unwrap_or(0)
+    }
+
+    /// `FrameDecoration::UpdateGfx` is simply `SetByDef(idSourceDef)` again
+    /// (C4GuiDialogs.cpp:144-148), so the snapshot is rebuilt from the
+    /// definition as it stands now. `None` is C++'s `SetByDef` returning
+    /// false, which the caller turns into `SetFrameDeco(nullptr)`.
+    fn rebuilt_frame_decoration(&mut self, id: &str) -> Option<ObjectMenuFrameDecoration> {
+        let facets = self.definition(id)?.action_graphics().clone();
+        let facet = |suffix: &str| {
+            facets
+                .get(&format!("FrameDeco{suffix}"))
+                .and_then(|graphics| graphics.facet.clone())
+        };
+        Some(ObjectMenuFrameDecoration {
+            source_definition: id.to_string(),
+            background_color: self.frame_decoration_callback_value(id, "BackClr") as u32,
+            border_top: self.frame_decoration_callback_value(id, "BorderTop"),
+            border_left: self.frame_decoration_callback_value(id, "BorderLeft"),
+            border_right: self.frame_decoration_callback_value(id, "BorderRight"),
+            border_bottom: self.frame_decoration_callback_value(id, "BorderBottom"),
+            top: facet("Top"),
+            top_right: facet("TopRight"),
+            right: facet("Right"),
+            bottom_right: facet("BottomRight"),
+            bottom: facet("Bottom"),
+            bottom_left: facet("BottomLeft"),
+            left: facet("Left"),
+            top_left: facet("TopLeft"),
+        })
+    }
+
+    /// `C4DefGraphicsPtrBackup::AssignUpdate` re-resolves the frame
+    /// decoration of every live object menu that took it from the reloaded
+    /// definition, and clears it when `UpdateGfx` fails
+    /// (`C4DefGraphics.cpp:392-400`); the removal sweep clears it outright
+    /// (`:473-477`). Decorations sourced from other definitions are
+    /// untouched, and the rebuild runs once per matching menu — C++'s own
+    /// comment notes it "may do multiple updates to the same deco if
+    /// multiple menus share it", so the callback count is per menu.
+    fn update_object_menu_decorations(&mut self, id: &str, still_supplied: bool) {
+        let targets = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| {
+                object
+                    .state
+                    .menu
+                    .as_ref()
+                    .and_then(|menu| menu.decoration.as_ref())
+                    .is_some_and(|decoration| decoration.source_definition == id)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in targets {
+            let rebuilt = still_supplied
+                .then(|| self.rebuilt_frame_decoration(id))
+                .flatten();
+            if let Some(menu) = self.objects[index].state.menu.as_mut() {
+                menu.decoration = rebuilt;
+            }
+        }
+    }
+
     pub fn reload_definition(&mut self, id: &str, network_enabled: bool) -> bool {
         // The network refusal is `C4Game::ReloadDef`'s first line.
         if network_enabled {
@@ -11100,6 +11203,7 @@ impl Engine {
             self.remove_definition(id);
             // The definition is gone, so every frame decoration drawing from
             // it goes with it.
+            self.update_object_menu_decorations(id, false);
             self.messages.update_def(id, false);
             return false;
         };
@@ -11113,6 +11217,9 @@ impl Engine {
         // and runs before the faces are refreshed so the refresh sees the
         // settled graphics.
         self.reassign_graphics_after_reload(id);
+        // The same sweep re-resolves live object menu decorations taken from
+        // this definition, before the faces are refreshed.
+        self.update_object_menu_decorations(id, true);
         // `C4Game::ReloadDef`'s success sweep: `UpdateFace(true)` on *every*
         // object of that id (`C4Game.cpp:2340-2345`). C++'s own comment says
         // why it is not a computed subset — an object can use another

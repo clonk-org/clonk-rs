@@ -1503,6 +1503,164 @@ fn set_menu_decoration_requires_a_known_def_and_a_menu_like_cpp() {
     );
 }
 
+/// Builds a CLNK object whose open menu carries a DECO frame decoration, with
+/// DECO reloadable from `group`.
+fn engine_with_decorated_menu(
+    group: &std::path::Path,
+    back_colour: i32,
+) -> (Engine, crate::ObjectId) {
+    let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func Deco() { return SetMenuDecoration(DECO, this()); }
+        "#;
+    let mut engine = script_engine(7, "CLNK", "Clonk", script);
+    let mut decoration = test_definition(
+        "DECO",
+        "Deco",
+        &format!(
+            r#"
+        protected func FrameDecorationBackClr() {{ return {back_colour}; }}
+        protected func FrameDecorationBorderTop() {{ return 1; }}
+        "#
+        ),
+    );
+    decoration.set_source_path(Some(group.to_path_buf()));
+    engine.register_test_definition(decoration);
+    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    engine.tick_without_snapshot().test_value();
+    let index = engine.test_object_index(clonk);
+    engine.call_test_object_function(index, "OpenMenu", Vec::new());
+    unit_assert_eq!(
+        engine.call_test_object_function(index, "Deco", Vec::new()) => Value::Bool(true)
+    );
+    (engine, clonk)
+}
+
+fn menu_decoration(engine: &Engine, object: crate::ObjectId) -> Option<ObjectMenuFrameDecoration> {
+    engine
+        .debug_object_menu(object.as_u64())
+        .expect("object exists")
+        .expect("menu is open")
+        .decoration
+}
+
+/// `C4DefGraphicsPtrBackup::AssignUpdate` re-resolves a live object menu's
+/// frame decoration when the reloaded definition is the one it came from —
+/// `pDeco->UpdateGfx()`, which is simply `SetByDef(idSourceDef)` again
+/// (C4DefGraphics.cpp:392-400; C4GuiDialogs.cpp:144-148). The snapshot the
+/// port takes at SetMenuDecoration time must therefore be rebuilt, not kept.
+#[test]
+fn reloading_a_decoration_definition_rebuilds_a_live_menu_decoration() {
+    let dir = tempfile::tempdir().test_value();
+    let group = dir.path().join("Deco.c4d");
+    std::fs::create_dir_all(&group).test_value();
+    std::fs::write(
+        group.join("DefCore.txt"),
+        "[DefCore]\nid=DECO\nVersion=4,9,8\nName=Deco\n",
+    )
+    .test_value();
+    std::fs::write(
+        group.join("Script.c"),
+        "protected func FrameDecorationBackClr() { return 777; }\n\
+         protected func FrameDecorationBorderTop() { return 9; }\n",
+    )
+    .test_value();
+
+    let (mut engine, clonk) = engine_with_decorated_menu(&group, 123_456);
+    unit_assert_eq!(
+        menu_decoration(&engine, clonk).map(|deco| (deco.background_color, deco.border_top)) =>
+        Some((123_456, 1))
+    );
+
+    unit_assert!(engine.reload_definition("DECO", false));
+
+    unit_assert_eq!(
+        menu_decoration(&engine, clonk).map(|deco| (deco.background_color, deco.border_top)) =>
+        Some((777, 9)),
+        "UpdateGfx re-runs SetByDef, so the menu shows the reloaded callbacks"
+    );
+}
+
+/// The failure arm drops the definition outright, and C++ clears every live
+/// menu decoration that came from it rather than leaving one drawing from a
+/// definition that is gone (C4DefGraphics.cpp:473-477).
+#[test]
+fn a_failed_decoration_reload_clears_a_live_menu_decoration() {
+    let dir = tempfile::tempdir().test_value();
+    let group = dir.path().join("Missing.c4d");
+
+    let (mut engine, clonk) = engine_with_decorated_menu(&group, 123_456);
+    unit_assert!(menu_decoration(&engine, clonk).is_some());
+
+    unit_assert!(!engine.reload_definition("DECO", false));
+
+    unit_assert_eq!(
+        menu_decoration(&engine, clonk) => None,
+        "a decoration whose definition is gone is cleared, not left stale"
+    );
+}
+
+/// The sweep walks every object and filters on
+/// `pDeco->idSourceDef == pDef->id` (C4DefGraphics.cpp:395), so each matching
+/// menu is updated — C++'s comment allows "multiple updates to the same deco
+/// if multiple menus share it" — and a decoration from another definition is
+/// left exactly as it was.
+#[test]
+fn a_reload_updates_every_matching_menu_and_ignores_other_definitions() {
+    let dir = tempfile::tempdir().test_value();
+    let group = dir.path().join("Deco.c4d");
+    std::fs::create_dir_all(&group).test_value();
+    std::fs::write(
+        group.join("DefCore.txt"),
+        "[DefCore]\nid=DECO\nVersion=4,9,8\nName=Deco\n",
+    )
+    .test_value();
+    std::fs::write(
+        group.join("Script.c"),
+        "protected func FrameDecorationBackClr() { return 777; }\n\
+         protected func FrameDecorationBorderTop() { return 9; }\n",
+    )
+    .test_value();
+
+    let (mut engine, first) = engine_with_decorated_menu(&group, 123_456);
+    let second = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    engine.tick_without_snapshot().test_value();
+    let index = engine.test_object_index(second);
+    engine.call_test_object_function(index, "OpenMenu", Vec::new());
+    unit_assert_eq!(
+        engine.call_test_object_function(index, "Deco", Vec::new()) => Value::Bool(true)
+    );
+
+    let other_group = dir.path().join("Other.c4d");
+    std::fs::create_dir_all(&other_group).test_value();
+    std::fs::write(
+        other_group.join("DefCore.txt"),
+        "[DefCore]\nid=DEC2\nVersion=4,9,8\nName=Other\n",
+    )
+    .test_value();
+    let mut unrelated = test_definition("DEC2", "Other", "");
+    unrelated.set_source_path(Some(other_group));
+    engine.register_test_definition(unrelated);
+
+    unit_assert!(engine.reload_definition("DEC2", false));
+    for object in [first, second] {
+        unit_assert_eq!(
+            menu_decoration(&engine, object).map(|deco| (deco.background_color, deco.border_top)) =>
+            Some((123_456, 1)),
+            "another definition's reload leaves this decoration alone"
+        );
+    }
+
+    unit_assert!(engine.reload_definition("DECO", false));
+    for object in [first, second] {
+        unit_assert_eq!(
+            menu_decoration(&engine, object).map(|deco| (deco.background_color, deco.border_top)) =>
+            Some((777, 9)),
+            "every menu sourced from the reloaded definition is rebuilt"
+        );
+    }
+}
+
 #[test]
 fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
     // C4Menu::Enter (C4Menu.cpp:498-523): no active menu -> false;
