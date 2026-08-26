@@ -8876,7 +8876,15 @@ impl ObjectScopeContext {
             self.current_fixed_rotation = C4Fixed::ZERO;
             self.current_rotation_velocity = C4Fixed::ZERO;
             self.pending_update.rotation = Some(0);
-            self.pending_update.rotation_velocity = Some(C4Fixed::ZERO);
+            // C4Object::ChangeDef ends `if (!Def->Rotateable) { r = 0;
+            // fix_r = rdir = Fix0; }` (C4Object.cpp:1238) -- a direct rdir
+            // write that never touches Mobile. Staging it on the mobilising
+            // field re-armed Mobile on every object that changed into a
+            // non-rotateable definition, which is every corpse: the fold ran
+            // after ExecMovement had demobilised it, so the port kept dead
+            // fish mobile where the oracle had them at rest
+            // (clonk-org/clonk-rs#1157).
+            self.pending_update.rotation_velocity_raw = Some(C4Fixed::ZERO);
         }
 
         if metadata.line == 0 {
