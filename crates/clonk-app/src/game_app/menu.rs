@@ -2313,14 +2313,7 @@ impl GameApp {
             Rect::new(0, 0, surface.width(), surface.height())
         });
         let font_images =
-            resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources())
-                .map_err(|error| {
-                    classic_parity_engine_error(report_classic_parity_boundary(
-                        ClassicParityBoundary::ScriptMenuPointerResources {
-                            detail: error.to_string(),
-                        },
-                    ))
-                })?;
+            resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources());
         let presentation = self
             .script_menu_presentations
             .get(&owner)
@@ -2387,14 +2380,7 @@ impl GameApp {
             Rect::new(0, 0, surface.width(), surface.height())
         });
         let font_images =
-            resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources())
-                .map_err(|error| {
-                    classic_parity_engine_error(report_classic_parity_boundary(
-                        ClassicParityBoundary::ScriptMenuPointerResources {
-                            detail: error.to_string(),
-                        },
-                    ))
-                })?;
+            resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources());
         let item_icons = if menu.style == 3 {
             self.script_menu_item_icons(menu)
         } else {

@@ -4993,15 +4993,8 @@ impl GameApp {
                     .definition_picture_image(title_id)
                     .map(definition_menu_picture);
                 let text_spec_resources = self.script_text_spec_resources();
-                let font_images = resolve_script_menu_font_images(
-                    &self.engine,
-                    menu,
-                    text_spec_resources,
-                )
-                .map_err(|error| {
-                    tracing::error!(%error, "classic menu text-image resource preflight failed");
-                    error
-                })?;
+                let font_images =
+                    resolve_script_menu_font_images(&self.engine, menu, text_spec_resources);
                 let item_icons = self.script_menu_item_icons(menu);
                 // C4MenuItem::DrawElement blits a row symbol only while its
                 // facet holds a surface (C4Menu.cpp:166), so a picture that
