@@ -2057,10 +2057,16 @@ fn draw_decoration_facet(
     );
 }
 
+/// Preflight for a frame decoration.
+///
+/// Deliberately says nothing about whether the source sprite sheet resolved:
+/// `SetByDef` ignores every `SetFacetByAction` return value, so an action the
+/// definition does not declare — or a definition with no bitmap at all —
+/// leaves that facet `Default()`, and `C4Facet::Draw` no-ops on it. The
+/// background box is drawn either way (`C4GuiDialogs.cpp:95-108, 150-196`).
 pub fn validate_menu_decoration_for_area(
     area: Rect,
     decoration: &clonk_engine::ObjectMenuFrameDecoration,
-    image: Option<&ImageData>,
 ) -> Result<(), String> {
     let borders = [
         ("top", decoration.border_top),
@@ -2095,12 +2101,6 @@ pub fn validate_menu_decoration_for_area(
         .filter_map(|(name, facet)| facet.map(|facet| (*name, facet)))
         .filter(|(_, facet)| facet.width > 0 && facet.height > 0)
         .collect::<Vec<_>>();
-    if drawable.is_empty() {
-        return Ok(());
-    }
-    if image.is_none() {
-        return Err("drawable facets require the source definition sprite sheet".to_string());
-    }
     for (name, facet) in drawable {
         let target_x = i64::from(facet.target_x);
         let target_y = i64::from(facet.target_y);
@@ -6302,31 +6302,109 @@ mod tests {
         assert!(validate_menu_decoration_for_area(
             Rect::new(0, 0, 640, 480),
             menu.decoration.as_ref().expect("decoration"),
-            Some(&image),
-        )
-        .is_ok());
-        assert!(validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            menu.decoration.as_ref().expect("decoration"),
-            None,
-        )
-        .is_err());
-        let mut background_only = menu.decoration.clone().expect("decoration");
-        background_only.top = None;
-        background_only.top_left = None;
-        assert!(validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            &background_only,
-            None,
         )
         .is_ok());
         menu.decoration.as_mut().expect("decoration").border_left = -1;
         assert!(validate_menu_decoration_for_area(
             Rect::new(0, 0, 640, 480),
             menu.decoration.as_ref().expect("decoration"),
-            Some(&image),
         )
         .is_err());
+    }
+
+    /// `SetByDef` ignores every `SetFacetByAction` result, so a facet whose
+    /// `FrameDeco*` action the definition never declared — or whose
+    /// definition carries no bitmap at all — stays `Default()` and
+    /// `C4Facet::Draw` returns immediately on it. The background box is drawn
+    /// before any of them and is unaffected
+    /// (src/C4GuiDialogs.cpp:95-124, 150-196).
+    #[test]
+    fn an_unresolved_decoration_facet_draws_nothing_and_keeps_the_background() {
+        use clonk_engine::{DefinitionActionFacet, ObjectMenuFrameDecoration};
+
+        let bounds = Rect::new(4, 6, 40, 30);
+        let background = 0x0033_6699;
+        let facet = || {
+            Some(DefinitionActionFacet {
+                x: 0,
+                y: 0,
+                width: 6,
+                height: 6,
+                target_x: 0,
+                target_y: 0,
+            })
+        };
+        let base = ObjectMenuFrameDecoration {
+            source_definition: "DECO".to_string(),
+            background_color: background,
+            border_top: 6,
+            border_left: 6,
+            border_right: 6,
+            border_bottom: 6,
+            top: None,
+            top_right: None,
+            right: None,
+            bottom_right: None,
+            bottom: None,
+            bottom_left: None,
+            left: None,
+            top_left: None,
+        };
+
+        // What the background alone paints, with no facet declared at all.
+        let paint = |decoration: &ObjectMenuFrameDecoration| {
+            let mut surface = Surface::new(64, 48, PixelFormat::Rgba8888);
+            surface.fill(Color::opaque(0, 0, 0));
+            draw_menu_decoration(&mut surface, bounds, decoration, None, None);
+            surface.pixels().to_vec()
+        };
+        let background_only = paint(&base);
+
+        // Every position in turn: declared, drawable, and unresolvable.
+        for name in [
+            "top",
+            "top-right",
+            "right",
+            "bottom-right",
+            "bottom",
+            "bottom-left",
+            "left",
+            "top-left",
+        ] {
+            let mut decoration = base.clone();
+            match name {
+                "top" => decoration.top = facet(),
+                "top-right" => decoration.top_right = facet(),
+                "right" => decoration.right = facet(),
+                "bottom-right" => decoration.bottom_right = facet(),
+                "bottom" => decoration.bottom = facet(),
+                "bottom-left" => decoration.bottom_left = facet(),
+                "left" => decoration.left = facet(),
+                _ => decoration.top_left = facet(),
+            }
+            assert!(
+                validate_menu_decoration_for_area(bounds, &decoration).is_ok(),
+                "an unresolvable {name} facet is not a preflight failure"
+            );
+            assert_eq!(
+                paint(&decoration),
+                background_only,
+                "an unresolvable {name} facet contributes no pixels"
+            );
+        }
+
+        // The background itself still reaches the pixels it owns.
+        let mut surface = Surface::new(64, 48, PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(0, 0, 0));
+        draw_menu_decoration(&mut surface, bounds, &base, None, None);
+        let inside = surface
+            .get_pixel(bounds.x as u32 + 1, bounds.y as u32 + 1)
+            .expect("a pixel inside the frame");
+        assert_eq!(
+            (inside.r, inside.g, inside.b),
+            (0x33, 0x66, 0x99),
+            "the background box is drawn before any facet"
+        );
     }
 
     #[test]
@@ -6479,12 +6557,8 @@ mod tests {
             decoration_image.height(),
             decoration_image.into_pixels(),
         );
-        validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            decoration,
-            Some(&decoration_image),
-        )
-        .expect("real MD69 geometry validates");
+        validate_menu_decoration_for_area(Rect::new(0, 0, 640, 480), decoration)
+            .expect("real MD69 geometry validates");
 
         let font_bytes = std::fs::read(repository.join("planet/System.c4g/Endeavour.ttf"))
             .expect("Endeavour.ttf reads");
