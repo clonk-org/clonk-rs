@@ -3746,3 +3746,110 @@ fn folder_map_titles_rasterize_at_the_resolved_font_zoom() {
     let tolerated = (native as f32 * 0.9).round() as i32;
     main_assert_eq!(painted_height(tolerated, false) => painted_height(native, false));
 }
+
+// The enhanced scenario search is a port divergence, so its wording is
+// port-owned `IDS_` text rather than an oracle string — but it is still read
+// from the frozen active language table, and English-only was never part of
+// the accepted divergence (clonk-org/clonk-rs#1175).
+#[test]
+fn scensel_enhanced_search_presentation_follows_the_active_language() {
+    let german = HashMap::from([
+        (
+            "IDS_MSG_SEARCHRESULTS".to_string(),
+            "%d von %d %s".to_string(),
+        ),
+        (
+            "IDS_MSG_SEARCHNOMATCHES".to_string(),
+            "Keine Treffer unter %d %s".to_string(),
+        ),
+        (
+            "IDS_MSG_SEARCHNORESULT".to_string(),
+            "Keine Szenarien passen zu \"%s\".".to_string(),
+        ),
+        (
+            "IDS_MSG_SEARCHCLEARHINT".to_string(),
+            "Esc drücken, um die Suche zu löschen.".to_string(),
+        ),
+        (
+            "IDS_MSG_SEARCHSCENARIO".to_string(),
+            "Szenario".to_string(),
+        ),
+        (
+            "IDS_MSG_SEARCHSCENARIOS".to_string(),
+            "Szenarien".to_string(),
+        ),
+    ]);
+
+    let build = |titles: &[&str], term: &str, resources: Option<&HashMap<String, String>>| {
+        let scenarios = titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| {
+                scensel_fixture!(frontend_scenario: entry, format!("s{index}"), (*title).to_string());
+                entry
+            })
+            .collect::<Vec<_>>();
+        let menu =
+            StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        if let Some(resources) = resources {
+            state.set_enhanced_search_resources(enhanced_search_resources(resources));
+        }
+        state.set_search_text(term);
+        state.apply_enhanced_search();
+        state
+    };
+
+    // Zero, one and several matches, each with its own noun.
+    let none = build(&["Crystal Cavern", "Gold Rush"], "zzzz", Some(&german));
+    main_assert_eq!(none.enhanced_search_caption().as_deref() => Some("Keine Treffer unter 2 Szenarien"));
+    main_assert_eq!(none.enhanced_search_empty_message().as_deref() => Some("Keine Szenarien passen zu \"zzzz\"."));
+
+    let one = build(&["Crystal Cavern"], "Crystal", Some(&german));
+    main_assert_eq!(one.enhanced_search_caption().as_deref() => Some("1 von 1 Szenario"));
+    main_assert!(one.enhanced_search_empty_message().is_none());
+
+    let several = build(
+        &["Crystal Cavern", "Crystal Lake", "Gold Rush"],
+        "Crystal",
+        Some(&german),
+    );
+    main_assert_eq!(several.enhanced_search_caption().as_deref() => Some("2 von 3 Szenarien"));
+    main_assert_eq!(several.enhanced_search_clear_hint() => "Esc drücken, um die Suche zu löschen.");
+
+    // A table without the keys keeps the shipped English.
+    let english = build(&["Crystal Cavern", "Gold Rush"], "Crystal", None);
+    main_assert_eq!(english.enhanced_search_caption().as_deref() => Some("1 of 2 scenarios"));
+    main_assert_eq!(english.enhanced_search_clear_hint() => "Press Esc to clear search.");
+}
+
+// Translated captions have to reach the pixels, not just the model: the
+// caption is drawn through the book caption and the guidance through the
+// list area, both of which read the same strings the model resolved.
+#[test]
+fn scensel_enhanced_search_translation_reaches_the_rendered_frame() {
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.open_scenario_browser();
+    app.menu_state
+        .set_enhanced_search_resources(enhanced_search_resources(&HashMap::from([(
+            "IDS_MSG_SEARCHCLEARHINT".to_string(),
+            "Esc drücken, um die Suche zu löschen.".to_string(),
+        )])));
+    app.menu_state.set_search_text("zzzznomatch");
+    app.menu_state.apply_enhanced_search();
+
+    let mut frame = vec![0_u8; 800 * 600 * 4];
+    main_assert!(app.render(&mut frame).expect("render the search result"));
+    let hinted = app.graphics.surface().pixels().to_vec();
+
+    app.menu_state
+        .set_enhanced_search_resources(EnhancedSearchResources::default());
+    let mut plain = vec![0_u8; 800 * 600 * 4];
+    main_assert!(app.render(&mut plain).expect("render the English hint"));
+
+    main_assert_ne!(
+        hinted => app.graphics.surface().pixels().to_vec(),
+        "the translated clear hint is drawn, not the English one"
+    );
+}

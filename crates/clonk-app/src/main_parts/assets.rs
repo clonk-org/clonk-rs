@@ -4854,6 +4854,47 @@ pub(crate) fn runtime_resource_text_from_table(
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// Reads the port-owned enhanced-search wording out of an active language
+/// table, keeping the shipped English for any key the table lacks
+/// (clonk-org/clonk-rs#1175).
+pub(crate) fn enhanced_search_resources(
+    resources: &HashMap<String, String>,
+) -> EnhancedSearchResources {
+    let defaults = EnhancedSearchResources::default();
+    EnhancedSearchResources {
+        results: runtime_resource_text_from_table(
+            resources,
+            "IDS_MSG_SEARCHRESULTS",
+            &defaults.results,
+        ),
+        no_matches: runtime_resource_text_from_table(
+            resources,
+            "IDS_MSG_SEARCHNOMATCHES",
+            &defaults.no_matches,
+        ),
+        no_result: runtime_resource_text_from_table(
+            resources,
+            "IDS_MSG_SEARCHNORESULT",
+            &defaults.no_result,
+        ),
+        clear_hint: runtime_resource_text_from_table(
+            resources,
+            "IDS_MSG_SEARCHCLEARHINT",
+            &defaults.clear_hint,
+        ),
+        scenario: runtime_resource_text_from_table(
+            resources,
+            "IDS_MSG_SEARCHSCENARIO",
+            &defaults.scenario,
+        ),
+        scenarios: runtime_resource_text_from_table(
+            resources,
+            "IDS_MSG_SEARCHSCENARIOS",
+            &defaults.scenarios,
+        ),
+    }
+}
+
 pub(crate) fn format_resource_string(mut template: String, arguments: &[&str]) -> String {
     for argument in arguments {
         let placeholder = [

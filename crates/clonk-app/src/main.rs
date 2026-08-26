@@ -2496,7 +2496,7 @@ impl GameApp {
         let main_menu_state = MainMenuState::new(main_menu, participants_label);
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
-        let menu_state = MenuState::new(menu, scenarios);
+        let mut menu_state = MenuState::new(menu, scenarios);
         let scenario_game_options = GameOptionButtons::new(
             GameOptionContext::LocalSelector,
             load_scenario_game_option_values(paths),
@@ -2585,6 +2585,8 @@ impl GameApp {
                     (table.entries.clone(), table.charset)
                 }
             };
+        menu_state
+            .set_enhanced_search_resources(enhanced_search_resources(&startup_tooltip_resources));
         engine.set_needed_material_resource_strings(
             needed_material_need.clone(),
             needed_material_none.clone(),
@@ -6495,6 +6497,8 @@ impl GameApp {
         self.object_no_dig = object_no_dig.clone();
         self.loaded_default_rank_names = Some(default_rank_resource_names(&table));
         self.startup_tooltip_resources = table.entries.clone();
+        self.menu_state
+            .set_enhanced_search_resources(enhanced_search_resources(&table.entries));
         self.config.language_charset = table.charset;
         self.engine
             .set_needed_material_resource_strings(needed_material_need, needed_material_none);
