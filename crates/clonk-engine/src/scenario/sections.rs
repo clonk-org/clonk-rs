@@ -104,6 +104,16 @@ pub(in crate::scenario) fn load_legacy_scenario_sections(
             discovered.push((name, entry.relative_path));
         }
     }
+    // An accepted divergence, not an oversight: C++ builds sections in C4Group
+    // entry order and prepends each (C4Game.cpp:3325; C4Scenario.cpp:557-566),
+    // so its list is reverse entry order — host `readdir` order for an open
+    // folder. Sorting here makes the list host-independent, which is kept
+    // because the ordering effect that matters most is port-only:
+    // `serialize_scenario_sections` re-serializes each modified section against
+    // one shared string table as it walks this list, so the walk order decides
+    // which section's values receive which `S<n>` ID, and C++ has no
+    // counterpart there. See `save-scenario-section-discovery-order` in
+    // `compat/profile.json` and parity/README.md's accepted divergences.
     discovered.sort_by(|(left, _), (right, _)| {
         left.to_ascii_lowercase()
             .cmp(&right.to_ascii_lowercase())

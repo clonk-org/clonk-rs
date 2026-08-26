@@ -679,6 +679,20 @@
       "profile_action": "kept",
       "determinism_critical": false,
       "owner": "clonk-org/clonk-rs#50"
+    },
+    {
+      "id": "save-scenario-section-discovery-order",
+      "area": "save_replay",
+      "summary": "Scenario-section discovery order: C++ builds one C4ScenarioSection per discovered Sect*.c4g in C4Group entry order and prepends each, so its list is reverse entry order - stored order for a packed group, host readdir order for an open folder. Rust sorts the discovered names case-insensitively before building the same reversed list, so the order is host-independent. The normalization is kept because the ordering effect that matters most is port-only: Rust re-serializes each modified section against one shared string table while walking the list, so the walk order decides which section's values receive which S<n> ID, and C++ has no counterpart to match there because it adds temp files written at section-switch time instead of re-serializing. Taking readdir order would therefore make Rust's own saved bytes host-dependent for no parity gain. The closed group is identical either way; only a partially written one differs, and section lookup can differ only between two sections whose names differ solely by case, which the port cannot hold distinctly because it keys sections by lowercase name.",
+      "cited_in": [
+        "crates/clonk-engine/src/scenario/sections.rs:106",
+        "parity/README.md"
+      ],
+      "cpp_reference": "C4Game.cpp:3325; C4Scenario.cpp:557-566",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "parity/README.md (Accepted safety divergences)"
     }
   ],
   "port_only_features": [

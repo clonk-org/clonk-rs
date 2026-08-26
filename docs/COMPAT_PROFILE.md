@@ -263,6 +263,7 @@ restores C++'s definition-transfer default.
 | Id | Action | Disposition |
 | --- | --- | --- |
 | `save-mission-access` | kept | `Config.General.MissionAccess` is persisted as soon as the shared mission list the engine mutates differs from the file. C++ leaves the write to `Config.Save()` on a clean quit, so a round that ends any other way relocks a mission C++ would have kept. Owned by clonk-org/clonk-rs#50. |
+| `save-scenario-section-discovery-order` | kept | C++ builds one `C4ScenarioSection` per discovered `Sect*.c4g` in `C4Group` entry order and prepends each, so its list is reverse entry order — stored order for a packed group, host `readdir` order for an open folder. Rust sorts the discovered names case-insensitively first, making the list host-independent. The sort is kept because the ordering effect that matters most has no C++ counterpart: Rust re-serializes each modified section against one shared string table as it walks the list, so the walk order decides which section's values get which `S<n>` ID, while C++ adds temp files written at section-switch time instead of re-serializing. Taking `readdir` order would make Rust's own saved bytes host-dependent for no parity gain. The closed group is identical either way. Owned by `parity/README.md`. |
 
 ## Port content appends
 

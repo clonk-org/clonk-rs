@@ -86,6 +86,28 @@ clonk-org/clonk-rs#1240.
   Mandel zero width or height is not excluded: its floating division is
   emulated with the same IEEE-754 inf/NaN propagation, and safe parameters
   remain formula-identical.
+- **Scenario-section discovery order:** C++ builds one `C4ScenarioSection` per
+  discovered `Sect*.c4g` in `C4Group` entry order and prepends each
+  (C4Game.cpp:3325; C4Scenario.cpp:557-566), so its list is reverse entry
+  order — stored order for a packed group, host `readdir` order for an open
+  folder. Rust sorts the discovered names case-insensitively before building
+  the same reversed list, so the order is host-independent. This is kept rather
+  than matched, because the ordering effect that matters most is port-only:
+  Rust re-serializes each modified section against one shared string table as
+  it walks the list, so the walk order decides which section's values receive
+  which `S<n>` ID, and C++ has nothing to match there — it adds temp files
+  written at section-switch time instead of re-serializing. Following `readdir`
+  order would make Rust's own saved bytes host-dependent for no parity gain.
+  The closed group is identical either way; only a partially written one
+  differs. Section lookup can differ only between two sections whose names
+  differ solely by case, which the port cannot hold distinctly in any event
+  because it keys sections by lowercase name.
+
+  This is the opposite call from material slots, which deliberately follow
+  `WalkDir` order because C++'s `readdir` order *is* the authoritative thing
+  being mirrored there — material indices exist on both sides and reach
+  synchronized state. Here the order decides port-only string IDs, so
+  normalizing costs no fidelity.
 
 ## How the oracle stays honest
 
