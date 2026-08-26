@@ -49,6 +49,7 @@ inventory in prose:
 | `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
 | `network_rule_goal_placement` | complete `C4SGame::ConvertGoals` and `C4Game::InitRules`/`InitGoals` bodies (`src/C4Scenario.cpp:506-556`; `src/C4Game.cpp:4056-4076`) | HarpoonRace's authored RVLR plus default energy realism becomes authoritative RVLR+ENRG parameters; rules use `max(count, 1)`, goals use the exact count, and local scenario lists cannot replace synchronized JoinData lists |
 | `player_join_capacity` | complete `C4PlayerList::GetCount` plus the mechanically extracted capacity block from `C4PlayerList::Join` (`src/C4PlayerList.cpp:172-178,288-294`) | all linked players count, zero is a closed limit, one remaining slot admits exactly one named player, and rejection leaves the ordered roster unchanged |
+| `scenario_sections` | complete `C4GameSave::SaveScenarioSections` plus the `C4ScenarioSection` constructor and accessors that build the list it walks (`src/C4GameSave.cpp:111-137`; `src/C4Scenario.cpp:555-566,649-657`) | the exact-save section sweep runs in **reverse** construction order, deletes the current section without re-adding it, and discards `Add`'s result |
 | `contents_list_order` | complete `C4ObjectList::Add`, `Remove`, `GetLink`, `RemoveLink`, `InsertLink`, and `ShiftContents` bodies (`src/C4ObjectList.cpp:110-268,310-318,614-636,815-831`) | exact category/id insertion, StaticBack/line/unsorted exceptions, tail-add, link-preserving rotation, fresh-link reinsertion, and iterator repair |
 | `container_lifecycle` | complete `C4Object::Enter`, `Exit`, and `Collect` bodies (`src/C4Object.cpp:1532-1637,5693-5717`) | callback and reentrant mutation order, both containment directions, controller transfer, final status, and raw fixed motion |
 | `contact_action_bottom_flight` | complete bottom `DFA_FLIGHT` arm of `C4Object::ContactAction` + action helpers | the `(OCF_HitSpeed4 \|\| fDisabled)` FlatUp gate, including low-speed disabled actions |
@@ -229,6 +230,24 @@ construction rules and examples:
   roster. The C++ scaffold executes and validates the diagnostic call, but the
   Rust differential deliberately makes no logging claim: application-level
   presentation is covered by the join-control tests.
+- `scenario_sections` compiles the complete production
+  `C4GameSave::SaveScenarioSections` body beside the real `C4ScenarioSection`
+  constructor, both of its accessors, and the `C4Strings` helpers that splice a
+  section name over the `*` in the real `Sect*.c4g` — so the composed entry
+  name and the list order both come from engine code rather than a restatement.
+  The destination group is a recorder: what a C4Group write *does* is not this
+  section's subject, its call order is. The decisive rule is that the
+  constructor **prepends**, so the sweep runs in reverse construction order and
+  the implicit node the first section switch creates is reached first; the
+  current section is deleted and never re-added even when modified; and `Add`'s
+  result is discarded, so the sweep has no failure exit. Rust drives the same
+  six section lists through a real `Engine` and compares the ordered
+  destination mutations, expanding its single `Replace` back into the
+  delete-then-add pair C++ emits. The constructor's folding of an empty or
+  case-insensitive `main` onto `C4ScenSect_Main` is **not** exercised, and
+  neither is section *discovery*: C++ takes C4Group entry order there while the
+  port normalizes to a host-independent sort, so both sides are handed the same
+  construction order.
 - `contents_list_order` compiles the complete production linked-list bodies
   that allocate, remove, insert, and rotate `C4ObjectLink`s. Constructor
   serials make link identity observable without relying on allocator address

@@ -7073,6 +7073,11 @@ namespace wildcard
 // header is where the default arguments (SizeMax, ';', false) come from, and
 // SAppend calls SCopy with two arguments relying on exactly that.
 #include "c4strings_helpers.inc"
+
+// The span above stops before SInsert/SDelete; SaveScenarioSections needs both
+// to splice a section name over the `*` in `Sect*.c4g`. Same global-scope
+// reasoning: SInsert's iMaxLen default lives in C4Strings.h.
+#include "c4strings_insert_delete.inc"
 #include "c4strings_advance_space.inc"
 
 // C4ConfigGeneral::GetLanguageSequence, with the smallest class that lets the
@@ -7088,6 +7093,154 @@ struct C4ConfigGeneral
 #include "config_language_sequence.inc"
 
 } // namespace config_language
+
+// C4GameSave::SaveScenarioSections, with the real C4ScenarioSection list
+// linkage that decides the order it walks in.
+//
+// `save_runtime_sequence` stubs this call out, so nothing yet pins what it
+// does. Everything under test here comes from an extracted `.inc`: the sweep
+// itself, the constructor that builds the list, both accessors it reads, and
+// the four C4Strings helpers that compose each entry name (at global scope,
+// above). The scaffolding below supplies only what those bodies name -- the
+// destination group is a recorder, because what a C4Group entry write *does*
+// is not this section's subject.
+//
+// _MAX_FNAME comes from StdFile.h:35 (`NAME_MAX`) at the pinned commit. It
+// only sizes the scratch buffer the composed name is built in and never
+// reaches the golden, so it is copied rather than lifted; every fixture name
+// is far shorter than either value.
+#include <climits>
+#ifndef _MAX_FNAME
+#define _MAX_FNAME NAME_MAX
+#endif
+
+namespace scenario_sections
+{
+
+// Every destination mutation the sweep makes, in call order. `Add`'s source is
+// the section's temp file; the port composes its replacement payload in memory
+// instead of on disk, so only the entry NAME is a comparable observable and
+// only that is recorded.
+static std::vector<std::string> g_trace;
+
+class C4ScenarioSection
+{
+public:
+	C4ScenarioSection(char *szName);
+
+	bool fModified;
+	C4ScenarioSection *pNext;
+
+	const char *GetName() const;
+	const char *GetTempFilename() const;
+
+	std::string Name;
+	// Never read by anything under test beyond GetTempFilename; the recorder
+	// below deliberately discards it. C4ScenarioSection::EnsureTempStore is
+	// what fills this in natively, and it needs the whole group layer.
+	std::string TempFilename;
+	std::string Filename;
+};
+
+struct C4Group
+{
+	void DeleteEntry(const char *entry)
+	{
+		g_trace.emplace_back(std::string("delete:") + entry);
+	}
+
+	bool Add(const char *, const char *addAs)
+	{
+		g_trace.emplace_back(std::string("add:") + addAs);
+		return true;
+	}
+};
+
+struct GameStub
+{
+	C4ScenarioSection *pScenarioSections = nullptr;
+	C4ScenarioSection *pCurrentScenarioSection = nullptr;
+};
+
+static GameStub Game;
+
+#include "scenario_section_ctor.inc"
+
+struct C4GameSave
+{
+	C4Group *pSaveGroup = nullptr;
+
+	bool SaveScenarioSections();
+};
+
+#include "game_save_scenario_sections.inc"
+
+// One fixture section: the name it is CONSTRUCTED with and whether it is
+// modified. Construction happens in array order, so the list the sweep walks
+// comes out reversed -- which is the rule this section exists to pin.
+//
+// Every fixture name is already in the form the constructor keeps. Its folding
+// of an empty or case-insensitive "main" onto C4ScenSect_Main is deliberately
+// not exercised: reaching it needs a scenario that ships a `SectMain.c4g` while
+// a different section is current, which is a question about how the section
+// list is DISCOVERED, and this section is scoped to the sweep over a given one.
+struct Section
+{
+	const char *constructed_name;
+	bool modified;
+};
+
+struct Case
+{
+	const char *name;
+	std::vector<Section> sections;
+	// Index into `sections` of the node `pCurrentScenarioSection` points at
+	// after a switch (C4Game.cpp:4227 -- the section switched TO), or -1
+	// before the first switch, when there is no implicit node either.
+	int current;
+};
+
+inline void run(const Case &c)
+{
+	g_trace.clear();
+	Game.pScenarioSections = nullptr;
+	Game.pCurrentScenarioSection = nullptr;
+
+	std::vector<std::unique_ptr<C4ScenarioSection>> owned;
+	std::vector<C4ScenarioSection *> built;
+	for (const auto &section : c.sections)
+	{
+		std::string name{section.constructed_name};
+		owned.push_back(std::make_unique<C4ScenarioSection>(name.data()));
+		built.push_back(owned.back().get());
+		built.back()->fModified = section.modified;
+		built.back()->TempFilename = std::string("/tmp/") + name + ".tmp";
+	}
+	if (c.current >= 0) Game.pCurrentScenarioSection = built[c.current];
+
+	C4Group group;
+	C4GameSave save;
+	save.pSaveGroup = &group;
+	const bool ok = save.SaveScenarioSections();
+
+	sep();
+	printf("{\"case\":\"%s\",\"ok\":%s,\"trace\":[", c.name, ok ? "true" : "false");
+	for (size_t i = 0; i < g_trace.size(); i++)
+	{
+		if (i) printf(",");
+		printf("\"%s\"", g_trace[i].c_str());
+	}
+	printf("]}");
+
+	// The list holds raw pointers into `owned`; drop both together so the next
+	// case starts from a genuinely empty Game.pScenarioSections.
+	for (auto &section : owned) section->pNext = nullptr;
+	Game.pScenarioSections = nullptr;
+	Game.pCurrentScenarioSection = nullptr;
+	g_trace.clear();
+}
+
+} // namespace scenario_sections
 
 // C4Config::AdaptToCurrentVersion, with the smallest set of fields the real
 // out-of-line definition touches. Field types and array widths match
@@ -13415,6 +13568,75 @@ int main()
         sep();
         printf("{\"case\":\"scenario_sort_order\",\"order\":\"%s\"}",
                savegame.GetSortOrder());
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4GameSave::SaveScenarioSections: the one step of the exact-save sweep
+    // `save_runtime_sequence` records reaching but stubs out. Three rules live
+    // in it and none is visible from the call site:
+    //
+    //   * The list is walked from `Game.pScenarioSections`, and the
+    //     constructor PREPENDS, so the sweep runs in REVERSE construction
+    //     order. C4Game::LoadScenarioSection creates the implicit current node
+    //     last, at the first section switch, so that node is visited FIRST.
+    //   * The current section is DELETED and never re-added -- whether or not
+    //     it is modified -- because its state is implied by
+    //     CurrentScenarioSection and the main landscape/object data. Reading
+    //     only the `fModified` arm would make this look like "skip".
+    //   * A modified section deletes before it adds and the Add result is
+    //     DISCARDED, so a broken temp file leaves the entry absent instead of
+    //     failing the save. The sweep has no failure exit at all: it returns
+    //     true even for an empty list.
+    //
+    // Scope: this is the sweep over a GIVEN section list. How that list is
+    // discovered differs deliberately -- C++ takes C4Group entry order while
+    // the port normalizes to a host-independent sorted order -- so the
+    // comparator supplies the same construction order to both sides rather
+    // than asserting the discovery.
+    arr_begin("scenario_sections");
+    {
+        using namespace scenario_sections;
+
+        // `sections` is CONSTRUCTION order. C4Game::LoadScenarioComponents
+        // builds one node per discovered `Sect*.c4g`; the implicit node for
+        // the departing section is built later, by the first
+        // C4Game::LoadScenarioSection (C4Game.cpp:4094-4097), so it appears
+        // LAST here and first in the walked list. `current` indexes the node
+        // that switch left `pCurrentScenarioSection` pointing at -- the
+        // section switched TO (C4Game.cpp:4227), not the implicit one.
+        const Case cases[] = {
+            // C4GameSave.cpp:114 -- a null list returns true before composing
+            // anything, so an unsectioned scenario writes nothing.
+            {"no_sections", {}, -1},
+            // Before the first switch there is no implicit node at all, so a
+            // save of an unmodified sectioned scenario emits nothing even
+            // though the sweep visits every node.
+            {"before_first_switch_nothing_modified",
+             {{"Alpha", false}, {"Cave", false}}, -1},
+            // A modified section deletes and then adds; an unmodified one is
+            // skipped outright. Still no current node.
+            {"modified_replaces_and_unmodified_skips",
+             {{"Alpha", true}, {"Cave", false}}, -1},
+            // The current section is deleted even though it is not modified --
+            // reading only the `fModified` arm would make this look like a
+            // skip.
+            {"current_section_is_deleted_unmodified",
+             {{"Alpha", false}, {"Cave", false}, {"main", false}}, 1},
+            // ...and it is STILL only deleted when it is modified. The
+            // departing implicit node beside it takes the replace arm, so the
+            // two arms are distinguished within one trace.
+            {"current_section_is_deleted_not_replaced",
+             {{"Alpha", false}, {"Cave", true}, {"main", true}}, 1},
+            // The rule this section exists for. Construction order is Alpha,
+            // beta, Gamma, then the implicit main built by the switch to beta,
+            // so the sweep emits main, Gamma, beta, Alpha -- exactly reversed.
+            {"traversal_is_reverse_construction_order",
+             {{"Alpha", true}, {"beta", false}, {"Gamma", true}, {"main", true}},
+             1},
+        };
+
+        for (const auto &c : cases) run(c);
     }
     arr_end();
     printf(",\n");

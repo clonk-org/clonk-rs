@@ -1433,6 +1433,43 @@ fn c4value_stateful_conversion_rust_driver_uses_vm_transitions() {
     assert_eq!(deref.rng_delta, 0);
 }
 
+/// One `scenario_sections` fixture node. Nothing the sweep reads comes from
+/// these fields — it looks at the name, the current-section pointer and
+/// `fModified` only — so every other value is the neutral default.
+fn parity_scenario_section_spec(name: &str) -> crate::scenario::ScenarioSectionSpec {
+    crate::scenario::ScenarioSectionSpec {
+        name: name.to_owned(),
+        source_group: None,
+        landscape: None,
+        landscape_systems: crate::scenario::ScenarioLandscapeSystems::default(),
+        exact_landscape: false,
+        texmap_lookups: Vec::new(),
+        resynthesize_static_map: false,
+        map_creator: None,
+        s2_overload: None,
+        gravity: crate::scenario::LegacyC4SVal::new(100, 0, 10, 200),
+        post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks::default(),
+        keep_map_creator: false,
+        no_initialize: false,
+        objects: Vec::new(),
+        scenario_values: crate::scenario::ScenarioValueStore::default(),
+        base_reject_entrance_enabled: true,
+        base_extinguish_enabled: true,
+        environment: crate::EnvironmentSettings::default(),
+    }
+}
+
+/// Stand-in for the temporary group `C4ScenarioSection::EnsureTempStore`
+/// leaves behind, which is what C++ hands to `C4Group::Add`. Only the entry
+/// name is compared, so the payload just has to be a loadable image.
+fn parity_frozen_section_image(name: &str) -> Vec<u8> {
+    let mut group = MutableGroup::new(format!("Sect{name}.c4g"));
+    group
+        .add_file("Objects.txt", name.as_bytes().to_vec())
+        .expect("compose frozen scenario section");
+    group.pack_raw().expect("pack frozen scenario section")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct C4ValueDenumerationOutcome {
     value: ScriptValue,
@@ -13541,6 +13578,150 @@ protected func ContactBottom()
             ported, hosts,
             "PARITY DIVERGENCE in `{label}` field `component_hosts`: C++ golden = {hosts:?}, Rust = {ported:?}"
         );
+    }
+
+    // 16h2. scenario_sections: `C4GameSave::SaveScenarioSections`
+    //       (C4GameSave.cpp:111-137) — the one step of the exact-save sweep
+    //       `save_runtime_sequence` records reaching and then stubs out.
+    //
+    //       The rule that cannot be read off the call site is the ORDER. The
+    //       sweep walks `Game.pScenarioSections`, and `C4ScenarioSection`'s
+    //       constructor PREPENDS (`C4Scenario.cpp:557-566`), so it runs in
+    //       reverse construction order — and the implicit node for the
+    //       departing section, which `C4Game::LoadScenarioSection` creates at
+    //       the first switch (`C4Game.cpp:4094-4097`), is therefore the one it
+    //       reaches first. Two more read backwards from their names: the
+    //       CURRENT section is deleted and never re-added even when it is
+    //       modified, and a modified section's `Add` result is discarded, so
+    //       the sweep has no failure exit at all.
+    //
+    //       C++ emits DeleteEntry and Add as separate calls where the port
+    //       carries one `Replace`; the port's app layer expands that back into
+    //       delete-then-add (`developer_console_save.rs`), so the comparison
+    //       expands it the same way rather than weakening the golden.
+    //
+    //       Scope: this is the sweep over a GIVEN section list. Discovery of
+    //       that list differs deliberately — C++ takes C4Group entry order,
+    //       the port normalizes to a host-independent sort — so both sides are
+    //       handed the same construction order here.
+    {
+        let sections = golden["scenario_sections"].as_array().unwrap();
+        assert_eq!(
+            sections.len(),
+            6,
+            "PARITY DIVERGENCE in `scenario_sections`: the golden must retain its exact 6-row matrix"
+        );
+
+        // Construction order for the C++ half is `configured[1..]` followed by
+        // the implicit root, which is why the port is configured root-first
+        // and the switch registers it afterwards.
+        struct SectionCase<'a> {
+            configured: &'a [&'a str],
+            switch_to: Option<&'a str>,
+            modified: &'a [&'a str],
+        }
+        let cases = [
+            SectionCase {
+                configured: &[],
+                switch_to: None,
+                modified: &[],
+            },
+            SectionCase {
+                configured: &["main", "Alpha", "Cave"],
+                switch_to: None,
+                modified: &[],
+            },
+            SectionCase {
+                configured: &["main", "Alpha", "Cave"],
+                switch_to: None,
+                modified: &["Alpha"],
+            },
+            SectionCase {
+                configured: &["main", "Alpha", "Cave"],
+                switch_to: Some("Cave"),
+                modified: &[],
+            },
+            SectionCase {
+                configured: &["main", "Alpha", "Cave"],
+                switch_to: Some("Cave"),
+                modified: &["main", "Cave"],
+            },
+            SectionCase {
+                configured: &["main", "Alpha", "beta", "Gamma"],
+                switch_to: Some("beta"),
+                modified: &["main", "Alpha", "Gamma"],
+            },
+        ];
+
+        for (case, golden_case) in cases.iter().zip(sections) {
+            let name = golden_case["case"].as_str().unwrap_or("?");
+            let label = format!("scenario_sections[{name}]");
+            let expected: Vec<&str> = golden_case["trace"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|step| step.as_str())
+                .collect();
+
+            let mut engine = Engine::new();
+            if !case.configured.is_empty() {
+                let specs: Vec<_> = case
+                    .configured
+                    .iter()
+                    .map(|name| parity_scenario_section_spec(name))
+                    .collect();
+                engine.configure_scenario_sections(&specs);
+            }
+            if let Some(target) = case.switch_to {
+                assert!(
+                    engine
+                        .load_scenario_section(target, 0, Vec::new())
+                        .unwrap_or_else(|error| panic!("{label}: section switch failed: {error}")),
+                    "{label}: section switch did not find `{target}`"
+                );
+            }
+            // Set every flag explicitly: the switch above owns whether it
+            // marks the departing section modified, and this section is about
+            // the sweep, not about that decision.
+            for configured in case.configured {
+                let modified = case.modified.contains(configured);
+                let key = configured.to_ascii_lowercase();
+                let section = engine
+                    .scenario_sections
+                    .get_mut(&key)
+                    .unwrap_or_else(|| panic!("{label}: `{configured}` was not configured"));
+                section.modified = modified;
+                // A modified section with no frozen image is rebuilt from live
+                // state, and a rebuild failure is reported as a bare delete.
+                // Freeze one so each row exercises the arm it names.
+                section.frozen_group = modified.then(|| parity_frozen_section_image(configured));
+            }
+
+            let actual: Vec<String> = engine
+                .live_c4_scenario_section_mutations()
+                .into_iter()
+                .flat_map(|mutation| match mutation {
+                    crate::live_c4_save::LiveC4SaveScenarioSectionMutation::Delete { name } => {
+                        vec![format!("delete:{name}")]
+                    }
+                    crate::live_c4_save::LiveC4SaveScenarioSectionMutation::Replace(section) => {
+                        vec![
+                            format!("delete:{}", section.name),
+                            format!("add:{}", section.name),
+                        ]
+                    }
+                })
+                .collect();
+
+            assert!(
+                golden_case["ok"].as_bool().unwrap_or(false),
+                "{label}: the C++ sweep has no failure exit, so no row may record one"
+            );
+            assert_eq!(
+                actual, expected,
+                "PARITY DIVERGENCE in `{label}` field `trace`: C++ golden = {expected:?}, Rust = {actual:?}"
+            );
+        }
     }
 
     // 16i. c4value_type_tags: `GetC4VID` / `GetC4VFromID` (C4Value.cpp:368-420)
