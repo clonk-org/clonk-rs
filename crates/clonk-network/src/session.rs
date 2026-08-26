@@ -1258,6 +1258,79 @@ mod tests {
         (state, core)
     }
 
+    /// A port peer announcing a different compatibility profile is refused
+    /// when it announces, before any lobby or game state exists
+    /// (clonk-org/clonk-rs#583).
+    #[tokio::test]
+    async fn a_peer_announcing_a_different_profile_is_disconnected() {
+        let client_id = 7;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        state.config.compat_profile_legacy = true;
+        let connection_id = *state
+            .accepted_routes
+            .keys()
+            .next()
+            .expect("the harness route exists");
+
+        // The peer says it is a port running the Normal profile.
+        let peer =
+            crate::PortCapabilities::from_bits(crate::PortCapabilities::COMPAT_PROFILE_ANNOUNCED);
+        crate::session::host_dispatch::handle_client_message(
+            connection_id,
+            client_id,
+            ControlMessage::PortCapabilities(peer),
+            0,
+            &mut state,
+        )
+        .await;
+
+        assert!(
+            !state.accepted_routes.contains_key(&connection_id),
+            "a mismatched profile must drop the route"
+        );
+        assert!(
+            !state.peer_capabilities.peer_supports(
+                client_id as i32,
+                crate::PortCapabilities::COMPAT_PROFILE_ANNOUNCED
+            ),
+            "a refused peer must not be recorded as a capable participant"
+        );
+    }
+
+    /// A stock C++ peer announces nothing at all, so it never reaches this
+    /// path — and a port peer on the same profile is admitted normally.
+    #[tokio::test]
+    async fn a_peer_announcing_the_same_profile_is_admitted() {
+        let client_id = 7;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        state.config.compat_profile_legacy = true;
+        let connection_id = *state
+            .accepted_routes
+            .keys()
+            .next()
+            .expect("the harness route exists");
+
+        let peer = crate::PortCapabilities::from_bits(
+            crate::PortCapabilities::COMPAT_PROFILE_ANNOUNCED
+                | crate::PortCapabilities::COMPAT_PROFILE_LEGACY_CLONK,
+        );
+        crate::session::host_dispatch::handle_client_message(
+            connection_id,
+            client_id,
+            ControlMessage::PortCapabilities(peer),
+            0,
+            &mut state,
+        )
+        .await;
+
+        assert!(
+            state.accepted_routes.contains_key(&connection_id),
+            "a matching profile must keep the route"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn host_wait_attribution_precedes_the_host_routed_aggregate() {
         let client_id = 7;
