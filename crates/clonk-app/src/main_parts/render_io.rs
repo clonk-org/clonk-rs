@@ -1993,17 +1993,23 @@ pub(crate) fn resolve_script_menu_font_images(
         .collect()
 }
 
+/// The scoreboard's resolvable inline images.
+///
+/// A spec that resolves to nothing is simply left out: `CStdFont::DrawText`
+/// consumes `{{...}}` markup and `continue`s when the image renderer is not
+/// hooked or the id is unknown — "printing it out wouldn't look better"
+/// (src/StdFont.cpp:868-890). The font layer already measures and draws an
+/// absent tag that way, so an unresolved image costs the cell no pixels and no
+/// advance rather than failing the frame (clonk-org/clonk-rs#1209).
 pub(crate) fn resolve_scoreboard_font_images(
     engine: &Engine,
     scoreboard: &clonk_engine::ScoreboardState,
     resources: ScriptTextSpecResources<'_>,
-) -> Result<HashMap<String, ImageData>> {
+) -> HashMap<String, ImageData> {
     clonk_frontend::scoreboard::scoreboard_inline_image_specs(scoreboard)
         .into_iter()
-        .map(|spec| {
-            resolve_script_font_image(engine, &spec, 0xff, resources)
-                .map(|image| (spec.clone(), image))
-                .ok_or_else(|| anyhow!("unresolved scoreboard text image '{{{{{spec}}}}}'"))
+        .filter_map(|spec| {
+            resolve_script_font_image(engine, &spec, 0xff, resources).map(|image| (spec, image))
         })
         .collect()
 }
