@@ -5154,11 +5154,7 @@ impl GameApp {
                         .map(default_owner_definition_sprite)
                 });
                 if let Some(decoration) = menu.decoration.as_ref() {
-                    if let Err(error) = validate_menu_decoration_for_area(
-                        area,
-                        decoration,
-                        frame_decoration.as_ref(),
-                    ) {
+                    if let Err(error) = validate_menu_decoration_for_area(area, decoration) {
                         tracing::error!(
                             decoration = ?menu.decoration,
                             %error,
