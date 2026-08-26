@@ -3313,6 +3313,18 @@ impl GameApp {
         if matches("GameAbort") {
             return Some(RuntimeCustomGamepadAction::Abort);
         }
+        // Registered immediately after `GameAbort` and before the console
+        // block, so it is offered here in that order (C4Game.cpp:3429-3432).
+        // The shell picks the scope's registration exactly as the keyboard
+        // route does: `FullscreenPauseToggle` is KEYSCOPE_Fullscreen and
+        // `ConsolePauseToggle` KEYSCOPE_Console.
+        if matches(if self.console_mode {
+            "ConsolePauseToggle"
+        } else {
+            "FullscreenPauseToggle"
+        }) {
+            return Some(RuntimeCustomGamepadAction::Pause);
+        }
         matches("ChartToggle").then_some(RuntimeCustomGamepadAction::Chart)
     }
 
@@ -3350,6 +3362,7 @@ impl GameApp {
                     self.show_abort_dialog(dialog_owner);
                 }
             }
+            RuntimeCustomGamepadAction::Pause => self.toggle_runtime_pause(),
             RuntimeCustomGamepadAction::Chart => self.toggle_network_chart(),
             RuntimeCustomGamepadAction::SpeedUp => self.step_runtime_speed(true)?,
             RuntimeCustomGamepadAction::SpeedDown => self.step_runtime_speed(false)?,
