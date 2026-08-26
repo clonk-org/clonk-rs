@@ -1626,10 +1626,12 @@
             scenario
                 .scenario_sections
                 .iter()
-                .map(|section| section.name.to_ascii_lowercase())
+                .map(|section| section.name.clone())
                 .collect::<Vec<_>>(),
-            vec!["cave", "main"],
-            "root is current Cave, SectMain remains an inactive section"
+            vec!["Cave", "main"],
+            "root is current Cave, SectMain remains an inactive section — and its \
+             name is folded to `main` by C4ScenarioSection's constructor \
+             (src/C4Scenario.cpp:555-566) while Cave keeps its authored case"
         );
 
         let mut engine = Engine::with_seed(0);
@@ -2484,5 +2486,41 @@
         assert_eq!(
             classifier.state.match_texture_names[usize::from(duplicate_defaults[1])].as_deref(),
             Some("Smooth")
+        );
+    }
+
+    // `C4ScenarioSection`'s constructor folds any case of `main` onto
+    // `C4ScenSect_Main` and leaves every other name alone
+    // (src/C4Scenario.cpp:555-566). `SaveScenarioSections` composes the written
+    // entry name from that stored name (src/C4GameSave.cpp:111-137), so a
+    // shipped `SectMain.c4g` is saved back as `Sectmain.c4g`.
+    #[test]
+    fn a_main_scenario_section_name_folds_to_lowercase_main() {
+        for authored in ["Main", "main", "MAIN", "mAiN"] {
+            assert_eq!(
+                crate::scenario::map::legacy_scenario_section_name(std::path::Path::new(&format!(
+                    "Sect{authored}.c4g"
+                )))
+                .test_value(),
+                Some("main".to_string()),
+                "Sect{authored}.c4g names the main section whatever its case"
+            );
+        }
+        for authored in ["Cave", "cave", "Mainland", "Domain"] {
+            assert_eq!(
+                crate::scenario::map::legacy_scenario_section_name(std::path::Path::new(&format!(
+                    "Sect{authored}.c4g"
+                )))
+                .test_value(),
+                Some(authored.to_string()),
+                "only an exact case-insensitive `main` folds; Sect{authored}.c4g keeps its case"
+            );
+        }
+        // C4Game::LoadScenarioSections rejects an empty name before the
+        // constructor could fold it (src/C4Game.cpp:3318-3322).
+        assert!(
+            crate::scenario::map::legacy_scenario_section_name(std::path::Path::new("Sect.c4g"))
+                .is_err(),
+            "an empty section name is refused, not folded onto main"
         );
     }
