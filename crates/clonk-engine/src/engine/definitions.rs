@@ -1901,7 +1901,12 @@ impl Engine {
 
         self.refresh_object_ocf(index);
         self.update_sector_for_index(index);
-        self.update_solid_mask(index);
+        // No solid-mask update here. C4Object::DoCon makes exactly two:
+        // UpdateFace(true)'s (C4Object.cpp:1487) and the keep-bottom
+        // branch's (:1490-1497), both already issued above. A third
+        // removes and re-puts the mask once more, probing every mask pixel
+        // for instability a second time and seeding movers the oracle never
+        // creates (clonk-org/clonk-rs#1166).
         if after <= 0 {
             self.remove_solid_mask(index);
             self.objects[index].mark_destroyed();
