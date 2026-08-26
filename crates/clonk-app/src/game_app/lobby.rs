@@ -3306,7 +3306,14 @@ impl GameApp {
             .without_focus(),
             MessageDialogContinuation::LobbyReadyCheck { remaining_seconds },
         )?;
+        // One continuation per check, created with the prompt so the dialog,
+        // the countdown and any toast all resolve through the same claim.
+        let continuation = crate::ready_check_notification::ReadyCheckContinuation::new();
         if self.ready_check_toasts_enabled && !self.window_active {
+            continuation.show(
+                self.lobby_ready_check_sink.as_ref(),
+                &self.lobby_ready_check_actions(),
+            );
             self.pending_desktop_notifications
                 .push_back(DesktopNotification::new(
                     "Are you ready?",
@@ -3314,7 +3321,66 @@ impl GameApp {
                     Duration::from_secs(u64::from(remaining_seconds)),
                 ));
         }
+        self.lobby_ready_check_continuation = Some(continuation);
         Ok(())
+    }
+
+    /// The toast's button labels.
+    ///
+    /// C++ builds them with `LoadResStrNoAmp`, so the hotkey marker the dialog
+    /// buttons carry is stripped (`src/C4Network2.cpp:161-162`).
+    fn lobby_ready_check_actions(&self) -> crate::ready_check_notification::NotificationActions {
+        crate::ready_check_notification::NotificationActions {
+            yes: self
+                .runtime_resource_text("IDS_DLG_YES", "&Yes")
+                .replace('&', ""),
+            no: self
+                .runtime_resource_text("IDS_DLG_NO", "&No")
+                .replace('&', ""),
+        }
+    }
+
+    /// Resolve the live ready check without answering it, hiding its toast.
+    ///
+    /// Returns whether there was one to close.
+    pub(crate) fn close_lobby_ready_check_continuation(&mut self) -> bool {
+        self.lobby_ready_check_continuation
+            .take()
+            .is_some_and(|continuation| continuation.close(self.lobby_ready_check_sink.as_ref()))
+    }
+
+    /// Submit an answer a notification action claimed on another thread.
+    ///
+    /// The backend can only record the outcome — `submit_ready_check` blocks
+    /// and the lobby state needs `&mut GameApp` — so the app loop drains it
+    /// here, closes the prompt the answer belongs to, and broadcasts. A
+    /// `Closed` outcome carries no answer: the body-click activation both C++
+    /// platforms disagree about resolves the prompt and broadcasts nothing.
+    pub(crate) fn poll_lobby_ready_check_notification(&mut self) -> Result<(), EngineError> {
+        let Some(outcome) = self
+            .lobby_ready_check_continuation
+            .as_ref()
+            .and_then(crate::ready_check_notification::ReadyCheckContinuation::outcome)
+        else {
+            return Ok(());
+        };
+        self.lobby_ready_check_continuation = None;
+        // The prompt is still open: the claim happened outside it. Drop it
+        // without running its continuation, which is already resolved.
+        if let Some(index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                &dialog.continuation,
+                MessageDialogContinuation::LobbyReadyCheck { .. }
+            )
+        }) {
+            self.remove_message_dialog_at(index);
+        }
+        match outcome {
+            crate::ready_check_notification::ReadyCheckOutcome::Answered(ready) => {
+                self.submit_lobby_ready_check_response(ready)
+            }
+            crate::ready_check_notification::ReadyCheckOutcome::Closed => Ok(()),
+        }
     }
 
     pub(crate) fn on_lobby_client_ready_state_change(
@@ -7204,6 +7270,12 @@ impl GameApp {
         // every remaining dialog without invoking acceptance/cancellation
         // callbacks (src/C4Network2.cpp:493-512).
         self.close_context_menu_silently();
+        // `ReadyCheckDialog::OnClosed` detaches the toast handler and hides
+        // the toast (`src/C4Network2.cpp:176-178`). Clearing the dialogs below
+        // never runs a continuation, so a live ready check is resolved here
+        // instead — otherwise its toast outlives the lobby and a later button
+        // press would answer a check that no longer exists.
+        self.close_lobby_ready_check_continuation();
         self.release_message_dialog_pointer_elements();
         self.message_dialogs.clear();
         self.message_dialog_active_index = None;
@@ -7488,10 +7560,36 @@ impl GameApp {
         Ok(())
     }
 
+    /// Answer the live ready check from the in-window dialog.
+    ///
+    /// The claim is what makes this exactly-once against a toast button
+    /// resolving on another thread: C++ has one modal whose `ShowModalDlg`
+    /// return value is the answer (`src/C4Network2.cpp:1672-1688`), and the
+    /// continuation is that single return value made thread-safe. Losing the
+    /// claim means the notification already answered, so this call submits
+    /// nothing.
     pub(crate) fn complete_lobby_ready_check_response(
         &mut self,
         ready: bool,
     ) -> Result<(), EngineError> {
+        // No continuation means no check is outstanding — one was answered
+        // already, or the lobby tore down. C++ cannot reach this at all: the
+        // answer *is* the modal's return value, so there is nothing to call.
+        let Some(continuation) = self.lobby_ready_check_continuation.clone() else {
+            return Ok(());
+        };
+        if !continuation.answer(ready, self.lobby_ready_check_sink.as_ref()) {
+            // A notification answered first. Leave the continuation in place
+            // so the loop's poll can still deliver *its* answer — taking it
+            // here would drop the winning one on the floor.
+            return Ok(());
+        }
+        self.lobby_ready_check_continuation = None;
+        self.submit_lobby_ready_check_response(ready)
+    }
+
+    /// Apply and broadcast an answer whose claim is already won.
+    fn submit_lobby_ready_check_response(&mut self, ready: bool) -> Result<(), EngineError> {
         // C++ checks the network status after the modal closes and returns
         // unless it is still exactly GS_Lobby. DoLobby normally deletes the
         // lobby and closes this dialog as soon as GS_Go is installed.

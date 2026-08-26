@@ -561,6 +561,26 @@ pub(crate) struct GameApp {
     pub(crate) lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
     pub(crate) ready_check_toasts_enabled: bool,
     pub(crate) pending_desktop_notifications: VecDeque<DesktopNotification>,
+    /// The live ready check's single-claim continuation.
+    ///
+    /// `C4Network2::ReadyCheckDialog` is one modal whose `ShowModalDlg` return
+    /// value *is* the answer, so a toast button and the dialog can never both
+    /// answer (`src/C4Network2.cpp:1672-1688`). The port's toast resolves on
+    /// another thread, so that single return value becomes an atomic claim
+    /// held here: whoever wins it owns the answer, and every other path —
+    /// second button press, countdown expiry, teardown — becomes inert.
+    /// `None` when no check is outstanding.
+    pub(crate) lobby_ready_check_continuation:
+        Option<crate::ready_check_notification::ReadyCheckContinuation>,
+    /// Where a resolved continuation hides its toast.
+    ///
+    /// Held by the app rather than by the backend thread because
+    /// `ReadyCheckDialog::OnClosed` hides the toast from whichever side
+    /// resolved the prompt (`src/C4Network2.cpp:176-178`), including the
+    /// in-window dialog. Defaults to a sink that shows nothing, which is also
+    /// what a platform without a toast service leaves in place.
+    pub(crate) lobby_ready_check_sink:
+        std::sync::Arc<dyn crate::ready_check_notification::NotificationSink + Send + Sync>,
     pub(crate) control_messages: ControlMessageState,
     pub(crate) league_votes: LeagueVoteState,
     pub(crate) startup_network_connection: Option<StartupNetworkConnection>,

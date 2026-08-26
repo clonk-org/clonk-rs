@@ -168,6 +168,24 @@ pub(crate) enum ReadyCheckOutcome {
     Closed,
 }
 
+/// A sink that shows nothing.
+///
+/// The platform default where no toast service exists, and the app's own sink
+/// until a backend replaces it. `ReadyCheckContinuation::hide` only reaches a
+/// sink for a notification that was actually shown, so claiming through this
+/// one is always safe.
+pub(crate) struct SilentSink;
+
+impl NotificationSink for SilentSink {
+    fn show(&self, _actions: &NotificationActions) -> anyhow::Result<NotificationId> {
+        anyhow::bail!("no notification backend is available")
+    }
+
+    fn hide(&self, _id: NotificationId) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 /// The in-window ready-check continuation, resolvable from either thread.
 ///
 /// Cloneable so a backend callback can hold one; the claim is shared.
