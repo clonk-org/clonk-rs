@@ -4351,6 +4351,7 @@ struct C4Object
         motion_y += my;
     }
     void DoUnattachedMovement();
+    bool DoAttachedMovement();
     void UpdateShape()
     {
         // C4Object::UpdateShape first copies Def->Shape and then applies the
@@ -4431,6 +4432,28 @@ void C4Object::DoUnattachedMovement()
     (void)ctcoy;
     (void)ctx;
     (void)cty;
+}
+
+// The attached half of C4Object::DoMovement (C4Movement.cpp:324-370), lifted
+// as the statement it is, with DoMovement's own locals supplied here. Returns
+// fNoAttach, which the production tail reads to decide whether the object
+// keeps its attachment; the DigFree preamble and ContactAction tail stay out
+// of this section's scope.
+bool C4Object::DoAttachedMovement()
+{
+    int32_t ctcox, ctcoy, ctx, cty, iContact = 0;
+    bool fAnyContact = false;
+    uint32_t iContacts = 0;
+    bool fNoAttach = false;
+#include "do_movement_attached.inc"
+    AnyContact = fAnyContact;
+    Contacts = iContacts;
+    (void)iContact;
+    (void)ctcox;
+    (void)ctcoy;
+    (void)ctx;
+    (void)cty;
+    return fNoAttach;
 }
 
 // The exact rotation block of C4Object::DoMovement
@@ -12116,6 +12139,190 @@ int main()
                     printf("%s%d", v ? "," : "", probe.vertex_contacts[v]);
                 printf("],\"random_count\":%d,\"random_hold\":%u}",
                        probe.random_count, static_cast<unsigned>(probe.random_hold));
+            }
+            printf("],\"random_count\":%d,\"random_hold\":%u}", RandomCount,
+                   static_cast<unsigned>(RandomHold));
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // The attached half of the movement walk (C4Movement.cpp:324-370). It is
+    // not a variant of the unattached loop: every step re-runs Shape.Attach
+    // (C4Shape.cpp:165-271), an attachment that moves ctx/cty overrides the
+    // momentum target and zeroes that axis' velocity, a contact aborts the
+    // walk by snapping the target back to the current position, and a failed
+    // attachment raises fNoAttach for the production tail to act on. Raw
+    // C4Fixed accumulators are emitted, never fixtoi alone.
+    arr_begin("do_movement_attached");
+    {
+        using namespace shape_contact;
+
+        struct Vertex
+        {
+            int32_t x, y, cnat, friction;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t seed;
+            int32_t x, y;
+            int32_t fix_x_offset, fix_y_offset;
+            int32_t xdir_n, xdir_d;
+            int32_t ydir_n, ydir_d;
+            int32_t t_attach;
+            int32_t floor_y, ceiling_y, wall_x, wall_material;
+            int32_t left_open, right_open;
+            bool top_open, bottom_open;
+            int32_t border_bound;
+            int32_t vertex_count;
+            Vertex vertices[MaxVertex];
+        };
+
+        const int32_t L = CNAT_Left, R = CNAT_Right, T = CNAT_Top, B = CNAT_Bottom;
+        const Case cases[] = {
+            // Each CNAT direction attaches to the surface it names and walks
+            // along it.
+            {"bottom_attach_walks_right", 61, 8, 6, 0, 0, 2, 1, 0, 1, B,
+             8, -1, -1, 1, 0, 0, false, false, 0, 1, {{0, 1, B, 0}}},
+            {"bottom_attach_walks_left", 62, 8, 6, 0, 0, -2, 1, 0, 1, B,
+             8, -1, -1, 1, 0, 0, false, false, 0, 1, {{0, 1, B, 0}}},
+            {"top_attach_walks_right", 63, 8, 8, 0, 0, 2, 1, 0, 1, T,
+             -1, 6, -1, 1, 0, 0, false, false, 0, 1, {{0, -1, T, 0}}},
+            {"left_attach_climbs", 64, 8, 8, 0, 0, 0, 1, -2, 1, L,
+             -1, -1, 6, 1, 0, 0, false, false, 0, 1, {{-1, 0, L, 0}}},
+            {"right_attach_climbs", 65, 8, 8, 0, 0, 0, 1, -2, 1, R,
+             -1, -1, 10, 1, 0, 0, false, false, 0, 1, {{1, 0, R, 0}}},
+            // A fractional accumulator: the integer target is only reached
+            // because fix_x already carried a fraction.
+            {"bottom_attach_fractional_step", 66, 8, 6, 20000, 0, 1, 4, 0, 1, B,
+             8, -1, -1, 1, 0, 0, false, false, 0, 1, {{0, 1, B, 0}}},
+            // Attach corrects the step onto a surface that is one pixel
+            // lower/higher than the momentum target, which is what raises the
+            // ctco overrides and zeroes that axis.
+            {"attach_correction_overrides_y", 67, 8, 5, 0, 0, 2, 1, 3, 1, B,
+             8, -1, -1, 1, 0, 0, false, false, 0, 1, {{0, 1, B, 0}}},
+            {"attach_correction_overrides_x", 68, 8, 8, 0, 0, 3, 1, 0, 1, L,
+             -1, -1, 6, 1, 0, 0, false, false, 0, 1, {{-1, 0, L, 0}}},
+            // No surface within AttachRange: Shape.Attach fails, fNoAttach
+            // rises, and the walk continues on momentum alone.
+            {"lost_attachment_no_surface", 69, 8, 6, 0, 0, 2, 1, 0, 1, B,
+             -1, -1, -1, 1, 0, 0, false, false, 0, 1, {{0, 1, B, 0}}},
+            // A wall in the path: ContactCheck aborts the walk and snaps both
+            // the target and the raw accumulator back to the current position.
+            {"contact_aborts_walk", 70, 8, 6, 0, 0, 4, 1, 0, 1, B,
+             8, -1, 11, 1, 0, 0, false, false, 0, 1, {{1, 0, R, 0}, {0, 1, B, 0}}},
+            // The MCVehic density a live solid mask writes, reached through
+            // the attached walk rather than a standalone contact probe.
+            {"solid_mask_wall_contact", 71, 8, 6, 0, 0, 4, 1, 0, 1, B,
+             8, -1, 11, MVehicle, 0, 0, false, false, 0, 2,
+             {{1, 0, R, 0}, {0, 1, B, 0}}},
+            // Bounds run before the walk, so a border clamps the target the
+            // attachment search then works against.
+            {"border_bound_clamps_target", 72, 3, 6, 0, 0, -6, 1, 0, 1, B,
+             8, -1, -1, 1, 0, 0, false, false, 1, 1, {{0, 1, B, 0}}},
+            {"open_border_lets_target_leave", 73, 3, 6, 0, 0, -6, 1, 0, 1, B,
+             8, -1, -1, 1, 8, 0, false, false, 0, 1, {{0, 1, B, 0}}},
+            // CNAT_MultiAttach searches every vertex and takes the nearest
+            // attachment across all of them.
+            {"multi_attach_nearest_vertex", 74, 8, 6, 0, 0, 2, 1, 0, 1,
+             CNAT_MultiAttach | B, 8, -1, -1, 1, 0, 0, false, false, 0, 2,
+             {{-1, 1, B, 0}, {1, 1, B, 0}}},
+        };
+
+        for (const auto &c : cases)
+        {
+            sep();
+            FixedRandom(c.seed);
+            Randomize3();
+
+            for (int32_t gy = 0; gy < GridHgt; ++gy)
+                for (int32_t gx = 0; gx < GridWdt; ++gx)
+                    g_grid[gy][gx] = 0;
+            if (c.floor_y >= 0)
+                for (int32_t gy = c.floor_y; gy < GridHgt; ++gy)
+                    for (int32_t gx = 0; gx < GridWdt; ++gx)
+                        g_grid[gy][gx] = 1;
+            if (c.ceiling_y >= 0)
+                for (int32_t gy = 0; gy <= c.ceiling_y; ++gy)
+                    for (int32_t gx = 0; gx < GridWdt; ++gx)
+                        g_grid[gy][gx] = 1;
+            if (c.wall_x >= 0)
+                for (int32_t gy = 0; gy < GridHgt; ++gy)
+                    g_grid[gy][c.wall_x] = c.wall_material;
+            g_left_open = c.left_open;
+            g_right_open = c.right_open;
+            g_top_open = c.top_open;
+            g_bottom_open = c.bottom_open;
+
+            shape_contact::C4Object object;
+            object.x = c.x;
+            object.y = c.y;
+            object.fix_x = itofix(c.x);
+            object.fix_x.val += c.fix_x_offset;
+            object.fix_y = itofix(c.y);
+            object.fix_y.val += c.fix_y_offset;
+            object.xdir = itofix(c.xdir_n, c.xdir_d);
+            object.ydir = itofix(c.ydir_n, c.ydir_d);
+            object.Alive = true;
+            object.Action.t_attach = c.t_attach;
+            object.DefStorage.BorderBound = c.border_bound;
+            object.Shape.x = -2;
+            object.Shape.y = -2;
+            object.Shape.Wdt = 5;
+            object.Shape.Hgt = 5;
+            object.Shape.VtxNum = c.vertex_count;
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+            {
+                object.Shape.VtxX[v] = c.vertices[v].x;
+                object.Shape.VtxY[v] = c.vertices[v].y;
+                object.Shape.VtxCNAT[v] = c.vertices[v].cnat;
+                object.Shape.VtxFriction[v] = c.vertices[v].friction;
+            }
+
+            const bool no_attach = object.DoAttachedMovement();
+
+            printf("{\"name\":\"%s\",\"seed\":%d,\"t_attach\":%d,"
+                   "\"start_x\":%d,\"start_y\":%d,"
+                   "\"fix_x_offset\":%d,\"fix_y_offset\":%d,"
+                   "\"xdir_n\":%d,\"xdir_d\":%d,\"ydir_n\":%d,\"ydir_d\":%d,"
+                   "\"floor_y\":%d,\"ceiling_y\":%d,\"wall_x\":%d,\"wall_material\":%d,"
+                   "\"left_open\":%d,\"right_open\":%d,\"top_open\":%d,\"bottom_open\":%d,"
+                   "\"border_bound\":%d,\"vertices\":[",
+                   c.name, c.seed, c.t_attach, c.x, c.y, c.fix_x_offset, c.fix_y_offset,
+                   c.xdir_n, c.xdir_d, c.ydir_n, c.ydir_d, c.floor_y, c.ceiling_y,
+                   c.wall_x, c.wall_material, c.left_open, c.right_open,
+                   c.top_open ? 1 : 0, c.bottom_open ? 1 : 0, c.border_bound);
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+                printf("%s{\"x\":%d,\"y\":%d,\"cnat\":%d,\"friction\":%d}",
+                       v ? "," : "", c.vertices[v].x, c.vertices[v].y,
+                       c.vertices[v].cnat, c.vertices[v].friction);
+            printf("],"
+                   "\"x\":%d,\"y\":%d,\"fix_x\":%d,\"fix_y\":%d,"
+                   "\"xdir\":%d,\"ydir\":%d,\"motion_x\":%d,\"motion_y\":%d,"
+                   "\"no_attach\":%d,\"any_contact\":%d,\"contacts\":%u,"
+                   "\"t_contact\":%d,\"attach_mat_valid\":%d,"
+                   "\"attach_mat_vehicle\":%d,\"attach_x\":%d,"
+                   "\"attach_y\":%d,\"attach_vtx\":%d,\"contact_invocations\":%d,"
+                   "\"probes\":[",
+                   object.x, object.y, object.fix_x.val,
+                   object.fix_y.val, object.xdir.val, object.ydir.val, object.motion_x,
+                   object.motion_y, no_attach ? 1 : 0, object.AnyContact ? 1 : 0,
+                   object.Contacts, object.t_contact,
+                   object.Shape.AttachMat != MNone ? 1 : 0,
+                   object.Shape.AttachMat == MVehicle ? 1 : 0,
+                   object.Shape.iAttachX, object.Shape.iAttachY, object.Shape.iAttachVtx,
+                   object.ContactCallCount);
+            for (int32_t p = 0; p < object.ProbeCount; ++p)
+            {
+                const MovementProbe &probe = object.Probes[p];
+                printf("%s{\"x\":%d,\"y\":%d,\"object_x\":%d,\"object_y\":%d,"
+                       "\"fix_x\":%d,\"fix_y\":%d,\"xdir\":%d,\"ydir\":%d,"
+                       "\"motion_x\":%d,\"motion_y\":%d,\"result\":%d,"
+                       "\"t_contact\":%d}",
+                       p ? "," : "", probe.x, probe.y, probe.object_x, probe.object_y,
+                       probe.fix_x, probe.fix_y, probe.xdir, probe.ydir, probe.motion_x,
+                       probe.motion_y, probe.result, probe.t_contact);
             }
             printf("],\"random_count\":%d,\"random_hold\":%u}", RandomCount,
                    static_cast<unsigned>(RandomHold));
