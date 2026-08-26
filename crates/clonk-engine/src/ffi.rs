@@ -2252,6 +2252,17 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.mobile, actual_object.mobile
                     ));
                 }
+                // InLiquid drives the DFA_SWIM out-of-liquid branch
+                // (C4Object.cpp:4967-4973): paddle back down, or
+                // `ObjectActionWalk(this); return;`. Diff it so a
+                // disagreement is reported where it happens instead of
+                // downstream as an action difference.
+                if expected_object.in_liquid != actual_object.in_liquid {
+                    problems.push(format!(
+                        "object {} in liquid rust {}, cpp {}",
+                        id, expected_object.in_liquid, actual_object.in_liquid
+                    ));
+                }
                 if expected_object.timer != actual_object.timer {
                     problems.push(format!(
                         "object {} def-timer rust {}, cpp {}",
@@ -5021,6 +5032,63 @@ global func Step(state, frame, random)
                 .expect("rotation difference is reported");
             assert!(detail.contains(label), "missing {label} in {detail}");
         }
+    }
+
+    /// `InLiquid` decides the DFA_SWIM out-of-liquid branch
+    /// (`C4Object.cpp:4967-4973`), where C++ either paddles back down or runs
+    /// `ObjectActionWalk(this); return;`. The bridge collects the flag from
+    /// both engines but never diffed it, so a disagreement stayed invisible
+    /// and surfaced only as the downstream action — an aquatic animal in
+    /// `Swim` where the oracle had reached `Walk`
+    /// (clonk-org/clonk-rs#1157). Report the cause, not the symptom.
+    #[test]
+    fn runtime_mismatch_reports_in_liquid() {
+        let object = || -> ObjectSnapshot {
+            serde_json::from_value(serde_json::json!({
+                "id": 1,
+                "definition_id": "FISH",
+                "position": {"x": 0, "y": 0},
+                "velocity": {"x": 0, "y": 0},
+                "rotation": 0,
+                "energy": 0,
+                "in_liquid": true,
+            }))
+            .expect("object snapshot deserializes")
+        };
+        let baseline = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+        let mut expected = baseline;
+        expected.objects = vec![object()];
+        let mut actual = expected.clone();
+        actual.objects[0].in_liquid = false;
+
+        let detail = runtime_snapshot_mismatch(&expected, &actual)
+            .expect("an in-liquid difference is reported");
+        assert!(
+            detail.contains("in liquid rust true, cpp false"),
+            "detail did not name the in-liquid difference: {detail}"
+        );
     }
 
     /// A bare "global effects mismatch" gives a reader nothing to act on —
