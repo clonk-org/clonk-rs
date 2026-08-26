@@ -3838,32 +3838,21 @@ impl GameApp {
                 continue;
             }
             match &request.kind {
-                MenuRequestKind::Activate | MenuRequestKind::ActivateTarget { .. } => {
-                    return Err(classic_object_menu_error(
-                        ClassicObjectMenuBoundary::Activate,
-                    ));
-                }
-                MenuRequestKind::Construction => {
-                    // Engine-owned construction requests are consumed while
-                    // applying the command event and open C4ObjectMenu there.
-                    // Ignore stale serialized snapshots like other internal
-                    // menu kinds rather than restoring the old fail-close.
-                }
-                MenuRequestKind::Get { .. } => {
-                    return Err(classic_object_menu_error(ClassicObjectMenuBoundary::Get));
-                }
-                MenuRequestKind::Context { .. } => {
-                    // Engine-owned C4MN_Context requests are consumed while
-                    // applying the command event. Ignore stale serialized
-                    // requests instead of resurrecting the non-C++ app menu.
-                }
-                MenuRequestKind::Buy { .. }
+                // Every `C4ObjectMenu` request is opened by the engine while
+                // the command event is applied, so nothing here is a live
+                // request: what reaches this loop is a stale serialized
+                // record, and the app has no menu of its own to build from
+                // one. Ignore them all rather than resurrecting a non-C++
+                // pane (clonk-org/clonk-rs#1205, clonk-org/clonk-rs#1206).
+                MenuRequestKind::Activate
+                | MenuRequestKind::ActivateTarget { .. }
+                | MenuRequestKind::Construction
+                | MenuRequestKind::Get { .. }
+                | MenuRequestKind::Context { .. }
+                | MenuRequestKind::Buy { .. }
                 | MenuRequestKind::Sell { .. }
                 | MenuRequestKind::Contents { .. }
-                | MenuRequestKind::Info { .. } => {
-                    // Internal C4ObjectMenu requests are consumed by the
-                    // engine. Ignore a stale serialized request here.
-                }
+                | MenuRequestKind::Info { .. } => {}
             }
         }
         Ok(())

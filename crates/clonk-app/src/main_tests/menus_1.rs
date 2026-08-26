@@ -3584,8 +3584,15 @@ fn ingame_menu_abort_routes_to_the_same_confirmation() {
     main_assert!(app.status_text.is_empty());
 }
 
+// Every `C4ObjectMenu` request the engine owns is consumed while the command
+// event is applied, where `C4Object::ActivateMenu` opens the menu
+// (src/C4Object.cpp's COM_Menu* routes). What survives into
+// `snapshot.menu_requests` afterwards is a stale serialized record, and the
+// app has no menu of its own to build from it — so it is ignored, exactly as
+// the Construction, Context, Buy, Sell, Contents and Info kinds already are
+// (clonk-org/clonk-rs#1205, clonk-org/clonk-rs#1206).
 #[test]
-fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() {
+fn engine_owned_object_menu_requests_are_consumed_and_stale_ones_ignored() {
     let mut app = new_state_only_menu_app(320, 200);
     app.start_sandbox_scenario(FrontendScenario::fallback())
         .test_value();
@@ -3597,34 +3604,30 @@ fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() 
         .test_value()
         .id;
 
-    for (kind, label) in [
-        (MenuRequestKind::Activate, "Activate"),
-        (
-            MenuRequestKind::ActivateTarget { container: crew_id },
-            "Activate",
-        ),
-        (MenuRequestKind::Get { container: crew_id }, "Get"),
+    // Every stale kind is ignored rather than ending the frame.
+    for kind in [
+        MenuRequestKind::Activate,
+        MenuRequestKind::ActivateTarget { container: crew_id },
+        MenuRequestKind::Get { container: crew_id },
+        MenuRequestKind::Construction,
+        MenuRequestKind::Context {
+            target: crew_id,
+            position: None,
+        },
     ] {
         app.object_menu = None;
         app.snapshot.menu_requests = vec![clonk_engine::MenuRequest {
             crew_id,
             owner: app.local_owner,
-            kind,
+            kind: kind.clone(),
         }];
-        let error = app
-            .handle_menu_requests()
-            .expect_err("generic app-owned object menu must fail at creation");
-        main_assert!(error.to_string().contains(label), "unexpected {error}");
-        main_assert!(app.object_menu.is_none());
+        app.handle_menu_requests()
+            .unwrap_or_else(|error| panic!("a stale {kind:?} request is not a failure: {error}"));
+        main_assert!(
+            app.object_menu.is_none(),
+            "a stale {kind:?} request opens no app-owned pane"
+        );
     }
-
-    app.snapshot.menu_requests = vec![clonk_engine::MenuRequest {
-        crew_id,
-        owner: app.local_owner,
-        kind: MenuRequestKind::Construction,
-    }];
-    app.handle_menu_requests().test_value();
-    main_assert!(app.object_menu.is_none());
 }
 
 #[test]
