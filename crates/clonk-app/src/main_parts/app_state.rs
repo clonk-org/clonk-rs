@@ -2150,12 +2150,6 @@ pub(crate) enum ClassicIngameMenuChild {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClassicObjectMenuBoundary {
-    Activate,
-    Get,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RunningChatMode {
     All,
     Allies,
@@ -2584,7 +2578,6 @@ pub(crate) enum ClassicParityBoundary {
         detail: String,
     },
     IngameMenuChild(ClassicIngameMenuChild),
-    ObjectMenu(ClassicObjectMenuBoundary),
     AppObjectMenu(AppObjectMenuMode),
     RuntimeHelpResources {
         detail: String,
@@ -2719,10 +2712,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::IngameMenuChild(child) => write!(
                 f,
                 "classic in-game menu child {child:?} is not implemented; refusing status/no-op substitute"
-            ),
-            Self::ObjectMenu(kind) => write!(
-                f,
-                "classic object menu {kind:?} is not implemented; refusing generic Rust object menu"
             ),
             Self::AppObjectMenu(mode) => write!(
                 f,
@@ -2901,12 +2890,6 @@ pub(crate) fn classic_game_lobby_model_engine_error(detail: impl Into<String>) -
 pub(crate) fn classic_ingame_menu_child_error(child: ClassicIngameMenuChild) -> EngineError {
     classic_parity_engine_error(report_classic_parity_boundary(
         ClassicParityBoundary::IngameMenuChild(child),
-    ))
-}
-
-pub(crate) fn classic_object_menu_error(kind: ClassicObjectMenuBoundary) -> EngineError {
-    classic_parity_engine_error(report_classic_parity_boundary(
-        ClassicParityBoundary::ObjectMenu(kind),
     ))
 }
 
