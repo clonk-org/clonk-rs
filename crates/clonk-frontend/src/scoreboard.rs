@@ -284,6 +284,28 @@ pub fn scoreboard_layout_with_title_presence(
     )
 }
 
+/// Calculate the dialog as a **console child window**, where the caption text
+/// belongs to the OS window bar rather than to a `WoodenLabel` inside the
+/// dialog (`C4GuiDialogs.cpp:390-395`).
+///
+/// `preferred` is the window's own client rectangle, not
+/// `C4GUI::Screen::GetPreferredDlgRect()`: `Screen::ShowDialog` skips
+/// `DoPlacement` entirely for a console dialog (`C4Gui.cpp:559-560`), so the
+/// returned `bounds` are only a size — the window, not the screen, decides
+/// where they land.
+pub fn scoreboard_console_layout(
+    preferred: IntRect,
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+) -> Result<ScoreboardLayout> {
+    scoreboard_layout_with_title_widgets(
+        preferred,
+        scoreboard,
+        resources,
+        TitleWidgets::ConsoleWindow,
+    )
+}
+
 /// Whether this `C4ScoreboardDlg` can own a `WoodenLabel` title at all, and if
 /// so what its state was on entry to the current Update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,6 +313,12 @@ enum TitleWidgets {
     /// The ordinary in-screen dialog, whose `SetTitle` allocates and frees the
     /// caption widget.
     Dialog { present_before_update: bool },
+    /// A console child window. `Dialog::SetTitle` puts the text on the OS
+    /// window bar and **returns before touching `pTitle`**
+    /// (`C4GuiDialogs.cpp:390-395`), so this dialog never owns a caption
+    /// widget, a title icon, a close button or the margin they sit in —
+    /// however many times `Update` calls `SetTitle`.
+    ConsoleWindow,
 }
 
 impl TitleWidgets {
@@ -320,6 +348,10 @@ impl TitleWidgets {
                     caption: visible_title_present,
                 }
             }
+            Self::ConsoleWindow => ResolvedTitleWidgets {
+                margin: false,
+                caption: false,
+            },
         }
     }
 }
@@ -597,6 +629,28 @@ impl ScoreboardPresentationState {
             title_scroll_offset: self.title_scroll_offset_at(now, resources),
         }
     }
+}
+
+/// `Dialog::CreateConsoleWindow`'s caption for a dialog whose `TitleString`
+/// is null (`C4GuiDialogs.cpp:311`).
+const CONSOLE_WINDOW_UNTITLED: &str = "???";
+
+/// The OS window-bar caption for a scoreboard shown as a console child window.
+///
+/// `C4ScoreboardDlg::Update` ends with an unconditional `SetTitle(szTitle)`
+/// taken from the caption cell's `StdStrBuf` **pointer**
+/// (`C4Scoreboard.cpp:326,333`), and in console mode `SetTitle` writes the
+/// window bar rather than allocating a `WoodenLabel`
+/// (`C4GuiDialogs.cpp:390-395`). An allocated empty caption therefore titles
+/// the window with the empty string, while a null one leaves `TitleString`
+/// null and the window is created as `"???"` — the same pointer distinction
+/// the width scan above already makes.
+pub fn scoreboard_console_window_title(scoreboard: &ScoreboardState) -> String {
+    scoreboard
+        .cell(0, 0)
+        .and_then(|cell| cell.text())
+        .map(presentation_text)
+        .unwrap_or_else(|| CONSOLE_WINDOW_UNTITLED.to_owned())
 }
 
 fn visible_scoreboard_title(scoreboard: &ScoreboardState) -> Option<&str> {
@@ -1744,6 +1798,60 @@ mod tests {
         assert_eq!(null.client.y, null.bounds.y);
         assert_eq!(empty.client.y - empty.bounds.y, stale_margin);
         assert_eq!(titled.bounds.h - titled.client.h, stale_margin);
+    }
+
+    /// A console child window carries its caption on the OS window bar:
+    /// `Dialog::SetTitle` writes it and returns before allocating the
+    /// `WoodenLabel` (`C4GuiDialogs.cpp:390-395`). The dialog therefore has no
+    /// caption row, no title icon, no close button and no margin for them —
+    /// even for a board whose caption cell has text, which is exactly the case
+    /// a fullscreen dialog gives all four.
+    #[test]
+    fn a_console_scoreboard_has_no_caption_widgets_however_its_title_reads() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let resources =
+            ScoreboardResources::new(&caption, &icons, fonts.as_ref()).expect("resources");
+        let titled = scoreboard(serde_json::json!([
+            [{"text":"Scores","value":-1}, {"text":"Pts","value":-1}],
+            [{"text":"Ada","value":-1}, {"text":"7","value":7}],
+        ]));
+
+        let dialog = scoreboard_layout(preferred(), &titled, &resources).expect("dialog layout");
+        assert!(dialog.caption.is_some());
+        assert!(dialog.title_icon.is_some());
+        assert!(dialog.close_button.is_some());
+
+        let console =
+            scoreboard_console_layout(preferred(), &titled, &resources).expect("console layout");
+        assert!(console.caption.is_none());
+        assert!(console.title_icon.is_none());
+        assert!(console.close_button.is_none());
+        assert_eq!(console.client.y, console.bounds.y);
+        // The spreadsheet itself is untouched: only the title band is gone.
+        assert_eq!(console.client.h, dialog.client.h);
+        assert_eq!(console.bounds.w, dialog.bounds.w);
+        assert_eq!(
+            dialog.bounds.h - console.bounds.h,
+            dialog.client.y - dialog.bounds.y
+        );
+    }
+
+    /// The window bar keeps C++'s pointer distinction: an allocated empty
+    /// caption titles the window with the empty string, a null one leaves
+    /// `TitleString` null and `CreateConsoleWindow` falls back to `"???"`
+    /// (`C4GuiDialogs.cpp:311`).
+    #[test]
+    fn a_console_scoreboard_window_title_separates_a_null_caption_from_an_empty_one() {
+        let titled = scoreboard(serde_json::json!([[{"text":"Scores","value":-1}]]));
+        assert_eq!(scoreboard_console_window_title(&titled), "Scores");
+
+        let empty = scoreboard(serde_json::json!([[{"text":"","value":-1}]]));
+        assert_eq!(scoreboard_console_window_title(&empty), "");
+
+        let null = scoreboard(serde_json::json!([[{"value":-1}]]));
+        assert_eq!(scoreboard_console_window_title(&null), "???");
     }
 
     #[test]

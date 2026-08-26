@@ -3366,6 +3366,98 @@ impl GameApp {
         self.developer_object_list_open = false;
     }
 
+    /// The console scoreboard child window's caption and natural size.
+    ///
+    /// The size is the dialog's own: `C4ScoreboardDlg::Update` sizes it to the
+    /// spreadsheet and `Dialog::UpdateSize` resizes the console window to
+    /// match (`C4GuiDialogs.cpp:445-473`), so the window follows live
+    /// `SetScoreboardData` rather than the player. C++'s console dialog style
+    /// is `WS_POPUP | WS_CAPTION` with no `WS_THICKFRAME`
+    /// (`C4GuiDialogs.cpp:56`) — a titled, fixed-size popup.
+    ///
+    /// Returns `None` when the board cannot be laid out at all, which is the
+    /// same condition that keeps `CreateConsoleWindow` from being reached.
+    pub(crate) fn console_scoreboard_window_chrome(&self) -> Option<(String, u32, u32)> {
+        let layout = self.console_scoreboard_layout()?.0;
+        Some((
+            clonk_frontend::scoreboard::scoreboard_console_window_title(
+                &self.snapshot.hud.scoreboard,
+            ),
+            layout.bounds.w.max(1) as u32,
+            layout.bounds.h.max(1) as u32,
+        ))
+    }
+
+    /// Lay the console scoreboard out at its own window origin.
+    ///
+    /// `Screen::ShowDialog` skips `DoPlacement` for a console dialog
+    /// (`C4Gui.cpp:559-560`) — the window, not the screen, decides where the
+    /// dialog lands — so the computed placement is discarded and only its size
+    /// survives.
+    ///
+    /// The layout is rebuilt on every call rather than retained the way the
+    /// fullscreen route caches `scoreboard_runtime.presentation`. C++ retains
+    /// `piColWidths` and recomputes on `InvalidateRows`, but a console window
+    /// has no drag, no cached placement and no pointer state to preserve
+    /// across a rebuild, so the snapshot *is* the layout — the same reasoning
+    /// `render_developer_object_list` records for its rows.
+    fn console_scoreboard_layout(
+        &self,
+    ) -> Option<(
+        clonk_frontend::scoreboard::ScoreboardLayout,
+        HashMap<String, ImageData>,
+    )> {
+        if !self.console_scoreboard_window_open() {
+            return None;
+        }
+        let font_images = resolve_scoreboard_font_images(
+            &self.engine,
+            &self.snapshot.hud.scoreboard,
+            self.script_text_spec_resources(),
+        );
+        let resources = self.assets.scoreboard_resources(&font_images).ok()?;
+        let mut layout = clonk_frontend::scoreboard::scoreboard_console_layout(
+            clonk_frontend::classic_gui::IntRect::new(0, 0, 0, 0),
+            &self.snapshot.hud.scoreboard,
+            &resources,
+        )
+        .ok()?;
+        layout.translate(-layout.bounds.x, -layout.bounds.y);
+        Some((layout, font_images))
+    }
+
+    /// Draw the console scoreboard at its window's extent.
+    ///
+    /// `Dialog::Draw` clears the separate window to the standard GUI
+    /// background before drawing the dialog into it
+    /// (`C4GuiDialogs.cpp:479-481`); `render_scoreboard_with_layout` paints
+    /// the same frame and body the fullscreen route does, minus the caption
+    /// the console has no widget for. `ordered_native` is always false in
+    /// console mode, so this is the single-pass form.
+    pub(crate) fn render_console_scoreboard(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Option<clonk_graphics::Surface> {
+        let (layout, font_images) = self.console_scoreboard_layout()?;
+        let resources = self.assets.scoreboard_resources(&font_images).ok()?;
+        let mut surface = clonk_graphics::Surface::new(
+            width.max(1),
+            height.max(1),
+            clonk_graphics::PixelFormat::Rgba8888,
+        );
+        clonk_frontend::scoreboard::render_scoreboard_with_layout(
+            &mut surface,
+            &self.snapshot.hud.scoreboard,
+            &resources,
+            &layout,
+            clonk_frontend::scoreboard::ScoreboardRenderState::default(),
+            None,
+        )
+        .ok()?;
+        Some(surface)
+    }
+
     /// Draw the object list at the window's extent.
     pub(crate) fn render_developer_object_list(
         &mut self,

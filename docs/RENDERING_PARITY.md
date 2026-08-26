@@ -37,10 +37,17 @@ CPU uses:
 | CPU through GPU | Software renderer writes the physical CPU frame | wgpu `WindowSurface` blits it | A retained source or shader exceeds the active device's supported limits. |
 | Software | Software renderer writes the physical CPU frame | wgpu-independent `SoftwarePresenter` | Forced by `LC_SOFTWARE_PRESENTATION`, or automatic when no usable adapter meets the graphics floor. |
 
-Auxiliary object-list, toolbox, and component-editor panes use `clonk-app`'s
-separate `SoftwareWindow` host: they compose CPU pixels but present them through
-their own GPU-backed `WindowSurface`. They are not another primary-window
-selection mode and do not inherit its wgpu-independent fallback.
+Auxiliary object-list, toolbox, component-editor, and scoreboard panes use
+`clonk-app`'s separate `SoftwareWindow` host: they compose CPU pixels but
+present them through their own GPU-backed `WindowSurface`. They are not another
+primary-window selection mode and do not inherit its wgpu-independent fallback.
+
+A console-mode dialog is one of these panes rather than a layer of the primary
+window: `Dialog::Show` creates a child window for any non-viewport dialog when
+the application is not fullscreen, and `Dialog::Close` destroys it again. Such a
+dialog has no caption widget, title icon, or close button — `Dialog::SetTitle`
+puts the text on the OS window bar and returns before allocating one — and it
+sizes itself, so the window follows the dialog rather than the player.
 
 Headless dumps, deterministic reference tests, resource preprocessing, and
 private scratch surfaces also use CPU pixels but do not present a window.

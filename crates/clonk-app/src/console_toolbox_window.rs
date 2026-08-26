@@ -252,6 +252,150 @@ pub(crate) fn handle_developer_object_list_event(
     }
 }
 
+/// The console scoreboard's registry key, if its dialog has a window.
+pub(crate) fn scoreboard_window_key(windows: &DeveloperWindows<DeveloperHost>) -> Option<WindowId> {
+    windows.find_key(|host| matches!(host, DeveloperHost::Scoreboard(_)))
+}
+
+/// Open, resize or close the console scoreboard window to match its dialog.
+///
+/// `Dialog::Show` creates the window and `Dialog::Close` destroys it
+/// (`C4GuiDialogs.cpp:659-661,677`), so the window's lifetime is exactly the
+/// dialog's — this reconciles against `GameApp::console_scoreboard_window_open`
+/// rather than being commanded, the same shape as the object list above.
+/// `CreateConsoleWindow` returns early when the dialog already has a window
+/// (`:308`), which is why a repeated show is not a second window.
+///
+/// While it is open the window also follows `Dialog::UpdateSize`
+/// (`C4GuiDialogs.cpp:445-473`): a live `SetScoreboardData` that grows the
+/// dialog grows the window with it.
+pub(crate) fn reconcile_console_scoreboard_window(
+    app: &mut crate::GameApp,
+    windows: &mut DeveloperWindows<DeveloperHost>,
+    next_key: &mut u64,
+    target: &winit::event_loop::ActiveEventLoop,
+) {
+    use crate::developer_windows::HostPurpose;
+    use crate::scoreboard_window_host::build_scoreboard_window;
+
+    let key = scoreboard_window_key(windows);
+    let chrome = app.console_scoreboard_window_chrome();
+    match (chrome, key) {
+        (Some((title, width, height)), None) => {
+            match build_scoreboard_window(target, &title, width, height) {
+                Ok(host) => {
+                    let key = WindowId(*next_key);
+                    *next_key += 1;
+                    tracing::debug!("opened the console scoreboard window");
+                    windows.insert(
+                        key,
+                        HostPurpose::Scoreboard,
+                        DeveloperHost::Scoreboard(host),
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to open the console scoreboard");
+                    // `Dialog::Show` returns false without showing when
+                    // `CreateConsoleWindow` fails, and `ShowRemoveDlg` then deletes
+                    // the dialog (`C4GuiDialogs.cpp:661`, `:1091-1101`). Leaving the
+                    // dialog open would retry the failed build every pass.
+                    app.close_scoreboard_dialog();
+                }
+            }
+        }
+        (Some((title, width, height)), Some(key)) => {
+            if let Some(board) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_scoreboard_mut)
+            {
+                board.set_chrome(&title, width, height);
+            }
+        }
+        // No dialog, or a board that cannot be laid out — both are states in
+        // which C++ has no window either.
+        (None, Some(key)) => {
+            windows.close(key);
+            // `Dialog::Close` hands focus back to the parent console.
+            windows.show_and_focus(crate::developer_windows::SHELL_WINDOW);
+        }
+        (None, None) => {}
+    }
+}
+
+/// The console scoreboard window's own events.
+pub(crate) fn handle_console_scoreboard_event(
+    key: WindowId,
+    event: &winit::event::Event<crate::NetworkEventWake>,
+    app: &mut crate::GameApp,
+    windows: &mut DeveloperWindows<DeveloperHost>,
+) {
+    use crate::developer_windows::DeveloperWindowPresenter;
+    use winit::event::{Event, WindowEvent};
+
+    match event {
+        // `DialogWinProc`'s `WM_CLOSE` arm is `dialog->Close(false)`
+        // (`C4GuiDialogs.cpp:236`) — the window's own close button closes the
+        // dialog exactly as the in-dialog close button does. The reconcile
+        // pass then removes the window and returns focus to the console.
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
+            app.close_scoreboard_dialog();
+            windows.close(key);
+            windows.show_and_focus(crate::developer_windows::SHELL_WINDOW);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::Resized(size),
+            ..
+        } => {
+            windows.resize(key, size.width.max(1), size.height.max(1));
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::ScaleFactorChanged { .. },
+            ..
+        } => {
+            windows.request_redraw(key);
+        }
+        // `DialogWinProc` forwards the dialog window's keys to
+        // `Game.DoKeyboardInput` (`C4GuiDialogs.cpp:219-228`), and
+        // `ScoreboardToggle` is registered at `KEYSCOPE_Generic`
+        // (`C4Game.cpp:3427`), so Tab on this window closes the board.
+        //
+        // Its pointer events are deliberately not routed: `C4ScoreboardDlg`
+        // overrides `IsMouseControlled()` to false (`C4Scoreboard.h:109`), and
+        // the console dialog has no close button or title bar of its own to
+        // hit (`C4GuiDialogs.cpp:390-395`).
+        Event::WindowEvent {
+            event: WindowEvent::KeyboardInput {
+                event: key_event, ..
+            },
+            ..
+        } => {
+            if let Some(legacy) =
+                crate::legacy_virtual_key_from_event(key_event, app.keyboard_modifiers)
+            {
+                if let Err(error) = app.handle_key(legacy, key_event.state) {
+                    tracing::error!(%error, "console scoreboard key dispatch failed");
+                }
+            }
+        }
+        Event::WindowEvent {
+            event: WindowEvent::RedrawRequested,
+            ..
+        } => {
+            if let Some(host) = windows.host_mut(key) {
+                if let Err(error) = host.present(app) {
+                    tracing::error!(%error, "console scoreboard present failed");
+                    app.close_scoreboard_dialog();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The component editor's registry key, if one is open.
 pub(crate) fn component_editor_window_key(
     windows: &DeveloperWindows<DeveloperHost>,

@@ -11,6 +11,7 @@
 use crate::component_editor_window_host::ComponentEditorWindowHost;
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
 use crate::object_list_window_host::ObjectListWindowHost;
+use crate::scoreboard_window_host::ScoreboardWindowHost;
 use crate::shell_window_host::ShellWindowHost;
 use crate::toolbox_window_host::ToolboxWindowHost;
 use crate::viewport_window_host::ViewportWindowHost;
@@ -28,6 +29,9 @@ pub enum DeveloperHost {
     /// A `C4ComponentHost::ShowDialog` editor. Modal in C++, so it too is
     /// destroyed rather than kept.
     ComponentEditor(ComponentEditorWindowHost),
+    /// The `C4ScoreboardDlg` console window, destroyed by `Dialog::Close`
+    /// along with the dialog itself (`C4GuiDialogs.cpp:677`).
+    Scoreboard(ScoreboardWindowHost),
 }
 
 impl DeveloperHost {
@@ -40,7 +44,8 @@ impl DeveloperHost {
             Self::Viewport(_)
             | Self::Toolbox(_)
             | Self::ObjectList(_)
-            | Self::ComponentEditor(_) => None,
+            | Self::ComponentEditor(_)
+            | Self::Scoreboard(_) => None,
         }
     }
 
@@ -49,9 +54,11 @@ impl DeveloperHost {
     pub fn as_toolbox_mut(&mut self) -> Option<&mut ToolboxWindowHost> {
         match self {
             Self::Toolbox(toolbox) => Some(toolbox),
-            Self::Shell(_) | Self::Viewport(_) | Self::ObjectList(_) | Self::ComponentEditor(_) => {
-                None
-            }
+            Self::Shell(_)
+            | Self::Viewport(_)
+            | Self::ObjectList(_)
+            | Self::ComponentEditor(_)
+            | Self::Scoreboard(_) => None,
         }
     }
 
@@ -59,9 +66,24 @@ impl DeveloperHost {
     pub fn as_object_list_mut(&mut self) -> Option<&mut ObjectListWindowHost> {
         match self {
             Self::ObjectList(list) => Some(list),
-            Self::Shell(_) | Self::Viewport(_) | Self::Toolbox(_) | Self::ComponentEditor(_) => {
-                None
-            }
+            Self::Shell(_)
+            | Self::Viewport(_)
+            | Self::Toolbox(_)
+            | Self::ComponentEditor(_)
+            | Self::Scoreboard(_) => None,
+        }
+    }
+
+    /// The console scoreboard's concrete state, for the title and size its
+    /// dialog asks the window to follow.
+    pub fn as_scoreboard_mut(&mut self) -> Option<&mut ScoreboardWindowHost> {
+        match self {
+            Self::Scoreboard(board) => Some(board),
+            Self::Shell(_)
+            | Self::Viewport(_)
+            | Self::Toolbox(_)
+            | Self::ObjectList(_)
+            | Self::ComponentEditor(_) => None,
         }
     }
 
@@ -69,9 +91,11 @@ impl DeveloperHost {
     pub fn viewport_identity(&self) -> Option<u64> {
         match self {
             Self::Viewport(viewport) => Some(viewport.identity),
-            Self::Shell(_) | Self::Toolbox(_) | Self::ObjectList(_) | Self::ComponentEditor(_) => {
-                None
-            }
+            Self::Shell(_)
+            | Self::Toolbox(_)
+            | Self::ObjectList(_)
+            | Self::ComponentEditor(_)
+            | Self::Scoreboard(_) => None,
         }
     }
 
@@ -83,6 +107,7 @@ impl DeveloperHost {
             Self::Toolbox(toolbox) => &toolbox.surface.window,
             Self::ObjectList(list) => &list.surface.window,
             Self::ComponentEditor(editor) => &editor.surface.window,
+            Self::Scoreboard(board) => &board.surface.window,
         }
     }
 }
@@ -95,6 +120,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::Toolbox(toolbox) => toolbox.resize(width, height),
             Self::ObjectList(list) => list.resize(width, height),
             Self::ComponentEditor(editor) => editor.resize(width, height),
+            Self::Scoreboard(board) => board.resize(width, height),
         }
     }
 
@@ -105,6 +131,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::Toolbox(toolbox) => toolbox.request_redraw(),
             Self::ObjectList(list) => list.request_redraw(),
             Self::ComponentEditor(editor) => editor.request_redraw(),
+            Self::Scoreboard(board) => board.request_redraw(),
         }
     }
 
@@ -119,6 +146,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::Toolbox(toolbox) => toolbox.set_visible(visible),
             Self::ObjectList(list) => list.set_visible(visible),
             Self::ComponentEditor(editor) => editor.set_visible(visible),
+            Self::Scoreboard(board) => board.set_visible(visible),
         }
     }
 
@@ -129,6 +157,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::Toolbox(toolbox) => toolbox.visible(),
             Self::ObjectList(list) => list.visible(),
             Self::ComponentEditor(editor) => editor.visible(),
+            Self::Scoreboard(board) => board.visible(),
         }
     }
 }
@@ -141,6 +170,7 @@ impl DeveloperWindowPresenter<GameApp> for DeveloperHost {
             Self::Toolbox(toolbox) => toolbox.present(app),
             Self::ObjectList(list) => list.present(app),
             Self::ComponentEditor(editor) => editor.present(app),
+            Self::Scoreboard(board) => board.present(app),
         }
     }
 }

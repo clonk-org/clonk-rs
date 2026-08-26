@@ -501,6 +501,19 @@ impl GameApp {
         self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::Scoreboard);
     }
 
+    /// Whether the scoreboard dialog owns a console child window.
+    ///
+    /// `Dialog::Show` creates one exactly when the application is not
+    /// fullscreen and the dialog is not a viewport dialog
+    /// (`C4GuiDialogs.cpp:659-661`), and `C4ScoreboardDlg` passes
+    /// `fViewportDlg = false` (`C4Scoreboard.cpp:292`). `Dialog::Close`
+    /// destroys it again (`:677`), so the window's lifetime is exactly the
+    /// dialog's — which is why the console runner reconciles against this
+    /// rather than being commanded.
+    pub(crate) fn console_scoreboard_window_open(&self) -> bool {
+        self.console_mode && self.scoreboard_dialog.is_some()
+    }
+
     pub(crate) fn close_scoreboard_dialog(&mut self) -> bool {
         let closed = self.scoreboard_dialog.take().is_some();
         self.scoreboard_pointer_left();
