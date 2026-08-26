@@ -274,6 +274,70 @@ pub fn scoreboard_layout_with_title_presence(
     resources: &ScoreboardResources<'_>,
     title_present_before_update: bool,
 ) -> Result<ScoreboardLayout> {
+    scoreboard_layout_with_title_widgets(
+        preferred,
+        scoreboard,
+        resources,
+        TitleWidgets::Dialog {
+            present_before_update: title_present_before_update,
+        },
+    )
+}
+
+/// Whether this `C4ScoreboardDlg` can own a `WoodenLabel` title at all, and if
+/// so what its state was on entry to the current Update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitleWidgets {
+    /// The ordinary in-screen dialog, whose `SetTitle` allocates and frees the
+    /// caption widget.
+    Dialog { present_before_update: bool },
+}
+
+impl TitleWidgets {
+    /// Resolve `pTitle` after the Update's two `SetTitle` calls, which is what
+    /// decides the top margin and the caption row.
+    fn resolve(
+        self,
+        title_pointer_present: bool,
+        visible_title_present: bool,
+    ) -> ResolvedTitleWidgets {
+        match self {
+            Self::Dialog {
+                present_before_update,
+            } => {
+                // Before querying margins C++ calls SetTitle iff bool(pTitle)
+                // differs from bool(szTitle pointer). SetTitle(empty) removes
+                // pTitle despite the non-null pointer. The unconditional
+                // SetTitle after SetBounds establishes `visible_title_present`
+                // for the following Update.
+                let margin = if present_before_update != title_pointer_present {
+                    visible_title_present
+                } else {
+                    present_before_update
+                };
+                ResolvedTitleWidgets {
+                    margin,
+                    caption: visible_title_present,
+                }
+            }
+        }
+    }
+}
+
+/// The two independent answers `TitleWidgets` produces: whether the dialog
+/// reserves the title margin, and whether it draws a caption row in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedTitleWidgets {
+    margin: bool,
+    caption: bool,
+}
+
+fn scoreboard_layout_with_title_widgets(
+    preferred: IntRect,
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+    title_widgets: TitleWidgets,
+) -> Result<ScoreboardLayout> {
     resources.validate()?;
     ensure!(
         preferred.w >= 0 && preferred.h >= 0,
@@ -334,20 +398,13 @@ pub fn scoreboard_layout_with_title_presence(
             .max(scoreboard_text_width(&title, font, images).saturating_add(TITLE_EXTRA_WIDTH));
     }
 
-    let title_pointer_present = title.is_some();
-    let visible_title_present = title.is_some_and(|title| !title.is_empty());
-    // Before querying margins C++ calls SetTitle iff bool(pTitle) differs
-    // from bool(szTitle pointer). SetTitle(empty) removes pTitle despite the
-    // non-null pointer. The unconditional SetTitle after SetBounds establishes
-    // `visible_title_present` for the following Update.
-    let title_present_for_margin = if title_present_before_update != title_pointer_present {
-        visible_title_present
-    } else {
-        title_present_before_update
-    };
+    let resolved = title_widgets.resolve(
+        title.is_some(),
+        title.is_some_and(|title| !title.is_empty()),
+    );
     let title_height = font.line_height.max(MIN_WOOD_BAR_HEIGHT);
-    let title_margin_height = title_present_for_margin.then_some(title_height);
-    let visible_caption_height = visible_title_present.then_some(title_height);
+    let title_margin_height = resolved.margin.then_some(title_height);
+    let visible_caption_height = resolved.caption.then_some(title_height);
     let row_height = font.line_height.saturating_add(Y_INDENT);
     let client_height = Y_MARGIN
         .saturating_mul(2)
