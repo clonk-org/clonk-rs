@@ -4,6 +4,26 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.2] - 2026-08-26
+
+### Bug fixes
+
+- Compare the object fields the bridge carries but never diffed (#1161)
+- Run the initial DoCon solid-mask update before the keep-bottom move (#1165)
+- Stop diffing a construction value the bridge never collects (#1164)
+- Stop a non-rotateable ChangeDef from re-mobilising the object (#1163)
+- Stop the walk-rotation rdir write from arming Mobile (#1162)
+- Report a construction divergence instead of its downstream probe (#1160)
+- Report an in-liquid divergence instead of its downstream action (#1159)
+
+### Documentation
+
+- Point menu parity at new issues now its trackers are closed (#1156)
+
+### Testing
+
+- Fail a content bump that strands the dev-replay goldens (#1158)
+
 ## [0.20.1] - 2026-08-26
 
 ### Bug fixes
