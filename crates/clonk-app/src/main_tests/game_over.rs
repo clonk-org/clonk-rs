@@ -2348,7 +2348,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
 
     main_assert_ne!(app.engine.player(app.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     main_assert!(app.game_over_dialog.is_some());
-    main_assert!(app.running_chat.is_some());
+    main_assert!(app.chat.running.is_some());
     main_assert!(app.ingame_menu.is_none());
 }
 

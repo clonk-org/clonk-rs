@@ -2235,7 +2235,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     main_assert_eq!(app.pending_screenshots.front().map(|request| request.kind) => Some(ScreenshotKind::FullLandscape));
     main_assert_eq!(app.pending_screenshots.front().map(|request| &request.gamma) => Some(&installed_gamma), "queued capture retains the ramp installed at keydown");
-    main_assert!(app.running_chat.is_some(), "the global screenshot binding works above an open chat dialog");
+    main_assert!(app.chat.running.is_some(), "the global screenshot binding works above an open chat dialog");
     app.graphics
         .apply_gamma_now(&app.snapshot.environment.gamma);
     app.clear_message_board_log();

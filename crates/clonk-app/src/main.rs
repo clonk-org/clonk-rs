@@ -2686,14 +2686,8 @@ impl GameApp {
             main_menu_state,
             startup_tooltip: ClassicTooltipTracker::new(),
             startup_network_dialog: None,
-            startup_irc_client: None,
+            chat: ChatState::default(),
             pending_editor_launch: None,
-            startup_irc_server: String::new(),
-            external_irc_dialog_visible: false,
-            external_irc_dialog: None,
-            startup_irc_initial_connect_pending: false,
-            irc_dialog_last_click: None,
-            external_irc_pointer_capture: false,
             startup_game_search: None,
             #[cfg(test)]
             startup_game_search_test_events: VecDeque::new(),
@@ -3039,9 +3033,6 @@ impl GameApp {
             network_chart_consumed_keys: HashSet::new(),
             network_chart_pointer_capture: false,
             network_chart_elevated: false,
-            running_chat: None,
-            chat_paste_consumed_keys: HashSet::new(),
-            lobby_chat_drag_anchor: None,
             message_input_history: VecDeque::new(),
             show_startup_hint: false,
             // Launch policy is resolved in `run` before this constructor and
@@ -3538,8 +3529,8 @@ impl GameApp {
         if let Some(dialog) = self.runtime_client_list.as_mut() {
             dialog.pointer_left();
         }
-        if self.external_irc_dialog_visible {
-            if let Some(dialog) = self.external_irc_dialog.as_mut() {
+        if self.chat.external_dialog_visible {
+            if let Some(dialog) = self.chat.external_dialog.as_mut() {
                 dialog.resize(width as i32, height as i32);
                 dialog.set_chat_bounds_override(Some(
                     clonk_frontend::startup_netdlg::NetDlgController::standalone_chat_bounds(
@@ -4365,7 +4356,7 @@ impl GameApp {
         self.game_option_input_pointer_position = None;
         self.game_option_consumed_keys.clear();
         self.game_option_pointer_capture = false;
-        self.chat_paste_consumed_keys.clear();
+        self.chat.paste_consumed_keys.clear();
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
         self.keyboard_modifiers = ModifiersState::empty();
@@ -5553,7 +5544,7 @@ impl GameApp {
             || self.game_over_dialog.is_some()
             || self.network_chart_dialog.is_some()
             || self.runtime_client_list.is_some()
-            || self.external_irc_dialog_visible
+            || self.chat.external_dialog_visible
             || self.startup_options_advanced_dialog.is_some()
             || self.startup_player_properties_dialog.is_some()
             || self
@@ -8152,7 +8143,7 @@ impl GameApp {
                 "C4ChartDialog",
             )?;
         }
-        if self.external_irc_dialog_visible {
+        if self.chat.external_dialog_visible {
             check(
                 self.assets
                     .netdlg_assets()
@@ -9106,7 +9097,7 @@ impl GameApp {
         // C4MessageBoard::Init reloads the bool-typed MsgBoard setting for
         // every game. A runtime multi-line count therefore collapses back to
         // ordinary one-line mode on the next initialization.
-        self.running_chat = None;
+        self.chat.running = None;
         self.game_option_input_dialog = None;
         self.league_signup_dialog = None;
         self.cancelled_league_signup_continuation = None;

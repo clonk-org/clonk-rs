@@ -3519,9 +3519,9 @@ impl GameApp {
                 .expect("joined lobby was checked above");
             (std::mem::take(&mut lobby.chat_edit), lobby.local_client_id)
         };
-        if self.lobby_chat_drag_anchor.is_some() && lobby_chat_paste_attempts_insertion(text) {
+        if self.chat.lobby_drag_anchor.is_some() && lobby_chat_paste_attempts_insertion(text) {
             if let Some((anchor, caret)) = view.selection {
-                self.lobby_chat_drag_anchor = Some(anchor.min(caret));
+                self.chat.lobby_drag_anchor = Some(anchor.min(caret));
             }
         }
         let result = lobby_chat_paste_text(
@@ -3541,8 +3541,8 @@ impl GameApp {
         let completed_lines = result
             .as_ref()
             .is_ok_and(|outcome| outcome.completed_lines > 0);
-        if completed_lines && self.lobby_chat_drag_anchor.is_some() {
-            self.lobby_chat_drag_anchor = Some(0);
+        if completed_lines && self.chat.lobby_drag_anchor.is_some() {
+            self.chat.lobby_drag_anchor = Some(0);
         }
         let still_active = self.startup_view == StartupView::NetworkLobby
             && self
@@ -3781,7 +3781,7 @@ impl GameApp {
         }
         if let Some(shortcut) = clipboard {
             if shortcut == LobbyChatClipboardShortcut::Paste {
-                self.chat_paste_consumed_keys.insert(key);
+                self.chat.paste_consumed_keys.insert(key);
             }
             self.process_classic_lobby_chat_request(LobbyChatRequest::Clipboard { shortcut })?;
             return Ok(true);
@@ -4073,7 +4073,7 @@ impl GameApp {
         } else {
             return false;
         }
-        self.lobby_chat_drag_anchor = None;
+        self.chat.lobby_drag_anchor = None;
         self.scenario_game_options.cancel_interaction();
         self.play_classic_lobby_sounds();
         true
@@ -4092,7 +4092,7 @@ impl GameApp {
         } else {
             return false;
         }
-        self.lobby_chat_drag_anchor = None;
+        self.chat.lobby_drag_anchor = None;
         self.menu_state.set_pointer_position(None);
         self.scenario_game_options.pointer_left();
         self.play_classic_lobby_sounds();
@@ -5808,8 +5808,8 @@ impl GameApp {
         let Some(mut view) = self.active_lobby_chat_view() else {
             return;
         };
-        if self.lobby_chat_drag_anchor.is_some() {
-            self.lobby_chat_drag_anchor = Some(0);
+        if self.chat.lobby_drag_anchor.is_some() {
+            self.chat.lobby_drag_anchor = Some(0);
         }
         if focused {
             view.caret = view.text.len();
@@ -5882,7 +5882,7 @@ impl GameApp {
         let retained_anchor = if begin {
             None
         } else {
-            self.lobby_chat_drag_anchor
+            self.chat.lobby_drag_anchor
         };
         let (layout, fonts) = self.active_lobby_chat_scroll_context()?;
         let mut view = self.active_lobby_chat_view().unwrap_or_default();
@@ -5895,11 +5895,11 @@ impl GameApp {
             retained_anchor,
         );
         if begin {
-            self.lobby_chat_drag_anchor = Some(position);
+            self.chat.lobby_drag_anchor = Some(position);
         } else if release {
-            self.lobby_chat_drag_anchor = None;
+            self.chat.lobby_drag_anchor = None;
         } else {
-            self.lobby_chat_drag_anchor = Some(anchor);
+            self.chat.lobby_drag_anchor = Some(anchor);
         }
         self.install_active_lobby_chat_view(view);
         Ok(())
@@ -5910,9 +5910,9 @@ impl GameApp {
             return Ok(());
         };
         let (layout, fonts) = self.active_lobby_chat_scroll_context()?;
-        if self.lobby_chat_drag_anchor.is_some() && lobby_chat_paste_attempts_insertion(text) {
+        if self.chat.lobby_drag_anchor.is_some() && lobby_chat_paste_attempts_insertion(text) {
             if let Some((anchor, caret)) = view.selection {
-                self.lobby_chat_drag_anchor = Some(anchor.min(caret));
+                self.chat.lobby_drag_anchor = Some(anchor.min(caret));
             }
         }
         let host = self.classic_host_lobby_active();
@@ -5942,9 +5942,9 @@ impl GameApp {
         if result
             .as_ref()
             .is_ok_and(|outcome| outcome.completed_lines > 0)
-            && self.lobby_chat_drag_anchor.is_some()
+            && self.chat.lobby_drag_anchor.is_some()
         {
-            self.lobby_chat_drag_anchor = Some(0);
+            self.chat.lobby_drag_anchor = Some(0);
         }
         let still_active = if host {
             self.classic_host_lobby_active()
@@ -5969,8 +5969,8 @@ impl GameApp {
         match request {
             LobbyChatRequest::FocusInput => {
                 let mut view = self.active_lobby_chat_view().unwrap_or_default();
-                if self.lobby_chat_drag_anchor.is_some() {
-                    self.lobby_chat_drag_anchor = Some(0);
+                if self.chat.lobby_drag_anchor.is_some() {
+                    self.chat.lobby_drag_anchor = Some(0);
                 }
                 view.caret = view.text.len();
                 view.selection = (!view.text.is_empty()).then_some((0, view.caret));
@@ -5979,9 +5979,9 @@ impl GameApp {
             }
             LobbyChatRequest::InsertText(text) => {
                 let mut view = self.active_lobby_chat_view().unwrap_or_default();
-                if self.lobby_chat_drag_anchor.is_some() {
+                if self.chat.lobby_drag_anchor.is_some() {
                     if let Some((anchor, caret)) = view.selection {
-                        self.lobby_chat_drag_anchor = Some(anchor.min(caret));
+                        self.chat.lobby_drag_anchor = Some(anchor.min(caret));
                     }
                 }
                 if lobby_chat_insert_text(&mut view, &text) {
@@ -5991,8 +5991,8 @@ impl GameApp {
             }
             LobbyChatRequest::RefocusAndInsert(text) => {
                 let mut view = self.active_lobby_chat_view().unwrap_or_default();
-                if self.lobby_chat_drag_anchor.is_some() {
-                    self.lobby_chat_drag_anchor = Some(0);
+                if self.chat.lobby_drag_anchor.is_some() {
+                    self.chat.lobby_drag_anchor = Some(0);
                 }
                 view.caret = view.text.len();
                 view.selection = (!view.text.is_empty()).then_some((0, view.caret));
@@ -6008,8 +6008,8 @@ impl GameApp {
                 if lobby_chat_apply_edit_key(&mut view, key, modifiers) {
                     self.scroll_active_lobby_chat_caret_in_view(&mut view)?;
                 }
-                if self.lobby_chat_drag_anchor.is_some() {
-                    self.lobby_chat_drag_anchor = match (old_selection, key, modifiers.shift) {
+                if self.chat.lobby_drag_anchor.is_some() {
+                    self.chat.lobby_drag_anchor = match (old_selection, key, modifiers.shift) {
                         (
                             Some((anchor, caret)),
                             LobbyChatEditKey::Backspace | LobbyChatEditKey::Delete,
@@ -6018,7 +6018,7 @@ impl GameApp {
                         (Some(_), _, false) => Some(0),
                         (Some((anchor, _)), _, true) => Some(anchor),
                         (None, _, true) if view.caret != old_caret => Some(old_caret),
-                        _ => self.lobby_chat_drag_anchor,
+                        _ => self.chat.lobby_drag_anchor,
                     };
                 }
                 self.install_active_lobby_chat_view(view);
@@ -6042,8 +6042,8 @@ impl GameApp {
                                 .and_then(|mut clipboard| clipboard.set_text(selected))
                                 .is_ok();
                             if copied && shortcut == LobbyChatClipboardShortcut::Cut {
-                                if self.lobby_chat_drag_anchor.is_some() {
-                                    self.lobby_chat_drag_anchor = Some(selection_start);
+                                if self.chat.lobby_drag_anchor.is_some() {
+                                    self.chat.lobby_drag_anchor = Some(selection_start);
                                 }
                                 lobby_chat_delete_selection(&mut view);
                             }
@@ -6051,8 +6051,8 @@ impl GameApp {
                     }
                     LobbyChatClipboardShortcut::Paste => unreachable!("paste handled above"),
                     LobbyChatClipboardShortcut::SelectAll => {
-                        if self.lobby_chat_drag_anchor.is_some() {
-                            self.lobby_chat_drag_anchor = Some(0);
+                        if self.chat.lobby_drag_anchor.is_some() {
+                            self.chat.lobby_drag_anchor = Some(0);
                         }
                         view.caret = view.text.len();
                         view.selection = (!view.text.is_empty()).then_some((0, view.caret));
@@ -6077,17 +6077,17 @@ impl GameApp {
                     });
                 }
                 let mut view = self.active_lobby_chat_view().unwrap_or_default();
-                if self.lobby_chat_drag_anchor.is_some() {
+                if self.chat.lobby_drag_anchor.is_some() {
                     if let Some(range) = lobby_chat_selection(&view) {
-                        self.lobby_chat_drag_anchor = Some(range.start);
+                        self.chat.lobby_drag_anchor = Some(range.start);
                     }
                 }
                 lobby_chat_delete_selection(&mut view);
                 self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::Submit(text) => {
-                if self.lobby_chat_drag_anchor.is_some() {
-                    self.lobby_chat_drag_anchor = Some(0);
+                if self.chat.lobby_drag_anchor.is_some() {
+                    self.chat.lobby_drag_anchor = Some(0);
                 }
                 if !self.classic_host_lobby_active()
                     && self.startup_view == StartupView::NetworkLobby
@@ -6141,8 +6141,8 @@ impl GameApp {
                 }
             }
             LobbyChatRequest::History { older } => {
-                if self.lobby_chat_drag_anchor.is_some() {
-                    self.lobby_chat_drag_anchor = Some(0);
+                if self.chat.lobby_drag_anchor.is_some() {
+                    self.chat.lobby_drag_anchor = Some(0);
                 }
                 if !self.classic_host_lobby_active() {
                     let history = self.message_input_history.clone();
@@ -6213,8 +6213,8 @@ impl GameApp {
                     true,
                     None,
                 );
-                if self.lobby_chat_drag_anchor.is_some() {
-                    self.lobby_chat_drag_anchor = Some(position);
+                if self.chat.lobby_drag_anchor.is_some() {
+                    self.chat.lobby_drag_anchor = Some(position);
                 }
                 if let Some(text) = primary_clipboard_text() {
                     if lobby_chat_insert_primary_text(&mut view, &text) {
@@ -6250,11 +6250,11 @@ impl GameApp {
                 })?;
                 let mut view = self.active_lobby_chat_view().unwrap_or_default();
                 lobby_chat_apply_double_click(&mut view, point, &layout, &fonts.text);
-                self.lobby_chat_drag_anchor = None;
+                self.chat.lobby_drag_anchor = None;
                 self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::TouchCancel => {
-                self.lobby_chat_drag_anchor = None;
+                self.chat.lobby_drag_anchor = None;
             }
             LobbyChatRequest::OpenExternalDialog => {
                 self.show_external_irc_dialog()?;
@@ -6355,7 +6355,7 @@ impl GameApp {
                         .map(|lobby| lobby.controller.chat_clipboard(shortcut))
                         .unwrap_or_default();
                     if shortcut == LobbyChatClipboardShortcut::Paste && !actions.is_empty() {
-                        self.chat_paste_consumed_keys.insert(key);
+                        self.chat.paste_consumed_keys.insert(key);
                     }
                     actions
                 } else {
@@ -7725,7 +7725,7 @@ impl GameApp {
             && self.league_signup_dialog.is_none()
             && self.message_dialogs.is_empty()
             && self.runtime_client_list.is_none()
-            && !self.external_irc_dialog_visible;
+            && !self.chat.external_dialog_visible;
         let surface = self.graphics.surface_mut();
         loader.render_background(surface, config, Some(&gamma));
         lobby.controller.render_without_tooltips(
@@ -7762,7 +7762,7 @@ impl GameApp {
             && self.league_signup_dialog.is_none()
             && self.message_dialogs.is_empty()
             && self.runtime_client_list.is_none()
-            && !self.external_irc_dialog_visible;
+            && !self.chat.external_dialog_visible;
         lobby.controller.render_tooltips(
             self.graphics.surface_mut(),
             &lobby_resources,

@@ -34,6 +34,45 @@ pub(crate) struct DeveloperComponentEdit {
     pub(crate) host: clonk_engine::developer_components::ComponentHost,
 }
 
+/// The IRC transport and every chat surface that talks to it.
+///
+/// C++ keeps `C4Network2IRC` process-global and independent of the dialogs
+/// that display it, so the transport, the two chat views that share it, and
+/// the input state they hand back and forth are one lifecycle: closing a
+/// view must not disturb the connection, and changing startup screens must
+/// not tear it down. Flat on `GameApp` that relationship is invisible.
+#[derive(Default)]
+pub(crate) struct ChatState {
+    /// Process-global C4Network2IRC analogue. Native retains the IRC client
+    /// independently of the startup network dialog, so changing startup
+    /// screens must not tear down a live connection.
+    pub(crate) client: Option<clonk_network::IrcClientHandle>,
+    pub(crate) server: String,
+    /// Whether the singleton-style C4ChatDlg analogue is currently shown.
+    /// The controller and transport remain process-global when this UI closes.
+    pub(crate) external_dialog_visible: bool,
+    /// Standalone C4ChatDlg owns a distinct C4ChatControl from the startup
+    /// NetworkGame sheet. Closing the window destroys this UI-local state
+    /// while the process-global IRC transport survives.
+    pub(crate) external_dialog: Option<clonk_frontend::startup_netdlg::NetDlgController>,
+    /// Distinguishes a resolver/TCP failure before the first Connected event
+    /// (classic modal failure) from an established-session disconnect (status
+    /// transcript line only).
+    pub(crate) initial_connect_pending: bool,
+    /// Shared double-click latch for the embedded and standalone chat views.
+    pub(crate) dialog_last_click: Option<(GuiPoint, Instant)>,
+    /// Left gesture retained by the standalone z=0 chat dialog.
+    pub(crate) external_pointer_capture: bool,
+    /// Process-global C4ChatInputDialog projection for ordinary game chat.
+    pub(crate) running: Option<RunningChatState>,
+    /// A paste may close its chat owner on key-down; retain the physical V
+    /// until release so the replacement screen cannot receive an orphaned up.
+    pub(crate) paste_consumed_keys: HashSet<VirtualKeyCode>,
+    /// C4GUI::Edit retains an equal start/end selection as its hidden drag
+    /// anchor even though the painted selection is empty.
+    pub(crate) lobby_drag_anchor: Option<usize>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -168,29 +207,11 @@ pub(crate) struct GameApp {
     /// the 500ms stillness delay are global.
     pub(crate) startup_tooltip: ClassicTooltipTracker,
     pub(crate) startup_network_dialog: Option<clonk_frontend::startup_netdlg::NetDlgController>,
-    /// Process-global C4Network2IRC analogue. Native retains the IRC client
-    /// independently of the startup network dialog, so changing startup
-    /// screens must not tear down a live connection.
-    pub(crate) startup_irc_client: Option<clonk_network::IrcClientHandle>,
+    /// IRC and every chat surface, which share one transport lifetime.
+    pub(crate) chat: ChatState,
     /// `Application.launchEditor`: set by `SwitchToEditor`, consumed by
     /// `~C4Application` after subsystem cleanup (C4Application.cpp:58-74).
     pub(crate) pending_editor_launch: Option<PathBuf>,
-    pub(crate) startup_irc_server: String,
-    /// Whether the singleton-style C4ChatDlg analogue is currently shown.
-    /// The controller and transport remain process-global when this UI closes.
-    pub(crate) external_irc_dialog_visible: bool,
-    /// Standalone C4ChatDlg owns a distinct C4ChatControl from the startup
-    /// NetworkGame sheet. Closing the window destroys this UI-local state
-    /// while the process-global IRC transport survives.
-    pub(crate) external_irc_dialog: Option<clonk_frontend::startup_netdlg::NetDlgController>,
-    /// Distinguishes a resolver/TCP failure before the first Connected event
-    /// (classic modal failure) from an established-session disconnect (status
-    /// transcript line only).
-    pub(crate) startup_irc_initial_connect_pending: bool,
-    /// Shared double-click latch for the embedded and standalone chat views.
-    pub(crate) irc_dialog_last_click: Option<(GuiPoint, Instant)>,
-    /// Left gesture retained by the standalone z=0 chat dialog.
-    pub(crate) external_irc_pointer_capture: bool,
     pub(crate) startup_game_search: Option<clonk_network::StartupGameSearch>,
     #[cfg(test)]
     pub(crate) startup_game_search_test_events: VecDeque<clonk_network::StartupGameSearchEvent>,
@@ -1132,14 +1153,6 @@ pub(crate) struct GameApp {
     /// `ActivateDialog`/new-dialog insertion can move the z=0 chart after
     /// already shown z=+1/+2 dialogs in the Screen's absolute list.
     pub(crate) network_chart_elevated: bool,
-    /// Process-global C4ChatInputDialog projection for ordinary game chat.
-    pub(crate) running_chat: Option<RunningChatState>,
-    /// A paste may close its chat owner on key-down; retain the physical V
-    /// until release so the replacement screen cannot receive an orphaned up.
-    pub(crate) chat_paste_consumed_keys: HashSet<VirtualKeyCode>,
-    /// C4GUI::Edit retains an equal start/end selection as its hidden drag
-    /// anchor even though the painted selection is empty.
-    pub(crate) lobby_chat_drag_anchor: Option<usize>,
     pub(crate) message_input_history: VecDeque<String>,
     /// `C4Player::ShowStartup` for the local player: device hint + name
     /// until the first control com (src/C4Player.cpp:1376,1735).

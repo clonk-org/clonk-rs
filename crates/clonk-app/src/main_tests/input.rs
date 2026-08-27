@@ -6672,7 +6672,7 @@ fn platform_ime_tracks_league_signup_and_its_context_menu() {
 fn platform_ime_tracks_external_irc_z_order_and_menu_mode() {
     let mut app = platform_ime_test_app();
     app.mode = AppMode::Running;
-    app.external_irc_dialog_visible = true;
+    app.chat.external_dialog_visible = true;
     app.scoreboard_dialog = Some(ScoreboardPresentationRequest {
         rows: 0,
         columns: 0,

@@ -2612,7 +2612,7 @@ impl GameApp {
                             pending.purpose == PendingInputDialogPurpose::RunningChat
                         })
                     {
-                        if self.running_chat.as_ref().is_some_and(|chat| {
+                        if self.chat.running.as_ref().is_some_and(|chat| {
                             matches!(&chat.kind, RunningChatKind::MessageBoardInput(_))
                         }) {
                             self.submit_running_chat_text(text)?;

@@ -12,7 +12,7 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if !self.external_irc_dialog_visible
+        if !self.chat.external_dialog_visible
             || (matches!(self.mode, AppMode::Running)
                 && !self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc))
         {
@@ -33,7 +33,8 @@ impl GameApp {
             && key == VirtualKeyCode::F4
             && modifiers == ModifiersState::CONTROL
         {
-            self.external_irc_dialog
+            self.chat
+                .external_dialog
                 .as_mut()
                 .map(clonk_frontend::startup_netdlg::NetDlgController::close_active_chat_sheet)
                 .unwrap_or_default()
@@ -42,7 +43,8 @@ impl GameApp {
             && (modifiers == ModifiersState::CONTROL
                 || modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT))
         {
-            self.external_irc_dialog
+            self.chat
+                .external_dialog
                 .as_mut()
                 .map(|dialog| dialog.cycle_chat_sheet(modifiers.contains(ModifiersState::SHIFT)))
                 .unwrap_or_default()
@@ -51,7 +53,8 @@ impl GameApp {
             {
                 Vec::new()
             } else {
-                self.external_irc_dialog
+                self.chat
+                    .external_dialog
                     .as_mut()
                     .map(|dialog| match state {
                         ElementState::Pressed => dialog.handle_key_down_with_tab_direction(
@@ -432,7 +435,7 @@ impl GameApp {
         self.suspend_ingame_pointer_for_gui();
         self.network_chart_elevated = false;
         self.message_dialog_active_index = None;
-        self.running_chat = Some(RunningChatState {
+        self.chat.running = Some(RunningChatState {
             history_index: -1,
             active: true,
             kind: RunningChatKind::Ordinary,
@@ -468,7 +471,7 @@ impl GameApp {
         self.suspend_ingame_pointer_for_gui();
         self.network_chart_elevated = false;
         self.message_dialog_active_index = None;
-        self.running_chat = Some(RunningChatState {
+        self.chat.running = Some(RunningChatState {
             history_index: -1,
             active: true,
             kind: RunningChatKind::MessageBoardInput(input),
@@ -487,7 +490,8 @@ impl GameApp {
     pub(crate) fn reconcile_message_board_input_dialog(&mut self) -> Result<(), EngineError> {
         let mut active = self.engine.active_message_board_input().cloned();
         let visible_query = self
-            .running_chat
+            .chat
+            .running
             .as_ref()
             .and_then(|chat| match &chat.kind {
                 RunningChatKind::Ordinary => None,
@@ -503,11 +507,11 @@ impl GameApp {
             self.finalize_running_chat_input()?;
             active = self.engine.active_message_board_input().cloned();
         }
-        if self.running_chat.is_some()
+        if self.chat.running.is_some()
             || self.game_option_input_dialog.is_some()
             || self.game_over_dialog.is_some()
             || self.top_message_dialog_is_exclusive()
-            || self.external_irc_dialog_visible
+            || self.chat.external_dialog_visible
             || self.context_menu.is_some()
             || self
                 .runtime_client_list
@@ -587,7 +591,7 @@ impl GameApp {
     }
 
     pub(crate) fn running_chat_active(&self) -> bool {
-        self.running_chat.as_ref().is_some_and(|chat| chat.active)
+        self.chat.running.as_ref().is_some_and(|chat| chat.active)
             && (self.mode != AppMode::Running
                 || self.running_active_dialog == Some(RunningDialogStackEntry::Chat))
     }
@@ -597,7 +601,7 @@ impl GameApp {
     }
 
     pub(crate) fn set_running_chat_active(&mut self, active: bool) {
-        if let Some(chat) = self.running_chat.as_mut() {
+        if let Some(chat) = self.chat.running.as_mut() {
             chat.active = active;
         }
         if active {
@@ -608,7 +612,8 @@ impl GameApp {
 
     pub(crate) fn close_running_chat(&mut self) -> Result<(), EngineError> {
         let input = self
-            .running_chat
+            .chat
+            .running
             .as_ref()
             .and_then(|chat| match &chat.kind {
                 RunningChatKind::Ordinary => None,
@@ -629,7 +634,7 @@ impl GameApp {
             self.release_message_dialog_pointer_elements();
             self.release_game_option_input_pointer_elements();
         }
-        self.running_chat = None;
+        self.chat.running = None;
         self.remove_running_dialog(RunningDialogStackEntry::Chat);
         if self
             .game_option_input_dialog
@@ -664,7 +669,7 @@ impl GameApp {
     }
 
     pub(crate) fn browse_running_chat_history(&mut self, older: bool) {
-        let Some(chat) = self.running_chat.as_mut() else {
+        let Some(chat) = self.chat.running.as_mut() else {
             return;
         };
         chat.history_index += if older { 1 } else { -1 };
@@ -782,7 +787,8 @@ impl GameApp {
 
     pub(crate) fn submit_running_chat_text(&mut self, text: String) -> Result<(), EngineError> {
         let kind = self
-            .running_chat
+            .chat
+            .running
             .as_ref()
             .map(|chat| chat.kind.clone())
             .unwrap_or(RunningChatKind::Ordinary);
@@ -912,7 +918,7 @@ impl GameApp {
         }
         if let Some(mode) = mode {
             if state == ElementState::Pressed {
-                if self.running_chat.is_some() {
+                if self.chat.running.is_some() {
                     if self
                         .running_chat_text()
                         .is_some_and(|text| !text.is_empty())
@@ -1024,7 +1030,8 @@ impl GameApp {
 
     pub(crate) fn external_irc_dialog_contains_point(&self, point: GuiPoint) -> bool {
         let Some(bounds) = self
-            .external_irc_dialog
+            .chat
+            .external_dialog
             .as_ref()
             .and_then(|dialog| dialog.chat_bounds_override())
         else {
@@ -1041,9 +1048,9 @@ impl GameApp {
         point: GuiPoint,
     ) -> Result<bool, EngineError> {
         if !matches!(self.mode, AppMode::Running)
-            || !self.external_irc_dialog_visible
+            || !self.chat.external_dialog_visible
             || (!self.external_irc_dialog_contains_point(point)
-                && !self.external_irc_pointer_capture)
+                && !self.chat.external_pointer_capture)
         {
             return Ok(false);
         }
@@ -1052,7 +1059,8 @@ impl GameApp {
             .clonk_fonts
             .clone()
             .and_then(|fonts| {
-                self.external_irc_dialog
+                self.chat
+                    .external_dialog
                     .as_mut()
                     .map(|dialog| dialog.handle_pointer_move(point, &fonts.text))
             })
@@ -1065,12 +1073,12 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<bool, EngineError> {
-        if !matches!(self.mode, AppMode::Running) || !self.external_irc_dialog_visible {
-            self.external_irc_pointer_capture = false;
+        if !matches!(self.mode, AppMode::Running) || !self.chat.external_dialog_visible {
+            self.chat.external_pointer_capture = false;
             return Ok(false);
         }
         let release_captured = button_state == ElementState::Released
-            && std::mem::take(&mut self.external_irc_pointer_capture);
+            && std::mem::take(&mut self.chat.external_pointer_capture);
         let Some(point) = self.running_pointer_position else {
             return Ok(release_captured);
         };
@@ -1078,14 +1086,15 @@ impl GameApp {
             return Ok(false);
         }
         if button_state == ElementState::Pressed {
-            self.external_irc_pointer_capture = true;
+            self.chat.external_pointer_capture = true;
             self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
         }
         let Some(fonts) = self.assets.clonk_fonts.clone() else {
             return Ok(true);
         };
         let mut actions = self
-            .external_irc_dialog
+            .chat
+            .external_dialog
             .as_mut()
             .map(|dialog| match button_state {
                 ElementState::Pressed => dialog.handle_pointer_down(point, &fonts.text),
@@ -1094,15 +1103,16 @@ impl GameApp {
             .unwrap_or_default();
         if button_state == ElementState::Released {
             let now = Instant::now();
-            let double = self.irc_dialog_last_click.is_some_and(|(last, at)| {
+            let double = self.chat.dialog_last_click.is_some_and(|(last, at)| {
                 now.saturating_duration_since(at) < CPP_DOUBLE_CLICK_INTERVAL
                     && (last.x - point.x).abs() <= 4.0
                     && (last.y - point.y).abs() <= 4.0
             });
-            self.irc_dialog_last_click = (!double).then_some((point, now));
+            self.chat.dialog_last_click = (!double).then_some((point, now));
             if double {
                 actions.extend(
-                    self.external_irc_dialog
+                    self.chat
+                        .external_dialog
                         .as_mut()
                         .map(|dialog| dialog.handle_pointer_double_click(point, &fonts.text))
                         .unwrap_or_default(),
@@ -1137,7 +1147,7 @@ impl GameApp {
         if self.running_chat_controller().is_some() {
             self.close_running_chat()?;
         }
-        if self.external_irc_dialog_visible && self.external_irc_dialog.is_some() {
+        if self.chat.external_dialog_visible && self.chat.external_dialog.is_some() {
             self.sync_startup_irc_snapshot();
             return Ok(());
         }
@@ -1156,12 +1166,12 @@ impl GameApp {
         if !active {
             dialog.show_chat_login();
         }
-        self.external_irc_dialog = Some(dialog);
-        self.external_irc_dialog_visible = true;
+        self.chat.external_dialog = Some(dialog);
+        self.chat.external_dialog_visible = true;
         self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
-        self.irc_dialog_last_click = None;
+        self.chat.dialog_last_click = None;
         self.sync_startup_irc_snapshot();
-        if let Some(dialog) = self.external_irc_dialog.as_mut() {
+        if let Some(dialog) = self.chat.external_dialog.as_mut() {
             // The standalone C4ChatControl picks its initial focus after the
             // process-global IRC projection has selected Login versus Chats.
             dialog.force_chat_mode_and_default_focus();
@@ -1172,15 +1182,15 @@ impl GameApp {
 
     pub(crate) fn hide_external_irc_dialog(&mut self) {
         self.close_context_menu_silently();
-        self.external_irc_dialog_visible = false;
-        self.external_irc_dialog = None;
+        self.chat.external_dialog_visible = false;
+        self.chat.external_dialog = None;
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
-        self.irc_dialog_last_click = None;
-        self.external_irc_pointer_capture = false;
+        self.chat.dialog_last_click = None;
+        self.chat.external_pointer_capture = false;
     }
 
     pub(crate) fn toggle_external_irc_dialog(&mut self) -> Result<(), EngineError> {
-        if self.external_irc_dialog_visible {
+        if self.chat.external_dialog_visible {
             self.hide_external_irc_dialog();
             Ok(())
         } else {
@@ -1192,7 +1202,7 @@ impl GameApp {
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             dialog.show_chat_login();
         }
-        if let Some(dialog) = self.external_irc_dialog.as_mut() {
+        if let Some(dialog) = self.chat.external_dialog.as_mut() {
             dialog.show_chat_login();
         }
     }
@@ -1275,7 +1285,7 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
-        if !self.external_irc_dialog_visible {
+        if !self.chat.external_dialog_visible {
             return Ok(());
         }
         let assets = self
@@ -1288,7 +1298,8 @@ impl GameApp {
             .clone()
             .context("C4ChatDlg fonts are unavailable")?;
         let controller = self
-            .external_irc_dialog
+            .chat
+            .external_dialog
             .as_ref()
             .context("C4ChatDlg controller is unavailable")?;
         let draw_focus = self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
@@ -1309,7 +1320,7 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<bool> {
-        if !self.external_irc_dialog_visible
+        if !self.chat.external_dialog_visible
             || !self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             || !self.message_dialogs.is_empty()
             || self.context_menu.is_some()
@@ -1320,7 +1331,8 @@ impl GameApp {
             return Ok(false);
         };
         let Some(target) = self
-            .external_irc_dialog
+            .chat
+            .external_dialog
             .as_ref()
             .and_then(|dialog| dialog.tooltip_at(pointer))
         else {

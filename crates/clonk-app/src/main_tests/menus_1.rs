@@ -2500,8 +2500,8 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
         )])
         .test_value();
     main_assert!(lobby_app.classic_host_lobby.is_some());
-    main_assert!(lobby_app.external_irc_dialog_visible);
-    let dialog = lobby_app.external_irc_dialog.test_ref();
+    main_assert!(lobby_app.chat.external_dialog_visible);
+    let dialog = lobby_app.chat.external_dialog.test_ref();
     main_assert_eq!(dialog.mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
     main_assert_eq!(dialog.chat_bounds_override() => Some(clonk_frontend::startup_netdlg::NetDlgController::standalone_chat_bounds(640, 480)));
     let first_dialog_ptr = std::ptr::from_ref(dialog);
@@ -2510,18 +2510,18 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             LobbyChatRequest::OpenExternalDialog,
         )])
         .test_value();
-    main_assert!(lobby_app.external_irc_dialog_visible);
+    main_assert!(lobby_app.chat.external_dialog_visible);
     main_assert_eq!(
         lobby_app
-            .external_irc_dialog
+            .chat.external_dialog
             .as_ref()
             .map(std::ptr::from_ref) =>
         Some(first_dialog_ptr),
         "raising the singleton must preserve its UI-local controller state"
     );
     lobby_app.hide_external_irc_dialog();
-    main_assert!(!lobby_app.external_irc_dialog_visible);
-    main_assert!(lobby_app.external_irc_dialog.is_none());
+    main_assert!(!lobby_app.chat.external_dialog_visible);
+    main_assert!(lobby_app.chat.external_dialog.is_none());
 
     for modifiers in [
         ModifiersState::ALT,
@@ -2538,11 +2538,11 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             start_location: (40, 50),
         });
         runtime_app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-        main_assert!(runtime_app.external_irc_dialog_visible);
+        main_assert!(runtime_app.chat.external_dialog_visible);
         main_assert!(runtime_app.menu_title_drag.is_none(), "activating C4ChatDlg releases an obscured menu-title drag");
         runtime_app.test_cursor(PhysicalPosition::new(300.0, 200.0));
         runtime_app.test_left_button(ElementState::Released);
-        main_assert!(runtime_app.external_irc_dialog_visible);
+        main_assert!(runtime_app.chat.external_dialog_visible);
 
         runtime_app
             .engine
@@ -2562,7 +2562,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             "runtime IRC release must not leak to modifier-blind player control"
         );
         runtime_app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-        main_assert!(!runtime_app.external_irc_dialog_visible);
+        main_assert!(!runtime_app.chat.external_dialog_visible);
     }
 
     let mut ignored_runtime = new_running_sandbox_app();
@@ -2577,7 +2577,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
     ] {
         ignored_runtime.test_modifiers(modifiers);
         main_assert!(!ignored_runtime.handle_runtime_irc_toggle_key(VirtualKeyCode::KeyC, ElementState::Pressed).expect("non-IRC chord is unhandled"));
-        main_assert!(!ignored_runtime.external_irc_dialog_visible);
+        main_assert!(!ignored_runtime.chat.external_dialog_visible);
     }
 }
 

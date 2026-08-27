@@ -66,7 +66,7 @@ fn default_z_dialog_order_tracks_show_raise_and_close() {
     app.toggle_network_chart();
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
     app.toggle_runtime_client_list().test_value();
-    app.external_irc_dialog_visible = true;
+    app.chat.external_dialog_visible = true;
     app.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
     main_assert_eq!(
         app.runtime_default_dialog_order_snapshot() =>
@@ -85,7 +85,7 @@ fn default_z_dialog_order_tracks_show_raise_and_close() {
     main_assert!(!app.runtime_client_list_above_game_over);
     app.dismiss_game_over_dialog();
     main_assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc));
-    app.external_irc_dialog_visible = false;
+    app.chat.external_dialog_visible = false;
     app.hide_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
     main_assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList));
     app.toggle_runtime_client_list().test_value();
@@ -372,7 +372,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert!(close_active_chat.running_chat_active());
     main_assert_eq!(close_active_chat.message_dialog_pointer_capture_index => Some(0));
     close_active_chat.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(close_active_chat.running_chat.is_none());
+    main_assert!(close_active_chat.chat.running.is_none());
     main_assert_eq!(close_active_chat.message_dialog_pointer_capture_index => None);
     main_assert!(!close_active_chat.message_dialogs[0].state.has_pointer_capture());
 
@@ -566,7 +566,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
     vote_return.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(vote_return.running_chat.is_none());
+    main_assert!(vote_return.chat.running.is_none());
     main_assert_eq!(vote_return.message_dialogs.len() => 1);
     vote_return.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert!(vote_return.message_dialogs.is_empty());
@@ -589,7 +589,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         app.test_key(key, ElementState::Pressed);
         app.test_key(key, ElementState::Released);
         main_assert_eq!(app.message_dialogs.len() => 1);
-        main_assert!(app.running_chat.is_none());
+        main_assert!(app.chat.running.is_none());
     }
 
     let mut unmatched_vote_hotkey = boxed_classic_running_sandbox_app();
@@ -598,7 +598,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .test_value();
     unmatched_vote_hotkey.test_modifiers(ModifiersState::ALT);
     unmatched_vote_hotkey.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-    main_assert!(unmatched_vote_hotkey.external_irc_dialog_visible);
+    main_assert!(unmatched_vote_hotkey.chat.external_dialog_visible);
     unmatched_vote_hotkey.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     main_assert_eq!(unmatched_vote_hotkey.message_dialogs.len() => 1);
 
@@ -625,7 +625,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     changed_release.test_modifiers(ModifiersState::CONTROL);
     changed_release.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert_eq!(changed_release.message_dialogs.len() => 1);
-    main_assert!(changed_release.running_chat.is_none());
+    main_assert!(changed_release.chat.running.is_none());
 
     let mut exclusive_top_scope = boxed_running_sandbox_app();
     exclusive_top_scope
@@ -647,7 +647,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     exclusive_top_scope.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert_eq!(exclusive_top_scope.message_dialogs.len() => 1);
     main_assert!(matches!(exclusive_top_scope.message_dialogs[0].continuation, MessageDialogContinuation::LeagueSurrender));
-    main_assert!(exclusive_top_scope.running_chat.is_none());
+    main_assert!(exclusive_top_scope.chat.running.is_none());
 
     let mut nonexclusive_top_scope = boxed_running_sandbox_app();
     nonexclusive_top_scope
@@ -775,7 +775,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     main_assert_eq!(app.running_chat_text() => Some(""));
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.running_chat.is_none());
+    main_assert!(app.chat.running.is_none());
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
@@ -902,7 +902,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Released);
     main_assert!(app.game_option_input_consumed_keys.is_empty());
     main_assert_eq!(app.running_chat_text() => text_before_context_key.as_deref());
-    main_assert_eq!(app.running_chat.as_ref().map(|chat| chat.history_index) => Some(-1));
+    main_assert_eq!(app.chat.running.as_ref().map(|chat| chat.history_index) => Some(-1));
 
     let caret_before_ctrl_left = app.running_chat_controller().test_value().caret();
     app.test_modifiers(ModifiersState::CONTROL);
@@ -913,13 +913,13 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
 
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-    main_assert!(app.external_irc_dialog_visible);
-    main_assert!(app.running_chat.is_none());
+    main_assert!(app.chat.external_dialog_visible);
+    main_assert!(app.chat.running.is_none());
     main_assert!(app.context_menu.is_none());
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
-    main_assert!(!app.external_irc_dialog_visible);
+    main_assert!(!app.chat.external_dialog_visible);
     app.test_modifiers(ModifiersState::empty());
     main_assert!(app.game_option_input_dialog.is_none());
     main_assert!(app.context_menu.is_none());

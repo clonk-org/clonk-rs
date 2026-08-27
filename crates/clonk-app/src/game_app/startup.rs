@@ -1884,19 +1884,20 @@ impl GameApp {
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             dialog.sync_chat_snapshot(snapshot.clone());
         }
-        if let Some(dialog) = self.external_irc_dialog.as_mut() {
+        if let Some(dialog) = self.chat.external_dialog.as_mut() {
             dialog.sync_chat_snapshot(snapshot);
         }
     }
 
     pub(crate) fn startup_irc_client_active(&self) -> bool {
-        self.startup_irc_client
+        self.chat
+            .client
             .as_ref()
             .is_some_and(clonk_network::IrcClientHandle::is_active)
     }
 
     fn startup_irc_chat_visible(&self) -> bool {
-        self.external_irc_dialog_visible
+        self.chat.external_dialog_visible
             || (self.mode == AppMode::Menu
                 && self.startup_view == StartupView::NetworkGame
                 && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
@@ -1962,7 +1963,7 @@ impl GameApp {
     }
 
     pub(crate) fn sync_startup_irc_snapshot(&mut self) {
-        let Some(client) = self.startup_irc_client.as_ref() else {
+        let Some(client) = self.chat.client.as_ref() else {
             return;
         };
         let snapshot = if self.startup_irc_chat_visible() {
@@ -1970,7 +1971,7 @@ impl GameApp {
         } else {
             client.snapshot()
         };
-        let snapshot = project_startup_irc_snapshot(&self.startup_irc_server, snapshot);
+        let snapshot = project_startup_irc_snapshot(&self.chat.server, snapshot);
         self.sync_startup_irc_projection(snapshot);
     }
 
@@ -2023,14 +2024,14 @@ impl GameApp {
         &mut self,
         login: clonk_frontend::startup_netdlg::NetDlgChatLogin,
     ) -> Result<(), EngineError> {
-        if let Some(mut client) = self.startup_irc_client.take() {
+        if let Some(mut client) = self.chat.client.take() {
             if let Err(error) = client.close() {
                 tracing::warn!(%error, "failed to close the previous IRC connection");
             }
         }
-        self.startup_irc_initial_connect_pending = false;
+        self.chat.initial_connect_pending = false;
 
-        self.startup_irc_server.clone_from(&login.server);
+        self.chat.server.clone_from(&login.server);
         self.sync_startup_irc_projection(clonk_frontend::startup_netdlg::NetDlgChatSnapshot {
             server: login.server.clone(),
             nick: login.nick.clone(),
@@ -2060,8 +2061,8 @@ impl GameApp {
         config.status_templates = self.localized_irc_status_templates();
         match clonk_network::IrcClientHandle::connect(config) {
             Ok(client) => {
-                self.startup_irc_initial_connect_pending = true;
-                self.startup_irc_client = Some(client);
+                self.chat.initial_connect_pending = true;
+                self.chat.client = Some(client);
                 self.sync_startup_irc_snapshot();
             }
             Err(error) => {
@@ -2080,13 +2081,12 @@ impl GameApp {
     }
 
     pub(crate) fn disconnect_startup_irc(&mut self) {
-        self.startup_irc_initial_connect_pending = false;
-        let Some(mut client) = self.startup_irc_client.take() else {
+        self.chat.initial_connect_pending = false;
+        let Some(mut client) = self.chat.client.take() else {
             return;
         };
         let close_error = client.close().err().map(|error| error.to_string());
-        let mut snapshot =
-            project_startup_irc_snapshot(&self.startup_irc_server, client.snapshot());
+        let mut snapshot = project_startup_irc_snapshot(&self.chat.server, client.snapshot());
         if close_error.is_some() {
             snapshot.last_error = close_error;
         }
@@ -2101,19 +2101,20 @@ impl GameApp {
             return;
         };
         let result = self
-            .startup_irc_client
+            .chat
+            .client
             .as_ref()
             .ok_or(clonk_network::IrcClientError::NotConnected)
             .and_then(|client| client.queue_command(command));
         if let Err(error) = result {
             tracing::warn!(%error, "failed to queue IRC command");
-            if let Some(client) = self.startup_irc_client.as_ref() {
+            if let Some(client) = self.chat.client.as_ref() {
                 let snapshot = if self.startup_irc_chat_visible() {
                     client.snapshot_and_mark_message_log_read()
                 } else {
                     client.snapshot()
                 };
-                let mut snapshot = project_startup_irc_snapshot(&self.startup_irc_server, snapshot);
+                let mut snapshot = project_startup_irc_snapshot(&self.chat.server, snapshot);
                 snapshot.last_error = Some(error.to_string());
                 self.sync_startup_irc_projection(snapshot);
             }
@@ -2122,7 +2123,8 @@ impl GameApp {
 
     pub(crate) fn poll_startup_irc(&mut self) -> Result<(), EngineError> {
         let events = self
-            .startup_irc_client
+            .chat
+            .client
             .as_ref()
             .map(|client| client.events().try_iter().collect::<Vec<_>>())
             .unwrap_or_default();
@@ -2131,16 +2133,16 @@ impl GameApp {
         for event in events {
             match event {
                 clonk_network::IrcClientEvent::Connected => {
-                    self.startup_irc_initial_connect_pending = false;
+                    self.chat.initial_connect_pending = false;
                 }
                 clonk_network::IrcClientEvent::Disconnected { reason }
-                    if self.startup_irc_initial_connect_pending =>
+                    if self.chat.initial_connect_pending =>
                 {
-                    self.startup_irc_initial_connect_pending = false;
+                    self.chat.initial_connect_pending = false;
                     initial_failure = Some(reason);
                 }
                 clonk_network::IrcClientEvent::Closed => {
-                    self.startup_irc_initial_connect_pending = false;
+                    self.chat.initial_connect_pending = false;
                 }
                 clonk_network::IrcClientEvent::Notification
                 | clonk_network::IrcClientEvent::Disconnected { .. } => {}
@@ -2150,7 +2152,7 @@ impl GameApp {
             self.sync_startup_irc_snapshot();
         }
         if let Some(error) = initial_failure {
-            self.startup_irc_client = None;
+            self.chat.client = None;
             self.show_irc_login_on_all_controllers();
             self.show_startup_irc_connect_failure(&error)?;
         }
@@ -5044,7 +5046,7 @@ impl GameApp {
         self.restore_startup_fonts();
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
-        self.running_chat = None;
+        self.chat.running = None;
         self.runtime_client_list = None;
         self.running_dialog_stack.clear();
         self.running_active_dialog = None;
@@ -5445,7 +5447,7 @@ impl GameApp {
             || self.game_option_input_dialog.is_some()
             || self.league_signup_dialog.is_some()
             || self.startup_options_advanced_dialog.is_some()
-            || self.external_irc_dialog_visible
+            || self.chat.external_dialog_visible
             || self.runtime_client_list.is_some()
         {
             return None;
@@ -5516,7 +5518,7 @@ impl GameApp {
                     && self.league_signup_dialog.is_none()
                     && self.message_dialogs.is_empty()
                     && self.startup_player_properties_dialog.is_none()
-                    && !self.external_irc_dialog_visible
+                    && !self.chat.external_dialog_visible
                     && self
                         .network_start_wait
                         .as_ref()

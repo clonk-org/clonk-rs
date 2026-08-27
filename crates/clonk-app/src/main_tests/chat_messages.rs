@@ -124,7 +124,7 @@ fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
     main_assert!(app.mouse_state.is_some_and(|state| state.motion.world_drag_started));
     app.test_left_button(ElementState::Released);
     main_assert!(app.mouse_state.is_none());
-    main_assert!(app.running_chat.is_some());
+    main_assert!(app.chat.running.is_some());
     main_assert_eq!(app.message_dialogs.len() => 1);
     main_assert_eq!(app.running_chat_text() => Some(""));
 }
@@ -1177,7 +1177,7 @@ fn hidden_startup_irc_warning_connects_immediately() {
 
     app.request_startup_irc_connection(login).test_value();
     main_assert_eq!(app.message_dialogs.len() => dialog_count);
-    let client = app.startup_irc_client.test_ref();
+    let client = app.chat.client.test_ref();
     main_assert!(matches!(client.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
     let persisted = Config::load(paths.config_file()).test_value();
     main_assert_eq!(persisted.get_in(Some("IRC"), "Nick") => Some("HiddenNick"));
@@ -1202,8 +1202,8 @@ fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport()
     main_assert!(matches!(handle.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
 
     let mut app = new_classic_running_sandbox_app();
-    app.startup_irc_server = address;
-    app.startup_irc_client = Some(handle);
+    app.chat.server = address;
+    app.chat.client = Some(handle);
     render_mouse_test_app(&mut app);
     let owner = app.local_owner;
     let chat = viewport_button_point(&app, owner, clonk_frontend::hud::ViewportButton::Chat);
@@ -1215,7 +1215,7 @@ fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport()
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    main_assert!(app.external_irc_dialog_visible);
+    main_assert!(app.chat.external_dialog_visible);
     main_assert!(app.startup_irc_client_active());
     app.hide_external_irc_dialog();
     main_assert!(app.startup_irc_client_active());
@@ -1239,7 +1239,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     let embedded_controller_ptr = app.startup_network_dialog.as_ref().map(std::ptr::from_ref);
     app.show_external_irc_dialog().test_value();
     main_assert_ne!(
-        app.external_irc_dialog.as_ref().map(std::ptr::from_ref) =>
+        app.chat.external_dialog.as_ref().map(std::ptr::from_ref) =>
         embedded_controller_ptr,
         "C4ChatDlg must own a distinct C4ChatControl from StartupNetDlg"
     );
@@ -1253,7 +1253,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
 
-    app.external_irc_dialog
+    app.chat.external_dialog
         .test_mut()
         .sync_chat_snapshot(NetDlgChatSnapshot {
             connection_state: NetDlgChatConnectionState::Connected,
@@ -1261,7 +1261,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
             nick: "Clonker".into(),
             ..NetDlgChatSnapshot::default()
         });
-    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Chats);
+    main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Chats);
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDisconnectConfirmationRequested])
         .test_value();
     let confirmation = app.message_dialogs.last().test_value();
@@ -1270,28 +1270,28 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     main_assert_eq!(confirmation.state.button_label(MessageDialogButton::Cancel) => "Abort");
     app.finish_message_dialog(MessageDialogResult::Cancel)
         .test_value();
-    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Chats);
+    main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Chats);
 
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDisconnectConfirmationRequested])
         .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Login);
-    main_assert!(app.external_irc_dialog_visible);
+    main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Login);
+    main_assert!(app.chat.external_dialog_visible);
 
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDialogCloseRequested])
         .test_value();
-    main_assert!(!app.external_irc_dialog_visible);
-    main_assert!(app.external_irc_dialog.is_none());
+    main_assert!(!app.chat.external_dialog_visible);
+    main_assert!(app.chat.external_dialog.is_none());
     main_assert_eq!(app.startup_network_dialog.as_ref().map(std::ptr::from_ref) => embedded_controller_ptr);
 
     app.show_external_irc_dialog().test_value();
-    app.external_irc_dialog
+    app.chat.external_dialog
         .as_mut()
         .test_value()
         .force_chat_mode_and_focus();
     let original_nick = app
-        .external_irc_dialog
+        .chat.external_dialog
         .as_ref()
         .test_value()
         .chat_login()
@@ -1299,19 +1299,19 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     main_assert!(app.context_menu.is_some());
     app.test_text_input('x');
-    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_login().nick => original_nick);
+    main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_login().nick => original_nick);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     main_assert!(app.context_menu.is_none());
-    main_assert!(app.external_irc_dialog_visible);
+    main_assert!(app.chat.external_dialog_visible);
     app.test_text_input('x');
-    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_login().nick => format!("{original_nick}x"));
+    main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_login().nick => format!("{original_nick}x"));
     app.hide_external_irc_dialog();
     app.show_external_irc_dialog().test_value();
-    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_login().nick => original_nick, "closing standalone chat discards its unsent edit state");
+    main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_login().nick => original_nick, "closing standalone chat discards its unsent edit state");
 
     let initial_bounds = app
-        .external_irc_dialog
+        .chat.external_dialog
         .as_ref()
         .and_then(|dialog| dialog.chat_bounds_override())
         .test_value();
@@ -1331,7 +1331,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         GuiPoint::new(drag_start.x + 50.0, drag_start.y + 40.0),
     );
     main_assert_eq!(
-        app.external_irc_dialog
+        app.chat.external_dialog
             .as_ref()
             .and_then(|dialog| dialog.chat_bounds_override()) =>
         Some(initial_bounds),
@@ -1433,7 +1433,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
         app.test_text_input(character);
     }
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(app.running_chat.is_none());
+    main_assert!(app.chat.running.is_none());
     main_assert_eq!(
         commands.take_submitted_messages() =>
         vec![MessageControlData {
@@ -1631,7 +1631,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
     main_assert_eq!(app.message_input_history.front().map(String::as_str) => Some("first"));
 
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(app.running_chat.is_none());
+    main_assert!(app.chat.running.is_none());
     main_assert_eq!(
         commands.take_submitted_messages() =>
         vec![MessageControlData {
@@ -1747,12 +1747,12 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Released)
         .expect("non-character Alt release is also down-only fallthrough"));
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-    main_assert!(app.external_irc_dialog_visible);
-    main_assert!(app.running_chat.is_none());
+    main_assert!(app.chat.external_dialog_visible);
+    main_assert!(app.chat.running.is_none());
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
-    main_assert!(!app.external_irc_dialog_visible);
+    main_assert!(!app.chat.external_dialog_visible);
     app.test_modifiers(ModifiersState::empty());
     app.start_running_chat(RunningChatMode::All);
     for character in "alpha beta".chars() {
