@@ -1477,31 +1477,12 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/StdFile.cpp" > "$gen/wildcard_match.inc"
 
-# 3q. Lift C4ConfigGeneral::GetLanguageSequence and the C4Strings helpers it is
-#     built from. The condensing rule is entirely in those helpers, so lifting
-#     only the caller would pin nothing: SCopySegment does the comma split, the
-#     whitespace skip and -- crucially -- the TRUNCATION to two characters, so
-#     `English` becomes `En` rather than being rejected, and an empty segment is
-#     dropped instead of producing an empty entry.
-#
-#     The whole span from SLen through SCopySegment is taken in one piece: it is
-#     nothing but pure string code, and the individual functions call each other
-#     (SAppend -> SCopy -> SCopyL, SCopySegment -> SCharPos/SAdvanceSpace/
-#     SCopyUntil), so splitting it up would only add anchors that can drift.
-awk '
-  /^char CharCapital\(char cChar\)$/ { p = 1 }
-  /^bool SCopySegmentEx\(/ { found = 1; exit }
-  p { print }
-  END { if (!found) exit 1 }
-' "$src/C4Strings.cpp" > "$gen/c4strings_helpers.inc"
-
-awk '
-  /^const char \*SAdvanceSpace\(const char \*szSPos\)$/ { p = 1 }
-  p { print }
-  p && /^}$/ { found = 1; exit }
-  END { if (!found) exit 1 }
-' "$src/C4Strings.cpp" > "$gen/c4strings_advance_space.inc"
-
+# 3q. Lift C4ConfigGeneral::GetLanguageSequence. The condensing rule it relies
+#     on lives in the C4Strings helpers -- SCopySegment does the comma split,
+#     the whitespace skip and, crucially, the TRUNCATION to two characters, so
+#     `English` becomes `En` rather than being rejected -- and those are no
+#     longer lifted: `src/C4Strings.cpp` is linked whole (see the compile step),
+#     so this caller reaches the real ones.
 awk '
   /^int C4ConfigGeneral::GetLanguageSequence\(const char \*strSource, char \*strTarget\)$/ { p = 1 }
   p { print }
@@ -1614,17 +1595,9 @@ awk '
 
 # Each entry name is `SCopy` of the pattern, `SDelete` of the wildcard, then
 # `SInsert` of the section name at that position -- so the composed name is
-# `Sect` + section name + `.c4g` only because of where the splice lands.
-# SCopy/SCharPos/SEqualNoCase already come from `c4strings_helpers.inc` (3q);
-# these are the two the span there stops short of. Lifting them keeps the real
-# `Sect*.c4g` from the real C4Components.h and the splice that rewrites it
-# honest together.
-awk '
-  /^void SInsert\(char \*szString, const char \*szInsert, size_t iPosition, size_t iMaxLen\)$/ ||
-  /^void SDelete\(char \*szString, size_t iLen, size_t iPosition\)$/ { p = 1; ++found }
-  p { print; if ($0 ~ /^}$/) p = 0 }
-  END { if (found != 2) exit 1 }
-' "$src/C4Strings.cpp" > "$gen/c4strings_insert_delete.inc"
+# `Sect` + section name + `.c4g` only because of where the splice lands. All
+# four come from the linked `src/C4Strings.cpp`, so the real `Sect*.c4g` in the
+# real C4Components.h and the splice that rewrites it stay honest together.
 
 # 3r. Lift C4Value::operator== whole. It is a nested switch on the LEFT tag and
 #     then the right, which is what makes it asymmetric: the object arm demands
@@ -1781,11 +1754,40 @@ awk '
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
 #    then run it to produce the golden JSON. The pinned ExecuteScan body keeps
 #    its intentional nested-if formatting, so suppress only that style warning.
+# C4Group is the first section whose subject is BYTES rather than a call
+# order, so its oracle cannot be a recorder: `src/C4Group.cpp` and the file
+# layer beneath it are linked whole and driven over real temporary files.
+#
+# That link is why the C4Strings helpers are no longer lifted into
+# `oracle_main.cpp` -- the lifted copies would be duplicate symbols beside the
+# real `C4Strings.cpp`. Everything that used them now calls the real thing.
+#
+# SHA1 is the one stub. `C4Group` reaches it only through the `Original` author
+# signature, which no section verifies, and linking it for real would drag in
+# OpenSSL.
+cat > "$gen/stdsha1_stub.cpp" <<'STUB'
+#include <StdSha1.h>
+struct StdSha1::Impl {};
+StdSha1::StdSha1() = default;
+StdSha1::~StdSha1() = default;
+void StdSha1::Update(const void *, std::size_t) {}
+void StdSha1::GetHash(void *) {}
+STUB
+
+# `-std=c++23`: C4Group.h:296,301 use std::to_underlying, which C++20 lacks.
+#     Verified to reproduce the committed golden byte-for-byte, so the other
+#     sections are unaffected by the bump.
+# `-DZLIB_CONST`: StdGzCompressedFile.cpp:108,275 assign a `const uint8_t *` to
+#     zlib's `Bytef *`, which only compiles under zlib's const-correct typing.
 cxx="${CXX:-clang++}"
-"$cxx" -std=c++20 -O0 \
+"$cxx" -std=c++23 -O0 -DZLIB_CONST \
   -Wno-dangling-else \
   -I"$gen" -I"$src" \
-  "$here/oracle_main.cpp" "$gen/sine_table.cpp" \
+  "$here/oracle_main.cpp" "$gen/sine_table.cpp" "$gen/stdsha1_stub.cpp" \
+  "$src/C4Group.cpp" "$src/C4Strings.cpp" "$src/StdFile.cpp" \
+  "$src/CStdFile.cpp" "$src/StdGzCompressedFile.cpp" "$src/StdBuf.cpp" \
+  "$src/C4InputValidation.cpp" \
+  -lz \
   -o "$gen/oracle"
 
 "$gen/oracle" > "$out"

@@ -126,6 +126,8 @@
 #include <C4SolidMaskBitmap.h> // real production active-bitmap mask sampling
 #include <C4Rect.h>            // real production rect, incl. the Scaled() decl
 #include <C4Components.h>     // real C4FLS_Scenario group sort order
+#include <C4Group.h>         // the real group, linked whole (see gen_golden.sh)
+#include <StdFile.h>         // _MAX_FNAME, for the entry-name scratch buffer
 #include <C4Strings.h>       // real declarations (and defaults) for the S* helpers
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
@@ -7091,17 +7093,81 @@ namespace wildcard
 
 } // namespace wildcard
 
-// The pure C4Strings helpers, lifted whole. They must sit at global scope so
-// each definition matches the declaration in the real C4Strings.h -- that
-// header is where the default arguments (SizeMax, ';', false) come from, and
-// SAppend calls SCopy with two arguments relying on exactly that.
-#include "c4strings_helpers.inc"
+// C4Group::Sort, driven through the real linked `src/C4Group.cpp`.
+//
+// This is the first section to use the linked group sources rather than a
+// recorder, and it is deliberately the one that needs no file bytes: `Sort`
+// reorders the in-memory entry list, so nothing here touches a creation stamp,
+// a file mtime or the `#ifdef __linux__` executable bit — the three
+// host-dependent values that have no place in a golden with no platform axis.
+//
+// What it pins, none of which is visible from the sort list alone:
+//
+//   * rank ordering is DESCENDING — `SortRank` returns a higher number for an
+//     earlier pattern and `Sort` keeps the higher rank first
+//     (`C4Group.cpp:2316-2318`);
+//   * an unlisted name ranks 0 and sinks below every listed one;
+//   * ties break on `stricmp` over the raw bytes (`:2320`), case-insensitively;
+//     a name byte above 0x7f is deliberately NOT in this matrix, because
+//     `stricmp` is locale-dependent there and the golden is recorded on one
+//     host and compared on another — it has no platform axis. The port's
+//     `secondary_sort_orders_high_bytes_like_native_stricmp` keeps that case;
+//   * `SortByList(nullptr)` is a no-op returning false (`:2368`), which is what
+//     `c4group -s` relies on;
+//   * `SortByList` picks the list by matching the *group's own filename*
+//     against the `C4CFN_FLS` table with `WildcardMatch`, so the same entries
+//     order differently under `Scenario.c4s` than under an unlisted name.
+namespace c4group_sort
+{
 
-// The span above stops before SInsert/SDelete; SaveScenarioSections needs both
-// to splice a section name over the `*` in `Sect*.c4g`. Same global-scope
-// reasoning: SInsert's iMaxLen default lives in C4Strings.h.
-#include "c4strings_insert_delete.inc"
-#include "c4strings_advance_space.inc"
+// One fixture: the group filename that selects the sort list, and the entries
+// in the order they are added.
+struct Case
+{
+	const char *name;
+	const char *group_filename;
+	std::vector<std::string> entries;
+	bool use_sort_list;
+};
+
+inline std::vector<std::string> run(const Case &c)
+{
+	// Each case creates its group fresh; a leftover from the previous one would
+	// make Open(create) fail.
+	EraseFile(c.group_filename);
+	C4Group grp;
+	if (!grp.Open(c.group_filename, true)) return {"<open-failed>"};
+	for (const auto &entry : c.entries)
+	{
+		// A one-byte in-memory entry with a pinned time and no executable bit:
+		// `Sort` reads only FileName, but AddEntry would otherwise stamp
+		// time(nullptr) into state this section must keep deterministic.
+		static char byte = 'x';
+		if (!grp.Add(entry.c_str(), &byte, 1, false, false, 1, false))
+			return {"<add-failed>"};
+	}
+	// C4CFN_FLS is the pattern/sort-list table the application installs through
+	// C4Group_SetSortList; `C4Group_SortList` itself is a file-scope global in
+	// C4Group.cpp with no header declaration, so the table is passed directly.
+	if (c.use_sort_list)
+		grp.SortByList(C4CFN_FLS, c.group_filename);
+	else
+		grp.SortByList(nullptr, c.group_filename);
+
+	std::vector<std::string> order;
+	grp.ResetSearch();
+	char found[_MAX_FNAME + 1];
+	while (grp.FindNextEntry("*", found)) order.emplace_back(found);
+	return order;
+}
+
+} // namespace c4group_sort
+
+// The C4Strings helpers are no longer lifted: `src/C4Strings.cpp` is linked
+// whole, so every caller here reaches the real definition rather than a copy of
+// it. That is strictly more faithful than the three `.inc` spans this replaced,
+// and it is what makes linking `src/C4Group.cpp` possible at all -- the lifted
+// copies would have been duplicate symbols beside it.
 
 // C4ConfigGeneral::GetLanguageSequence, with the smallest class that lets the
 // real out-of-line definition compile.
@@ -13844,6 +13910,66 @@ int main()
         };
 
         for (const auto &c : cases) run(c);
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4Group::Sort over the real linked group sources. See the namespace
+    // comment for what each row is here to catch.
+    arr_begin("c4group_sort");
+    {
+        using namespace c4group_sort;
+        // `Scenario.c4s` selects C4FLS_Scenario; `Unlisted.dat` matches no
+        // pattern at all, so every entry ranks 0 and the whole order collapses
+        // onto the tie-break.
+        const Case cases[] = {
+            {"scenario_ranks_before_tiebreak", "Scenario.c4s",
+             {"Script.c", "Scenario.txt", "Objects.txt", "Title.txt"}, true},
+            {"unlisted_names_sink_below_listed_ones", "Scenario.c4s",
+             {"zebra.dat", "Scenario.txt", "alpha.dat"}, true},
+            // Every name here is absent from C4FLS_Scenario, so all rank 0 and
+            // the order is decided purely by the stricmp tie-break. A group
+            // whose own FILENAME is unlisted would not sort at all — SortByList
+            // finds no pattern and returns false — which is a different rule.
+            {"equal_rank_breaks_on_case_insensitive_raw_bytes", "Scenario.c4s",
+             {"beta.dat", "Alpha.dat", "ALPHA2.dat", "alpha1.dat"}, true},
+            // An unlisted group filename matches no C4CFN_FLS pattern, so
+            // SortByList returns false and never reaches Sort.
+            {"an_unlisted_group_filename_is_not_sorted_at_all", "Unlisted.dat",
+             {"zebra.dat", "alpha.dat"}, true},
+            // `c4group -s` passes a null list: Sort is never reached and the
+            // insertion order stands.
+            {"a_null_sort_list_keeps_insertion_order", "Scenario.c4s",
+             {"Script.c", "Scenario.txt", "Objects.txt"}, false},
+        };
+
+        for (const auto &c : cases)
+        {
+            const auto order = run(c);
+            sep();
+            printf("{\"case\":\"%s\",\"group\":\"%s\",\"input\":[",
+                   c.name, c.group_filename);
+            for (size_t i = 0; i < c.entries.size(); i++)
+            {
+                if (i) printf(",");
+                printf("\"%s\"", c.entries[i].c_str());
+            }
+            printf("],\"order\":[");
+            for (size_t i = 0; i < order.size(); i++)
+            {
+                if (i) printf(",");
+                printf("\"");
+                for (unsigned char ch : order[i])
+                {
+                    if (ch < 0x20 || ch > 0x7e || ch == '"' || ch == '\\')
+                        printf("\\u%04x", ch);
+                    else
+                        printf("%c", ch);
+                }
+                printf("\"");
+            }
+            printf("]}");
+        }
     }
     arr_end();
     printf(",\n");
