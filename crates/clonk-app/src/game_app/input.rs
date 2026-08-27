@@ -2693,6 +2693,27 @@ impl GameApp {
             self.toggle_runtime_client_list()?;
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
+        // The `C4ToolsDlg` actions, registered at `KEYSCOPE_Console`
+        // immediately after `ConsolePauseToggle` (`C4Game.cpp:3433-3439`), so
+        // they act only in console mode. They take `PRIO_Base` like the pause
+        // key, and lose the same way to a rebound player control.
+        //
+        // `EditCursorModeToggle` (`K_SPACE`) and `EditCursorDelete`
+        // (`K_DELETE`) register in the same block and are deliberately absent:
+        // the console shell owns both for text editing, and reproducing C++'s
+        // GTK edit-box ownership is its own change (clonk-org/clonk-rs#1222).
+        let tools_action = self
+            .console_mode
+            .then(|| self.console_tools_key_action(key, c4_modifiers))
+            .flatten()
+            .filter(|_| !self.local_player_key_binding_in_scope(key));
+        if let Some(action) = tools_action {
+            if state == ElementState::Released {
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
+            }
+            self.execute_console_tools_action(action);
+            return Ok(RuntimeGlobalKeyOutcome::Handled);
+        }
         let debug_keys = [
             (
                 "DbgModeToggle",
@@ -3395,6 +3416,84 @@ impl GameApp {
         // two actions it shadows claims the same code.
         (matches("StatsToggle") && !matches("ChartToggle") && !matches("NetStatsToggle"))
             .then_some(RuntimeCustomGamepadAction::StatsToggle)
+    }
+
+    /// Which `C4ToolsDlg` action a console-scope chord names, if any.
+    ///
+    /// Defaults from `C4Game.cpp:3433-3439`. A configured binding overrides
+    /// the default exactly as every other registered action does.
+    fn console_tools_key_action(
+        &self,
+        key: VirtualKeyCode,
+        c4_modifiers: ModifiersState,
+    ) -> Option<ConsoleToolsAction> {
+        let control = c4_modifiers == ModifiersState::CONTROL;
+        let bare = c4_modifiers.is_empty();
+        [
+            (
+                "ToolsDlgGradeUp",
+                ConsoleToolsAction::GradeUp,
+                key == VirtualKeyCode::NumpadAdd && bare,
+            ),
+            (
+                "ToolsDlgGradeDown",
+                ConsoleToolsAction::GradeDown,
+                key == VirtualKeyCode::NumpadSubtract && bare,
+            ),
+            (
+                "ToolsDlgPopMaterial",
+                ConsoleToolsAction::PopMaterial,
+                key == VirtualKeyCode::KeyM && control,
+            ),
+            (
+                "ToolsDlgPopTextures",
+                ConsoleToolsAction::PopTextures,
+                key == VirtualKeyCode::KeyT && control,
+            ),
+            (
+                "ToolsDlgIFTToggle",
+                ConsoleToolsAction::ToggleIft,
+                key == VirtualKeyCode::KeyI && control,
+            ),
+            (
+                "ToolsDlgToolToggle",
+                ConsoleToolsAction::ToggleTool,
+                key == VirtualKeyCode::KeyW && control,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(name, action, default_matches)| {
+            self.runtime_keyboard_binding_matches(name, key, default_matches)
+                .then_some(action)
+        })
+    }
+
+    /// Run one, with the availability its C++ callback checks for itself.
+    fn execute_console_tools_action(&mut self, action: ConsoleToolsAction) {
+        use crate::developer_toolbox_view::ToolsCombo;
+        use crate::developer_windows::ToolboxPage;
+
+        match action {
+            // `ChangeGrade` bounds into the grade range and has no dialog gate
+            // of its own (`C4ToolsDlg.cpp:739-745`). `change_grade` takes the
+            // step count and applies `GRADE_KEY_STEP` per step, which is the
+            // five grades the key registrations pass.
+            ConsoleToolsAction::GradeUp => self.developer_tools.change_grade(1),
+            ConsoleToolsAction::GradeDown => self.developer_tools.change_grade(-1),
+            ConsoleToolsAction::ToggleIft => self.developer_tools.toggle_ift(),
+            ConsoleToolsAction::ToggleTool => self.developer_tools.toggle_tool(),
+            // `PopMaterial`/`PopTextures` return false without a dialog window
+            // (`C4ToolsDlg.cpp:747-772`), so they pop nothing unless the tools
+            // page is up to hold the combo.
+            ConsoleToolsAction::PopMaterial | ConsoleToolsAction::PopTextures => {
+                if self.developer_toolbox.current_page() == Some(ToolboxPage::Tools) {
+                    self.developer_tools_open_combo = Some(match action {
+                        ConsoleToolsAction::PopTextures => ToolsCombo::Textures,
+                        _ => ToolsCombo::Materials,
+                    });
+                }
+            }
+        }
     }
 
     fn execute_runtime_custom_gamepad_action(

@@ -2456,6 +2456,18 @@ pub(crate) enum RuntimeDebugKey {
     SolidMask,
 }
 
+/// The `C4ToolsDlg` actions registered at `KEYSCOPE_Console`
+/// (`C4Game.cpp:3433-3439`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConsoleToolsAction {
+    GradeUp,
+    GradeDown,
+    PopMaterial,
+    PopTextures,
+    ToggleIft,
+    ToggleTool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeCustomGamepadAction {
     Chat(RunningChatMode),
