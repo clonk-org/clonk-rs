@@ -83,14 +83,64 @@ pub(crate) fn object_list_rows(
     rows
 }
 
-/// How many rows fit, and which one is first, so the selection stays visible.
-fn visible_window(rows: usize, selected_row: Option<usize>, height: u32) -> (usize, usize) {
-    let capacity = (((height as i32 - PADDING * 2 - 2) / ROW_HEIGHT).max(1)) as usize;
-    let first = selected_row
-        .filter(|row| *row >= capacity)
-        .map_or(0, |row| row + 1 - capacity)
-        .min(rows.saturating_sub(capacity.min(rows)));
-    (first, capacity)
+/// The list's retained scroll position.
+///
+/// C++ puts the tree in an automatic scrolled window
+/// (`C4ObjectListDlg.cpp:747-780`), so the position is state of the widget:
+/// `Update` rebuilds the model on every object change and the adjustment does
+/// not move. Deriving the offset from the selection instead — which is what
+/// this replaces — makes every rebuild jump the view and makes scrolling away
+/// from the selection impossible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ObjectListScroll {
+    /// The retained first row. Kept unclamped so a tree that shrinks and grows
+    /// again — objects entering and leaving a container — comes back where the
+    /// user left it rather than at whatever the shortest moment allowed.
+    first: usize,
+}
+
+impl ObjectListScroll {
+    /// How many rows fit in a list of this height.
+    pub(crate) fn capacity(height: u32) -> usize {
+        (((height as i32 - PADDING * 2 - 2) / ROW_HEIGHT).max(1)) as usize
+    }
+
+    /// The first visible row and the capacity, for the tree as it stands now.
+    pub(crate) fn window(&self, rows: usize, height: u32) -> (usize, usize) {
+        let capacity = Self::capacity(height);
+        (self.first.min(Self::last_top(rows, capacity)), capacity)
+    }
+
+    /// Scroll by whole rows, as a wheel notch or a bar arrow does.
+    pub(crate) fn scroll_by(&mut self, delta: i32, rows: usize, height: u32) {
+        let capacity = Self::capacity(height);
+        let last = Self::last_top(rows, capacity);
+        let current = i64::try_from(self.first.min(last)).unwrap_or(i64::MAX);
+        let target = current.saturating_add(i64::from(delta)).max(0);
+        self.first = usize::try_from(target).unwrap_or(usize::MAX).min(last);
+    }
+
+    /// Scroll a row into view, moving as little as possible.
+    ///
+    /// `gtk_tree_view_set_cursor` scrolls the row into view rather than
+    /// centring it, so a row one past the bottom edge moves the window by one.
+    pub(crate) fn reveal(&mut self, row: usize, rows: usize, height: u32) {
+        let capacity = Self::capacity(height);
+        let last = Self::last_top(rows, capacity);
+        let first = self.first.min(last);
+        self.first = if row < first {
+            row
+        } else if row >= first + capacity {
+            (row + 1 - capacity).min(last)
+        } else {
+            first
+        };
+    }
+
+    /// The highest first row that still fills the view.
+    fn last_top(rows: usize, capacity: usize) -> usize {
+        rows.saturating_sub(capacity)
+    }
 }
 
 /// The rectangle a visible row occupies.
@@ -144,12 +194,12 @@ fn icon_rect(row: IntRect, depth: usize, icon: &ImageData) -> Option<IntRect> {
 /// give.
 pub(crate) fn object_list_hit(
     rows: &[ObjectListRow],
-    selected_row: Option<usize>,
+    scroll: ObjectListScroll,
     width: u32,
     height: u32,
     point: (i32, i32),
 ) -> Option<ObjectId> {
-    let (first, capacity) = visible_window(rows.len(), selected_row, height);
+    let (first, capacity) = scroll.window(rows.len(), height);
     let position = GuiPoint::new(point.0 as f32, point.1 as f32);
     rows.iter()
         .enumerate()
@@ -169,6 +219,7 @@ pub(crate) fn render_object_list(
     font: &dyn TextFont,
     rows: &[ObjectListRow],
     selected: &[ObjectId],
+    scroll: ObjectListScroll,
 ) {
     surface.fill(WINDOW_BACKGROUND);
     let (width, height) = (surface.width(), surface.height());
@@ -179,10 +230,7 @@ pub(crate) fn render_object_list(
         (height as i32 - PADDING * 2).max(1),
     );
     draw_sunken(surface, client, CONTROL_BACKGROUND);
-    let first_selected = rows
-        .iter()
-        .position(|row| selected.first().is_some_and(|id| row.id == *id));
-    let (first, capacity) = visible_window(rows.len(), first_selected, height);
+    let (first, capacity) = scroll.window(rows.len(), height);
     for (index, row) in rows.iter().enumerate().skip(first).take(capacity) {
         let rect = row_rect(index, first, width);
         let chosen = selected.contains(&row.id);
@@ -219,6 +267,69 @@ pub(crate) fn render_object_list(
 ))]
 mod tests {
     use super::*;
+
+    /// The list keeps where the user put it.
+    ///
+    /// C++ puts the tree in an automatic scrolled window
+    /// (`C4ObjectListDlg.cpp:747-780`), whose adjustment is state of the
+    /// widget rather than something recomputed from the selection. A rebuild —
+    /// and `Update` rebuilds on every object change — leaves it alone.
+    #[test]
+    fn the_object_list_scroll_offset_survives_a_rebuild_and_clamps_when_the_tree_shrinks() {
+        let height = 8 * ROW_HEIGHT as u32 + (PADDING * 2 + 2) as u32;
+        let mut scroll = ObjectListScroll::default();
+        let capacity = ObjectListScroll::capacity(height);
+        assert_eq!(capacity, 8);
+
+        scroll.scroll_by(5, 100, height);
+        assert_eq!(scroll.window(100, height), (5, 8));
+
+        // A rebuild is not a reason to move.
+        assert_eq!(scroll.window(100, height), (5, 8));
+
+        // Shrinking past the offset pins it to the last full page rather than
+        // leaving the view scrolled past the end.
+        assert_eq!(scroll.window(10, height), (2, 8));
+        // A tree shorter than one page starts at the top.
+        assert_eq!(scroll.window(3, height), (0, 8));
+        assert_eq!(scroll.window(0, height), (0, 8));
+        // Clamping for a short tree is not a *write*: the retained offset
+        // comes back when the tree grows again, which is what makes a live
+        // mutation non-destructive.
+        assert_eq!(scroll.window(100, height), (5, 8));
+    }
+
+    /// Selecting an offscreen row brings it into view, and no further.
+    ///
+    /// `gtk_tree_view_set_cursor` scrolls the row into view rather than
+    /// centring it, so a row just below the last visible one moves the window
+    /// by exactly one.
+    #[test]
+    fn revealing_a_row_moves_the_window_the_minimum_in_either_direction() {
+        let height = 8 * ROW_HEIGHT as u32 + (PADDING * 2 + 2) as u32;
+        let mut scroll = ObjectListScroll::default();
+        scroll.scroll_by(20, 100, height);
+        assert_eq!(scroll.window(100, height).0, 20);
+
+        // Already visible: nothing moves.
+        for row in [20, 24, 27] {
+            scroll.reveal(row, 100, height);
+            assert_eq!(scroll.window(100, height).0, 20, "row {row} was visible");
+        }
+
+        // One past the bottom scrolls by one.
+        scroll.reveal(28, 100, height);
+        assert_eq!(scroll.window(100, height).0, 21);
+
+        // Above the top puts the row first.
+        scroll.reveal(4, 100, height);
+        assert_eq!(scroll.window(100, height).0, 4);
+
+        // Far below lands the row on the last visible line.
+        scroll.reveal(99, 100, height);
+        assert_eq!(scroll.window(100, height).0, 92);
+    }
+
     use clonk_graphics::{BitmapFont, PixelFormat};
 
     fn node(id: u64, contents: Vec<InspectionNode>) -> InspectionNode {
@@ -304,7 +415,7 @@ mod tests {
         assert_eq!(
             object_list_hit(
                 &rows,
-                None,
+                ObjectListScroll::default(),
                 extent.0,
                 extent.1,
                 (first.x + 2, first.y + ROW_HEIGHT / 2)
@@ -317,7 +428,7 @@ mod tests {
         assert_eq!(
             object_list_hit(
                 &rows,
-                None,
+                ObjectListScroll::default(),
                 extent.0,
                 extent.1,
                 (third.x + 2, third.y + ROW_HEIGHT / 2)
@@ -326,46 +437,64 @@ mod tests {
         );
         // Past the last row, and outside the client area, select nothing.
         assert_eq!(
-            object_list_hit(&rows, None, extent.0, extent.1, (10, extent.1 as i32 - 8)),
+            object_list_hit(
+                &rows,
+                ObjectListScroll::default(),
+                extent.0,
+                extent.1,
+                (10, extent.1 as i32 - 8)
+            ),
             None
         );
         assert_eq!(
-            object_list_hit(&rows, None, extent.0, extent.1, (0, 0)),
+            object_list_hit(
+                &rows,
+                ObjectListScroll::default(),
+                extent.0,
+                extent.1,
+                (0, 0)
+            ),
             None
         );
         assert_eq!(
-            object_list_hit(&[], None, extent.0, extent.1, (10, 10)),
+            object_list_hit(
+                &[],
+                ObjectListScroll::default(),
+                extent.0,
+                extent.1,
+                (10, 10)
+            ),
             None
         );
     }
 
-    // A list longer than the window scrolls to keep the selection on screen,
-    // and the row a click resolves to is the row that was drawn there.
+    // The row a click resolves to is the row that was drawn there, wherever
+    // the retained offset has put the window.
     #[test]
-    fn object_list_scrolls_to_the_selection_and_hit_testing_follows_it() {
+    fn object_list_hit_testing_follows_the_retained_scroll_offset() {
         let rows = object_list_rows(
             &(0..100).map(|id| node(id, vec![])).collect::<Vec<_>>(),
             |id| format!("Object {}", id.as_u64()),
             |_| None,
         );
         let (width, height) = (OBJECT_LIST_WIDTH, 100);
-        let (first, capacity) = visible_window(rows.len(), Some(80), height);
+        let mut scroll = ObjectListScroll::default();
+        scroll.reveal(80, rows.len(), height);
+        let (first, capacity) = scroll.window(rows.len(), height);
         assert_eq!(capacity, 3, "24px icons determine the fixed row metric");
         assert_eq!(
             first + capacity - 1,
             80,
-            "the selected row is the last one on screen"
+            "revealing puts the row on the last visible line"
         );
         let rect = row_rect(80, first, width);
         assert_eq!(
-            object_list_hit(&rows, Some(80), width, height, (rect.x + 2, rect.y + 2)),
+            object_list_hit(&rows, scroll, width, height, (rect.x + 2, rect.y + 2)),
             Some(ObjectId::new(80))
         );
-        // A selection already on screen does not scroll at all.
-        assert_eq!(visible_window(rows.len(), Some(0), height).0, 0);
-        assert_eq!(visible_window(rows.len(), None, height).0, 0);
         // The window never scrolls past the end of the list.
-        let (first, capacity) = visible_window(rows.len(), Some(99), height);
+        scroll.reveal(99, rows.len(), height);
+        let (first, capacity) = scroll.window(rows.len(), height);
         assert!(first + capacity <= rows.len());
     }
 
@@ -380,8 +509,10 @@ mod tests {
             (600, 800),
         ] {
             let mut surface = Surface::new(width, height, PixelFormat::Rgba8888);
-            render_object_list(&mut surface, &font, &rows, &[ObjectId::new(3)]);
-            let _ = object_list_hit(&rows, Some(2), width, height, (5, 5));
+            let mut scroll = ObjectListScroll::default();
+            scroll.reveal(2, rows.len(), height);
+            render_object_list(&mut surface, &font, &rows, &[ObjectId::new(3)], scroll);
+            let _ = object_list_hit(&rows, scroll, width, height, (5, 5));
         }
     }
 }
