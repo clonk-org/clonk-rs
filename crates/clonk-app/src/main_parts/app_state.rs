@@ -461,6 +461,12 @@ pub(crate) struct GameApp {
     /// The property pane's retained first visible line
     /// (`C4PropertyDlg.cpp:257-262`).
     pub(crate) developer_property_scroll: crate::developer_toolbox_view::LineScroll,
+    /// The viewport whose scroll thumb is being dragged, and on which axis.
+    ///
+    /// Per physical viewport: two detached windows can be dragged one after
+    /// the other without the first one's capture answering for the second.
+    pub(crate) console_viewport_scroll_drag:
+        Option<(u64, clonk_engine::developer_viewport::ScrollAxis)>,
     pub(crate) console_viewport_projections:
         std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
     /// The last pointer position in world coordinates, so a held drag can

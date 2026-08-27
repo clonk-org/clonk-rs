@@ -6,6 +6,13 @@
 
 use super::*;
 
+/// The detached viewport bars' thickness.
+///
+/// One constant because the drawing and the hit test have to agree: a bar the
+/// pointer misses by two pixels is worse than no bar. Wide enough to hit,
+/// narrow enough not to eat the view a 400x250 window starts with.
+const CONSOLE_SCROLL_BAR_THICKNESS: i32 = 6;
+
 impl GameApp {
     /// Compose the port's opt-in diagnostics overlay (`Graphics.ShowStats`,
     /// plus a default-unbound `StatsToggle` key — both off by default).
@@ -4271,6 +4278,116 @@ impl GameApp {
             .is_some()
     }
 
+    /// The bars a detached viewport window is currently showing, if any.
+    ///
+    /// `None` while the player lock is on, which is what hides them:
+    /// `ScrollBarsByViewPosition` returns false immediately when locked
+    /// (`C4Viewport.cpp:272`).
+    fn console_viewport_scroll_bars(
+        &self,
+        identity: u64,
+        extent: (u32, u32),
+    ) -> Option<(
+        clonk_engine::developer_viewport::ScrollBarLayout,
+        clonk_engine::developer_viewport::ScrollRange,
+        clonk_engine::developer_viewport::ScrollRange,
+        (i32, i32),
+    )> {
+        use clonk_engine::developer_viewport::{scroll_bar_layout, scroll_ranges};
+
+        let (view_x, view_y, view_width, view_height) =
+            self.graphics.detached_viewport_view(identity)?;
+        let landscape = self.snapshot.landscape.as_ref()?;
+        let ranges = scroll_ranges(
+            self.console_viewport_player_lock(identity),
+            view_x,
+            view_y,
+            view_width,
+            view_height,
+            landscape.width() as i32,
+            landscape.estimated_height().max(1),
+        )?;
+        let layout = scroll_bar_layout(
+            Some(ranges),
+            extent.0 as i32,
+            extent.1 as i32,
+            CONSOLE_SCROLL_BAR_THICKNESS,
+        )?;
+        Some((layout, ranges.0, ranges.1, (view_width, view_height)))
+    }
+
+    /// A press inside a detached viewport window's scroll chrome.
+    ///
+    /// Returns whether the chrome took it. A press it takes never reaches the
+    /// gameplay or editor routing underneath — the bars are window chrome, and
+    /// in C++ they are separate child controls that Windows dispatches to
+    /// before the viewport ever sees a message.
+    pub(crate) fn console_viewport_scroll_press(
+        &mut self,
+        identity: u64,
+        point: (i32, i32),
+        extent: (u32, u32),
+    ) -> bool {
+        use clonk_engine::developer_viewport::{scroll_bar_hit, scroll_bar_step, ScrollBarPart};
+
+        let Some((layout, horizontal, vertical, view)) =
+            self.console_viewport_scroll_bars(identity, extent)
+        else {
+            return false;
+        };
+        let Some(press) = scroll_bar_hit(&layout, point) else {
+            return false;
+        };
+        if press.part == ScrollBarPart::Thumb {
+            self.console_viewport_scroll_drag = Some((identity, press.axis));
+            return true;
+        }
+        let (dx, dy) = scroll_bar_step(press.axis, press.part, view);
+        let _ = (horizontal, vertical);
+        self.scroll_console_viewport(identity, dx, dy);
+        true
+    }
+
+    /// Pointer motion while a thumb is held.
+    pub(crate) fn console_viewport_scroll_drag(
+        &mut self,
+        identity: u64,
+        point: (i32, i32),
+        extent: (u32, u32),
+    ) -> bool {
+        use clonk_engine::developer_viewport::{scroll_bar_thumb_position, ScrollAxis};
+
+        let Some((held, axis)) = self.console_viewport_scroll_drag else {
+            return false;
+        };
+        if held != identity {
+            return false;
+        }
+        let Some((layout, horizontal, vertical, _)) =
+            self.console_viewport_scroll_bars(identity, extent)
+        else {
+            return false;
+        };
+        let range = match axis {
+            ScrollAxis::Horizontal => horizontal,
+            ScrollAxis::Vertical => vertical,
+        };
+        let target = scroll_bar_thumb_position(axis, &layout, range, point);
+        // `SB_THUMBTRACK` assigns the position; the port's viewport moves by a
+        // delta, so the delta is whatever closes the gap.
+        let delta = target - range.position;
+        match axis {
+            ScrollAxis::Horizontal => self.scroll_console_viewport(identity, delta, 0),
+            ScrollAxis::Vertical => self.scroll_console_viewport(identity, 0, delta),
+        };
+        true
+    }
+
+    /// Release the thumb, whichever window holds it.
+    pub(crate) fn console_viewport_scroll_release(&mut self) -> bool {
+        self.console_viewport_scroll_drag.take().is_some()
+    }
+
     /// `C4EditCursor::AltDown`/`AltUp` (`C4EditCursor.cpp:773-792`).
     ///
     /// Alt selects the picker for as long as it is held and restores the
@@ -4770,22 +4887,24 @@ impl GameApp {
     ) {
         use clonk_engine::developer_viewport::scroll_bar_layout;
 
-        /// Wide enough to hit with a pointer, narrow enough not to eat the
-        /// view a 400x250 window starts with.
-        const THICKNESS: i32 = 6;
-
         let Some(layout) = scroll_bar_layout(
             ranges,
             surface.width() as i32,
             surface.height() as i32,
-            THICKNESS,
+            CONSOLE_SCROLL_BAR_THICKNESS,
         ) else {
             return;
         };
         let track = clonk_graphics::Color::opaque(24, 24, 24);
         let thumb = clonk_graphics::Color::opaque(168, 168, 168);
+        let arrow = clonk_graphics::Color::opaque(104, 104, 104);
         for bar in [layout.horizontal, layout.vertical] {
             Self::fill_surface_rect(surface, bar.track, track);
+            // Drawn before the thumb, so a thumb that has slid under an arrow
+            // still reads as the thumb.
+            for end in clonk_engine::developer_viewport::scroll_bar_arrows(bar) {
+                Self::fill_surface_rect(surface, end, arrow);
+            }
             Self::fill_surface_rect(surface, bar.thumb, thumb);
         }
     }

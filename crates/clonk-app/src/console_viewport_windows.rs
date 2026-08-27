@@ -351,6 +351,14 @@ pub(crate) fn handle_console_viewport_event(
                 windows.request_redraw(key);
                 return;
             }
+            // A held scroll thumb owns the pointer for the whole drag, even
+            // once it leaves the bar — that is what capture means, and it is
+            // why the drag is tracked per viewport rather than per press.
+            if app.console_viewport_scroll_drag(identity, surface_local, viewport.surface_extent())
+            {
+                windows.request_redraw(key);
+                return;
+            }
             let modifiers = app.keyboard_modifiers;
             app.console_viewport_motion(
                 identity,
@@ -379,6 +387,11 @@ pub(crate) fn handle_console_viewport_event(
             // the item may already have closed the menu, so the grab is what
             // is asked, not whether a popup is still open.
             let identity = viewport.identity;
+            // Ending a thumb drag is the whole of this release: the press that
+            // started it never reached the editor, so neither does its end.
+            if app.console_viewport_scroll_release() {
+                return;
+            }
             if app.take_console_viewport_pointer_grab(identity)
                 || app.console_viewport_context_menu_owns_pointer(identity)
             {
@@ -404,6 +417,14 @@ pub(crate) fn handle_console_viewport_event(
             // GTK menu holds a pointer grab, so neither ever lets one through
             // to the viewport underneath.
             if app.console_viewport_context_menu_click(identity, surface_local, extent) {
+                windows.request_redraw(key);
+                return;
+            }
+            // The scroll bars are window chrome: in C++ they are separate
+            // child controls, and Windows dispatches to them before the
+            // viewport sees a message at all. A press they take must not leak
+            // into gameplay or editor routing.
+            if app.console_viewport_scroll_press(identity, surface_local, extent) {
                 windows.request_redraw(key);
                 return;
             }
