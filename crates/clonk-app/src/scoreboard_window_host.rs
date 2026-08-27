@@ -19,6 +19,10 @@ use crate::software_window::{build_software_window, SoftwarePresent, SoftwareWin
 use crate::GameApp;
 use winit::event_loop::ActiveEventLoop;
 
+/// `C4ScoreboardDlg::GetID()` (`C4Scoreboard.h:107`), which is what names the
+/// dialog's remembered geometry entry.
+pub(crate) const SCOREBOARD_DIALOG_ID: &str = "Scoreboard";
+
 pub struct ScoreboardWindowHost {
     pub(crate) surface: SoftwareWindow,
 }
@@ -29,6 +33,7 @@ pub(crate) fn build_scoreboard_window(
     title: &str,
     width: u32,
     height: u32,
+    position: Option<(i32, i32)>,
 ) -> anyhow::Result<ScoreboardWindowHost> {
     Ok(ScoreboardWindowHost {
         surface: build_software_window(
@@ -37,7 +42,9 @@ pub(crate) fn build_scoreboard_window(
             // No `WS_THICKFRAME`: the dialog sizes itself.
             false,
             false,
-            None,
+            // `CStdWindow::RestorePosition` places the window from the stored
+            // entry as it is created (`StdRegistry.cpp:300-327`).
+            position,
             width,
             height,
             "console scoreboard",
@@ -48,6 +55,11 @@ pub(crate) fn build_scoreboard_window(
 impl ScoreboardWindowHost {
     pub(crate) fn surface_extent(&self) -> (u32, u32) {
         self.surface.surface_extent()
+    }
+
+    /// Where the window is now, for the entry stored when it closes.
+    pub(crate) fn position(&self) -> Option<(i32, i32)> {
+        self.surface.position()
     }
 
     /// Follow `Dialog::UpdateSize`, which resizes the console window whenever

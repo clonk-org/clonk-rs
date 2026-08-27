@@ -92,6 +92,30 @@ pub(crate) fn viewport_position_key(player: i32) -> String {
     format!("Viewport{}", player.saturating_add(1))
 }
 
+/// The `ConsoleGUI_{GetID()}` key a console **dialog** remembers its geometry
+/// under (`DialogWindow::GetPositionData`, `C4GuiDialogs.cpp:285-297`).
+///
+/// The same `Console` subkey as the console's own `Main` entry and a
+/// viewport's, keyed on the dialog's own `GetID()` — `"Scoreboard"` for
+/// `C4ScoreboardDlg` (`C4Scoreboard.h:107`). A dialog whose `GetID()` is empty
+/// gets no entry at all (`:287`), which is what `None` means here.
+pub(crate) fn console_dialog_position_key(dialog_id: &str) -> Option<String> {
+    (!dialog_id.is_empty()).then(|| format!("ConsoleGUI_{dialog_id}"))
+}
+
+/// A console dialog's entry. `GetPositionData` sets `storeSize = true`
+/// (`C4GuiDialogs.cpp:291`), so it is the same four-field form a viewport
+/// writes rather than the console's own two-field one.
+///
+/// The stored size is written but is not what the dialog ends up at: every
+/// `C4ScoreboardDlg::Update` runs `Dialog::UpdateSize`, which resizes the
+/// window from the dialog's recomputed bounds (`C4GuiDialogs.cpp:445-473`).
+/// Restoring it still matters for the frame between window creation and the
+/// first update, and for byte-parity with the config C++ writes.
+pub(crate) fn format_console_dialog_position(x: i32, y: i32, width: i32, height: i32) -> String {
+    format_viewport_position(x, y, width, height)
+}
+
 /// A viewport's entry. `GetPositionData` sets `storeSize = true`
 /// (`C4Viewport.cpp:221`), so unlike the console this is the four-field form
 /// (`StdRegistry.cpp:296-297`) and the remembered size comes back with the

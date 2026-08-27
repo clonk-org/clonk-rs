@@ -3881,6 +3881,47 @@ pub(crate) fn store_viewport_window_position(
     )
 }
 
+/// A console dialog's remembered geometry (`DialogWindow::GetPositionData`,
+/// `C4GuiDialogs.cpp:285-297`). Same `Console` section, keyed
+/// `ConsoleGUI_{GetID()}`.
+pub(crate) fn load_console_dialog_window_position(
+    paths: Option<&AppPaths>,
+    dialog_id: &str,
+) -> Option<crate::console_window_position::ConsoleWindowPlacement> {
+    let key = crate::console_window_position::console_dialog_position_key(dialog_id)?;
+    native_config_text(
+        &load_native_config_bytes(paths),
+        crate::console_window_position::CONSOLE_POSITION_SECTION,
+        &key,
+    )
+    .as_deref()
+    .and_then(crate::console_window_position::parse_console_position)
+}
+
+/// Stores it. `storeSize` is set for a dialog, so the size goes with the
+/// position, exactly as it does for a viewport.
+pub(crate) fn store_console_dialog_window_position(
+    paths: &AppPaths,
+    dialog_id: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> io::Result<()> {
+    let Some(key) = crate::console_window_position::console_dialog_position_key(dialog_id) else {
+        return Ok(());
+    };
+    let value = crate::console_window_position::format_console_dialog_position(x, y, width, height);
+    persist_native_config_values(
+        paths,
+        crate::console_window_position::CONSOLE_POSITION_SECTION,
+        &[(
+            key.as_str(),
+            clonk_app_netplay::NativeConfigValue::RawAscii(&value),
+        )],
+    )
+}
+
 /// `Graphics.VerboseObjectLoading`, default 0 (C4Config.cpp:453). Gates the
 /// definition and particle loading diagnostics in `clonk-engine`.
 pub(crate) fn load_verbose_object_loading(paths: Option<&AppPaths>) -> i32 {

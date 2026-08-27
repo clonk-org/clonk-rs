@@ -282,7 +282,15 @@ pub(crate) fn reconcile_console_scoreboard_window(
     let chrome = app.console_scoreboard_window_chrome();
     match (chrome, key) {
         (Some((title, width, height)), None) => {
-            match build_scoreboard_window(target, &title, width, height) {
+            // `CStdWindow::RestorePosition` reads the stored entry as the
+            // window is created (`StdRegistry.cpp:300-327`); a missing or
+            // unparsable one simply leaves the platform default.
+            let restored = crate::load_console_dialog_window_position(
+                app.app_paths.as_ref(),
+                crate::scoreboard_window_host::SCOREBOARD_DIALOG_ID,
+            )
+            .and_then(crate::console_window_position::ConsoleWindowPlacement::position);
+            match build_scoreboard_window(target, &title, width, height, restored) {
                 Ok(host) => {
                     let key = WindowId(*next_key);
                     *next_key += 1;
@@ -314,11 +322,48 @@ pub(crate) fn reconcile_console_scoreboard_window(
         // No dialog, or a board that cannot be laid out — both are states in
         // which C++ has no window either.
         (None, Some(key)) => {
+            store_console_scoreboard_geometry(app, windows, key);
             windows.close(key);
             // `Dialog::Close` hands focus back to the parent console.
             windows.show_and_focus(crate::developer_windows::SHELL_WINDOW);
         }
         (None, None) => {}
+    }
+}
+
+/// Remember where the scoreboard window was before it is destroyed.
+///
+/// `CStdWindow::StorePosition` writes the entry on the way down
+/// (`StdRegistry.cpp:290-298`), and `GetPositionData` sets `storeSize` for a
+/// dialog (`C4GuiDialogs.cpp:291`), so the size goes with the position even
+/// though the dialog resizes itself again on its next Update.
+fn store_console_scoreboard_geometry(
+    app: &crate::GameApp,
+    windows: &DeveloperWindows<DeveloperHost>,
+    key: WindowId,
+) {
+    let Some(paths) = app.app_paths.as_ref() else {
+        return;
+    };
+    let Some(board) = windows.host(key).and_then(|host| match host {
+        DeveloperHost::Scoreboard(board) => Some(board),
+        _ => None,
+    }) else {
+        return;
+    };
+    let Some((x, y)) = board.position() else {
+        return;
+    };
+    let (width, height) = board.surface_extent();
+    if let Err(error) = crate::store_console_dialog_window_position(
+        paths,
+        crate::scoreboard_window_host::SCOREBOARD_DIALOG_ID,
+        x,
+        y,
+        width as i32,
+        height as i32,
+    ) {
+        tracing::warn!(%error, "failed to store the console scoreboard geometry");
     }
 }
 
@@ -341,6 +386,7 @@ pub(crate) fn handle_console_scoreboard_event(
             event: WindowEvent::CloseRequested,
             ..
         } => {
+            store_console_scoreboard_geometry(app, windows, key);
             app.close_scoreboard_dialog();
             windows.close(key);
             windows.show_and_focus(crate::developer_windows::SHELL_WINDOW);
