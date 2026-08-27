@@ -4120,11 +4120,19 @@ fn rejected_stabilize_keeps_the_trial_update_pos_sector_links_like_cpp() {
     engine.set_materials(materials);
     engine.set_landscape(Landscape::flat_with_material(120, 50, Some(earth)));
 
-    let mut definition = test_definition("SRJT", "Rejected stabilizer", "");
+    let mut definition = test_definition(
+        "SRJT",
+        "Rejected stabilizer",
+        "protected func Probe() { AddEffect(\"Nothing\", this, 1, 0, this); return 0; }",
+    );
     definition.set_rotateable(1);
     definition.set_contact_density(50);
     definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
+    // Execute invokes TimerCall after movement without an unconditional
+    // UpdatePos (oracle-src-pinned src/C4Object.cpp:1069-1103).
+    definition.set_timer(1);
+    definition.set_timer_call(Some("Probe".to_string()));
     engine.register_test_definition(definition);
 
     let object_id =
@@ -4153,6 +4161,18 @@ fn rejected_stabilize_keeps_the_trial_update_pos_sector_links_like_cpp() {
             .shape_ids(sector::SectorKey::Inside { x: 1, y: 0 })
             .is_empty(),
         "sector links remain those produced by the upright trial UpdateShape"
+    );
+
+    engine.tick_without_snapshot().test_value();
+
+    unit_assert!(
+        engine
+            .sectors
+            .as_ref()
+            .expect("sectors exist")
+            .shape_ids(sector::SectorKey::Inside { x: 1, y: 0 })
+            .is_empty(),
+        "the rest of C4Object::Execute does not refresh the restored tilted shape (C4Object.cpp:1069-1103)"
     );
 }
 
