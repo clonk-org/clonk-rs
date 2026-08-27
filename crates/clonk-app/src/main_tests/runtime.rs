@@ -5407,6 +5407,94 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
     runtime_assert!(!app.developer_property_page_click(button, extent));
 }
 
+/// The keyboard cursor is separate from the selection, as GTK's is.
+///
+/// `gtk_tree_selection_set_mode(selection, GTK_SELECTION_MULTIPLE)`
+/// (`C4ObjectListDlg.cpp:777-779`) is what makes the distinction meaningful: a
+/// plain arrow moves the cursor and takes the selection with it, Ctrl moves the
+/// cursor alone, and Ctrl+Space then selects what it is on without disturbing
+/// what is already selected.
+#[test]
+fn object_list_arrow_keys_move_the_selection_and_ctrl_moves_only_the_cursor() {
+    use clonk_engine::developer_selection::SelectionWriter;
+    use crate::developer_object_list_view::ObjectListKey;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    let definition = app
+        .snapshot
+        .objects
+        .first()
+        .test_value()
+        .definition_id
+        .clone();
+    for _ in 0..4 {
+        app.engine
+            .spawn_test_object(clonk_engine::SpawnConfig::new(definition.clone()));
+    }
+    app.snapshot = app.engine.snapshot();
+    let height = 240u32;
+    let rows = app.developer_object_list_rows_for_test();
+    runtime_assert!(rows.len() >= 4);
+
+    // With no cursor, the first key lands on the first row and selects it.
+    runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, false, false, height));
+    runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[0].id));
+    runtime_assert_eq!(app.developer_selection.objects() => &[rows[0].id]);
+
+    // A plain arrow takes the selection with it.
+    runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, false, false, height));
+    runtime_assert_eq!(app.developer_selection.objects() => &[rows[1].id]);
+
+    // Ctrl moves the cursor and leaves the selection where it was.
+    runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, true, false, height));
+    runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[2].id));
+    runtime_assert_eq!(
+        app.developer_selection.objects() => &[rows[1].id],
+        "Ctrl+arrow is a cursor move, not a selection change",
+    );
+
+    // Ctrl+Space then adds what the cursor is on.
+    runtime_assert!(app.toggle_developer_object_list_cursor_selection());
+    let mut selected = app.developer_selection.objects().to_vec();
+    selected.sort_by_key(|id| id.as_u64());
+    let mut expected = vec![rows[1].id, rows[2].id];
+    expected.sort_by_key(|id| id.as_u64());
+    runtime_assert_eq!(selected => expected);
+    // And removes it again.
+    runtime_assert!(app.toggle_developer_object_list_cursor_selection());
+    runtime_assert_eq!(app.developer_selection.objects() => &[rows[1].id]);
+
+    // Home returns to the top, and asking again claims nothing.
+    runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Home, false, false, height));
+    runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[0].id));
+    runtime_assert!(
+        !app.navigate_developer_object_list(ObjectListKey::Home, false, false, height),
+        "already at the top: the key is left unclaimed"
+    );
+    runtime_assert!(
+        !app.navigate_developer_object_list(ObjectListKey::Up, false, false, height),
+        "and there is nowhere above it"
+    );
+
+    // Shift extends a range from the anchor the last plain move set.
+    runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, false, true, height));
+    runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, false, true, height));
+    let mut extended = app.developer_selection.objects().to_vec();
+    extended.sort_by_key(|id| id.as_u64());
+    let mut range = vec![rows[0].id, rows[1].id, rows[2].id];
+    range.sort_by_key(|id| id.as_u64());
+    runtime_assert_eq!(extended => range, "Shift covers the anchor through the cursor");
+
+    // A click resets both, the way `set_cursor` does.
+    app.developer_selection
+        .clear(SelectionWriter::ObjectTree);
+    let rect = crate::developer_object_list_view::object_list_row_rect_for_test(1, 200);
+    app.developer_object_list_click((rect.x + rect.w - 4, rect.y + rect.h / 2), (200, height));
+    runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[1].id));
+    runtime_assert_eq!(app.developer_selection.objects() => &[rows[1].id]);
+}
+
 /// The tree opens on the expander and stays open across a rebuild.
 ///
 /// `C4ObjectListDlg::Open` builds a plain `GtkTreeView` over a hierarchical

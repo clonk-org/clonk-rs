@@ -261,6 +261,92 @@ pub(crate) fn object_list_row_rect_for_test(index: usize, width: u32) -> IntRect
     row_rect(index, 0, width)
 }
 
+/// A navigation key the tree understands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObjectListKey {
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    /// Close the row, or step out to its parent.
+    Left,
+    /// Open the row, or step into it.
+    Right,
+}
+
+/// What a navigation key asked the list to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObjectListNavigation {
+    /// Put the cursor on this row.
+    MoveCursor(ObjectId),
+    Expand(ObjectId),
+    Collapse(ObjectId),
+}
+
+/// Resolve a navigation key against the rows that are on screen.
+///
+/// `C4ObjectListDlg` builds a stock `GtkTreeView` (`C4ObjectListDlg.cpp:
+/// 726-787`), so its key handling is GTK's: the cursor walks the *visible*
+/// rows, stepping over a closed container rather than into it, and Left/Right
+/// work the disclosure before they work the cursor.
+///
+/// Returns `None` when the key asks for something the list cannot do — the end
+/// of the list, or a leaf asked to open — which is what leaves the key
+/// unclaimed.
+pub(crate) fn object_list_navigate(
+    rows: &[ObjectListRow],
+    cursor: Option<ObjectId>,
+    key: ObjectListKey,
+    page: usize,
+) -> Option<ObjectListNavigation> {
+    if rows.is_empty() {
+        return None;
+    }
+    // A cursor whose row is no longer drawn — its container was closed, or the
+    // object left the world — is not a position, so the first key starts over.
+    let Some(index) = cursor.and_then(|id| rows.iter().position(|row| row.id == id)) else {
+        return Some(ObjectListNavigation::MoveCursor(rows[0].id));
+    };
+    let last = rows.len() - 1;
+    let page = page.max(1);
+    let row = &rows[index];
+
+    let target = match key {
+        ObjectListKey::Up => index.checked_sub(1)?,
+        ObjectListKey::Down => (index < last).then_some(index + 1)?,
+        ObjectListKey::Home => 0,
+        ObjectListKey::End => last,
+        ObjectListKey::PageUp => index.saturating_sub(page),
+        ObjectListKey::PageDown => (index + page).min(last),
+        ObjectListKey::Right => {
+            return match (row.has_children, row.expanded) {
+                (true, false) => Some(ObjectListNavigation::Expand(row.id)),
+                // The child of an open row is the next visible row, by
+                // construction: contents follow their container.
+                (true, true) => rows
+                    .get(index + 1)
+                    .map(|child| ObjectListNavigation::MoveCursor(child.id)),
+                (false, _) => None,
+            };
+        }
+        ObjectListKey::Left => {
+            if row.expanded {
+                return Some(ObjectListNavigation::Collapse(row.id));
+            }
+            // Step out: the parent is the nearest earlier row one step
+            // shallower, which is what a path walk would find.
+            return rows[..index]
+                .iter()
+                .rposition(|candidate| candidate.depth + 1 == row.depth)
+                .map(|parent| ObjectListNavigation::MoveCursor(rows[parent].id));
+        }
+    };
+
+    (target != index).then(|| ObjectListNavigation::MoveCursor(rows[target].id))
+}
+
 /// What a click on the list asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ObjectListClick {
@@ -465,6 +551,168 @@ mod tests {
             id: ObjectId::new(id),
             contents,
         }
+    }
+
+    /// Arrow keys walk the rows that are actually on screen.
+    ///
+    /// `GtkTreeView`'s cursor moves through the *visible* rows, so a closed
+    /// container's contents are stepped over rather than descended into — the
+    /// same rows `object_list_rows` produces (`C4ObjectListDlg.cpp:726-787`
+    /// builds a stock tree view, whose key handling is GTK's).
+    #[test]
+    fn arrow_keys_walk_the_visible_rows_and_stop_at_the_ends() {
+        let tree = vec![
+            node(1, vec![node(2, vec![]), node(3, vec![])]),
+            node(4, vec![]),
+        ];
+        let name = |id: ObjectId| format!("Object {}", id.as_u64());
+        let icon = |_: ObjectId| None;
+        let closed = object_list_rows(&tree, &ObjectTreeExpansion::default(), name, icon);
+
+        // Closed: rows are 1 and 4, so Down from 1 reaches 4.
+        assert_eq!(
+            object_list_navigate(&closed, None, ObjectListKey::Down, 8),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(1))),
+            "with no cursor, the first key lands on the first row"
+        );
+        assert_eq!(
+            object_list_navigate(&closed, Some(ObjectId::new(1)), ObjectListKey::Down, 8),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(4)))
+        );
+        assert_eq!(
+            object_list_navigate(&closed, Some(ObjectId::new(4)), ObjectListKey::Down, 8),
+            None,
+            "the last row is the end"
+        );
+        assert_eq!(
+            object_list_navigate(&closed, Some(ObjectId::new(1)), ObjectListKey::Up, 8),
+            None,
+            "and the first row is the other end"
+        );
+
+        // Open: the contents are now rows, so Down descends into them.
+        let mut expansion = ObjectTreeExpansion::default();
+        expansion.toggle(ObjectId::new(1));
+        let open = object_list_rows(&tree, &expansion, name, icon);
+        assert_eq!(
+            object_list_navigate(&open, Some(ObjectId::new(1)), ObjectListKey::Down, 8),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(2)))
+        );
+
+        // A cursor on a row that is no longer visible starts over.
+        assert_eq!(
+            object_list_navigate(&closed, Some(ObjectId::new(2)), ObjectListKey::Down, 8),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(1))),
+            "a cursor inside a closed container is not a position"
+        );
+
+        // Nothing to walk.
+        assert_eq!(
+            object_list_navigate(&[], None, ObjectListKey::Down, 8),
+            None
+        );
+        assert_eq!(object_list_navigate(&[], None, ObjectListKey::End, 8), None);
+    }
+
+    /// Home, End and the page keys address the visible list.
+    #[test]
+    fn home_end_and_page_keys_move_by_the_list_and_by_the_page() {
+        let tree = (0..20).map(|id| node(id, vec![])).collect::<Vec<_>>();
+        let rows = object_list_rows(
+            &tree,
+            &ObjectTreeExpansion::default(),
+            |id| format!("Object {}", id.as_u64()),
+            |_| None,
+        );
+        let page = 6;
+
+        assert_eq!(
+            object_list_navigate(&rows, Some(ObjectId::new(9)), ObjectListKey::Home, page),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(0)))
+        );
+        assert_eq!(
+            object_list_navigate(&rows, Some(ObjectId::new(9)), ObjectListKey::End, page),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(19)))
+        );
+        assert_eq!(
+            object_list_navigate(&rows, Some(ObjectId::new(9)), ObjectListKey::PageDown, page),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(15)))
+        );
+        assert_eq!(
+            object_list_navigate(&rows, Some(ObjectId::new(9)), ObjectListKey::PageUp, page),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(3)))
+        );
+        // A page that would run off either end stops at it rather than
+        // refusing to move.
+        assert_eq!(
+            object_list_navigate(&rows, Some(ObjectId::new(2)), ObjectListKey::PageUp, page),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(0)))
+        );
+        assert_eq!(
+            object_list_navigate(
+                &rows,
+                Some(ObjectId::new(17)),
+                ObjectListKey::PageDown,
+                page
+            ),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(19)))
+        );
+        // Already there: nothing to do.
+        assert_eq!(
+            object_list_navigate(&rows, Some(ObjectId::new(0)), ObjectListKey::Home, page),
+            None
+        );
+    }
+
+    /// Left and right work the disclosure before they work the cursor.
+    ///
+    /// GTK's tree view gives Right two jobs: open a closed row, or step into
+    /// an already-open one. Left is the mirror — close an open row, or step
+    /// out to the parent.
+    #[test]
+    fn left_and_right_expand_collapse_then_move() {
+        let tree = vec![
+            node(1, vec![node(2, vec![node(3, vec![])])]),
+            node(4, vec![]),
+        ];
+        let name = |id: ObjectId| format!("Object {}", id.as_u64());
+        let icon = |_: ObjectId| None;
+
+        let mut expansion = ObjectTreeExpansion::default();
+        let closed = object_list_rows(&tree, &expansion, name, icon);
+        assert_eq!(
+            object_list_navigate(&closed, Some(ObjectId::new(1)), ObjectListKey::Right, 8),
+            Some(ObjectListNavigation::Expand(ObjectId::new(1))),
+            "right opens a closed container"
+        );
+
+        expansion.toggle(ObjectId::new(1));
+        let open = object_list_rows(&tree, &expansion, name, icon);
+        assert_eq!(
+            object_list_navigate(&open, Some(ObjectId::new(1)), ObjectListKey::Right, 8),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(2))),
+            "right on an open container steps into it"
+        );
+        assert_eq!(
+            object_list_navigate(&open, Some(ObjectId::new(1)), ObjectListKey::Left, 8),
+            Some(ObjectListNavigation::Collapse(ObjectId::new(1))),
+            "left closes it again"
+        );
+        assert_eq!(
+            object_list_navigate(&open, Some(ObjectId::new(2)), ObjectListKey::Left, 8),
+            Some(ObjectListNavigation::MoveCursor(ObjectId::new(1))),
+            "left on a closed child steps out to its parent"
+        );
+        assert_eq!(
+            object_list_navigate(&open, Some(ObjectId::new(4)), ObjectListKey::Left, 8),
+            None,
+            "a top-level leaf has nowhere to step out to"
+        );
+        assert_eq!(
+            object_list_navigate(&open, Some(ObjectId::new(4)), ObjectListKey::Right, 8),
+            None,
+            "and nothing to open"
+        );
     }
 
     /// The expander is its own click target, ahead of the row's own.
