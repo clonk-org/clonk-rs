@@ -11,7 +11,8 @@
 
 use crate::developer_host::DeveloperHost;
 use crate::developer_toolbox::ToolboxEffect;
-use crate::developer_windows::{DeveloperWindows, WindowId};
+use crate::developer_windows::{DeveloperWindows, ToolboxPage, WindowId};
+use crate::DeveloperPane;
 
 /// The toolbox's registry key, if it has a window.
 pub(crate) fn toolbox_window_key(windows: &DeveloperWindows<DeveloperHost>) -> Option<WindowId> {
@@ -208,11 +209,16 @@ pub(crate) fn handle_developer_object_list_event(
             event: WindowEvent::CursorMoved { position, .. },
             ..
         } => {
-            if let Some(list) = windows
+            let Some(list) = windows
                 .host_mut(key)
                 .and_then(DeveloperHost::as_object_list_mut)
-            {
-                list.surface.last_pointer = (position.x as i32, position.y as i32);
+            else {
+                return;
+            };
+            list.surface.last_pointer = (position.x as i32, position.y as i32);
+            let (point, extent) = (list.surface.last_pointer, list.surface_extent());
+            if app.developer_pane_scroll_drag(DeveloperPane::ObjectList, point, extent) {
+                windows.request_redraw(key);
             }
         }
         // The tree view has focus while its window does, so GTK's own key
@@ -287,6 +293,21 @@ pub(crate) fn handle_developer_object_list_event(
                 windows.request_redraw(key);
             }
         }
+        // A release ends a held thumb wherever the pointer finished, which is
+        // what makes a drag that leaves the bar still end cleanly.
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Released,
+                    button: winit::event::MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            if app.developer_pane_scroll_release() {
+                windows.request_redraw(key);
+            }
+        }
         Event::WindowEvent {
             event:
                 WindowEvent::MouseInput {
@@ -303,6 +324,12 @@ pub(crate) fn handle_developer_object_list_event(
                 return;
             };
             let (point, extent) = (list.surface.last_pointer, list.surface_extent());
+            // The bar is a sibling widget inside the scrolled window, so a
+            // press it takes never reaches the tree.
+            if app.developer_pane_scroll_press(DeveloperPane::ObjectList, point, extent) {
+                windows.request_redraw(key);
+                return;
+            }
             app.developer_object_list_click(point, extent);
             windows.request_redraw(key);
         }
@@ -766,11 +793,18 @@ pub(crate) fn handle_developer_toolbox_event(
             event: WindowEvent::CursorMoved { position, .. },
             ..
         } => {
-            if let Some(toolbox) = windows
+            let Some(toolbox) = windows
                 .host_mut(key)
                 .and_then(DeveloperHost::as_toolbox_mut)
+            else {
+                return;
+            };
+            toolbox.surface.last_pointer = (position.x as i32, position.y as i32);
+            let (point, extent) = (toolbox.surface.last_pointer, toolbox.surface_extent());
+            if app.developer_toolbox.current_page() == Some(ToolboxPage::Property)
+                && app.developer_pane_scroll_drag(DeveloperPane::PropertyOutput, point, extent)
             {
-                toolbox.surface.last_pointer = (position.x as i32, position.y as i32);
+                windows.request_redraw(key);
             }
         }
         // The property output is a scrolled text view
@@ -779,7 +813,6 @@ pub(crate) fn handle_developer_toolbox_event(
             event: WindowEvent::MouseWheel { delta, .. },
             ..
         } => {
-            use crate::developer_windows::ToolboxPage;
             use clonk_engine::developer_viewport::{wheel_scroll_step, WheelDelta};
 
             if app.developer_toolbox.current_page() != Some(ToolboxPage::Property) {
@@ -806,6 +839,21 @@ pub(crate) fn handle_developer_toolbox_event(
                 windows.request_redraw(key);
             }
         }
+        // A release ends a held thumb wherever the pointer finished, which is
+        // what makes a drag that leaves the bar still end cleanly.
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Released,
+                    button: winit::event::MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            if app.developer_pane_scroll_release() {
+                windows.request_redraw(key);
+            }
+        }
         Event::WindowEvent {
             event:
                 WindowEvent::MouseInput {
@@ -822,6 +870,12 @@ pub(crate) fn handle_developer_toolbox_event(
                 return;
             };
             let (point, extent) = (toolbox.surface.last_pointer, toolbox.surface_extent());
+            if app.developer_toolbox.current_page() == Some(ToolboxPage::Property)
+                && app.developer_pane_scroll_press(DeveloperPane::PropertyOutput, point, extent)
+            {
+                windows.request_redraw(key);
+                return;
+            }
             app.developer_toolbox_click(point, extent);
             windows.request_redraw(key);
         }

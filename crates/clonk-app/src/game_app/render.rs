@@ -3614,6 +3614,110 @@ impl GameApp {
         true
     }
 
+    /// A press on either pane's scroll bar.
+    ///
+    /// Returns whether the bar took it. A press the bar takes never reaches
+    /// the pane underneath — in GTK the bar is a sibling widget inside the
+    /// scrolled window, and the pane never sees the event.
+    pub(crate) fn developer_pane_scroll_press(
+        &mut self,
+        pane: DeveloperPane,
+        point: (i32, i32),
+        extent: (u32, u32),
+    ) -> bool {
+        use clonk_frontend::developer_chrome::{pane_scroll_bar_press, PaneScrollPart};
+
+        let Some(bar) = self.developer_pane_scroll_bar(pane, extent) else {
+            return false;
+        };
+        let Some(part) = pane_scroll_bar_press(&bar, point) else {
+            return false;
+        };
+        match part {
+            PaneScrollPart::Thumb => {
+                self.developer_pane_scroll_drag = Some(pane);
+            }
+            PaneScrollPart::LineBack => self.step_developer_pane_scroll(pane, -1, extent),
+            PaneScrollPart::LineForward => self.step_developer_pane_scroll(pane, 1, extent),
+            PaneScrollPart::PageBack => {
+                let page = i32::try_from(bar.capacity).unwrap_or(i32::MAX);
+                self.step_developer_pane_scroll(pane, -page, extent);
+            }
+            PaneScrollPart::PageForward => {
+                let page = i32::try_from(bar.capacity).unwrap_or(i32::MAX);
+                self.step_developer_pane_scroll(pane, page, extent);
+            }
+        }
+        true
+    }
+
+    /// Pointer motion while a pane thumb is held.
+    pub(crate) fn developer_pane_scroll_drag(
+        &mut self,
+        pane: DeveloperPane,
+        point: (i32, i32),
+        extent: (u32, u32),
+    ) -> bool {
+        use clonk_frontend::developer_chrome::pane_scroll_bar_line;
+
+        if self.developer_pane_scroll_drag != Some(pane) {
+            return false;
+        }
+        let Some(bar) = self.developer_pane_scroll_bar(pane, extent) else {
+            return false;
+        };
+        let first = pane_scroll_bar_line(&bar, point.1);
+        match pane {
+            DeveloperPane::PropertyOutput => {
+                let lines = self.developer_property_page_line_count();
+                let capacity = crate::developer_toolbox_view::property_output_capacity(extent.1);
+                self.developer_property_scroll
+                    .scroll_to(first, lines, capacity);
+            }
+            DeveloperPane::ObjectList => {
+                let rows = self.developer_object_list_rows().len();
+                self.developer_object_list_scroll
+                    .scroll_to(first, rows, extent.1);
+            }
+        }
+        true
+    }
+
+    /// Release whichever pane thumb is held.
+    pub(crate) fn developer_pane_scroll_release(&mut self) -> bool {
+        self.developer_pane_scroll_drag.take().is_some()
+    }
+
+    fn developer_pane_scroll_bar(
+        &self,
+        pane: DeveloperPane,
+        extent: (u32, u32),
+    ) -> Option<clonk_frontend::developer_chrome::PaneScrollBar> {
+        match pane {
+            DeveloperPane::PropertyOutput => crate::developer_toolbox_view::property_output_bar(
+                extent,
+                self.developer_property_page_line_count(),
+                self.developer_property_scroll,
+            ),
+            DeveloperPane::ObjectList => crate::developer_object_list_view::object_list_bar(
+                extent,
+                self.developer_object_list_rows().len(),
+                self.developer_object_list_scroll,
+            ),
+        }
+    }
+
+    fn step_developer_pane_scroll(&mut self, pane: DeveloperPane, lines: i32, extent: (u32, u32)) {
+        match pane {
+            DeveloperPane::PropertyOutput => {
+                self.scroll_developer_property_page(lines, extent.1);
+            }
+            DeveloperPane::ObjectList => {
+                self.scroll_developer_object_list(lines, extent.1);
+            }
+        };
+    }
+
     /// One wheel notch over the object list.
     ///
     /// The tree lives in an automatic scrolled window

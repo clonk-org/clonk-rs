@@ -5517,6 +5517,118 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
     );
 }
 
+/// Both developer panes drive their retained position from one bar.
+///
+/// The panes sit in `GTK_POLICY_AUTOMATIC` scrolled windows
+/// (`C4ObjectListDlg.cpp:748`; `C4PropertyDlg.cpp:128-140`), so the bar exists
+/// only while the content overflows, and a press it takes never reaches the
+/// pane — in GTK the bar is a sibling widget and the pane never sees the event.
+#[test]
+fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane() {
+    use clonk_engine::developer_selection::SelectionWriter;
+    use crate::developer_object_list_view::object_list_bar;
+    use crate::main_app_state::DeveloperPane;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    let definition = app
+        .snapshot
+        .objects
+        .first()
+        .test_value()
+        .definition_id
+        .clone();
+    for _ in 0..40 {
+        app.engine
+            .spawn_test_object(clonk_engine::SpawnConfig::new(definition.clone()));
+    }
+    app.snapshot = app.engine.snapshot();
+
+    let extent = (200u32, 200u32);
+    let rows = app.developer_object_list_rows_for_test().len();
+    // Recomputed before every press: the thumb moves as the view does, so a
+    // rectangle captured once stops describing the bar after the first step.
+    let bar_now = |app: &GameApp| {
+        object_list_bar(extent, rows, app.developer_object_list_scroll).expect("overflowing")
+    };
+    let bar = bar_now(&app);
+
+    // Away from the bar is the tree's, not the bar's.
+    runtime_assert!(!app.developer_pane_scroll_press(
+        DeveloperPane::ObjectList,
+        (4, bar.track.y + 4),
+        extent
+    ));
+
+    // The trailing arrow steps by one row.
+    let selection_before = app.developer_selection.objects().to_vec();
+    runtime_assert!(app.developer_pane_scroll_press(
+        DeveloperPane::ObjectList,
+        (bar.track.x + 1, bar.track.y + bar.track.h - 2),
+        extent
+    ));
+    runtime_assert_eq!(app.developer_object_list_scroll.window(rows, extent.1).0 => 1);
+    runtime_assert_eq!(
+        app.developer_selection.objects() => selection_before.as_slice(),
+        "a press the bar took never selected a row",
+    );
+
+    // The track below the thumb pages by the visible capacity.
+    let page = app.developer_object_list_scroll.window(rows, extent.1).1;
+    let stepped = bar_now(&app);
+    runtime_assert!(app.developer_pane_scroll_press(
+        DeveloperPane::ObjectList,
+        (stepped.track.x + 1, stepped.thumb.y + stepped.thumb.h + 2),
+        extent
+    ));
+    runtime_assert_eq!(
+        app.developer_object_list_scroll.window(rows, extent.1).0 => 1 + page
+    );
+
+    // The thumb captures, and the drag names an absolute row.
+    let paged = bar_now(&app);
+    runtime_assert!(app.developer_pane_scroll_press(
+        DeveloperPane::ObjectList,
+        (paged.track.x + 1, paged.thumb.y + paged.thumb.h / 2),
+        extent
+    ));
+    runtime_assert_eq!(app.developer_pane_scroll_drag => Some(DeveloperPane::ObjectList));
+    runtime_assert!(app.developer_pane_scroll_drag(
+        DeveloperPane::ObjectList,
+        (bar.track.x + 1, bar.track.y + bar.track.h),
+        extent
+    ));
+    runtime_assert_eq!(
+        app.developer_object_list_scroll.window(rows, extent.1).0 => rows - page,
+        "dragging to the bottom shows the last full page",
+    );
+    // The other pane is not this drag.
+    runtime_assert!(!app.developer_pane_scroll_drag(
+        DeveloperPane::PropertyOutput,
+        (bar.track.x + 1, bar.track.y),
+        extent
+    ));
+    runtime_assert!(app.developer_pane_scroll_release());
+    runtime_assert!(!app.developer_pane_scroll_release());
+
+    // A pane whose content fits has no bar and answers no press.
+    app.developer_selection.clear(SelectionWriter::ObjectTree);
+    runtime_assert!(
+        crate::developer_toolbox_view::property_output_bar(
+            (240, 160),
+            app.developer_property_page_line_count(),
+            app.developer_property_scroll,
+        )
+        .is_none(),
+        "an empty property pane is one line and fits"
+    );
+    runtime_assert!(!app.developer_pane_scroll_press(
+        DeveloperPane::PropertyOutput,
+        (200, 20),
+        (240, 160)
+    ));
+}
+
 /// The keyboard cursor is separate from the selection, as GTK's is.
 ///
 /// `gtk_tree_selection_set_mode(selection, GTK_SELECTION_MULTIPLE)`

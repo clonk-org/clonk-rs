@@ -16,11 +16,11 @@
 use clonk_engine::developer_inspection::InspectionNode;
 use clonk_engine::ObjectId;
 use clonk_frontend::classic_gui::{draw_facet_stretch, IntRect};
-use clonk_frontend::developer_chrome::PaneScroll;
 use clonk_frontend::developer_chrome::{
     contains, draw_fitted_text, draw_sunken, fill, CONTROL_BACKGROUND, CONTROL_TEXT,
     SELECTED_BACKGROUND, SELECTED_TEXT, SMALL_FONT_SIZE, WINDOW_BACKGROUND,
 };
+use clonk_frontend::developer_chrome::{pane_scroll_bar_at, PaneScroll, PaneScrollBar};
 use clonk_frontend::{GuiPoint, ImageData};
 use clonk_graphics::{Surface, TextFont};
 
@@ -213,6 +213,24 @@ fn icon_rect(row: IntRect, depth: usize, icon: &ImageData) -> Option<IntRect> {
         width,
         height,
     ))
+}
+
+/// The list's own vertical bar, for the tree as it currently stands.
+pub(crate) fn object_list_bar(
+    extent: (u32, u32),
+    rows: usize,
+    scroll: ObjectListScroll,
+) -> Option<PaneScrollBar> {
+    let (width, height) = (extent.0 as i32, extent.1 as i32);
+    let bar_width = crate::developer_toolbox_view::PANE_BAR_THICKNESS;
+    let track = IntRect::new(
+        width - PADDING - bar_width,
+        PADDING + 1,
+        bar_width,
+        (height - PADDING * 2 - 2).max(1),
+    );
+    let (first, capacity) = scroll.window(rows, extent.1);
+    pane_scroll_bar_at(track, rows, capacity, first)
 }
 
 /// The expander occupies the indent step before the row's own content, which
@@ -420,6 +438,9 @@ pub(crate) fn render_object_list(
         (height as i32 - PADDING * 2).max(1),
     );
     draw_sunken(surface, client, CONTROL_BACKGROUND);
+    if let Some(bar) = object_list_bar((width, height), rows.len(), scroll) {
+        crate::developer_toolbox_view::draw_pane_scroll_bar(surface, &bar);
+    }
     let (first, capacity) = scroll.window(rows.len(), height);
     for (index, row) in rows.iter().enumerate().skip(first).take(capacity) {
         let rect = row_rect(index, first, width);

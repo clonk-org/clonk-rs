@@ -82,6 +82,120 @@ impl PaneScroll {
     }
 }
 
+/// One pane scroll bar: the track it runs in and the thumb inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneScrollBar {
+    pub track: IntRect,
+    pub thumb: IntRect,
+    /// The content and page the thumb was built from, so a press can be
+    /// answered without the caller re-deriving them.
+    pub lines: usize,
+    pub capacity: usize,
+}
+
+/// The region of a pane bar a press landed on.
+///
+/// The same four a Win32 scroll bar divides into, and the same names the
+/// detached viewport bars use — the panes are a different widget but not a
+/// different vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneScrollPart {
+    LineBack,
+    LineForward,
+    PageBack,
+    PageForward,
+    Thumb,
+}
+
+/// How much of each end of a pane track is an arrow button.
+const PANE_ARROW_EXTENT: i32 = 10;
+
+/// The shortest thumb that still reads as a thumb rather than a mark.
+const PANE_MINIMUM_THUMB: i32 = 6;
+
+/// A bar for content already scrolled to `first`, or `None` when it fits.
+///
+/// Both panes sit in `GTK_POLICY_AUTOMATIC` scrolled windows
+/// (`C4ObjectListDlg.cpp:748`; `C4PropertyDlg.cpp:128-140`), so the bar exists
+/// only when there is something it could reach.
+pub fn pane_scroll_bar_at(
+    track: IntRect,
+    lines: usize,
+    capacity: usize,
+    first: usize,
+) -> Option<PaneScrollBar> {
+    if capacity == 0 || lines <= capacity || track.h <= 0 || track.w <= 0 {
+        return None;
+    }
+    let reach = lines - capacity;
+    let extent = (i64::from(track.h) * capacity as i64 / lines as i64) as i32;
+    let extent = extent.clamp(PANE_MINIMUM_THUMB.min(track.h), track.h);
+    let travel = (track.h - extent).max(0);
+    let offset = (i64::from(travel) * first.min(reach) as i64 / reach as i64) as i32;
+    Some(PaneScrollBar {
+        track,
+        thumb: IntRect::new(track.x, track.y + offset, track.w, extent),
+        lines,
+        capacity,
+    })
+}
+
+/// A bar for content at the top — the shape a caller wants when it only needs
+/// to know whether a bar exists at all.
+pub fn pane_scroll_bar(track: IntRect, lines: usize, capacity: usize) -> Option<PaneScrollBar> {
+    pane_scroll_bar_at(track, lines, capacity, 0)
+}
+
+/// Which part of a bar a press landed on, or `None` for the pane itself.
+pub fn pane_scroll_bar_press(bar: &PaneScrollBar, point: (i32, i32)) -> Option<PaneScrollPart> {
+    let track = bar.track;
+    let inside = point.0 >= track.x
+        && point.0 < track.x + track.w
+        && point.1 >= track.y
+        && point.1 < track.y + track.h;
+    if !inside {
+        return None;
+    }
+    // The arrows never take more than a third of the bar each, so a short
+    // track stays usable as a track.
+    let arrow = PANE_ARROW_EXTENT.min(track.h / 3);
+    if arrow > 0 && point.1 < track.y + arrow {
+        return Some(PaneScrollPart::LineBack);
+    }
+    if arrow > 0 && point.1 >= track.y + track.h - arrow {
+        return Some(PaneScrollPart::LineForward);
+    }
+    if point.1 >= bar.thumb.y && point.1 < bar.thumb.y + bar.thumb.h {
+        return Some(PaneScrollPart::Thumb);
+    }
+    Some(if point.1 < bar.thumb.y {
+        PaneScrollPart::PageBack
+    } else {
+        PaneScrollPart::PageForward
+    })
+}
+
+/// The first line a thumb at this pointer position names.
+///
+/// The position follows the pointer rather than accumulating a delta, so a
+/// drag that leaves the bar and comes back lands where the pointer is.
+pub fn pane_scroll_bar_line(bar: &PaneScrollBar, y: i32) -> usize {
+    let reach = bar.lines.saturating_sub(bar.capacity);
+    let span = bar.track.h.max(1);
+    let along = (y - bar.track.y).clamp(0, span);
+    (i64::from(along) * reach as i64 / i64::from(span)) as usize
+}
+
+/// The two arrow boxes of a pane bar, in drawing order.
+pub fn pane_scroll_bar_arrows(bar: &PaneScrollBar) -> [IntRect; 2] {
+    let track = bar.track;
+    let arrow = PANE_ARROW_EXTENT.min(track.h / 3).max(0);
+    [
+        IntRect::new(track.x, track.y, track.w, arrow),
+        IntRect::new(track.x, track.y + track.h - arrow, track.w, arrow),
+    ]
+}
+
 pub const MENU_ITEM_HEIGHT: i32 = 22;
 /// A separator row, which is shorter than an item and carries no text.
 pub const MENU_SEPARATOR_HEIGHT: i32 = 8;
@@ -199,4 +313,96 @@ pub fn draw_fitted_text(
         size,
         color,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pane whose content fits shows no bar at all.
+    ///
+    /// `gtk_scrolled_window_set_policy(..., GTK_POLICY_AUTOMATIC,
+    /// GTK_POLICY_AUTOMATIC)` (`C4ObjectListDlg.cpp:748`) is exactly that
+    /// policy: the bar appears only when there is something it could reach.
+    #[test]
+    fn a_pane_bar_appears_only_when_the_content_overflows() {
+        let track = IntRect::new(100, 0, 10, 200);
+        assert_eq!(pane_scroll_bar(track, 6, 10), None, "six lines in ten fit");
+        assert_eq!(pane_scroll_bar(track, 10, 10), None, "exactly a page fits");
+        let bar = pane_scroll_bar(track, 40, 10).expect("forty lines in ten do not");
+        assert!(bar.thumb.h > 0 && bar.thumb.h <= track.h);
+        assert!(bar.thumb.y >= track.y);
+        assert!(bar.thumb.y + bar.thumb.h <= track.y + track.h);
+    }
+
+    /// The thumb carries the visible proportion and the position.
+    #[test]
+    fn a_pane_thumb_reports_the_page_and_the_position() {
+        let track = IntRect::new(0, 0, 10, 100);
+        let top = pane_scroll_bar_at(track, 100, 10, 0).expect("overflowing");
+        let bottom = pane_scroll_bar_at(track, 100, 10, 90).expect("overflowing");
+        assert_eq!(top.thumb.y, track.y, "the top of the content is the top");
+        assert_eq!(
+            bottom.thumb.y + bottom.thumb.h,
+            track.y + track.h,
+            "and the last page reaches the bottom"
+        );
+        assert!(
+            top.thumb.h < track.h / 2,
+            "a tenth of the content is a short thumb: {}",
+            top.thumb.h
+        );
+    }
+
+    /// A press resolves to the same four regions the viewport bars use.
+    #[test]
+    fn a_pane_bar_press_resolves_to_a_line_page_or_thumb() {
+        let track = IntRect::new(0, 0, 10, 100);
+        let bar = pane_scroll_bar_at(track, 100, 10, 40).expect("overflowing");
+
+        assert_eq!(
+            pane_scroll_bar_press(&bar, (5, track.y + 1)),
+            Some(PaneScrollPart::LineBack)
+        );
+        assert_eq!(
+            pane_scroll_bar_press(&bar, (5, track.y + track.h - 2)),
+            Some(PaneScrollPart::LineForward)
+        );
+        assert_eq!(
+            pane_scroll_bar_press(&bar, (5, bar.thumb.y + bar.thumb.h / 2)),
+            Some(PaneScrollPart::Thumb)
+        );
+        assert_eq!(
+            pane_scroll_bar_press(&bar, (5, bar.thumb.y - 1)),
+            Some(PaneScrollPart::PageBack)
+        );
+        assert_eq!(
+            pane_scroll_bar_press(&bar, (5, bar.thumb.y + bar.thumb.h + 1)),
+            Some(PaneScrollPart::PageForward)
+        );
+        assert_eq!(
+            pane_scroll_bar_press(&bar, (-5, bar.thumb.y)),
+            None,
+            "outside the track is the pane's, not the bar's"
+        );
+    }
+
+    /// A drag names an absolute first line, clamped at both ends.
+    #[test]
+    fn a_pane_thumb_drag_names_a_first_line() {
+        let track = IntRect::new(0, 0, 10, 100);
+        let bar = pane_scroll_bar_at(track, 100, 10, 0).expect("overflowing");
+        assert_eq!(pane_scroll_bar_line(&bar, track.y), 0);
+        assert_eq!(
+            pane_scroll_bar_line(&bar, track.y + track.h),
+            90,
+            "the bottom is as far as a full page can reach"
+        );
+        assert_eq!(pane_scroll_bar_line(&bar, track.y - 50), 0, "clamped above");
+        assert_eq!(
+            pane_scroll_bar_line(&bar, track.y + track.h + 50),
+            90,
+            "and below"
+        );
+    }
 }

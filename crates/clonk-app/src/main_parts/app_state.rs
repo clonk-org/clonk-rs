@@ -444,6 +444,12 @@ pub(crate) struct GameApp {
     /// selection change rather than on every frame — otherwise scrolling away
     /// from the selection would be impossible.
     pub(crate) developer_object_list_scroll: crate::developer_object_list_view::ObjectListScroll,
+    /// Which developer pane's scroll thumb is being dragged.
+    ///
+    /// One field for both panes because they live in different windows: a
+    /// drag can only ever be in one of them, and holding it here is what lets
+    /// the release find it wherever the pointer ended up.
+    pub(crate) developer_pane_scroll_drag: Option<DeveloperPane>,
     /// The object list's keyboard cursor.
     ///
     /// `GtkTreeView` keeps a cursor separate from the selection: Ctrl+arrows
@@ -2486,6 +2492,15 @@ pub(crate) enum RuntimeGlobalKeyOutcome {
     UnhandledAfterDeniedDebug,
     Handled,
     DownstreamWithoutEngineDispatch,
+}
+
+/// A developer pane with a scroll bar of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeveloperPane {
+    /// `C4PropertyDlg`'s output box.
+    PropertyOutput,
+    /// `C4ObjectListDlg`'s tree.
+    ObjectList,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
