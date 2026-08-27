@@ -2353,6 +2353,7 @@ impl GameApp {
             initial_host_local_alternate_colors(network_mode.as_ref());
         let host_local_player_info_ids = initial_host_local_player_info_ids(network_mode.as_ref());
         let control_player_infos = ControlPlayerInfoRegistry::default();
+        let runtime_language_table = load_runtime_language_table(paths);
         // Scenario discovery only walks directories and reads scenario
         // groups; start it only after the process-global resource gate.
         let scenario_discovery = frontend_scenarios.is_none().then(|| {
@@ -2538,7 +2539,6 @@ impl GameApp {
                 None
             }
         };
-        let runtime_language_table = load_runtime_language_table(paths);
         let generated_team_name_template = runtime_language_table
             .as_ref()
             .map(generated_team_name_template)
