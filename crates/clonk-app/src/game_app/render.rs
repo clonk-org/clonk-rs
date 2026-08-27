@@ -3524,6 +3524,14 @@ impl GameApp {
         self.developer_object_list_scroll != before
     }
 
+    /// The visible rows, for a test that needs to address one by index.
+    #[cfg(test)]
+    pub(crate) fn developer_object_list_rows_for_test(
+        &self,
+    ) -> Vec<crate::developer_object_list_view::ObjectListRow> {
+        self.developer_object_list_rows()
+    }
+
     /// The list's rows, rebuilt from the live snapshot.
     fn developer_object_list_rows(&self) -> Vec<crate::developer_object_list_view::ObjectListRow> {
         use clonk_engine::developer_inspection::object_tree;
@@ -3531,6 +3539,7 @@ impl GameApp {
         let tree = object_tree(&self.snapshot.render_order, &self.snapshot);
         crate::developer_object_list_view::object_list_rows(
             &tree,
+            &self.developer_object_tree_expansion,
             |id| {
                 // `name_cell_data_func` draws `object->GetName()` (`:659-664`),
                 // which is the custom name when there is one and the definition's
@@ -3582,6 +3591,7 @@ impl GameApp {
     /// so a surface can recognise its own change instead of a flag having to
     /// be raised and lowered around every write.
     pub(crate) fn developer_object_list_click(&mut self, point: (i32, i32), extent: (u32, u32)) {
+        use crate::developer_object_list_view::ObjectListClick;
         use clonk_engine::developer_selection::SelectionWriter;
 
         let rows = self.developer_object_list_rows();
@@ -3592,13 +3602,21 @@ impl GameApp {
             extent.1,
             point,
         ) {
-            Some(object) => self
-                .developer_selection
-                .replace(SelectionWriter::ObjectTree, object),
+            Some(ObjectListClick::Select(object)) => {
+                self.developer_selection
+                    .replace(SelectionWriter::ObjectTree, object);
+            }
+            // The expander column consumes its own click: `GtkTreeView` opens
+            // or closes the row and the selection does not follow.
+            Some(ObjectListClick::Toggle(object)) => {
+                self.developer_object_tree_expansion.toggle(object);
+            }
             // No path under the pointer: `gtk_tree_selection_get_selected_rows`
             // returns an empty list and the handler still clears.
-            None => self.developer_selection.clear(SelectionWriter::ObjectTree),
-        };
+            None => {
+                self.developer_selection.clear(SelectionWriter::ObjectTree);
+            }
+        }
     }
 
     /// Draw one toolbox page at the window's extent.

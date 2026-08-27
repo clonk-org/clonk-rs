@@ -5407,6 +5407,90 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
     runtime_assert!(!app.developer_property_page_click(button, extent));
 }
 
+/// The tree opens on the expander and stays open across a rebuild.
+///
+/// `C4ObjectListDlg::Open` builds a plain `GtkTreeView` over a hierarchical
+/// model and never expands it (`C4ObjectListDlg.cpp:726-787`), so a container
+/// starts closed; `Update` then rebuilds the model on every object change
+/// without touching what the view has open.
+#[test]
+fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
+    use clonk_engine::developer_selection::SelectionWriter;
+    use crate::developer_object_list_view::{expander_rect, ObjectListRow};
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    let container = app.snapshot.objects.first().test_value().id;
+    let definition = app
+        .snapshot
+        .objects
+        .first()
+        .test_value()
+        .definition_id
+        .clone();
+    let held = app.engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new(definition.clone()).with_container(container),
+    );
+    app.snapshot = app.engine.snapshot();
+
+    let extent = (200u32, 240u32);
+    let row_of = |app: &GameApp, id| -> Option<usize> {
+        app.developer_object_list_rows_for_test()
+            .iter()
+            .position(|row: &ObjectListRow| row.id == id)
+    };
+
+    // The contained object is not drawn while its container is closed.
+    let rows = app.developer_object_list_rows_for_test();
+    let index = rows
+        .iter()
+        .position(|row| row.id == container)
+        .test_value();
+    runtime_assert!(rows[index].has_children, "the container holds one object");
+    runtime_assert!(!rows[index].expanded);
+    runtime_assert!(
+        row_of(&app, held).is_none(),
+        "a closed container hides what it holds"
+    );
+
+    // A click on the expander opens it, and does not select the row.
+    let before = app.developer_selection.objects().to_vec();
+    let rect = crate::developer_object_list_view::object_list_row_rect_for_test(index, extent.0);
+    let expander = expander_rect(rect, rows[index].depth).test_value();
+    app.developer_object_list_click(
+        (expander.x + expander.w / 2, expander.y + expander.h / 2),
+        extent,
+    );
+    runtime_assert_eq!(
+        app.developer_selection.objects() => before.as_slice(),
+        "the expander column consumes its own click",
+    );
+    runtime_assert!(
+        row_of(&app, held).is_some(),
+        "opening the container reveals what it holds"
+    );
+
+    // A live mutation rebuilds the rows and leaves the tree open.
+    let loose = app
+        .engine
+        .spawn_test_object(clonk_engine::SpawnConfig::new(definition));
+    app.snapshot = app.engine.snapshot();
+    runtime_assert!(row_of(&app, held).is_some(), "a spawn does not close it");
+    runtime_assert!(row_of(&app, loose).is_some());
+
+    // Selecting the contained object from the edit cursor does not close it
+    // either, and clicking its own row still selects.
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, held);
+    let index = row_of(&app, held).test_value();
+    let rect = crate::developer_object_list_view::object_list_row_rect_for_test(index, extent.0);
+    app.developer_object_list_click(
+        (rect.x + rect.w - 4, rect.y + rect.h / 2),
+        extent,
+    );
+    runtime_assert_eq!(app.developer_selection.objects() => &[held]);
+}
+
 /// The list's scroll survives the rebuilds a live round produces, and moves
 /// only when the selection it mirrors changes.
 ///

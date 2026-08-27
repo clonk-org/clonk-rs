@@ -444,6 +444,10 @@ pub(crate) struct GameApp {
     /// selection change rather than on every frame — otherwise scrolling away
     /// from the selection would be impossible.
     pub(crate) developer_object_list_scroll: crate::developer_object_list_view::ObjectListScroll,
+    /// Which containers the user has opened in the object tree
+    /// (`C4ObjectListDlg.cpp:726-787`).
+    pub(crate) developer_object_tree_expansion:
+        crate::developer_object_list_view::ObjectTreeExpansion,
     pub(crate) developer_object_list_revealed: Option<clonk_engine::ObjectId>,
     /// The property pane's retained first visible line
     /// (`C4PropertyDlg.cpp:257-262`).
