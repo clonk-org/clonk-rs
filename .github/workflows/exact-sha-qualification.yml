@@ -99,7 +99,79 @@ jobs:
         with:
           ref: ${{ inputs.source-sha }}
           persist-credentials: false
-          submodules: recursive
+
+      # `submodules: recursive` fetched content unbounded inside checkout, so a
+      # stalled transfer spent the whole 15-minute budget there and took the row
+      # down before a single test ran. The fetch is the same shallow, blobless
+      # one `landing.yml` uses; what is new is that each attempt is bounded and
+      # retried, so a transient stall costs minutes instead of the budget.
+      #
+      # This workflow may not cache (`scripts/tests/test_workflow_runtime_inventory.py`
+      # and `test_rust_ci_coverage.py` both assert no `actions/cache/*` here), and
+      # content is a gigabyte, so neither a shared cache nor a run-scoped artifact
+      # handoff is available to collapse the per-row fetch.
+      - name: Resolve pinned content revision
+        id: content
+        run: |
+          revision=$(git rev-parse HEAD:content)
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid content gitlink: $revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize pinned content checkout
+        timeout-minutes: 9
+        run: |
+          # Bound each attempt rather than the job: an unbounded fetch that
+          # stalls is indistinguishable from a slow one until the runner
+          # cancels the row, and by then the whole budget is gone.
+          #
+          # The first attempt gets five minutes because no cold blobless fetch
+          # time is recorded anywhere -- a healthy one has to fit inside the
+          # 15-minute row alongside an instrumented compile and its tests, so
+          # five is already far more than it can be using. The retry gets three:
+          # it resumes from whatever the first attempt fetched, and a second
+          # stall is a provider problem rather than a slow transfer. Eight
+          # minutes worst case still leaves the row more time than the 14m53s
+          # stall left it, which was none.
+          for attempt in 1 2; do
+            case "$attempt" in
+              1) budget=300 ;;
+              *) budget=180 ;;
+            esac
+            started=$SECONDS
+            status=0
+            timeout "$budget" git submodule update --init --force --depth=1 \
+              --filter=blob:none content || status=$?
+            elapsed=$((SECONDS - started))
+            if (( status == 0 )); then
+              size=$(du -sk .git/modules/content | cut -f1)
+              echo "content-checkout attempt=$attempt seconds=$elapsed size-kib=$size"
+              exit 0
+            fi
+            # `timeout` reports 124 for the stall this exists to bound; any
+            # other status is the fetch itself failing, and reporting one as
+            # the other sends the next reader looking at the wrong thing. The
+            # size on the success line is what separates a provider stall from
+            # a repository that simply grew.
+            if (( status == 124 )); then
+              reason=stalled
+            else
+              reason=failed-status-$status
+            fi
+            echo "content-checkout attempt=$attempt $reason after=${elapsed}s" >&2
+          done
+          echo "::error::pinned content checkout did not complete in two bounded attempts" >&2
+          exit 1
+
+      - name: Verify pinned content checkout
+        env:
+          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
+        run: |
+          actual=$(git -C content rev-parse HEAD)
+          [[ "$actual" == "$CONTENT_REVISION" ]]
+          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
 
       - name: Install native Rust dependencies
         if: matrix.apt != ''
@@ -325,7 +397,79 @@ jobs:
         with:
           ref: ${{ inputs.source-sha }}
           persist-credentials: false
-          submodules: recursive
+
+      # `submodules: recursive` fetched content unbounded inside checkout, so a
+      # stalled transfer spent the whole 15-minute budget there and took the row
+      # down before a single test ran. The fetch is the same shallow, blobless
+      # one `landing.yml` uses; what is new is that each attempt is bounded and
+      # retried, so a transient stall costs minutes instead of the budget.
+      #
+      # This workflow may not cache (`scripts/tests/test_workflow_runtime_inventory.py`
+      # and `test_rust_ci_coverage.py` both assert no `actions/cache/*` here), and
+      # content is a gigabyte, so neither a shared cache nor a run-scoped artifact
+      # handoff is available to collapse the per-row fetch.
+      - name: Resolve pinned content revision
+        id: content
+        run: |
+          revision=$(git rev-parse HEAD:content)
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid content gitlink: $revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize pinned content checkout
+        timeout-minutes: 9
+        run: |
+          # Bound each attempt rather than the job: an unbounded fetch that
+          # stalls is indistinguishable from a slow one until the runner
+          # cancels the row, and by then the whole budget is gone.
+          #
+          # The first attempt gets five minutes because no cold blobless fetch
+          # time is recorded anywhere -- a healthy one has to fit inside the
+          # 15-minute row alongside an instrumented compile and its tests, so
+          # five is already far more than it can be using. The retry gets three:
+          # it resumes from whatever the first attempt fetched, and a second
+          # stall is a provider problem rather than a slow transfer. Eight
+          # minutes worst case still leaves the row more time than the 14m53s
+          # stall left it, which was none.
+          for attempt in 1 2; do
+            case "$attempt" in
+              1) budget=300 ;;
+              *) budget=180 ;;
+            esac
+            started=$SECONDS
+            status=0
+            timeout "$budget" git submodule update --init --force --depth=1 \
+              --filter=blob:none content || status=$?
+            elapsed=$((SECONDS - started))
+            if (( status == 0 )); then
+              size=$(du -sk .git/modules/content | cut -f1)
+              echo "content-checkout attempt=$attempt seconds=$elapsed size-kib=$size"
+              exit 0
+            fi
+            # `timeout` reports 124 for the stall this exists to bound; any
+            # other status is the fetch itself failing, and reporting one as
+            # the other sends the next reader looking at the wrong thing. The
+            # size on the success line is what separates a provider stall from
+            # a repository that simply grew.
+            if (( status == 124 )); then
+              reason=stalled
+            else
+              reason=failed-status-$status
+            fi
+            echo "content-checkout attempt=$attempt $reason after=${elapsed}s" >&2
+          done
+          echo "::error::pinned content checkout did not complete in two bounded attempts" >&2
+          exit 1
+
+      - name: Verify pinned content checkout
+        env:
+          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
+        run: |
+          actual=$(git -C content rev-parse HEAD)
+          [[ "$actual" == "$CONTENT_REVISION" ]]
+          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
 
       - name: Install native Rust dependencies
         run: |
@@ -414,7 +558,79 @@ jobs:
         with:
           ref: ${{ inputs.source-sha }}
           persist-credentials: false
-          submodules: recursive
+
+      # `submodules: recursive` fetched content unbounded inside checkout, so a
+      # stalled transfer spent the whole 15-minute budget there and took the row
+      # down before a single test ran. The fetch is the same shallow, blobless
+      # one `landing.yml` uses; what is new is that each attempt is bounded and
+      # retried, so a transient stall costs minutes instead of the budget.
+      #
+      # This workflow may not cache (`scripts/tests/test_workflow_runtime_inventory.py`
+      # and `test_rust_ci_coverage.py` both assert no `actions/cache/*` here), and
+      # content is a gigabyte, so neither a shared cache nor a run-scoped artifact
+      # handoff is available to collapse the per-row fetch.
+      - name: Resolve pinned content revision
+        id: content
+        run: |
+          revision=$(git rev-parse HEAD:content)
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid content gitlink: $revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize pinned content checkout
+        timeout-minutes: 9
+        run: |
+          # Bound each attempt rather than the job: an unbounded fetch that
+          # stalls is indistinguishable from a slow one until the runner
+          # cancels the row, and by then the whole budget is gone.
+          #
+          # The first attempt gets five minutes because no cold blobless fetch
+          # time is recorded anywhere -- a healthy one has to fit inside the
+          # 15-minute row alongside an instrumented compile and its tests, so
+          # five is already far more than it can be using. The retry gets three:
+          # it resumes from whatever the first attempt fetched, and a second
+          # stall is a provider problem rather than a slow transfer. Eight
+          # minutes worst case still leaves the row more time than the 14m53s
+          # stall left it, which was none.
+          for attempt in 1 2; do
+            case "$attempt" in
+              1) budget=300 ;;
+              *) budget=180 ;;
+            esac
+            started=$SECONDS
+            status=0
+            timeout "$budget" git submodule update --init --force --depth=1 \
+              --filter=blob:none content || status=$?
+            elapsed=$((SECONDS - started))
+            if (( status == 0 )); then
+              size=$(du -sk .git/modules/content | cut -f1)
+              echo "content-checkout attempt=$attempt seconds=$elapsed size-kib=$size"
+              exit 0
+            fi
+            # `timeout` reports 124 for the stall this exists to bound; any
+            # other status is the fetch itself failing, and reporting one as
+            # the other sends the next reader looking at the wrong thing. The
+            # size on the success line is what separates a provider stall from
+            # a repository that simply grew.
+            if (( status == 124 )); then
+              reason=stalled
+            else
+              reason=failed-status-$status
+            fi
+            echo "content-checkout attempt=$attempt $reason after=${elapsed}s" >&2
+          done
+          echo "::error::pinned content checkout did not complete in two bounded attempts" >&2
+          exit 1
+
+      - name: Verify pinned content checkout
+        env:
+          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
+        run: |
+          actual=$(git -C content rev-parse HEAD)
+          [[ "$actual" == "$CONTENT_REVISION" ]]
+          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
