@@ -220,6 +220,14 @@ pub struct SessionConfig {
     /// peers added no host-side cost even though a real uplink carries one copy
     /// of the aggregate per peer.
     pub host_uplink_bps: u32,
+    /// Bytes of resource payload the host still owes each peer when the
+    /// session starts. Zero -- the default -- models a session whose peers
+    /// already hold every resource, which is what this harness measured before.
+    pub resource_bytes: u64,
+    /// Fragment size the transfer is cut into. Fragments share the strictly
+    /// ordered reliable stream with control, so one that has to be repaired
+    /// withholds every control aggregate sequenced behind it.
+    pub resource_fragment_bytes: u32,
 }
 
 impl SessionConfig {
@@ -251,6 +259,10 @@ impl Default for SessionConfig {
             // Unmetered by default, so every existing caller keeps the
             // independent-link model it was written against.
             host_uplink_bps: 0,
+            // No transfer, so every existing caller keeps the
+            // resources-already-present model it was written against.
+            resource_bytes: 0,
+            resource_fragment_bytes: 0,
         }
     }
 }
@@ -274,6 +286,13 @@ pub struct ClientOutcome {
     pub mean_horizon: Duration,
     /// True when its machine could not sustain the tick rate at all.
     pub overloaded: bool,
+    /// Control ticks this client received late *because* an earlier resource
+    /// fragment on the same ordered stream was still being repaired. Counted
+    /// apart from `blocked_ticks` so an ordered-stream stall is never read as
+    /// bandwidth contention.
+    pub resource_stalled_ticks: usize,
+    /// Time those ticks spent withheld behind the fragment.
+    pub resource_stall_total: Duration,
 }
 
 impl ClientOutcome {
@@ -303,6 +322,29 @@ pub struct SessionReport {
     pub unpublished_ticks: usize,
     /// What the shared host uplink carried and cost, when one was modelled.
     pub host_uplink: HostUplinkReport,
+    /// What sharing the ordered stream with a resource transfer cost, when one
+    /// was modelled.
+    pub resource_stream: ResourceStreamReport,
+}
+
+/// The resource transfer's contribution, reported apart from the link's
+/// bandwidth so the two causes stay distinguishable. Competing bulk traffic
+/// *delays* a control packet; an unrepaired fragment ahead of it in the
+/// ordered stream *withholds* it, and only the second can freeze a peer for
+/// longer than one repair interval.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceStreamReport {
+    /// Whether a transfer shared the stream at all.
+    pub modelled: bool,
+    /// Fragments the host put on the stream, first attempts and repairs alike.
+    pub fragments_sent: usize,
+    /// Fragments the link dropped, each of which withholds what follows it
+    /// until the repair lands.
+    pub fragments_lost: usize,
+    /// Control aggregates that had to wait behind an unrepaired fragment.
+    pub stalls: usize,
+    /// Total time those aggregates spent withheld.
+    pub stall_total: Duration,
 }
 
 /// The shared host pipe's contribution, so a report can show whether peer
@@ -420,6 +462,15 @@ struct Peer {
     horizons: Vec<Duration>,
     /// Consecutive ticks this client failed to deliver before the host packed.
     consecutive_late: u32,
+    /// Resource bytes the host still owes this peer.
+    resource_owed: u64,
+    /// Fragments awaiting repair, as the time each will land. The stream is
+    /// strictly ordered, so the latest of these is the barrier every control
+    /// aggregate behind them has to wait for.
+    fragment_repairs: Vec<Duration>,
+    /// The barrier itself: while an earlier fragment is unrepaired, nothing
+    /// sequenced behind it is delivered before this instant.
+    stream_barrier: Option<Duration>,
     outcome: ClientOutcome,
 }
 
@@ -443,6 +494,37 @@ impl Peer {
             (self.presend_frames(config) as u64 * 1_000_000) / config.target_fps.max(1) as u64,
         )
     }
+
+    /// Retire repairs that have landed and republish the barrier.
+    ///
+    /// The stream is strictly ordered, so what blocks delivery is the *latest*
+    /// outstanding fragment: everything sequenced behind it waits, and an
+    /// earlier repair landing first does not release anything on its own.
+    fn refresh_stream_barrier(&mut self, now: Duration) {
+        self.fragment_repairs.retain(|at| *at > now);
+        self.stream_barrier = self.fragment_repairs.iter().copied().max();
+    }
+
+    /// Push one resource fragment onto the shared ordered stream.
+    fn send_resource_fragment(
+        &mut self,
+        now: Duration,
+        bytes: u32,
+        host_uplink: &mut SharedUplink,
+        stream: &mut ResourceStreamReport,
+    ) {
+        let payload = vec![0u8; bytes as usize];
+        let released = host_uplink.release_at(now, payload.len());
+        stream.fragments_sent += 1;
+        if self.link.enqueue(released, false, payload).is_none() {
+            // A dropped fragment is repaired, and until it lands nothing
+            // sequenced behind it may be delivered. That is the difference
+            // between this and competing bandwidth, which only delays.
+            stream.fragments_lost += 1;
+            self.fragment_repairs
+                .push(now + RELIABLE_UDP_RECHECK_INTERVAL);
+        }
+    }
 }
 
 /// Runs one lockstep session and reports what each participant experienced.
@@ -450,6 +532,11 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
     let mut rng = SimRng::new(config.seed);
     let mut coordinator = ControlCoordinator::new(256);
     let mut host_uplink = SharedUplink::new(config.host_uplink_bps);
+    let fragment_bytes = config.resource_fragment_bytes;
+    let mut resource_stream = ResourceStreamReport {
+        modelled: config.resource_bytes > 0 && fragment_bytes > 0,
+        ..ResourceStreamReport::default()
+    };
     let mut peers: Vec<Peer> = config
         .clients
         .iter()
@@ -469,6 +556,9 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
                 downlink: Vec::new(),
                 uplink_repair: Vec::new(),
                 downlink_repair: Vec::new(),
+                resource_owed: config.resource_bytes,
+                fragment_repairs: Vec::new(),
+                stream_barrier: None,
                 arrived: BTreeMap::new(),
                 stamped_at: BTreeMap::new(),
                 horizons: Vec::new(),
@@ -670,6 +760,20 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
             // makes an eight-player session cost the host more than a
             // four-player one.
             for peer in &mut peers {
+                // Resource fragments are sequenced *ahead* of this tick's
+                // aggregate, which is the ordering that lets one of them
+                // withhold it. The host sends what the cadence gives it room
+                // for rather than the whole transfer at once.
+                if resource_stream.modelled && peer.resource_owed > 0 {
+                    let chunk = u64::from(fragment_bytes).min(peer.resource_owed);
+                    peer.resource_owed -= chunk;
+                    peer.send_resource_fragment(
+                        now,
+                        chunk as u32,
+                        &mut host_uplink,
+                        &mut resource_stream,
+                    );
+                }
                 let payload = vec![0u8; 16];
                 let released = host_uplink.release_at(now, payload.len());
                 match peer.link.enqueue(released, false, payload) {
@@ -690,6 +794,20 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
                 .map(|(_, tick)| *tick)
                 .collect();
             peer.downlink.retain(|(at, _)| *at > now);
+            // An unrepaired fragment ahead of these aggregates withholds them:
+            // the stream is ordered, so their bytes are on the wire but cannot
+            // be delivered yet.
+            peer.refresh_stream_barrier(now);
+            if let Some(barrier) = peer.stream_barrier {
+                for tick in &landed {
+                    resource_stream.stalls += 1;
+                    resource_stream.stall_total += barrier.saturating_sub(now);
+                    peer.outcome.resource_stalled_ticks += 1;
+                    peer.outcome.resource_stall_total += barrier.saturating_sub(now);
+                    peer.downlink.push((barrier, *tick));
+                }
+                continue;
+            }
             for tick in landed {
                 peer.arrived.entry(tick).or_insert(now);
                 // Size the horizon from how *late* the aggregate was against
@@ -779,6 +897,7 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
         forced_ticks,
         unpublished_ticks: ticks.saturating_sub(published.len()),
         host_uplink: host_uplink.report,
+        resource_stream,
     }
 }
 
@@ -1145,6 +1264,112 @@ mod control_rate_tests {
                 !reference.is_overloaded(rate),
                 "rate {rate} must not make a capable machine look overloaded"
             );
+        }
+    }
+
+    #[test]
+    fn a_lost_resource_fragment_withholds_the_controls_behind_it() {
+        // Resource transfer and control share one strictly ordered reliable
+        // stream, so a fragment that has to be repaired holds up every control
+        // aggregate sequenced behind it. That head-of-line stall is the
+        // mechanism behind a multi-second freeze while a peer downloads, and it
+        // is not something competing bandwidth alone can produce: cross traffic
+        // delays a packet, an unrepaired fragment withholds it.
+        let lossy = ClientProfile {
+            conditions: LinkConditions {
+                rtt_ms: 60,
+                jitter_ms: 5,
+                loss_permille: 120,
+                ..LinkConditions::perfect()
+            },
+            cpu: CpuProfile::reference(),
+        };
+        let base = SessionConfig {
+            clients: vec![lossy.clone(); 3],
+            ticks: 200,
+            seed: 0x1230_0001,
+            ..SessionConfig::default()
+        };
+
+        let without = run_session(&base);
+        assert!(
+            !without.resource_stream.modelled,
+            "no transfer is configured, so no fragments share the stream"
+        );
+        assert_eq!(without.resource_stream.fragments_sent, 0);
+        for client in &without.clients {
+            assert_eq!(
+                client.resource_stalled_ticks, 0,
+                "a session with no resource transfer cannot stall on one"
+            );
+        }
+
+        let with = run_session(&SessionConfig {
+            resource_bytes: 4 * 1024 * 1024,
+            resource_fragment_bytes: 1024,
+            ..base
+        });
+        assert!(with.resource_stream.modelled);
+        assert!(
+            with.resource_stream.fragments_sent > 0,
+            "a configured transfer has to put fragments on the stream"
+        );
+        assert!(
+            with.resource_stream.fragments_lost > 0,
+            "a lossy link over this many fragments has to lose one"
+        );
+        assert!(
+            with.resource_stream.stalls > 0,
+            "a lost fragment has to withhold the controls behind it"
+        );
+
+        let stalled: usize = with
+            .clients
+            .iter()
+            .map(|client| client.resource_stalled_ticks)
+            .sum();
+        assert!(
+            stalled > 0,
+            "the stall is reported per client, not only in aggregate"
+        );
+        let blocked_with: Duration = with.clients.iter().map(|c| c.blocked_total).sum();
+        let blocked_without: Duration = without.clients.iter().map(|c| c.blocked_total).sum();
+        assert!(
+            blocked_with > blocked_without,
+            "withholding controls has to cost healthy players time: \
+             {blocked_with:?} vs {blocked_without:?}"
+        );
+    }
+
+    #[test]
+    fn cross_traffic_alone_never_reports_a_resource_stall() {
+        // The report has to distinguish the ordered-stream stall from
+        // bandwidth-only contention, which is the whole reason the two are
+        // counted apart.
+        let congested = ClientProfile {
+            conditions: LinkConditions {
+                rtt_ms: 60,
+                jitter_ms: 5,
+                loss_permille: 40,
+                downlink_bps: 2_000_000,
+                uplink_bps: 512_000,
+                cross_traffic_down_bps: 1_800_000,
+                cross_traffic_up_bps: 400_000,
+                ..LinkConditions::perfect()
+            },
+            cpu: CpuProfile::reference(),
+        };
+        let report = run_session(&SessionConfig {
+            clients: vec![congested; 3],
+            ticks: 200,
+            seed: 0x1230_0002,
+            ..SessionConfig::default()
+        });
+
+        assert!(!report.resource_stream.modelled);
+        assert_eq!(report.resource_stream.stalls, 0);
+        for client in &report.clients {
+            assert_eq!(client.resource_stalled_ticks, 0);
         }
     }
 

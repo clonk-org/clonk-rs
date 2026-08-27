@@ -16,7 +16,11 @@
       "healthy_horizon_us_median": 225920,
       "unpublished_total": 0,
       "host_uplink_delayed_total": 0,
-      "host_uplink_delay_us_total": 0
+      "host_uplink_delay_us_total": 0,
+      "resource_fragments_total": 0,
+      "resource_fragments_lost_total": 0,
+      "resource_stalls_total": 0,
+      "resource_stall_us_total": 0
     },
     {
       "name": "slow-cpu-only",
@@ -33,7 +37,11 @@
       "healthy_horizon_us_median": 269473,
       "unpublished_total": 0,
       "host_uplink_delayed_total": 0,
-      "host_uplink_delay_us_total": 0
+      "host_uplink_delay_us_total": 0,
+      "resource_fragments_total": 0,
+      "resource_fragments_lost_total": 0,
+      "resource_stalls_total": 0,
+      "resource_stall_us_total": 0
     },
     {
       "name": "bad-link-only",
@@ -50,7 +58,11 @@
       "healthy_horizon_us_median": 316051,
       "unpublished_total": 0,
       "host_uplink_delayed_total": 0,
-      "host_uplink_delay_us_total": 0
+      "host_uplink_delay_us_total": 0,
+      "resource_fragments_total": 0,
+      "resource_fragments_lost_total": 0,
+      "resource_stalls_total": 0,
+      "resource_stall_us_total": 0
     },
     {
       "name": "potato-dialup",
@@ -67,7 +79,11 @@
       "healthy_horizon_us_median": 274473,
       "unpublished_total": 0,
       "host_uplink_delayed_total": 9612,
-      "host_uplink_delay_us_total": 4836750
+      "host_uplink_delay_us_total": 4836750,
+      "resource_fragments_total": 0,
+      "resource_fragments_lost_total": 0,
+      "resource_stalls_total": 0,
+      "resource_stall_us_total": 0
     },
     {
       "name": "pi4-hotel-wifi",
@@ -84,7 +100,11 @@
       "healthy_horizon_us_median": 350920,
       "unpublished_total": 0,
       "host_uplink_delayed_total": 0,
-      "host_uplink_delay_us_total": 0
+      "host_uplink_delay_us_total": 0,
+      "resource_fragments_total": 0,
+      "resource_fragments_lost_total": 0,
+      "resource_stalls_total": 0,
+      "resource_stall_us_total": 0
     },
     {
       "name": "potato-dialup-8p",
@@ -101,7 +121,32 @@
       "healthy_horizon_us_median": 273815,
       "unpublished_total": 0,
       "host_uplink_delayed_total": 22518,
-      "host_uplink_delay_us_total": 23728750
+      "host_uplink_delay_us_total": 23728750,
+      "resource_fragments_total": 0,
+      "resource_fragments_lost_total": 0,
+      "resource_stalls_total": 0,
+      "resource_stall_us_total": 0
+    },
+    {
+      "name": "joining-download",
+      "description": "four peers still downloading resources while play continues; fragments share the ordered stream with control",
+      "seeds": 16,
+      "ticks": 200,
+      "healthy_blocked_permille_median": 5,
+      "healthy_blocked_permille_worst": 35,
+      "healthy_drift_ms_median": 470,
+      "healthy_drift_ms_worst": 887,
+      "impaired_drift_ms_median": 655,
+      "dropped_inputs_total": 2110,
+      "forced_ticks_total": 2072,
+      "healthy_horizon_us_median": 339999,
+      "unpublished_total": 0,
+      "host_uplink_delayed_total": 23411,
+      "host_uplink_delay_us_total": 659965000,
+      "resource_fragments_total": 12800,
+      "resource_fragments_lost_total": 423,
+      "resource_stalls_total": 1234,
+      "resource_stall_us_total": 131681000
     }
   ]
 }
