@@ -219,7 +219,13 @@ impl LoaderSelection {
 /// fallback instead (`C4LoaderScreen.cpp:145-152`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum LoaderGuiProgress {
-    GuiValid { progress_bar: Option<ImageData> },
+    /// `C4GUI::IsGUIValid()` with `GetRes()->fctProgressBar`
+    /// (`C4LoaderScreen.cpp:146-148`). The facet is not optional: a valid GUI
+    /// resource set owns one by construction, so "valid but missing" is a
+    /// state C++ cannot reach and this no longer represents.
+    GuiValid {
+        progress_bar: ImageData,
+    },
     GuiUnavailable,
 }
 
@@ -234,12 +240,7 @@ pub struct LoaderResources {
 impl LoaderResources {
     /// Convenience constructor for a valid GUI with a present progress image.
     pub fn new(fonts: Arc<ClonkFontSet>, progress_bar: ImageData) -> Result<Self> {
-        Self::from_gui_state(
-            fonts,
-            LoaderGuiProgress::GuiValid {
-                progress_bar: Some(progress_bar),
-            },
-        )
+        Self::from_gui_state(fonts, LoaderGuiProgress::GuiValid { progress_bar })
     }
 
     pub fn gui_unavailable(fonts: Arc<ClonkFontSet>) -> Result<Self> {
@@ -252,9 +253,6 @@ impl LoaderResources {
     ) -> Result<Self> {
         validate_font_set(&fonts)?;
         if let LoaderGuiProgress::GuiValid { progress_bar } = &gui_progress {
-            let progress_bar = progress_bar.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("classic loader GUI is valid but GUIProgress is missing")
-            })?;
             validate_rgba_image("GUIProgress", progress_bar)?;
             ensure!(
                 progress_bar.width() >= 3,
@@ -278,7 +276,7 @@ impl LoaderResources {
 
     pub fn progress_bar(&self) -> Option<&ImageData> {
         match &self.gui_progress {
-            LoaderGuiProgress::GuiValid { progress_bar } => progress_bar.as_ref(),
+            LoaderGuiProgress::GuiValid { progress_bar } => Some(progress_bar),
             LoaderGuiProgress::GuiUnavailable => None,
         }
     }
@@ -512,8 +510,7 @@ impl LoaderScreen {
     /// [`Self::render_chrome`] in logical pixels, upscale it, then call
     /// [`Self::render_native_text`] so glyphs are never bilinearly enlarged.
     pub fn render(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) -> Result<()> {
-        self.validate_render_text()?;
-        self.render_chrome(surface, LoaderRenderConfig::default(), gamma)?;
+        self.render_chrome(surface, LoaderRenderConfig::default(), gamma);
         self.render_logical_text(surface, gamma)
     }
 
@@ -529,8 +526,7 @@ impl LoaderScreen {
             config.application_scale() == 1.0,
             "classic loader logical text may only be rendered at application scale one"
         );
-        self.validate_render_text()?;
-        self.render_chrome(surface, config, gamma)?;
+        self.render_chrome(surface, config, gamma);
         self.render_logical_text(surface, gamma)
     }
 
@@ -548,12 +544,16 @@ impl LoaderScreen {
 
     /// Draws only the filterable logical-pixel layers: background, progress
     /// frame/fill, and optional log box. No glyph is included in this pass.
+    /// Infallible, as `C4LoaderScreen::Draw` is: every call it makes returns
+    /// void (`C4LoaderScreen.cpp:126-177`). The one condition it does test —
+    /// `C4GUI::IsGUIValid()` — chooses between two draws rather than
+    /// refusing, and that choice is [`LoaderGuiProgress`].
     pub fn render_chrome(
         &self,
         surface: &mut Surface,
         config: LoaderRenderConfig,
         gamma: Option<&GammaRamp>,
-    ) -> Result<()> {
+    ) {
         let width = i32::try_from(surface.width()).unwrap_or(i32::MAX);
         let height = i32::try_from(surface.height()).unwrap_or(i32::MAX);
         let fonts = &self.resources.fonts;
@@ -577,9 +577,6 @@ impl LoaderScreen {
         // fallback when C4GUI itself is unavailable.
         match &self.resources.gui_progress {
             LoaderGuiProgress::GuiValid { progress_bar } => {
-                let progress_bar = progress_bar.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("classic loader GUI is valid but GUIProgress is missing")
-                })?;
                 if layout.progress_fill.width > 0 && layout.progress_fill.height > 0 {
                     draw_progress_facet(surface, progress_bar, layout.progress_fill, gamma, config);
                 }
@@ -605,7 +602,6 @@ impl LoaderScreen {
         if matches!(self.state.log, LoaderLog::Visible(_)) {
             draw_box_dw_rect(surface, layout.log_box, LOG_BOX_COLOR, gamma);
         }
-        Ok(())
     }
 
     /// Draws loader text directly into an already-upscaled, possibly clipped
@@ -632,7 +628,6 @@ impl LoaderScreen {
         logical_height: u32,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
-        self.validate_render_text()?;
         ensure!(
             logical_width > 0 && logical_height > 0,
             "classic loader logical dimensions must be positive"
@@ -803,12 +798,14 @@ impl LoaderScreen {
         }
 
         // Process is appended directly after the final displayed log line.
-        if let Some(process) = self.state.process {
-            let (last_width, last_height) = last_extent.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "classic loader process suffix requires a visible non-empty log line"
-                )
-            })?;
+        //
+        // With no line drawn there is nothing to append to: C++ reads its
+        // never-assigned `w`/`h` and places the suffix at an indeterminate
+        // offset (`C4LoaderScreen.cpp:157-176`), which is undefined rather
+        // than a placement to mirror. `Draw` cannot refuse (`:126`), so the
+        // suffix is omitted instead of the screen.
+        if let (Some(process), Some((last_width, last_height))) = (self.state.process, last_extent)
+        {
             y -= last_height;
             x += last_width;
             fonts.mini.draw_with_gamma(
@@ -821,21 +818,6 @@ impl LoaderScreen {
                 true,
                 gamma,
             );
-        }
-        Ok(())
-    }
-
-    fn validate_render_text(&self) -> Result<()> {
-        if let LoaderLog::Visible(lines) = &self.state.log {
-            if self.state.process.is_some()
-                && !visible_log_has_nonempty_line(lines, self.resources.fonts.mini.line_height)
-            {
-                anyhow::bail!(
-                    "classic loader process suffix requires a visible non-empty log line"
-                );
-            }
-        } else if self.state.process.is_some() {
-            anyhow::bail!("classic loader process suffix requires a visible non-empty log line");
         }
         Ok(())
     }
@@ -894,17 +876,6 @@ fn validate_font_set(fonts: &ClonkFontSet) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn visible_log_has_nonempty_line(lines: &[String], line_height: i32) -> bool {
-    if line_height <= 0 {
-        return false;
-    }
-    let visible = (LOG_BOX_HEIGHT - 2 * LOG_BOX_MARGIN) / line_height;
-    let start = lines
-        .len()
-        .saturating_sub(usize::try_from(visible).unwrap_or_default());
-    lines[start..].iter().any(|line| !line.is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1650,6 +1621,41 @@ mod tests {
         LoaderScreen::new(selection, background, resources(), state).expect("screen")
     }
 
+    /// A process percentage with no log line to anchor it draws nothing, and
+    /// does not fail.
+    ///
+    /// C++ appends the suffix relative to the **last line it drew**:
+    ///
+    /// ```text
+    /// int32_t w, h;
+    /// for (int i = -iLinesVisible; i < 0; ++i) { ...; GetTextExtent(szLine, w, h, true); ... }
+    /// if (Process) { iY -= h; iX += w; TextOut(...); }
+    /// ```
+    ///
+    /// (`C4LoaderScreen.cpp:157-176`). When the loop draws nothing, `w` and
+    /// `h` are never assigned, so C++ places the suffix at an indeterminate
+    /// offset — undefined behaviour, with no native placement to mirror.
+    /// `Draw` has no failure path to refuse through either (`:126`), so
+    /// refusing the whole screen would be a worse divergence than omitting
+    /// one suffix.
+    #[test]
+    fn a_process_suffix_without_an_anchor_line_is_omitted_rather_than_fatal() {
+        let screen = synthetic_screen(
+            LoaderState {
+                title: String::new(),
+                progress: 40,
+                log: LoaderLog::Visible(Vec::new()),
+                process: Some(70),
+            },
+            [0, 0, 0, 255],
+        );
+        let mut surface = Surface::new(320, 200, PixelFormat::Rgba8888);
+
+        screen
+            .render_with_config(&mut surface, LoaderRenderConfig::scale_one(false), None)
+            .expect("an anchorless process suffix is not a draw failure");
+    }
+
     fn synthetic_screen(state: LoaderState, color: [u8; 4]) -> LoaderScreen {
         let selection = LoaderSelection::scenario("Loader*", "LoaderTest.png").unwrap();
         let background = ImageData::new(2, 2, color.repeat(4));
@@ -2093,13 +2099,11 @@ mod tests {
         variable_loader.update(LoaderUpdate::SetProgress(100));
         variable_loader.replace_resources(variable);
         let mut variable_frame = Surface::new(320, 240, PixelFormat::Rgba8888);
-        variable_loader
-            .render_chrome(
-                &mut variable_frame,
-                LoaderRenderConfig::scale_one(true),
-                None,
-            )
-            .unwrap();
+        variable_loader.render_chrome(
+            &mut variable_frame,
+            LoaderRenderConfig::scale_one(true),
+            None,
+        );
         let variable_pixel = variable_frame.get_pixel(30, 120).unwrap();
         assert!(variable_pixel.r > variable_pixel.g);
 
@@ -2119,17 +2123,6 @@ mod tests {
                 .expect("short progress")
                 .to_string(),
             "classic loader GUIProgress RGBA length mismatch: expected 4096, got 11"
-        );
-
-        assert_eq!(
-            LoaderResources::from_gui_state(
-                endeavour_font_set(),
-                LoaderGuiProgress::GuiValid { progress_bar: None },
-            )
-            .err()
-            .expect("missing GUIProgress")
-            .to_string(),
-            "classic loader GUI is valid but GUIProgress is missing"
         );
 
         let empty_fonts = Arc::new(ClonkFontSet {
@@ -2188,11 +2181,8 @@ mod tests {
         );
         let mut gui_frame = Surface::new(320, 240, PixelFormat::Rgba8888);
         let mut fallback_frame = Surface::new(320, 240, PixelFormat::Rgba8888);
-        gui.render_chrome(&mut gui_frame, LoaderRenderConfig::default(), None)
-            .unwrap();
-        fallback
-            .render_chrome(&mut fallback_frame, LoaderRenderConfig::default(), None)
-            .unwrap();
+        gui.render_chrome(&mut gui_frame, LoaderRenderConfig::default(), None);
+        fallback.render_chrome(&mut fallback_frame, LoaderRenderConfig::default(), None);
 
         // At 0%, DrawX receives width zero and draws nothing. The no-GUI
         // DrawBoxDw path receives equal x endpoints and therefore paints one
@@ -2471,9 +2461,7 @@ mod tests {
             LoaderScreen::new(selection, background, resources(), LoaderState::initial(""))
                 .unwrap();
         let mut target = Surface::new(2, 2, PixelFormat::Rgba8888);
-        loader
-            .render_chrome(&mut target, LoaderRenderConfig::scale_one(false), None)
-            .unwrap();
+        loader.render_chrome(&mut target, LoaderRenderConfig::scale_one(false), None);
         assert_eq!(target.pixels(), pixels.as_slice());
     }
 
@@ -2506,9 +2494,7 @@ mod tests {
         assert_ne!(background_only.pixels(), without_gamma.pixels());
 
         let mut chrome = Surface::new(320, 240, PixelFormat::Rgba8888);
-        loader
-            .render_chrome(&mut chrome, config, Some(&gamma))
-            .unwrap();
+        loader.render_chrome(&mut chrome, config, Some(&gamma));
         assert_ne!(background_only.pixels(), chrome.pixels());
     }
 
@@ -2681,12 +2667,8 @@ mod tests {
         let config = LoaderRenderConfig::new(2.0, true).unwrap();
         let mut first_chrome = Surface::new(320, 240, PixelFormat::Rgba8888);
         let mut second_chrome = Surface::new(320, 240, PixelFormat::Rgba8888);
-        first
-            .render_chrome(&mut first_chrome, config, None)
-            .unwrap();
-        second
-            .render_chrome(&mut second_chrome, config, None)
-            .unwrap();
+        first.render_chrome(&mut first_chrome, config, None);
+        second.render_chrome(&mut second_chrome, config, None);
         assert_eq!(first_chrome.pixels(), second_chrome.pixels());
 
         let native = build_native_font_set(&endeavour_bytes(), 2).expect("native fonts");
@@ -2796,16 +2778,22 @@ mod tests {
         }
     }
 
+    /// The same case through the real update path: a log of one empty line
+    /// draws nothing to anchor the suffix to.
+    ///
+    /// This replaces a test that asserted the render *failed* here. That
+    /// pinned the port being stricter than the oracle: `C4LoaderScreen::Draw`
+    /// returns void and cannot refuse (`C4LoaderScreen.cpp:126`), so a
+    /// failure was a port-only outcome rather than a behaviour to keep.
     #[test]
-    fn process_without_a_nonempty_visible_log_line_fails_explicitly() {
+    fn process_without_a_nonempty_visible_log_line_draws_no_suffix() {
         let mut loader = screen(LoaderContext::Scenario, LoaderState::initial("Loading..."));
         loader.update(LoaderUpdate::ReplaceLog(vec![String::new()]));
         loader.update(LoaderUpdate::SetProcess(Some(1)));
         let mut surface = Surface::new(320, 240, PixelFormat::Rgba8888);
-        assert_eq!(
-            loader.render(&mut surface, None).unwrap_err().to_string(),
-            "classic loader process suffix requires a visible non-empty log line"
-        );
+        loader
+            .render(&mut surface, None)
+            .expect("an anchorless suffix is omitted, not refused");
     }
 
     #[test]

@@ -3535,7 +3535,7 @@ pub(crate) fn resolve_client_network_loading_refresh(
                 .find(|sheet| sheet.stem == "GUIProgress")
             {
                 Some(sheet) => LoaderGuiProgress::GuiValid {
-                    progress_bar: Some(sheet.image.clone()),
+                    progress_bar: sheet.image.clone(),
                 },
                 None => {
                     let graphics = main_graphics_group(paths)?;
@@ -5412,7 +5412,7 @@ pub(crate) fn build_scenario_loader(
         .iter()
         .find(|sheet| sheet.stem == "GUIProgress")
         .map(|sheet| LoaderGuiProgress::GuiValid {
-            progress_bar: Some(sheet.image.clone()),
+            progress_bar: sheet.image.clone(),
         })
         .unwrap_or_else(|| initial_resources.gui_progress().clone());
     let refreshed_resources = match refreshed_font_bundle.as_ref() {
