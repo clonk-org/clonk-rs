@@ -2941,6 +2941,7 @@ impl GameApp {
             update_check_requested: false,
             update_check: None,
             update_download: None,
+            update_download_dialog: None,
             automatic_update_check_allowed: !cfg!(test),
             ingame_gui_pointer: None,
             ingame_pointer: None,
