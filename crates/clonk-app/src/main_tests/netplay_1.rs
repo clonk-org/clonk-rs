@@ -864,6 +864,16 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
         raster_p95: Duration::ZERO,
         raster_p99: Duration::ZERO,
         raster_samples: Vec::new(),
+        simulation_max: Duration::ZERO,
+        simulation_p50: Duration::ZERO,
+        simulation_p95: Duration::ZERO,
+        simulation_p99: Duration::ZERO,
+        simulation_samples: Vec::new(),
+        frame_max: Duration::ZERO,
+        frame_p50: Duration::ZERO,
+        frame_p95: Duration::ZERO,
+        frame_p99: Duration::ZERO,
+        frame_samples: Vec::new(),
         retained_gpu_profiles: Vec::new(),
         gpu_timestamp_frames: Vec::new(),
     };
@@ -1980,7 +1990,9 @@ fn n1_assert_mission_access_grant(grant: N1MissionAccessGrant) {
             app = new_menu_app_with_paths(640, 480, &paths);
         }
         N1MissionAccessGrant::MemoryOnly => {
-            app.config.mission_access.update_modules("other;lock", false);
+            app.config
+                .mission_access
+                .update_modules("other;lock", false);
             main_assert_eq!(
                 load_configured_mission_access(&paths).expect("read stale config access") =>
                 "",
@@ -2865,7 +2877,8 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
     persist_config_value(&paths, "General", "LanguageEx", "DE").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     main_assert!(
-        !app.startup.player_models
+        !app.startup
+            .player_models
             .iter()
             .any(|player| player.activated),
         "regression requires a raw participant omitted by discovery"
@@ -3070,7 +3083,8 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
     ));
     main_assert_eq!(warning.state.checkbox_checked() => Some(false));
 
-    app.dialogs.messages
+    app.dialogs
+        .messages
         .last_mut()
         .test_value()
         .state
@@ -5665,25 +5679,26 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         MessageDialogContinuation::None,
     )
     .test_value();
-    let (upper_layout, title_point) = {
-        let resources = app.assets.message_dialog_resources().test_value();
-        let layout =
-            app.dialogs.messages
-                .last()
-                .test_value()
-                .state
-                .layout(640, 480, &resources.fonts.text);
-        let caption = layout.caption.test_value();
-        let point = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
-        (layout, point)
-    };
+    let (upper_layout, title_point) =
+        {
+            let resources = app.assets.message_dialog_resources().test_value();
+            let layout = app.dialogs.messages.last().test_value().state.layout(
+                640,
+                480,
+                &resources.fonts.text,
+            );
+            let caption = layout.caption.test_value();
+            let point = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
+            (layout, point)
+        };
     let tooltip_started = Instant::now()
         .checked_sub(clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY + Duration::from_millis(1))
         .test_value();
     app.startup_tooltip = ClassicTooltipTracker::new_at(tooltip_started);
     app.startup_tooltip
         .note_pointer_move_at(title_point, tooltip_started);
-    app.dialogs.messages
+    app.dialogs
+        .messages
         .last_mut()
         .test_value()
         .state

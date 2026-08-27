@@ -150,6 +150,7 @@ class BenchmarkLineTests(unittest.TestCase):
             "graphics_pass_p99_ms=7.000000 "
 "max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
             "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
+            "max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 "
             "graphics_pass_samples_ns=[1000000,4000000,7000000]"
         )
 
@@ -176,6 +177,7 @@ class BenchmarkLineTests(unittest.TestCase):
             "graphics_pass_p99_ms=7.000000 "
 "max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
             "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
+            "max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 "
             "graphics_pass_samples_ns=[1000000,4000000,7000000]"
         )
 
@@ -288,7 +290,7 @@ class BenchmarkLineTests(unittest.TestCase):
             "automatic_graphics_skips=0 average_graphics_pass_ms=1 "
             "max_graphics_pass_ms=1 graphics_pass_sample_count=1 "
             "graphics_pass_p50_ms=1 graphics_pass_p95_ms=1 "
-            "graphics_pass_p99_ms=1 max_present_ms=0.1 present_p50_ms=0.1 present_p95_ms=0.1 present_p99_ms=0.1 max_raster_ms=0.9 raster_p50_ms=0.9 raster_p95_ms=0.9 raster_p99_ms=0.9 graphics_pass_samples_ns=[1000000]"
+            "graphics_pass_p99_ms=1 max_present_ms=0.1 present_p50_ms=0.1 present_p95_ms=0.1 present_p99_ms=0.1 max_raster_ms=0.9 raster_p50_ms=0.9 raster_p95_ms=0.9 raster_p99_ms=0.9 max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 graphics_pass_samples_ns=[1000000]"
         )
 
         context = (
@@ -338,6 +340,7 @@ class BenchmarkLineTests(unittest.TestCase):
             "graphics_pass_p95_ms=1 graphics_pass_p99_ms=1 "
 "max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
             "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
+            "max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 "
             "graphics_pass_samples_ns=[1000000]"
         )
         context = (
@@ -365,7 +368,7 @@ class BenchmarkLineTests(unittest.TestCase):
             "automatic_graphics_skips=0 average_graphics_pass_ms=1 "
             "max_graphics_pass_ms=1 graphics_pass_sample_count=1 "
             "graphics_pass_p50_ms=1 graphics_pass_p95_ms=1 "
-            "graphics_pass_p99_ms=1 max_present_ms=0.1 present_p50_ms=0.1 present_p95_ms=0.1 present_p99_ms=0.1 max_raster_ms=0.9 raster_p50_ms=0.9 raster_p95_ms=0.9 raster_p99_ms=0.9 graphics_pass_samples_ns=[1000000]"
+            "graphics_pass_p99_ms=1 max_present_ms=0.1 present_p50_ms=0.1 present_p95_ms=0.1 present_p99_ms=0.1 max_raster_ms=0.9 raster_p50_ms=0.9 raster_p95_ms=0.9 raster_p99_ms=0.9 max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 graphics_pass_samples_ns=[1000000]"
         )
         context = (
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 "
@@ -459,6 +462,15 @@ class BenchmarkLineTests(unittest.TestCase):
             "raster_p50_ms": 0.0,
             "raster_p95_ms": 0.0,
             "raster_p99_ms": 0.0,
+            "max_simulation_ms": 0.0,
+            "simulation_p50_ms": 0.0,
+            "simulation_p95_ms": 0.0,
+            "simulation_p99_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "frame_p50_ms": 0.0,
+            "frame_p95_ms": 0.0,
+            "frame_p99_ms": 0.0,
+            "frame_sample_count": 0,
             "graphics_pass_samples_ns": [24_000_000] * 2100,
             "benchmark_context": {
                 "runtime_players": 24,
@@ -575,6 +587,15 @@ class BenchmarkLineTests(unittest.TestCase):
             "raster_p50_ms": 0.0,
             "raster_p95_ms": 0.0,
             "raster_p99_ms": 0.0,
+            "max_simulation_ms": 0.0,
+            "simulation_p50_ms": 0.0,
+            "simulation_p95_ms": 0.0,
+            "simulation_p99_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "frame_p50_ms": 0.0,
+            "frame_p95_ms": 0.0,
+            "frame_p99_ms": 0.0,
+            "frame_sample_count": 0,
             "graphics_pass_samples_ns": [],
             "benchmark_context": {
                 "runtime_players": 4,
@@ -658,6 +679,15 @@ class BenchmarkLineTests(unittest.TestCase):
             "raster_p50_ms": 0.0,
             "raster_p95_ms": 0.0,
             "raster_p99_ms": 0.0,
+            "max_simulation_ms": 0.0,
+            "simulation_p50_ms": 0.0,
+            "simulation_p95_ms": 0.0,
+            "simulation_p99_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "frame_p50_ms": 0.0,
+            "frame_p95_ms": 0.0,
+            "frame_p99_ms": 0.0,
+            "frame_sample_count": 0,
             "graphics_pass_samples_ns": [1_000_000],
             "benchmark_context": {
                 "runtime_players": 24,
@@ -723,6 +753,15 @@ class BenchmarkLineTests(unittest.TestCase):
             "raster_p50_ms": 0.0,
             "raster_p95_ms": 0.0,
             "raster_p99_ms": 0.0,
+            "max_simulation_ms": 0.0,
+            "simulation_p50_ms": 0.0,
+            "simulation_p95_ms": 0.0,
+            "simulation_p99_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "frame_p50_ms": 0.0,
+            "frame_p95_ms": 0.0,
+            "frame_p99_ms": 0.0,
+            "frame_sample_count": 0,
             "graphics_pass_samples_ns": [],
             "benchmark_context": {
                 "runtime_players": 24,
@@ -820,6 +859,15 @@ class BenchmarkLineTests(unittest.TestCase):
             "raster_p50_ms": 0.0,
             "raster_p95_ms": 0.0,
             "raster_p99_ms": 0.0,
+            "max_simulation_ms": 0.0,
+            "simulation_p50_ms": 0.0,
+            "simulation_p95_ms": 0.0,
+            "simulation_p99_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "frame_p50_ms": 0.0,
+            "frame_p95_ms": 0.0,
+            "frame_p99_ms": 0.0,
+            "frame_sample_count": 0,
             "graphics_pass_samples_ns": [],
             "benchmark_context": {
                 "runtime_players": 24,
@@ -886,6 +934,15 @@ class BenchmarkLineTests(unittest.TestCase):
             "raster_p50_ms": 0.0,
             "raster_p95_ms": 0.0,
             "raster_p99_ms": 0.0,
+            "max_simulation_ms": 0.0,
+            "simulation_p50_ms": 0.0,
+            "simulation_p95_ms": 0.0,
+            "simulation_p99_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "frame_p50_ms": 0.0,
+            "frame_p95_ms": 0.0,
+            "frame_p99_ms": 0.0,
+            "frame_sample_count": 0,
             "graphics_pass_samples_ns": [],
             "benchmark_context": {
                 "runtime_players": 24,
@@ -1026,6 +1083,15 @@ class BenchmarkLineTests(unittest.TestCase):
             "raster_p50_ms": 0.0,
             "raster_p95_ms": 0.0,
             "raster_p99_ms": 0.0,
+            "max_simulation_ms": 0.0,
+            "simulation_p50_ms": 0.0,
+            "simulation_p95_ms": 0.0,
+            "simulation_p99_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "frame_p50_ms": 0.0,
+            "frame_p95_ms": 0.0,
+            "frame_p99_ms": 0.0,
+            "frame_sample_count": 0,
             "graphics_pass_samples_ns": [4_000_000, 20_000_000],
             "benchmark_context": {
                 "runtime_players": 24,
@@ -1079,6 +1145,15 @@ class BenchmarkLineTests(unittest.TestCase):
             "raster_p50_ms": 0.0,
             "raster_p95_ms": 0.0,
             "raster_p99_ms": 0.0,
+            "max_simulation_ms": 0.0,
+            "simulation_p50_ms": 0.0,
+            "simulation_p95_ms": 0.0,
+            "simulation_p99_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "frame_p50_ms": 0.0,
+            "frame_p95_ms": 0.0,
+            "frame_p99_ms": 0.0,
+            "frame_sample_count": 0,
             "graphics_pass_samples_ns": [1_000_000] * 100,
             "benchmark_context": {
                 "runtime_players": 24,
@@ -1746,6 +1821,15 @@ class ProcessLifecycleTests(unittest.TestCase):
                 "raster_p50_ms": 0.0,
                 "raster_p95_ms": 0.0,
                 "raster_p99_ms": 0.0,
+                "max_simulation_ms": 0.0,
+                "simulation_p50_ms": 0.0,
+                "simulation_p95_ms": 0.0,
+                "simulation_p99_ms": 0.0,
+                "max_frame_ms": 0.0,
+                "frame_p50_ms": 0.0,
+                "frame_p95_ms": 0.0,
+                "frame_p99_ms": 0.0,
+                "frame_sample_count": 0,
                 "graphics_pass_samples_ns": [],
                 "benchmark_context": {
                     "runtime_players": 4,
@@ -2041,7 +2125,7 @@ class ProcessLifecycleTests(unittest.TestCase):
             "automatic_graphics_skips=0 average_graphics_pass_ms=1 "
             "max_graphics_pass_ms=1 graphics_pass_sample_count=1 "
             "graphics_pass_p50_ms=1 graphics_pass_p95_ms=1 "
-            "graphics_pass_p99_ms=1 max_present_ms=0.1 present_p50_ms=0.1 present_p95_ms=0.1 present_p99_ms=0.1 max_raster_ms=0.9 raster_p50_ms=0.9 raster_p95_ms=0.9 raster_p99_ms=0.9 graphics_pass_samples_ns=[1000000]\n"
+            "graphics_pass_p99_ms=1 max_present_ms=0.1 present_p50_ms=0.1 present_p95_ms=0.1 present_p99_ms=0.1 max_raster_ms=0.9 raster_p50_ms=0.9 raster_p95_ms=0.9 raster_p99_ms=0.9 max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 graphics_pass_samples_ns=[1000000]\n"
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=1 "
             "synchronized_player_infos=1 activated_nonhost_clients=1 "
             "runtime_crew_objects=1 "
@@ -2135,7 +2219,7 @@ class ProcessLifecycleTests(unittest.TestCase):
             "automatic_graphics_skips=0 average_graphics_pass_ms=1 "
             "max_graphics_pass_ms=1 graphics_pass_sample_count=1 "
             "graphics_pass_p50_ms=1 graphics_pass_p95_ms=1 "
-            "graphics_pass_p99_ms=1 max_present_ms=0.1 present_p50_ms=0.1 present_p95_ms=0.1 present_p99_ms=0.1 max_raster_ms=0.9 raster_p50_ms=0.9 raster_p95_ms=0.9 raster_p99_ms=0.9 graphics_pass_samples_ns=[1000000]\n"
+            "graphics_pass_p99_ms=1 max_present_ms=0.1 present_p50_ms=0.1 present_p95_ms=0.1 present_p99_ms=0.1 max_raster_ms=0.9 raster_p50_ms=0.9 raster_p95_ms=0.9 raster_p99_ms=0.9 max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 graphics_pass_samples_ns=[1000000]\n"
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=2 "
             "synchronized_player_infos=2 activated_nonhost_clients=2 "
             "runtime_crew_objects=2 "

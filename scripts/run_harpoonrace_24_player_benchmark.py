@@ -86,6 +86,7 @@ INTEGER_METRICS = {
     "simulation_frames",
     "automatic_graphics_skips",
     "graphics_pass_sample_count",
+    "frame_sample_count",
 }
 FLOAT_METRICS = {
     "elapsed_seconds",
@@ -107,6 +108,17 @@ FLOAT_METRICS = {
     "raster_p50_ms",
     "raster_p95_ms",
     "raster_p99_ms",
+    # The simulation burst and the complete frame it shares with presentation.
+    # Sampled per event-loop iteration, so a frame that skipped its render is
+    # still represented here.
+    "max_simulation_ms",
+    "simulation_p50_ms",
+    "simulation_p95_ms",
+    "simulation_p99_ms",
+    "max_frame_ms",
+    "frame_p50_ms",
+    "frame_p95_ms",
+    "frame_p99_ms",
 }
 REQUIRED_METRICS = INTEGER_METRICS | FLOAT_METRICS | {
     "graphics_pass_samples_ns"

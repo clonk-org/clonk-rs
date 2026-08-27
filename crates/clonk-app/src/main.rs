@@ -1534,12 +1534,25 @@ fn run() -> Result<()> {
                             app.submit_due_input_latency_benchmark_pair(started, probe_now);
                         }
                     }
-                    let simulation_pass = match advance_simulation_pass_within(
+                    let simulation_started = Instant::now();
+                    let simulation_result = advance_simulation_pass_within(
                         &mut app,
                         &mut frame_schedule,
                         &mut accumulator,
                         burst_budget,
-                    ) {
+                    );
+                    let simulation_duration = simulation_started.elapsed();
+                    // Every iteration inside the window is a sample, including
+                    // the ones that skip their render: the presenter's cost is
+                    // only readable against the frame it shares.
+                    if let Some(benchmark) = presentation_benchmark.as_mut() {
+                        benchmark.record_frame_pass(
+                            simulation_started,
+                            simulation_duration,
+                            frame_time,
+                        );
+                    }
+                    let simulation_pass = match simulation_result {
                         Ok(outcome) => outcome,
                         Err(err) => {
                             tracing::error!(error = ?err, "tick failed");
