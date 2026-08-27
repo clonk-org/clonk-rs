@@ -5242,6 +5242,52 @@ fn developer_object_list_opens_and_binds_the_selection_both_ways() {
 // long before anything could emit one.
 /// `C4ViewportWindow::GetPositionData` (`C4Viewport.cpp:217-222`) puts every
 /// detached viewport's geometry in the **console's** subkey, keyed
+/// `DialogWindow::GetPositionData` names a console dialog's entry after the
+/// dialog's own `GetID()` — `ConsoleGUI_Scoreboard` for `C4ScoreboardDlg`
+/// (`C4GuiDialogs.cpp:285-297`; `C4Scoreboard.h:107`) — in the same `Console`
+/// subkey the console and its viewports use, and sets `storeSize`, so the size
+/// is written with the position.
+#[test]
+fn console_dialog_geometry_round_trips_under_its_own_dialog_id() {
+    use crate::console_window_position::{console_dialog_position_key, ConsoleWindowPlacement};
+
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+
+    runtime_assert_eq!(
+        console_dialog_position_key("Scoreboard") => Some("ConsoleGUI_Scoreboard".to_owned())
+    );
+    runtime_assert_eq!(
+        console_dialog_position_key("") => None,
+        "a dialog with no GetID gets no entry at all (C4GuiDialogs.cpp:287)",
+    );
+
+    runtime_assert!(
+        load_console_dialog_window_position(Some(&paths), "Scoreboard").is_none(),
+        "nothing is remembered before the dialog stores anything"
+    );
+
+    store_console_dialog_window_position(&paths, "Scoreboard", 40, 22, 260, 130).test_value();
+    runtime_assert_eq!(
+        load_console_dialog_window_position(Some(&paths), "Scoreboard") => Some(ConsoleWindowPlacement::PositionAndSize { x: 40, y: 22, width: 260, height: 130, }),
+        "storeSize is set for a dialog, so the size survives with the position",
+    );
+
+    // A different dialog id is a different slot, and neither lands on the
+    // console's own `Main` key or on a viewport's.
+    runtime_assert!(load_console_dialog_window_position(Some(&paths), "Other").is_none());
+    runtime_assert!(
+        load_console_window_position(Some(&paths)).is_none(),
+        "a dialog must not land on the console's `Main` key"
+    );
+    runtime_assert!(
+        load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE).is_none(),
+        "nor on a viewport's slot"
+    );
+}
+
 /// `Viewport{Player + 1}` with `storeSize` set — so unlike the console's own
 /// `Main` entry the size comes back too, and two viewports following different
 /// players never share a slot.
