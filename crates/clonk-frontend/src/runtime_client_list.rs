@@ -337,11 +337,29 @@ enum RuntimeListEntry<'a> {
     },
 }
 
+/// Whether this dialog can own a caption widget at all.
+///
+/// `Dialog::Show` gives a non-viewport dialog an OS child window when the
+/// application is not fullscreen (`C4GuiDialogs.cpp:659-661`), and
+/// `Dialog::SetTitle` then puts the text on that window's bar and
+/// **returns before allocating `pTitle`** (`:390-395`). A console child
+/// therefore has no caption row, no close button and no margin for them,
+/// however many times `Update` sets the title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitleWidgets {
+    /// The ordinary in-screen dialog, which owns its caption.
+    Dialog,
+    /// A console child window, which does not.
+    ConsoleWindow,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeClientListLayout {
     pub bounds: IntRect,
-    pub caption: IntRect,
-    pub close_button: IntRect,
+    /// `None` in a console child window, which owns no caption widget at all.
+    pub caption: Option<IntRect>,
+    /// `None` for the same reason: the close button lives on the caption row.
+    pub close_button: Option<IntRect>,
     pub options: IntRect,
     pub option_scrollbar: IntRect,
     pub list: IntRect,
@@ -355,8 +373,10 @@ pub struct RuntimeClientListLayout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeClientInfoLayout {
     pub bounds: IntRect,
-    pub caption: IntRect,
-    pub close_button: IntRect,
+    /// `None` in a console child window, which owns no caption widget at all.
+    pub caption: Option<IntRect>,
+    /// `None` for the same reason: the close button lives on the caption row.
+    pub close_button: Option<IntRect>,
     pub bottom_close_button: Option<IntRect>,
     pub text_window: IntRect,
     pub text: IntRect,
@@ -746,6 +766,24 @@ impl RuntimeClientListDialog {
     }
 
     pub fn layout(&self, preferred: IntRect, font_line_height: i32) -> RuntimeClientListLayout {
+        self.layout_with_title_widgets(preferred, font_line_height, TitleWidgets::Dialog)
+    }
+
+    /// The same dialog laid out for a console child window.
+    pub fn console_layout(
+        &self,
+        preferred: IntRect,
+        font_line_height: i32,
+    ) -> RuntimeClientListLayout {
+        self.layout_with_title_widgets(preferred, font_line_height, TitleWidgets::ConsoleWindow)
+    }
+
+    fn layout_with_title_widgets(
+        &self,
+        preferred: IntRect,
+        font_line_height: i32,
+        title_widgets: TitleWidgets,
+    ) -> RuntimeClientListLayout {
         let (width, height) = if self.is_static_info_only() {
             (preferred.w.max(1), preferred.h.max(1))
         } else {
@@ -760,7 +798,12 @@ impl RuntimeClientListDialog {
             width,
             height,
         );
-        let caption_height = (font_line_height + 8).max(24).min(height);
+        // No caption widget means no row for one, so every rect below starts
+        // at the top of the window instead of under a title bar.
+        let caption_height = match title_widgets {
+            TitleWidgets::Dialog => (font_line_height + 8).max(24).min(height),
+            TitleWidgets::ConsoleWindow => 0,
+        };
         let status_height = font_line_height
             .max(1)
             .min((height - caption_height).max(1));
@@ -836,13 +879,16 @@ impl RuntimeClientListDialog {
             .collect();
         let layout = RuntimeClientListLayout {
             bounds,
-            caption: IntRect::new(bounds.x, bounds.y, bounds.w, caption_height),
-            close_button: IntRect::new(
-                bounds.x + bounds.w - 20,
-                bounds.y + (caption_height - 16) / 2,
-                16,
-                16,
-            ),
+            caption: matches!(title_widgets, TitleWidgets::Dialog)
+                .then(|| IntRect::new(bounds.x, bounds.y, bounds.w, caption_height)),
+            close_button: matches!(title_widgets, TitleWidgets::Dialog).then(|| {
+                IntRect::new(
+                    bounds.x + bounds.w - 20,
+                    bounds.y + (caption_height - 16) / 2,
+                    16,
+                    16,
+                )
+            }),
             options,
             option_scrollbar,
             list: IntRect::new(
@@ -929,20 +975,25 @@ impl RuntimeClientListDialog {
 
         let layout = self.layout(preferred, font_line_height);
         if let Some(info) = self.info_layout_from_parent(&layout) {
-            if contains(info.close_button, point)
+            if info.close_button.is_some_and(|rect| contains(rect, point))
                 || info
                     .bottom_close_button
                     .is_some_and(|button| contains(button, point))
             {
                 Some(StartupTooltip::resource("IDS_MNU_CLOSE"))
-            } else if contains(info.caption, point) {
+            } else if info.caption.is_some_and(|rect| contains(rect, point)) {
                 Some(StartupTooltip::text(self.info_dialog.caption().to_string()))
             } else {
                 None
             }
-        } else if contains(layout.close_button, point) {
+        } else if layout
+            .close_button
+            .is_some_and(|rect| contains(rect, point))
+        {
             Some(StartupTooltip::resource("IDS_MNU_CLOSE"))
-        } else if contains(layout.caption, point) && !self.caption.is_empty() {
+        } else if layout.caption.is_some_and(|rect| contains(rect, point))
+            && !self.caption.is_empty()
+        {
             Some(StartupTooltip::text(self.caption.clone()))
         } else {
             None
@@ -1308,8 +1359,8 @@ impl RuntimeClientListDialog {
         let scrolling = self.info_dialog.geometry(text_window, font_line_height);
         Some(RuntimeClientInfoLayout {
             bounds,
-            caption,
-            close_button: IntRect::new(
+            caption: Some(caption),
+            close_button: Some(IntRect::new(
                 bounds.x + bounds.w - 20,
                 if self.info_static {
                     caption.y + 4
@@ -1318,7 +1369,7 @@ impl RuntimeClientListDialog {
                 },
                 16,
                 16,
-            ),
+            )),
             bottom_close_button,
             text_window,
             text: scrolling.viewport,
@@ -1328,12 +1379,15 @@ impl RuntimeClientListDialog {
 
     fn title_at(&self, point: GuiPoint, layout: &RuntimeClientListLayout) -> Option<DialogTitle> {
         if let Some(info) = self.info_layout_from_parent(layout) {
-            return (!contains(info.close_button, point) && contains(info.caption, point))
-                .then_some(DialogTitle::Info);
+            return (!info.close_button.is_some_and(|rect| contains(rect, point))
+                && info.caption.is_some_and(|rect| contains(rect, point)))
+            .then_some(DialogTitle::Info);
         }
         (!self.info_only
-            && !contains(layout.close_button, point)
-            && contains(layout.caption, point))
+            && !layout
+                .close_button
+                .is_some_and(|rect| contains(rect, point))
+            && layout.caption.is_some_and(|rect| contains(rect, point)))
         .then_some(DialogTitle::Main)
     }
 
@@ -1970,34 +2024,41 @@ impl RuntimeClientListDialog {
             return Ok(());
         }
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
-        let caption_scroll = self.caption_scroll_offset_at(
-            now,
-            &resources.fonts.text,
-            &layout.caption,
-            DialogTitle::Main,
-        );
-        resources.skin.draw_caption_scrolled(
-            surface,
-            layout.caption,
-            &self.caption,
-            &resources.fonts.text,
-            [255, 255, 255, 255],
-            TextAlign::Left,
-            TITLE_RIGHT_INDENT,
-            caption_scroll,
-            gamma,
-        );
-        self.draw_icon_button(
-            surface,
-            layout.close_button,
-            ICON_CLOSE,
-            HitTarget::Close,
-            &layout,
-            resources,
-            keyboard_active,
-            mouse_active,
-            gamma,
-        );
+        // A console child has no caption row and no close button to draw:
+        // `Dialog::SetTitle` puts the text on the OS window bar and returns
+        // before allocating `pTitle` (`C4GuiDialogs.cpp:390-395`).
+        if let Some(caption) = layout.caption {
+            let caption_scroll = self.caption_scroll_offset_at(
+                now,
+                &resources.fonts.text,
+                &caption,
+                DialogTitle::Main,
+            );
+            resources.skin.draw_caption_scrolled(
+                surface,
+                caption,
+                &self.caption,
+                &resources.fonts.text,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                TITLE_RIGHT_INDENT,
+                caption_scroll,
+                gamma,
+            );
+        }
+        if let Some(close_button) = layout.close_button {
+            self.draw_icon_button(
+                surface,
+                close_button,
+                ICON_CLOSE,
+                HitTarget::Close,
+                &layout,
+                resources,
+                keyboard_active,
+                mouse_active,
+                gamma,
+            );
+        }
 
         for row_layout in &layout.option_rows {
             if row_layout.rect.y + row_layout.rect.h > layout.options.y + layout.options.h {
@@ -2413,51 +2474,40 @@ impl RuntimeClientListDialog {
         let geometry = info_scrolling_geometry(layout, resources.fonts.text.line_height);
         self.info_dialog
             .prepare_wrapped_lines(&resources.fonts.text, geometry.viewport.w);
-        let caption_scroll = self.caption_scroll_offset_at(
-            now,
-            &resources.fonts.text,
-            &layout.caption,
-            DialogTitle::Info,
-        );
-        resources.skin.draw_caption_scrolled(
-            surface,
-            layout.caption,
-            self.info_dialog.caption(),
-            &resources.fonts.text,
-            [255, 255, 255, 255],
-            TextAlign::Left,
-            TITLE_RIGHT_INDENT,
-            caption_scroll,
-            gamma,
-        );
+        // As in the parent list, a console child owns neither widget.
+        if let Some(caption) = layout.caption {
+            let caption_scroll = self.caption_scroll_offset_at(
+                now,
+                &resources.fonts.text,
+                &caption,
+                DialogTitle::Info,
+            );
+            resources.skin.draw_caption_scrolled(
+                surface,
+                caption,
+                self.info_dialog.caption(),
+                &resources.fonts.text,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                TITLE_RIGHT_INDENT,
+                caption_scroll,
+                gamma,
+            );
+        }
 
         let pointer_target = self
             .pointer
             .and_then(|point| self.hit_target(point, parent));
         let close_hovered = active && pointer_target == Some(HitTarget::InfoClose);
         let close_pressed = close_hovered && self.pointer_capture == Some(HitTarget::InfoClose);
-        if close_hovered && !close_pressed {
-            draw_highlight(
-                surface,
-                layout.close_button,
-                resources.button_highlight,
-                gamma,
-            );
-        }
-        draw_icon(
-            surface,
-            layout.close_button,
-            resources.icons,
-            ICON_CLOSE,
-            gamma,
-        );
-        if close_pressed {
-            draw_highlight(
-                surface,
-                layout.close_button,
-                resources.button_highlight,
-                gamma,
-            );
+        if let Some(close_button) = layout.close_button {
+            if close_hovered && !close_pressed {
+                draw_highlight(surface, close_button, resources.button_highlight, gamma);
+            }
+            draw_icon(surface, close_button, resources.icons, ICON_CLOSE, gamma);
+            if close_pressed {
+                draw_highlight(surface, close_button, resources.button_highlight, gamma);
+            }
         }
 
         draw_engine_box(
@@ -2528,34 +2578,38 @@ impl RuntimeClientListDialog {
         let geometry = info_scrolling_geometry(layout, resources.fonts.text.line_height);
         self.info_dialog
             .prepare_wrapped_lines(&resources.fonts.text, geometry.viewport.w);
-        let caption_scroll = self.caption_scroll_offset_at(
-            now,
-            &resources.fonts.text,
-            &layout.caption,
-            DialogTitle::Info,
-        );
-        resources.skin.draw_caption_scrolled(
-            surface,
-            layout.caption,
-            self.info_dialog.caption(),
-            &resources.fonts.text,
-            [255, 255, 255, 255],
-            TextAlign::Left,
-            TITLE_RIGHT_INDENT,
-            caption_scroll,
-            gamma,
-        );
-        self.draw_icon_button(
-            surface,
-            layout.close_button,
-            ICON_CLOSE,
-            HitTarget::InfoClose,
-            parent,
-            resources,
-            keyboard_active,
-            mouse_active,
-            gamma,
-        );
+        if let Some(caption) = layout.caption {
+            let caption_scroll = self.caption_scroll_offset_at(
+                now,
+                &resources.fonts.text,
+                &caption,
+                DialogTitle::Info,
+            );
+            resources.skin.draw_caption_scrolled(
+                surface,
+                caption,
+                self.info_dialog.caption(),
+                &resources.fonts.text,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                TITLE_RIGHT_INDENT,
+                caption_scroll,
+                gamma,
+            );
+        }
+        if let Some(close_button) = layout.close_button {
+            self.draw_icon_button(
+                surface,
+                close_button,
+                ICON_CLOSE,
+                HitTarget::InfoClose,
+                parent,
+                resources,
+                keyboard_active,
+                mouse_active,
+                gamma,
+            );
+        }
         draw_engine_box(
             surface,
             layout.text_window.x,
@@ -2703,7 +2757,7 @@ impl RuntimeClientListDialog {
 
     fn hit_target(&self, point: GuiPoint, layout: &RuntimeClientListLayout) -> Option<HitTarget> {
         if let Some(info) = self.info_layout_from_parent(layout) {
-            return if contains(info.close_button, point) {
+            return if info.close_button.is_some_and(|rect| contains(rect, point)) {
                 Some(HitTarget::InfoClose)
             } else if info
                 .bottom_close_button
@@ -2725,7 +2779,10 @@ impl RuntimeClientListDialog {
                 None
             };
         }
-        if contains(layout.close_button, point) {
+        if layout
+            .close_button
+            .is_some_and(|rect| contains(rect, point))
+        {
             return Some(HitTarget::Close);
         }
         if self.option_max_scroll(layout) > 0 && contains(layout.option_scrollbar, point) {
@@ -3272,8 +3329,16 @@ mod tests {
         let layout = dialog.layout(preferred, 16);
         dialog.focus = Some(RuntimeClientListFocus::Close);
         dialog.pointer = Some(GuiPoint::new(
-            (layout.close_button.x + 1) as f32,
-            (layout.close_button.y + 1) as f32,
+            (layout
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .x
+                + 1) as f32,
+            (layout
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + 1) as f32,
         ));
         dialog.pointer_capture = Some(HitTarget::Close);
 
@@ -3366,8 +3431,24 @@ mod tests {
         let preferred = IntRect::new(0, 0, 800, 600);
         let layout = dialog.info_layout(preferred, 16).expect("static layout");
         assert_eq!(layout.bounds.w, 620);
-        assert_eq!(layout.caption.h, 23);
-        assert_eq!(layout.close_button.y, layout.caption.y + 4);
+        assert_eq!(
+            layout
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .h,
+            23
+        );
+        assert_eq!(
+            layout
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .y,
+            layout
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + 4
+        );
         let bottom_close = layout.bottom_close_button.expect("bottom Close button");
         assert_eq!(bottom_close.w, 140);
         assert_eq!(bottom_close.h, 32);
@@ -3422,8 +3503,20 @@ mod tests {
         );
         let initial = dialog.layout(preferred, 16);
         let main_start = GuiPoint::new(
-            (initial.caption.x + 8) as f32,
-            (initial.caption.y + initial.caption.h / 2) as f32,
+            (initial
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .x
+                + 8) as f32,
+            (initial
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + initial
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets")
+                    .h
+                    / 2) as f32,
         );
         assert!(dialog.handle_pointer_down(main_start, preferred, 16));
         assert!(dialog.has_positional_pointer_drag());
@@ -3472,8 +3565,20 @@ mod tests {
         );
 
         let info_start = GuiPoint::new(
-            (initial_info.caption.x + 8) as f32,
-            (initial_info.caption.y + initial_info.caption.h / 2) as f32,
+            (initial_info
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .x
+                + 8) as f32,
+            (initial_info
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + initial_info
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets")
+                    .h
+                    / 2) as f32,
         );
         assert!(dialog.handle_pointer_down(info_start, preferred, 16));
         let info_moved = GuiPoint::new(info_start.x - 22.0, info_start.y + 31.0);
@@ -3508,8 +3613,16 @@ mod tests {
         assert_eq!(dialog.layout(preferred, 16).bounds, retained_main.bounds);
 
         let moved_close = GuiPoint::new(
-            (retained_info.close_button.x + 1) as f32,
-            (retained_info.close_button.y + 1) as f32,
+            (retained_info
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .x
+                + 1) as f32,
+            (retained_info
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + 1) as f32,
         );
         assert!(dialog.handle_pointer_down(moved_close, preferred, 16));
         assert_eq!(
@@ -3533,34 +3646,67 @@ mod tests {
         let layout = dialog.layout(preferred, font.line_height);
         assert_eq!(
             font.measure(&dialog.caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
-                - layout.caption.w,
+                - layout
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets")
+                    .w,
             3
         );
         let base = Instant::now();
         assert_eq!(
-            dialog.caption_scroll_offset_at(base, &font, &layout.caption, DialogTitle::Main),
+            dialog.caption_scroll_offset_at(
+                base,
+                &font,
+                &layout
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets"),
+                DialogTitle::Main
+            ),
             0
         );
         assert_eq!(
             dialog.caption_scroll_offset_at(
                 base + TITLE_SCROLL_DELAY - Duration::from_millis(1),
                 &font,
-                &layout.caption,
+                &layout
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets"),
                 DialogTitle::Main,
             ),
             0
         );
         let outbound = base + TITLE_SCROLL_DELAY;
         assert_eq!(
-            dialog.caption_scroll_offset_at(outbound, &font, &layout.caption, DialogTitle::Main),
+            dialog.caption_scroll_offset_at(
+                outbound,
+                &font,
+                &layout
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets"),
+                DialogTitle::Main
+            ),
             1
         );
         assert_eq!(
-            dialog.caption_scroll_offset_at(outbound, &font, &layout.caption, DialogTitle::Main),
+            dialog.caption_scroll_offset_at(
+                outbound,
+                &font,
+                &layout
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets"),
+                DialogTitle::Main
+            ),
             2
         );
         assert_eq!(
-            dialog.caption_scroll_offset_at(outbound, &font, &layout.caption, DialogTitle::Main),
+            dialog.caption_scroll_offset_at(
+                outbound,
+                &font,
+                &layout
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets"),
+                DialogTitle::Main
+            ),
             2,
             "the attempted far endpoint backs off and begins its three-second dwell"
         );
@@ -3573,12 +3719,22 @@ mod tests {
             font.measure(dialog.info_dialog.caption(), true).0
                 + TITLE_LEFT_INDENT
                 + TITLE_RIGHT_INDENT
-                - info.caption.w,
+                - info
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets")
+                    .w,
             3
         );
         let info_base = outbound + Duration::from_secs(1);
         assert_eq!(
-            dialog.caption_scroll_offset_at(info_base, &font, &info.caption, DialogTitle::Info,),
+            dialog.caption_scroll_offset_at(
+                info_base,
+                &font,
+                &info
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets"),
+                DialogTitle::Info,
+            ),
             0,
             "the info dialog owns an independent three-second clock"
         );
@@ -3586,7 +3742,9 @@ mod tests {
             dialog.caption_scroll_offset_at(
                 info_base + TITLE_SCROLL_DELAY,
                 &font,
-                &info.caption,
+                &info
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets"),
                 DialogTitle::Info,
             ),
             1
@@ -3595,10 +3753,59 @@ mod tests {
             dialog.caption_scroll_offset_at(
                 info_base + TITLE_SCROLL_DELAY,
                 &font,
-                &info.caption,
+                &info
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets"),
                 DialogTitle::Info,
             ),
             2
+        );
+    }
+
+    /// A console child owns no caption row, and the client area starts where
+    /// the caption would have been.
+    ///
+    /// `Dialog::Show` gives a non-viewport dialog an OS child window outside
+    /// fullscreen (`C4GuiDialogs.cpp:659-661`) and `Dialog::SetTitle` returns
+    /// before allocating `pTitle` (`:390-395`), so there is no caption widget,
+    /// no close button, and no margin reserved for either. The dialog is the
+    /// same one otherwise: same bounds, same options, same list.
+    #[test]
+    fn a_console_child_layout_has_no_caption_row_and_reclaims_its_margin() {
+        let dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        let preferred = IntRect::new(0, 0, 400, 300);
+        let line_height = 12;
+
+        let windowed = dialog.layout(preferred, line_height);
+        let console = dialog.console_layout(preferred, line_height);
+
+        assert!(windowed.caption.is_some());
+        assert!(windowed.close_button.is_some());
+        assert_eq!(console.caption, None, "no caption widget to lay out");
+        assert_eq!(console.close_button, None, "and none to close it with");
+
+        assert_eq!(
+            console.bounds, windowed.bounds,
+            "the window itself is unchanged; only its contents move up"
+        );
+        let reclaimed = windowed.options.y - console.options.y;
+        assert!(
+            reclaimed > 0,
+            "the options row starts higher without a caption above it: {reclaimed}"
+        );
+        assert_eq!(
+            console.list.y - console.options.y,
+            windowed.list.y - windowed.options.y,
+            "everything below keeps its spacing"
+        );
+        assert!(
+            console.list.h > windowed.list.h,
+            "and the list gets the reclaimed height"
         );
     }
 
@@ -3614,8 +3821,20 @@ mod tests {
         .with_info_caption("Client information");
         let layout = dialog.layout(preferred, 16);
         let title_point = GuiPoint::new(
-            (layout.caption.x + 8) as f32,
-            (layout.caption.y + layout.caption.h / 2) as f32,
+            (layout
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .x
+                + 8) as f32,
+            (layout
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + layout
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets")
+                    .h
+                    / 2) as f32,
         );
         let base = Instant::now();
         let mut tracker = ClassicTooltipTracker::new_at(base);
@@ -3633,8 +3852,16 @@ mod tests {
         );
 
         let close_point = GuiPoint::new(
-            (layout.close_button.x + 1) as f32,
-            (layout.close_button.y + 1) as f32,
+            (layout
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .x
+                + 1) as f32,
+            (layout
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + 1) as f32,
         );
         let close_at = base + Duration::from_secs(1);
         tracker.note_pointer_move_at(close_point, close_at);
@@ -3650,8 +3877,20 @@ mod tests {
         dialog.info_client_id = Some(7);
         let info = dialog.info_layout(preferred, 16).expect("info layout");
         let info_title = GuiPoint::new(
-            (info.caption.x + 8) as f32,
-            (info.caption.y + info.caption.h / 2) as f32,
+            (info
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .x
+                + 8) as f32,
+            (info
+                .caption
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + info
+                    .caption
+                    .expect("an ordinary dialog owns its title widgets")
+                    .h
+                    / 2) as f32,
         );
         let info_at = close_at + Duration::from_secs(1);
         tracker.note_pointer_move_at(info_title, info_at);
@@ -3664,8 +3903,16 @@ mod tests {
         );
 
         let info_close = GuiPoint::new(
-            (info.close_button.x + 1) as f32,
-            (info.close_button.y + 1) as f32,
+            (info
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .x
+                + 1) as f32,
+            (info
+                .close_button
+                .expect("an ordinary dialog owns its title widgets")
+                .y
+                + 1) as f32,
         );
         let info_close_at = info_at + Duration::from_secs(1);
         tracker.note_pointer_move_at(info_close, info_close_at);
