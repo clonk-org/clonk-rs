@@ -265,8 +265,8 @@ pub use sim::{
     LinkConditions, LinkReport, LockstepPlayout, Lookahead, SimRng, CONTROL_PERIOD, STEP,
 };
 pub use sim_session::{
-    run_session, ClientOutcome, ClientProfile, CpuProfile, PresendSource, SessionConfig,
-    SessionReport, FRAME_INTERVAL,
+    run_session, ClientOutcome, ClientProfile, CpuProfile, HostUplinkReport, PresendSource,
+    SessionConfig, SessionReport, FRAME_INTERVAL,
 };
 pub use statistics::{
     ConnectionRateStatistics, ConnectionStatisticsKey, ConnectionStatisticsRecorder,

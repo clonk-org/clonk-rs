@@ -16,13 +16,14 @@
 //! Percentiles are taken once over the merged sample set from every seed, never
 //! averaged across seeds — you cannot average a percentile.
 //!
-//! **Coverage boundary.** Each participant gets its own independent simulated
-//! link, so the host's uplink is not shared between peers. Adding participants
-//! therefore does not add host-side contention, and `potato-dialup-8p` currently
-//! reports the same numbers as `potato-dialup`. Real host uplink is one pipe
-//! carrying N copies of every aggregate. The missing shared pipe is tracked by
-//! clonk-org/clonk-rs#1229 and documented with the other boundaries in
-//! `chaos/README.md`.
+//! **Shared host uplink.** Profiles that set `host_uplink_bps` charge every
+//! host-to-peer copy against one bounded pipe, so a real uplink carrying N
+//! copies of every aggregate is what makes an eight-player session cost the
+//! host more than a four-player one. Profiles that leave it zero keep the older
+//! independent-link model, where peers were free. The payload charged is the
+//! same nominal 16-byte aggregate the rest of the model uses, so contention is
+//! comparable between profiles rather than against a wire capture; that
+//! boundary and the others are in `chaos/README.md`.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -60,6 +61,11 @@ const SEEDS: [u64; 16] = [
 const DEFAULT_TICKS: usize = 200;
 const BASELINE_PATH: &str = "chaos/baseline.json";
 
+/// The host's shared uplink for the profiles that model one: a domestic
+/// upstream, deliberately the same for the four- and eight-player dial-up
+/// profiles so the only difference between them is how many copies it carries.
+const HOST_UPLINK_BPS: u32 = 512_000;
+
 /// A named `(link, cpu)` pairing. The two are deliberately separable: a single
 /// blended "lag" number cannot tell "buy a CPU" from "buy an ISP", and the fixes
 /// differ, so the suite carries profiles that isolate each.
@@ -71,6 +77,11 @@ struct Profile {
     /// Impaired participant's machine. `None` means it gets a reference machine.
     cpu: Option<CpuProfile>,
     clients: usize,
+    /// The host's single uplink, in bits per second. Zero leaves it unmetered,
+    /// which is the independent-link model every profile used before: adding
+    /// peers then cost the host nothing, because nothing carried the extra
+    /// copies.
+    host_uplink_bps: u32,
 }
 
 fn dialup() -> LinkConditions {
@@ -109,6 +120,7 @@ fn profiles() -> Vec<Profile> {
             link: None,
             cpu: None,
             clients: 4,
+            host_uplink_bps: 0,
         },
         Profile {
             name: "slow-cpu-only",
@@ -116,6 +128,7 @@ fn profiles() -> Vec<Profile> {
             link: None,
             cpu: Some(CpuProfile::potato()),
             clients: 4,
+            host_uplink_bps: 0,
         },
         Profile {
             name: "bad-link-only",
@@ -123,6 +136,7 @@ fn profiles() -> Vec<Profile> {
             link: Some(dialup()),
             cpu: None,
             clients: 4,
+            host_uplink_bps: 0,
         },
         Profile {
             name: "potato-dialup",
@@ -130,6 +144,7 @@ fn profiles() -> Vec<Profile> {
             link: Some(dialup()),
             cpu: Some(CpuProfile::potato()),
             clients: 4,
+            host_uplink_bps: HOST_UPLINK_BPS,
         },
         Profile {
             name: "pi4-hotel-wifi",
@@ -137,14 +152,16 @@ fn profiles() -> Vec<Profile> {
             link: Some(hotel_wifi()),
             cpu: Some(CpuProfile::pi4()),
             clients: 4,
+            host_uplink_bps: 0,
         },
         Profile {
             name: "potato-dialup-8p",
-            description: "same, with 8 participants; shared host-uplink contention is not \
-                          modelled (clonk-org/clonk-rs#1229)",
+            description: "same, with 8 participants sharing one host uplink, so the host \
+                          pays for every extra copy",
             link: Some(dialup()),
             cpu: Some(CpuProfile::potato()),
             clients: 8,
+            host_uplink_bps: HOST_UPLINK_BPS,
         },
     ]
 }
@@ -172,6 +189,7 @@ impl Profile {
             ticks,
             seed,
             presend_source,
+            host_uplink_bps: self.host_uplink_bps,
             ..SessionConfig::default()
         }
     }
@@ -203,6 +221,12 @@ struct ProfileMetrics {
     /// spending input latency, so a one-sided figure rewards the wrong thing.
     healthy_horizon_us_median: u64,
     unpublished_total: u64,
+    /// Payloads the shared host uplink had to hold back because it was still
+    /// busy with an earlier copy, summed over the sweep. Zero for a profile
+    /// that does not model one.
+    host_uplink_delayed_total: u64,
+    /// Total delay it imposed, in microseconds.
+    host_uplink_delay_us_total: u64,
 }
 
 fn percentile_u64(sorted: &[u64], fraction: f64) -> u64 {
@@ -231,6 +255,7 @@ struct Coverage {
     dropped_inputs: u64,
     datagram_drops: u64,
     queue_drops: u64,
+    host_uplink_delays: u64,
 }
 
 impl Coverage {
@@ -251,6 +276,9 @@ impl Coverage {
         if self.queue_drops == 0 {
             missing.push("no queue ever overflowed");
         }
+        if self.host_uplink_delays == 0 {
+            missing.push("the shared host uplink never delayed a payload");
+        }
         missing
     }
 }
@@ -268,6 +296,8 @@ fn measure(
     let mut dropped_inputs_total = 0u64;
     let mut forced_ticks_total = 0u64;
     let mut unpublished_total = 0u64;
+    let mut host_uplink_delayed_total = 0u64;
+    let mut host_uplink_delay_us_total = 0u64;
 
     for seed in SEEDS {
         let report: SessionReport = run_session(&profile.session_with(seed, ticks, presend_source));
@@ -289,6 +319,9 @@ fn measure(
         coverage.stalls += stalls as u64;
         coverage.forced += report.forced_ticks as u64;
         coverage.dropped_inputs += dropped as u64;
+        host_uplink_delayed_total += report.host_uplink.delayed_payloads as u64;
+        host_uplink_delay_us_total += report.host_uplink.delay.as_micros() as u64;
+        coverage.host_uplink_delays += report.host_uplink.delayed_payloads as u64;
     }
 
     // The transport view of the same link, which is where datagram-level loss
@@ -328,6 +361,8 @@ fn measure(
         forced_ticks_total,
         healthy_horizon_us_median: median(&mut healthy_horizon),
         unpublished_total,
+        host_uplink_delayed_total,
+        host_uplink_delay_us_total,
     }
 }
 
@@ -363,18 +398,26 @@ fn render_table(metrics: &[ProfileMetrics]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<20} {:>10} {:>10} {:>11} {:>11} {:>9} {:>8} {:>10}",
-        "profile", "blocked", "blocked", "healthy", "impaired", "dropped", "forced", "horizon"
+        "{:<20} {:>10} {:>10} {:>11} {:>11} {:>9} {:>8} {:>10} {:>10}",
+        "profile",
+        "blocked",
+        "blocked",
+        "healthy",
+        "impaired",
+        "dropped",
+        "forced",
+        "horizon",
+        "host up"
     );
     let _ = writeln!(
         out,
-        "{:<20} {:>10} {:>10} {:>11} {:>11} {:>9} {:>8} {:>10}",
-        "", "p50 ‰", "max ‰", "drift p50", "drift p50", "inputs", "ticks", "p50"
+        "{:<20} {:>10} {:>10} {:>11} {:>11} {:>9} {:>8} {:>10} {:>10}",
+        "", "p50 ‰", "max ‰", "drift p50", "drift p50", "inputs", "ticks", "p50", "held ms"
     );
     for metric in metrics {
         let _ = writeln!(
             out,
-            "{:<20} {:>10} {:>10} {:>10}ms {:>10}ms {:>9} {:>8} {:>8}us",
+            "{:<20} {:>10} {:>10} {:>10}ms {:>10}ms {:>9} {:>8} {:>8}us {:>10}",
             metric.name,
             metric.healthy_blocked_permille_median,
             metric.healthy_blocked_permille_worst,
@@ -383,6 +426,7 @@ fn render_table(metrics: &[ProfileMetrics]) -> String {
             metric.dropped_inputs_total,
             metric.forced_ticks_total,
             metric.healthy_horizon_us_median,
+            metric.host_uplink_delay_us_total / 1_000,
         );
     }
     out
@@ -407,7 +451,9 @@ fn to_json(metrics: &[ProfileMetrics]) -> String {
                 "      \"dropped_inputs_total\": {},\n",
                 "      \"forced_ticks_total\": {},\n",
                 "      \"healthy_horizon_us_median\": {},\n",
-                "      \"unpublished_total\": {}\n",
+                "      \"unpublished_total\": {},\n",
+                "      \"host_uplink_delayed_total\": {},\n",
+                "      \"host_uplink_delay_us_total\": {}\n",
                 "    }}"
             ),
             metric.name,
@@ -423,6 +469,8 @@ fn to_json(metrics: &[ProfileMetrics]) -> String {
             metric.forced_ticks_total,
             metric.healthy_horizon_us_median,
             metric.unpublished_total,
+            metric.host_uplink_delayed_total,
+            metric.host_uplink_delay_us_total,
         );
         out.push_str(if index + 1 == metrics.len() {
             "\n"
@@ -549,12 +597,13 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
         }
         println!(
             "\ncoverage ok: {} stalls, {} forced ticks, {} dropped inputs, {} datagram drops \
-             ({} from full queues)",
+             ({} from full queues), {} payloads held back by the shared host uplink",
             coverage.stalls,
             coverage.forced,
             coverage.dropped_inputs,
             coverage.datagram_drops,
-            coverage.queue_drops
+            coverage.queue_drops,
+            coverage.host_uplink_delays
         );
     }
 
@@ -692,6 +741,8 @@ mod tests {
             forced_ticks_total: 77,
             healthy_horizon_us_median: 88,
             unpublished_total: 99,
+            host_uplink_delayed_total: 111,
+            host_uplink_delay_us_total: 222,
         }];
         let json = to_json(&metrics);
 

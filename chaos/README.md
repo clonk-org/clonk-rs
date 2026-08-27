@@ -49,11 +49,11 @@ network-quality number.
 
 ## Coverage boundaries
 
-- **The host's uplink is not shared between peers.** Each participant has its own
-  independent simulated link, so adding participants adds no host-side
-  contention and `potato-dialup-8p` reports the same numbers as `potato-dialup`.
-  Real host uplink is one pipe carrying N copies of every aggregate, and that is
-  where a larger game degrades first. Tracked by clonk-org/clonk-rs#1229.
+- **Payload sizes are nominal.** The shared host uplink and every per-peer link
+  charge a fixed 16-byte aggregate rather than a real serialized control packet,
+  so the *shape* of contention is modelled but its absolute bitrate is not. A
+  profile's capacity numbers are therefore comparable against each other and
+  against the baseline, not against a wire capture.
 - **Resource transfer is not modelled on the shared sequence space.** The link
   model has competing bulk traffic (`cross_traffic_*_bps`), but the session
   harness does not yet put resource fragments into the same strictly-ordered

@@ -214,6 +214,12 @@ pub struct SessionConfig {
     /// set is the same move C++ already makes for `NCS_Chasing` clients, which
     /// `isWaitedFor()` excludes from `AllClientsReady`.
     pub straggler_patience: u32,
+    /// One bounded pipe every host-to-peer payload is charged against, in bits
+    /// per second. Zero leaves the host unmetered, which is what the harness
+    /// modelled before: each participant had an independent link, so adding
+    /// peers added no host-side cost even though a real uplink carries one copy
+    /// of the aggregate per peer.
+    pub host_uplink_bps: u32,
 }
 
 impl SessionConfig {
@@ -242,6 +248,9 @@ impl Default for SessionConfig {
             // Matches `HostConfig::straggler_patience` so the harness measures
             // what actually ships.
             straggler_patience: 4,
+            // Unmetered by default, so every existing caller keeps the
+            // independent-link model it was written against.
+            host_uplink_bps: 0,
         }
     }
 }
@@ -292,6 +301,70 @@ pub struct SessionReport {
     pub forced_ticks: usize,
     /// Ticks the host never managed to publish at all.
     pub unpublished_ticks: usize,
+    /// What the shared host uplink carried and cost, when one was modelled.
+    pub host_uplink: HostUplinkReport,
+}
+
+/// The shared host pipe's contribution, so a report can show whether peer
+/// count alone made the host the bottleneck.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostUplinkReport {
+    /// Whether a bounded pipe was modelled at all.
+    pub modelled: bool,
+    /// Payloads the host pushed through it.
+    pub payloads: usize,
+    /// Bytes it carried.
+    pub bytes: u64,
+    /// Payloads that had to wait because the pipe was still busy — the
+    /// contention that a single-peer profile cannot produce.
+    pub delayed_payloads: usize,
+    /// Total delay it imposed, summed over every payload.
+    pub delay: Duration,
+}
+
+/// A single serialising pipe: each payload occupies it for as long as its bits
+/// take at `bps`, and the next one starts when the previous finishes.
+#[derive(Debug, Default)]
+struct SharedUplink {
+    bps: u32,
+    cursor: Duration,
+    report: HostUplinkReport,
+}
+
+impl SharedUplink {
+    fn new(bps: u32) -> Self {
+        Self {
+            bps,
+            cursor: Duration::ZERO,
+            report: HostUplinkReport {
+                modelled: bps > 0,
+                ..HostUplinkReport::default()
+            },
+        }
+    }
+
+    /// When `bytes` finish leaving the host, given it is `now`.
+    ///
+    /// An unmetered pipe releases immediately, which reproduces the previous
+    /// model exactly.
+    fn release_at(&mut self, now: Duration, bytes: usize) -> Duration {
+        if self.bps == 0 {
+            return now;
+        }
+        let start = self.cursor.max(now);
+        if start > now {
+            self.report.delayed_payloads += 1;
+            self.report.delay += start - now;
+        }
+        let nanos = (bytes as u64)
+            .saturating_mul(8)
+            .saturating_mul(1_000_000_000)
+            / u64::from(self.bps).max(1);
+        self.cursor = start + Duration::from_nanos(nanos);
+        self.report.payloads += 1;
+        self.report.bytes += bytes as u64;
+        start
+    }
 }
 
 impl SessionReport {
@@ -376,6 +449,7 @@ impl Peer {
 pub fn run_session(config: &SessionConfig) -> SessionReport {
     let mut rng = SimRng::new(config.seed);
     let mut coordinator = ControlCoordinator::new(256);
+    let mut host_uplink = SharedUplink::new(config.host_uplink_bps);
     let mut peers: Vec<Peer> = config
         .clients
         .iter()
@@ -448,7 +522,11 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
                 .collect();
             peer.downlink_repair.retain(|(at, _)| *at > now);
             for (_, tick) in due {
-                match peer.link.enqueue(now, false, vec![0u8; 16]) {
+                // The retransmission leaves through the same single pipe as a
+                // first attempt.
+                let payload = vec![0u8; 16];
+                let released = host_uplink.release_at(now, payload.len());
+                match peer.link.enqueue(released, false, payload) {
                     Some(arrival) => peer.downlink.push((arrival, tick)),
                     None => peer
                         .downlink_repair
@@ -586,9 +664,15 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
             pending_release.remove(&tick);
             published.entry(tick).or_insert(now);
             wait_start = None;
-            // Broadcast the aggregate back down every client's own link.
+            // Broadcast the aggregate back down every client's own link. The
+            // host sends one copy per peer through a single uplink, so the
+            // copies serialise against each other: this is the contention that
+            // makes an eight-player session cost the host more than a
+            // four-player one.
             for peer in &mut peers {
-                match peer.link.enqueue(now, false, vec![0u8; 16]) {
+                let payload = vec![0u8; 16];
+                let released = host_uplink.release_at(now, payload.len());
+                match peer.link.enqueue(released, false, payload) {
                     Some(arrival) => peer.downlink.push((arrival, tick)),
                     None => peer
                         .downlink_repair
@@ -694,6 +778,7 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
         clients,
         forced_ticks,
         unpublished_ticks: ticks.saturating_sub(published.len()),
+        host_uplink: host_uplink.report,
     }
 }
 
@@ -707,6 +792,87 @@ mod tests {
             ticks,
             ..SessionConfig::default()
         }
+    }
+
+    fn uplink_config(clients: usize, host_uplink_bps: u32) -> SessionConfig {
+        SessionConfig {
+            clients: vec![ClientProfile::healthy(); clients],
+            ticks: 120,
+            host_uplink_bps,
+            ..SessionConfig::default()
+        }
+    }
+
+    /// Zero is the unmetered host every caller had before a shared pipe
+    /// existed, so the model has to be inert at that setting.
+    #[test]
+    fn an_unmetered_host_uplink_costs_nothing_and_is_reported_as_absent() {
+        let report = run_session(&uplink_config(4, 0));
+        assert!(!report.host_uplink.modelled);
+        assert_eq!(report.host_uplink.payloads, 0);
+        assert_eq!(report.host_uplink.delayed_payloads, 0);
+        assert_eq!(report.host_uplink.delay, Duration::ZERO);
+    }
+
+    /// The capacity has to be load-bearing: narrowing the same pipe, with
+    /// everything else identical, must hold more payloads back for longer.
+    /// Without this a capacity change would only move a fixture number.
+    #[test]
+    fn a_narrower_host_uplink_delays_more_of_the_same_traffic() {
+        let roomy = run_session(&uplink_config(4, 4_000_000));
+        let narrow = run_session(&uplink_config(4, 256_000));
+
+        assert!(roomy.host_uplink.modelled && narrow.host_uplink.modelled);
+        assert_eq!(
+            roomy.host_uplink.payloads, narrow.host_uplink.payloads,
+            "the same session pushes the same number of copies through either pipe"
+        );
+        // The *count* saturates: within one broadcast burst every copy after
+        // the first waits at either capacity, so it cannot separate them.
+        // How long they waited can, which is why the delay is the number the
+        // report leads with.
+        assert!(
+            narrow.host_uplink.delayed_payloads >= roomy.host_uplink.delayed_payloads,
+            "narrow held back {} payloads, roomy {}",
+            narrow.host_uplink.delayed_payloads,
+            roomy.host_uplink.delayed_payloads
+        );
+        assert!(
+            narrow.host_uplink.delay > roomy.host_uplink.delay,
+            "narrow imposed {:?}, roomy {:?}",
+            narrow.host_uplink.delay,
+            roomy.host_uplink.delay
+        );
+    }
+
+    /// The gap the harness could not previously show: with one shared pipe,
+    /// peers cost the host, so eight participants contend where four do not.
+    /// An independent link per participant produces neither difference.
+    #[test]
+    fn more_peers_contend_for_one_host_uplink() {
+        let four = run_session(&uplink_config(4, 512_000));
+        let eight = run_session(&uplink_config(8, 512_000));
+
+        assert!(
+            eight.host_uplink.payloads > four.host_uplink.payloads,
+            "the host sends one copy per peer"
+        );
+        assert!(
+            eight.host_uplink.delayed_payloads > four.host_uplink.delayed_payloads,
+            "eight peers held back {} payloads, four held back {}",
+            eight.host_uplink.delayed_payloads,
+            four.host_uplink.delayed_payloads
+        );
+    }
+
+    /// Every number here is taken under the virtual clock, so the same seed has
+    /// to produce the same contention twice — the harness fails on a
+    /// determinism break rather than reporting noise.
+    #[test]
+    fn shared_uplink_contention_is_reproducible() {
+        let first = run_session(&uplink_config(8, 512_000));
+        let second = run_session(&uplink_config(8, 512_000));
+        assert_eq!(first.host_uplink, second.host_uplink);
     }
 
     #[test]
