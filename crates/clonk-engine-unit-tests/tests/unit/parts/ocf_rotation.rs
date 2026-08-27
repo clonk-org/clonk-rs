@@ -3096,7 +3096,7 @@ fn round_goal_evaluation_recomputes_master_order_and_uses_rivalry_callback(
     let rivalry = engine.spawn_object(SpawnConfig::new("RVLR"))?;
     // exec_list is the reverse of C++ master-list order. B removes
     // itself while cnt=0; recomputing cnt=1 over [A,C] selects C, not A.
-    engine.exec_list = vec![rivalry, goal_c_second, goal_c_first, goal_a, goal_b];
+    engine.execution.exec_list = vec![rivalry, goal_c_second, goal_c_first, goal_a, goal_b];
     engine.register_player(PlayerConfig::new(2, "Remote"))?;
     engine.register_player(PlayerConfig::new(7, "Local"))?;
     engine.set_local_players([7]);

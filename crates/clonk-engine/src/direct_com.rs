@@ -2306,7 +2306,13 @@ impl Engine {
 
         // AttachContext functions of every active DFA_ATTACH object whose
         // first action target is the context target, in global object order.
-        let attached_objects = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let attached_objects = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         for attached_id in attached_objects {
             let Some(attached_index) = self.find_object_index(attached_id) else {
                 continue;
@@ -3353,7 +3359,8 @@ impl Engine {
         let min_y = first.y.min(second.y);
         let max_y = first.y.max(second.y);
         // `exec_list` is the reverse of C++'s main list (lib.rs:11372-11380).
-        self.exec_list
+        self.execution
+            .exec_list
             .iter()
             .rev()
             .filter_map(|id| {
@@ -6266,7 +6273,7 @@ impl Engine {
         target: ObjectId,
         definition_id: Option<&str>,
     ) -> Option<usize> {
-        self.exec_list.iter().rev().find_map(|object_id| {
+        self.execution.exec_list.iter().rev().find_map(|object_id| {
             let index = self.find_object_index(*object_id)?;
             let object = &self.objects[index];
             (!object.destroyed

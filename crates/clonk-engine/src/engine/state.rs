@@ -296,7 +296,7 @@ impl Engine {
             player_info_league_scores: self.player_info_league_scores.as_ref().clone(),
             physics: Some(self.physics),
             objects,
-            render_order: self.exec_list.clone(),
+            render_order: self.execution.exec_list.clone(),
             environment,
             sky: sky_snapshot,
             weather_events,
@@ -534,7 +534,7 @@ impl Engine {
             .iter()
             .map(|object| object.solid_mask_bake.clone())
             .collect::<Vec<_>>();
-        for &id in self.exec_list.iter().rev() {
+        for &id in self.execution.exec_list.iter().rev() {
             let Some(index) = self.find_object_index(id) else {
                 continue;
             };
@@ -570,7 +570,13 @@ impl Engine {
 
     /// C4GameObjects::PutSolidMasks after loading a persisted landscape.
     fn put_all_solid_masks(&mut self) {
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         for id in master_order {
             let Some(index) = self.find_object_index(id) else {
                 continue;
@@ -718,8 +724,8 @@ impl Engine {
             scenario_values: Some(self.scenario_values.as_ref().clone()),
             base_reject_entrance_enabled: Some(self.base_reject_entrance_enabled),
             objects,
-            object_order: self.exec_list.clone(),
-            inactive_object_order: self.inactive_exec_list.clone(),
+            object_order: self.execution.exec_list.clone(),
+            inactive_object_order: self.execution.inactive.clone(),
             particles,
             pxs_component: self.pxs_system.to_c4b(),
             players,
@@ -947,12 +953,12 @@ impl Engine {
         }
         self.rng = state.rng.clone();
         self.objects.clear();
-        self.exec_list.clear();
-        self.inactive_exec_list.clear();
-        self.pending_object_order_commands.clear();
-        self.resort_any_object = false;
+        self.execution.exec_list.clear();
+        self.execution.inactive.clear();
+        self.execution.pending_object_order_commands.clear();
+        self.execution.resort_any_object = false;
         self.pending_legacy_object_infos.clear();
-        self.exec_cursor = None;
+        self.execution.cursor = None;
         self.note_objects_changed();
         self.crew_rosters = state.crew_info_rosters.clone();
         // Older Rust states predate C4ObjectInfo::WasInAction. Active or
@@ -1357,7 +1363,7 @@ impl Engine {
             }
         }
         if !state.object_order.is_empty() {
-            let live: HashSet<ObjectId> = self.exec_list.iter().copied().collect();
+            let live: HashSet<ObjectId> = self.execution.exec_list.iter().copied().collect();
             let mut seen = HashSet::with_capacity(live.len());
             let mut restored_order: Vec<ObjectId> = state
                 .object_order
@@ -1365,11 +1371,17 @@ impl Engine {
                 .copied()
                 .filter(|id| live.contains(id) && seen.insert(*id))
                 .collect();
-            restored_order.extend(self.exec_list.iter().copied().filter(|id| seen.insert(*id)));
-            self.exec_list = restored_order;
+            restored_order.extend(
+                self.execution
+                    .exec_list
+                    .iter()
+                    .copied()
+                    .filter(|id| seen.insert(*id)),
+            );
+            self.execution.exec_list = restored_order;
         }
         if !state.inactive_object_order.is_empty() {
-            let live: HashSet<ObjectId> = self.inactive_exec_list.iter().copied().collect();
+            let live: HashSet<ObjectId> = self.execution.inactive.iter().copied().collect();
             let mut seen = HashSet::with_capacity(live.len());
             let mut restored_order = state
                 .inactive_object_order
@@ -1378,12 +1390,13 @@ impl Engine {
                 .filter(|id| live.contains(id) && seen.insert(*id))
                 .collect::<Vec<_>>();
             restored_order.extend(
-                self.inactive_exec_list
+                self.execution
+                    .inactive
                     .iter()
                     .copied()
                     .filter(|id| seen.insert(*id)),
             );
-            self.inactive_exec_list = restored_order;
+            self.execution.inactive = restored_order;
         }
         self.reset_sectors_from_landscape();
 
@@ -1746,7 +1759,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands
+            self.execution
+                .pending_object_order_commands
                 .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if !audio_events.is_empty() {
@@ -3058,7 +3072,7 @@ impl Engine {
         // follows the live Next link after each AssignRemoval: callbacks may
         // unlink a future object by deactivating it or insert a new object on
         // either side of the cursor (C4Game.cpp:4190-4193).
-        let mut current = self.exec_list.iter().rev().copied().find(|id| {
+        let mut current = self.execution.exec_list.iter().rev().copied().find(|id| {
             self.find_object_index(*id).is_some_and(|index| {
                 self.objects[index].state.status.is_active() && !self.objects[index].destroyed
             })
@@ -3066,16 +3080,21 @@ impl Engine {
         while let Some(object) = current {
             let _ = self.assign_object_removal(object)?;
             current = self
+                .execution
                 .exec_list
                 .iter()
                 .position(|candidate| *candidate == object)
                 .and_then(|position| {
-                    self.exec_list[..position].iter().rev().copied().find(|id| {
-                        self.find_object_index(*id).is_some_and(|index| {
-                            self.objects[index].state.status.is_active()
-                                && !self.objects[index].destroyed
+                    self.execution.exec_list[..position]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|id| {
+                            self.find_object_index(*id).is_some_and(|index| {
+                                self.objects[index].state.status.is_active()
+                                    && !self.objects[index].destroyed
+                            })
                         })
-                    })
                 });
         }
 
@@ -3083,6 +3102,7 @@ impl Engine {
         // pointer to each of them without calling AssignRemoval again, then
         // deletes the whole active list (C4Game.cpp:4194-4201).
         let created_during_destruction = self
+            .execution
             .exec_list
             .iter()
             .rev()
@@ -3107,8 +3127,11 @@ impl Engine {
             .map(|object| object.id)
             .collect::<HashSet<_>>();
         self.objects.retain(|object| !removed.contains(&object.id));
-        self.exec_list.retain(|object| !removed.contains(object));
-        self.inactive_exec_list
+        self.execution
+            .exec_list
+            .retain(|object| !removed.contains(object));
+        self.execution
+            .inactive
             .retain(|object| !removed.contains(object));
         if let Some(sectors) = self.sectors.as_mut() {
             for object in &removed {
@@ -3126,6 +3149,7 @@ impl Engine {
     /// inactive list (C4Game.cpp:2699-2704; C4GameObjects.cpp:313-331).
     fn clear_active_objects_for_scenario_section_init(&mut self) -> Result<(), EngineError> {
         let active = self
+            .execution
             .exec_list
             .iter()
             .rev()
@@ -3150,8 +3174,11 @@ impl Engine {
             .map(|object| object.id)
             .collect::<HashSet<_>>();
         self.objects.retain(|object| !removed.contains(&object.id));
-        self.exec_list.retain(|object| !removed.contains(object));
-        self.inactive_exec_list
+        self.execution
+            .exec_list
+            .retain(|object| !removed.contains(object));
+        self.execution
+            .inactive
             .retain(|object| !removed.contains(object));
         if let Some(sectors) = self.sectors.as_mut() {
             for object in &removed {
@@ -4766,6 +4793,7 @@ impl Engine {
             return;
         }
         let crew = self
+            .execution
             .exec_list
             .iter()
             .rev()

@@ -2004,9 +2004,9 @@ impl Engine {
         // InactiveObjects ledger for that pass: deactivation order can differ
         // from the object's former position in Game.Objects.
         let order = if status == ObjectStatus::Inactive {
-            &self.inactive_exec_list
+            &self.execution.inactive
         } else {
-            &self.exec_list
+            &self.execution.exec_list
         };
         let object_ids = order
             .iter()
@@ -2300,7 +2300,7 @@ impl Engine {
         // order. Advance from the current physical link after each callback:
         // AssignRemoval may append a new unsorted/Line object after that link,
         // and native's live `clnk = clnk->Next` visits it in this same pass.
-        let mut current = self.exec_list.last().copied();
+        let mut current = self.execution.exec_list.last().copied();
         while let Some(object_id) = current {
             let remove = self.find_object_index(object_id).is_some_and(|index| {
                 let object = &self.objects[index];
@@ -2314,11 +2314,12 @@ impl Engine {
                 let _ = self.assign_object_removal_with_contents(object_id, true)?;
             }
             current = self
+                .execution
                 .exec_list
                 .iter()
                 .position(|candidate| *candidate == object_id)
                 .and_then(|position| position.checked_sub(1))
-                .and_then(|position| self.exec_list.get(position).copied());
+                .and_then(|position| self.execution.exec_list.get(position).copied());
         }
         Ok(())
     }
@@ -2455,8 +2456,8 @@ impl Engine {
             return Ok(());
         }
 
-        let mut order = self.exec_list.clone();
-        order.extend(self.inactive_exec_list.iter().copied());
+        let mut order = self.execution.exec_list.clone();
+        order.extend(self.execution.inactive.iter().copied());
         let mut seen = HashSet::new();
         order.retain(|object| seen.insert(*object));
 

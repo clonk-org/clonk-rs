@@ -848,7 +848,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands
+            self.execution
+                .pending_object_order_commands
                 .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if destroy {
@@ -1096,7 +1097,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands
+            self.execution
+                .pending_object_order_commands
                 .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if destroy {
@@ -1288,7 +1290,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands
+            self.execution
+                .pending_object_order_commands
                 .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if !landscape_ops.is_empty() {
@@ -1340,7 +1343,10 @@ impl Engine {
         let new_id = object.id;
         self.objects.push(object);
         self.note_objects_changed();
-        self.insert_exec_link(initial_exec_position.min(self.exec_list.len()), new_id);
+        self.insert_exec_link(
+            initial_exec_position.min(self.execution.exec_list.len()),
+            new_id,
+        );
         if self
             .find_object_index(new_id)
             .is_some_and(|index| self.objects[index].state.status == ObjectStatus::Inactive)

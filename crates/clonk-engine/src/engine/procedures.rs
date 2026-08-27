@@ -3911,7 +3911,13 @@ impl Engine {
         }
         let focf = crate::ocf::FIGHT_READY;
         let tocf = crate::ocf::FIGHT_READY;
-        let object_ids = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let object_ids = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         'outer: for obj1_id in object_ids {
             let Some(idx) = self.find_object_index(obj1_id) else {
                 continue;
@@ -4010,7 +4016,13 @@ impl Engine {
         if focf == 0 || tocf == 0 {
             return Ok(());
         }
-        let object_ids = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let object_ids = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         for obj1_id in object_ids {
             let Some(idx) = self.find_object_index(obj1_id) else {
                 continue;
@@ -4186,7 +4198,13 @@ impl Engine {
             focf |= crate::ocf::COLLECTION;
             tocf |= crate::ocf::CARRYABLE;
         }
-        let object_ids = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let object_ids = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         'outer: for obj1_id in object_ids {
             let Some(idx) = self.find_object_index(obj1_id) else {
                 continue;

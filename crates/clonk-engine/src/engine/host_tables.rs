@@ -677,7 +677,7 @@ impl Engine {
         HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let engine = source.cast::<Self>();
         let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
-        let exec_list = unsafe { &*std::ptr::addr_of!((*engine).exec_list) };
+        let exec_list = unsafe { &*std::ptr::addr_of!((*engine).execution.exec_list) };
         let index_cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) }.borrow();
         let mut master_order = Vec::with_capacity(exec_list.len());
         master_order.extend(exec_list.iter().rev().copied().filter(|id| {
@@ -904,7 +904,7 @@ impl Engine {
         .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
         .with_scenario_script_counter(self.scenario_script_counter)
         .with_next_storage_index(self.objects.len())
-        .with_inactive_order(self.inactive_exec_list.iter().rev().copied())
+        .with_inactive_order(self.execution.inactive.iter().rev().copied())
         .with_pathfinder_settings(
             self.pathfinder_level,
             self.pathfinder_transfer_zones_enabled,
@@ -1344,6 +1344,7 @@ impl Engine {
         // otherwise mutate the list, while later snapshotted objects must be
         // resolved and tested against their live state at their turn.
         let broadcast_targets: Vec<ObjectId> = self
+            .execution
             .exec_list
             .iter()
             .rev()

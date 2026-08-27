@@ -7339,6 +7339,48 @@ pub struct ScenarioBatch {
     pub script_counter: Option<i32>,
 }
 
+/// C++ main-list order and the live walk over it.
+///
+/// One state machine rather than six fields: a spawn inserts into `exec_list`
+/// and bumps `insert_generation` so live command snapshots refresh their
+/// tie-break ranks; `cursor` decides whether that insertion still executes
+/// this frame or has already missed the iterator; `pending_order_commands` and
+/// `resort_any_object` are the deferred work that rewrites the order between
+/// walks. Reasoning about any one of them means reasoning about the cursor,
+/// which is why they belong together.
+///
+/// Both lists are the C4ObjectList **reversed** — `C4Game::ExecObjects` walks
+/// from the back (C4Game.cpp:1582), so index 0 executes first.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct ExecutionListState {
+    /// The C++ master object list (`::Objects`) kept in EXEC order.
+    /// Maintained by `insert_into_exec_list` (C4ObjectList::Add stMain
+    /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
+    /// never touch it (C4Object.cpp:1513-1615 only move Contents).
+    pub exec_list: Vec<ObjectId>,
+    /// Bumped whenever `insert_exec_link` adds or re-adds a main-list link.
+    /// Such insertions can happen during the live object walk, so command
+    /// snapshots use this to refresh their forward-list tie-break ranks.
+    pub(crate) insert_generation: u64,
+    /// `C4GameObjects::InactiveObjects`, also stored in reverse C++ list
+    /// order so the same stMain insertion rules as `exec_list` apply.
+    /// Unlike the retained execution ledger above, this list is updated on
+    /// every modeled status transition and is authoritative for callbacks
+    /// that explicitly walk InactiveObjects.
+    pub(crate) inactive: Vec<ObjectId>,
+    /// Deferred category resorts plus FnSetObjectOrder requests. Category
+    /// work runs first; relative requests execute newest-first afterward.
+    pub pending_object_order_commands: Vec<ObjectOrderCommand>,
+    /// Native `C4Game::fResortAnyObject`. This is deliberately independent
+    /// of ResortProc: relative and category-order requests do not set it.
+    pub(crate) resort_any_object: bool,
+    /// Next `exec_list` slot during the live reverse-list walk. Insertions
+    /// before this cursor have already missed the C++ iterator; insertions at
+    /// or after it still execute this frame.
+    pub(crate) cursor: Option<usize>,
+}
+
 /// The definition orders and every view derived from `Engine::definitions`.
 ///
 /// The two orders are genuinely different keys on the same table — C++ links
@@ -8250,35 +8292,9 @@ pub struct Engine {
     /// order for Game.txt/JoinData serialization; lookup is exact and the
     /// first registration of a name wins.
     message_board_commands: Vec<InitialNetworkMessageBoardCommand>,
-    /// The C++ master object list (`::Objects`) kept in EXEC order:
-    /// C4Game::ExecObjects walks the list from the BACK (C4Game.cpp:1582),
-    /// so this vec is the C4ObjectList REVERSED — index 0 executes first.
-    /// Maintained by `insert_into_exec_list` (C4ObjectList::Add stMain
-    /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
-    /// never touch it (C4Object.cpp:1513-1615 only move Contents).
+    /// The main-list order, its pending reorders, and the live-walk cursor.
     #[doc(hidden)]
-    pub exec_list: Vec<ObjectId>,
-    /// Bumped whenever `insert_exec_link` adds or re-adds a main-list link.
-    /// Such insertions can happen during the live object walk, so command
-    /// snapshots use this to refresh their forward-list tie-break ranks.
-    exec_list_insert_generation: u64,
-    /// `C4GameObjects::InactiveObjects`, also stored in reverse C++ list
-    /// order so the same stMain insertion rules as `exec_list` apply.
-    /// Unlike the retained execution ledger above, this list is updated on
-    /// every modeled status transition and is authoritative for callbacks
-    /// that explicitly walk InactiveObjects.
-    inactive_exec_list: Vec<ObjectId>,
-    /// Deferred category resorts plus FnSetObjectOrder requests. Category
-    /// work runs first; relative requests execute newest-first afterward.
-    #[doc(hidden)]
-    pub pending_object_order_commands: Vec<ObjectOrderCommand>,
-    /// Native `C4Game::fResortAnyObject`. This is deliberately independent
-    /// of ResortProc: relative and category-order requests do not set it.
-    resort_any_object: bool,
-    /// Next `exec_list` slot during the live reverse-list walk. Insertions
-    /// before this cursor have already missed the C++ iterator; insertions at
-    /// or after it still execute this frame.
-    exec_cursor: Option<usize>,
+    pub execution: ExecutionListState,
     #[doc(hidden)]
     pub frame: u64,
     /// Process-local C4Application timer state. It is deliberately excluded
@@ -10547,12 +10563,7 @@ impl Engine {
             control_key_names: Rc::new(HashMap::new()),
             active_message_board_input: None,
             message_board_commands: vec![InitialNetworkMessageBoardCommand::speed()],
-            exec_list: Vec::new(),
-            exec_list_insert_generation: 0,
-            inactive_exec_list: Vec::new(),
-            pending_object_order_commands: Vec::new(),
-            resort_any_object: false,
-            exec_cursor: None,
+            execution: ExecutionListState::default(),
             frame: 0,
             game_tick_delay_ms: Rc::new(std::cell::Cell::new(DEFAULT_GAME_TICK_DELAY_MS)),
             game_tick_delay_revision: Rc::new(

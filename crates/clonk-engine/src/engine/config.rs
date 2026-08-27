@@ -15,13 +15,18 @@ impl Engine {
     }
 
     pub(crate) fn resort_any_object_pending(&self) -> bool {
-        self.resort_any_object
-            || self.pending_object_order_commands.iter().any(|command| {
-                matches!(
-                    command,
-                    ObjectOrderCommand::ResortObject(_) | ObjectOrderCommand::ResortUnsortedSweep
-                )
-            })
+        self.execution.resort_any_object
+            || self
+                .execution
+                .pending_object_order_commands
+                .iter()
+                .any(|command| {
+                    matches!(
+                        command,
+                        ObjectOrderCommand::ResortObject(_)
+                            | ObjectOrderCommand::ResortUnsortedSweep
+                    )
+                })
     }
 
     /// Installs the exact runtime fields compiled from a network savegame.
@@ -69,7 +74,7 @@ impl Engine {
             // transient section-load flag word is not part of Game.txt.
             self.scenario_section_state.last_flags = Some(0);
         }
-        self.resort_any_object = data.resort_any_object;
+        self.execution.resort_any_object = data.resort_any_object;
         self.next_mission = data.next_mission.clone();
         self.message_board_commands = data.message_board_commands.clone();
         self.scenario_script_go = data.script_go;

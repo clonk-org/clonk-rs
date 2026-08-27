@@ -1122,9 +1122,10 @@ impl Engine {
 
     fn live_object_numbers_for_save(&self) -> HashMap<u64, i32> {
         let mut seen = HashSet::new();
-        self.exec_list
+        self.execution
+            .exec_list
             .iter()
-            .chain(&self.inactive_exec_list)
+            .chain(&self.execution.inactive)
             .copied()
             .filter(|id| seen.insert(*id) && self.find_object_index(*id).is_some())
             .filter_map(|id| {
@@ -1149,9 +1150,10 @@ impl Engine {
     ) -> LiveObjectPointerEnumeration {
         let mut seen = HashSet::new();
         let listed_ids = self
+            .execution
             .exec_list
             .iter()
-            .chain(&self.inactive_exec_list)
+            .chain(&self.execution.inactive)
             .copied()
             .filter(|id| seen.insert(*id) && self.find_object_index(*id).is_some())
             .collect::<Vec<_>>();
@@ -2383,8 +2385,8 @@ impl LiveC4ObjectsCapture {
             .collect();
         let capture = Self {
             objects,
-            active_order: engine.exec_list.clone(),
-            inactive_order: engine.inactive_exec_list.clone(),
+            active_order: engine.execution.exec_list.clone(),
+            inactive_order: engine.execution.inactive.clone(),
             metadata,
         };
         engine.denumerate_object_compiler_caches_after_save(&enumeration);
@@ -2495,7 +2497,7 @@ fn serialize_objects_for_save(
     // reversed master-list view (index zero executes/saves first).
     let mut output = serialize_list(
         engine,
-        engine.exec_list.iter().copied(),
+        engine.execution.exec_list.iter().copied(),
         strings,
         skip_user_player_objects,
     );
@@ -2504,7 +2506,7 @@ fn serialize_objects_for_save(
     output.extend_from_slice(b"\r\n");
     output.extend_from_slice(&serialize_list(
         engine,
-        engine.inactive_exec_list.iter().copied(),
+        engine.execution.inactive.iter().copied(),
         strings,
         skip_user_player_objects,
     ));
@@ -4599,8 +4601,8 @@ mod tests {
         let mut engine = test_engine("SAVE", "Save");
         let object = spawn_with_id(&mut engine, "SAVE", 1);
         let off_list = spawn_with_id(&mut engine, "SAVE", 2);
-        engine.exec_list = vec![object];
-        engine.inactive_exec_list.clear();
+        engine.execution.exec_list = vec![object];
+        engine.execution.inactive.clear();
         let index = object_index(&engine, object);
         engine.objects[index].state.action.target = Some(off_list);
         engine.objects[index].compiler_cache.action_target1 = 777;
@@ -5089,8 +5091,8 @@ mod tests {
         for id in 1..=4 {
             spawn_with_id(&mut engine, "REFS", id);
         }
-        engine.exec_list = vec![ObjectId::new(1), ObjectId::new(4)];
-        engine.inactive_exec_list = vec![ObjectId::new(3)];
+        engine.execution.exec_list = vec![ObjectId::new(1), ObjectId::new(4)];
+        engine.execution.inactive = vec![ObjectId::new(3)];
         engine.objects[2].state.status = ObjectStatus::Inactive;
         engine.objects[3].state.status = ObjectStatus::Deleted;
 
@@ -5415,8 +5417,8 @@ mod tests {
 
         // Both vectors are Last -> Prev already. Saving must consume them
         // directly; reversing here would invert native execution order.
-        engine.exec_list = vec![ids[2], ids[0], ids[1]];
-        engine.inactive_exec_list = vec![ids[4], ids[3]];
+        engine.execution.exec_list = vec![ids[2], ids[0], ids[1]];
+        engine.execution.inactive = vec![ids[4], ids[3]];
         for id in &ids[3..] {
             let index = object_index(&engine, *id);
             engine.objects[index].state.status = ObjectStatus::Inactive;
@@ -5516,8 +5518,8 @@ mod tests {
         let referenced = spawn_with_id(&mut engine, "CACH", 2);
         let off_list = spawn_with_id(&mut engine, "CACH", 3);
         let deleted = spawn_with_id(&mut engine, "CACH", 4);
-        engine.exec_list = vec![object, deleted];
-        engine.inactive_exec_list = vec![referenced];
+        engine.execution.exec_list = vec![object, deleted];
+        engine.execution.inactive = vec![referenced];
         let referenced_index = object_index(&engine, referenced);
         engine.objects[referenced_index].state.status = ObjectStatus::Inactive;
         let deleted_index = object_index(&engine, deleted);
@@ -6069,8 +6071,8 @@ mod tests {
         // root list may no longer contain either allocation when the section
         // is saved.
         engine.objects.clear();
-        engine.exec_list.clear();
-        engine.inactive_exec_list.clear();
+        engine.execution.exec_list.clear();
+        engine.execution.inactive.clear();
         engine.configure_scenario_sections(&[
             section_spec("main", None),
             section_spec("archive", Some(source)),

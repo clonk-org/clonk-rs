@@ -45,6 +45,7 @@ func Construction()
     engine.objects[older_index].state.category = CATEGORY_OBJECT;
     engine.objects[newer_index].state.category = CATEGORY_STRUCTURE;
     engine
+        .execution
         .pending_object_order_commands
         .push(ObjectOrderCommand::SortByCategory);
     engine.execute_object_order_commands();

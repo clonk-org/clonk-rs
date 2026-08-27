@@ -1555,6 +1555,7 @@ mod tests {
 
         let mut engine = Engine::new();
         engine
+            .execution
             .pending_object_order_commands
             .push(ObjectOrderCommand::SetRelative {
                 relative_to: crate::ObjectId::new(1),
@@ -1562,6 +1563,7 @@ mod tests {
                 after: false,
             });
         engine
+            .execution
             .pending_object_order_commands
             .push(ObjectOrderCommand::SortByCategory);
         assert!(
@@ -1572,6 +1574,7 @@ mod tests {
         );
 
         engine
+            .execution
             .pending_object_order_commands
             .push(ObjectOrderCommand::ResortUnsortedSweep);
         assert!(
