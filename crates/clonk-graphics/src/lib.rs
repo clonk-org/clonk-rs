@@ -1,6 +1,7 @@
 pub mod clip_projection;
 pub mod clonk_font;
 pub mod color;
+pub mod compositing;
 pub mod font;
 pub mod gamma;
 pub mod gpu_scene;
