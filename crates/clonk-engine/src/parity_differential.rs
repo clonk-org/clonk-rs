@@ -10802,6 +10802,147 @@ protected func ContactBottom()
         expect_rng_state_at(&label, case_index, case, &engine.rng);
     }
 
+    // 16b12b. The landscape-aware half of C4Shape::LineConnect
+    //          (C4Shape.cpp:273-331): the endpoint move when the new path is
+    //          free, the three-range bend search seeded from ForLine's reported
+    //          intersection, the old-endpoint PathFreeIgnoreVehicle fallback,
+    //          and the ordered vertex list each produces. The ignore-vehicle
+    //          predicate compares a material *index* against C4M_Solid = 50
+    //          (C4Landscape.cpp:2044-2048; C4Wrappers.h:68-71), which is why an
+    //          ordinary earth wall still finds the fallback and only a
+    //          high-index material can break the line.
+    for (case_index, case) in golden["line_connect_routing"]
+        .as_array()
+        .expect("line_connect_routing is an array")
+        .iter()
+        .enumerate()
+    {
+        const WIDTH: u32 = 40;
+        const HEIGHT: i32 = 30;
+        const EARTH: u8 = 1;
+        const VEHICLE: u8 = 3;
+        const HIGH_INDEX: u8 = 60;
+
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("line_connect_routing[{name}]");
+
+        // The oracle grid stores material indices directly, so the Rust
+        // material map has to place each one at the same index: Earth at 1,
+        // Vehicle at 3, and a solid material at 60 whose index alone is what
+        // makes the ignore-vehicle check block.
+        let mut library = String::new();
+        for index in 0..=u32::from(HIGH_INDEX) {
+            let (name, density) = match u8::try_from(index).unwrap_or(0) {
+                EARTH => ("Earth".to_string(), 50),
+                VEHICLE => ("Vehicle".to_string(), 100),
+                HIGH_INDEX => ("HighIndex".to_string(), 100),
+                other => (format!("Filler{other:02}"), 0),
+            };
+            library.push_str(&format!(
+                "\n[Material {name}]\nName={name}\nDensity={density}\n"
+            ));
+        }
+        let materials = clonk_resources::MaterialLibrary::parse(&library)
+            .expect("line connect materials parse");
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&materials);
+        assert_eq!(
+            engine.materials.id_of("HighIndex").map(|id| id.index()),
+            Some(usize::from(HIGH_INDEX)),
+            "{label}: the high-index material must sit at the oracle's index"
+        );
+
+        let mut bytes = vec![0_u8; WIDTH as usize * HEIGHT as usize];
+        for wall in case["walls"].as_array().expect("line connect walls") {
+            let (x, y) = (i(wall, "x") as i32, i(wall, "y") as i32);
+            let (w, h) = (i(wall, "w") as i32, i(wall, "h") as i32);
+            let material = i(wall, "material") as u8;
+            for gy in y..(y + h).min(HEIGHT) {
+                for gx in x..(x + w).min(WIDTH as i32) {
+                    if gx >= 0 && gy >= 0 {
+                        bytes[gy as usize * WIDTH as usize + gx as usize] = material;
+                    }
+                }
+            }
+        }
+        let mut densities = vec![0; 128];
+        let mut material_names = vec![None; 128];
+        for byte in [EARTH, VEHICLE, HIGH_INDEX] {
+            let name = match byte {
+                EARTH => "Earth",
+                VEHICLE => "Vehicle",
+                _ => "HighIndex",
+            };
+            densities[usize::from(byte)] = if byte == EARTH { 50 } else { 100 };
+            material_names[usize::from(byte)] = Some(name.to_string());
+        }
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT as u32,
+            bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        ));
+        landscape.set_world_height(HEIGHT);
+        let vehicle = engine
+            .materials
+            .id_of("Vehicle")
+            .expect("line connect declares Vehicle");
+        landscape.set_vehicle_material(Some(vehicle));
+        // The grid resolves its byte→material table against the engine's
+        // material map, so the landscape has to be installed before any path
+        // check reads it; a standalone landscape answers "no material" for
+        // every byte and would make every path look free.
+        engine.set_landscape(landscape);
+
+        let mut vertices = case["start_vertices"]
+            .as_array()
+            .expect("line connect start vertices")
+            .iter()
+            .map(|vertex| crate::ObjectVertex::new(i(vertex, "x") as i32, i(vertex, "y") as i32))
+            .collect::<Vec<_>>();
+        let endpoint = usize::try_from(i(case, "cvtx")).expect("line connect endpoint index");
+        let direction = isize::try_from(i(case, "ld")).expect("line connect direction");
+        let target = crate::Vector2::new(i(case, "tx") as i32, i(case, "ty") as i32);
+
+        let installed = engine.landscape().expect("line connect landscape installs");
+        let connected = Engine::line_connect_endpoint(
+            Some(installed),
+            &mut vertices,
+            target,
+            endpoint,
+            direction,
+        );
+
+        expect_eq(
+            &label,
+            case_index,
+            "connected",
+            i(case, "connected"),
+            i64::from(connected),
+        );
+        expect_eq(
+            &label,
+            case_index,
+            "vertex_count",
+            i(case, "vertex_count"),
+            vertices.len() as i64,
+        );
+        expect_json_eq(
+            &label,
+            case_index,
+            "vertices",
+            case["vertices"].clone(),
+            serde_json::json!(vertices
+                .iter()
+                .map(|vertex| serde_json::json!({"x": vertex.x, "y": vertex.y}))
+                .collect::<Vec<_>>()),
+        );
+    }
+
     // 16b13. The DoMovement tail bridges its aggregate contact mask into
     //         ContactAction (C4Movement.cpp:467-472). A wall probe followed by
     //         a floor probe leaves the last-probe mask at Bottom but hands

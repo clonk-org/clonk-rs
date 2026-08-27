@@ -312,6 +312,45 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Shape.cpp" > "$gen/shape_line_connect_vertex_guard.inc"
 
+# The rest of C4Shape::LineConnect — the landscape-dependent endpoint move, the
+# bend search over three ranges, the old-endpoint PathFreeIgnoreVehicle
+# fallback and the insertion — lifted whole, together with the InsertVertex it
+# calls and the PathFree family and line walker those stand on. The scaffold
+# supplies only the pixel plane underneath GBackPix/GBackSolid.
+awk '
+  /^bool C4Shape::LineConnect\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Shape.cpp" > "$gen/shape_line_connect.inc"
+
+awk '
+  /^bool C4Shape::InsertVertex\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Shape.cpp" > "$gen/shape_insert_vertex.inc"
+
+# ForLine is the Bresenham walk every PathFree* rides, including the
+# `lastx`/`lasty` intersection report the bend search starts from.
+awk '
+  /^bool ForLine\(int32_t x1, int32_t y1, int32_t x2, int32_t y2,$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/for_line.inc"
+
+# PathFreePix through PathFreeIgnoreVehicle inclusive: four short functions
+# whose only difference is the pixel predicate, and that difference is the
+# whole point of the fallback arm.
+awk '
+  /^bool PathFreePix\(/ { p = 1 }
+  p { print }
+  p && /^bool PathFreeIgnoreVehicle\(/ { tail = 1 }
+  tail && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/path_free.inc"
+
 awk '
   /^void C4Object::DigOutMaterialCast\(/ { p = 1 }
   p { print }

@@ -44,6 +44,7 @@ inventory in prose:
 | `action_callbacks` | `src/C4ActionCallbacks.h`, called by `C4Object::SetAction` | synchronous callback count and Start-before-End/Abort ordering |
 | `connect_missing_target_removal` | mechanically extracted `C4Object.cpp` DFA_CONNECT missing-target branch | `LineBreak(true)` before `AssignRemoval`/`Destruction`, with final deleted status |
 | `connect_geometry_break_removal` | mechanically extracted `C4Shape::LineConnect` vertex guard + later DFA_CONNECT break branch | zero-argument `LineBreak()` before the same removal lifecycle |
+| `line_connect_routing` | the complete `C4Shape::LineConnect` body past that guard, plus `InsertVertex`, `PathFree`/`PathFreeIgnoreVehicle` and `ForLine` (`src/C4Shape.cpp:273-341`; `src/C4Landscape.cpp:1670-1720,2034-2053`) | endpoint move, three-range bend search, old-endpoint fallback across vehicle material, the index-vs-density rule that decides whether a line can break at all, and the ordered vertex list |
 | `solid_mask_graphics` | `src/C4SolidMaskBitmap.h`, called by `C4SolidMask` | active/default graphics selection and transparent/solid mask sampling after `SetGraphics` |
 | `shake_objects` | complete `C4Game::ShakeObjects` + `C4Object::Fling` bodies | master-order gates, `Random(3)`/`Rnd3()` consumption, attachment material identity, and raw Fling fallback |
 | `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
@@ -211,9 +212,21 @@ construction rules and examples:
   `C4Shape::LineConnect` one-vertex failure guard and the later DFA_CONNECT
   `LineBreak()`/removal block. Rust drives both through the real
   `Engine::exec_connect_line` method and inspects each deleted line before frame
-  cleanup. Other golden sections cover the general removal lifecycle; the
-  landscape-dependent `LineConnect` path and bend search after its vertex-count
-  guard are tracked by clonk-org/clonk-rs#1243.
+  cleanup. Other golden sections cover the general removal lifecycle.
+- `line_connect_routing` compiles the **rest** of `C4Shape::LineConnect`
+  (C4Shape.cpp:273-331) — the endpoint move, the three-range bend search seeded
+  from `ForLine`'s reported intersection, the old-endpoint fallback and the
+  insertion — together with the `InsertVertex`, `PathFree`/
+  `PathFreeIgnoreVehicle` and `ForLine` bodies underneath it. Only the pixel
+  plane below `GBackPix`/`GBackSolid` is scaffolding. It pins one C++ detail
+  that decides how often lines break at all: `PathFreeIgnoreVehiclePix`
+  compares a material **index** against `C4M_Solid = 50`
+  (C4Landscape.cpp:2044-2048; C4Wrappers.h:68-71; C4Material.h:201), so every
+  material a real scenario declares reads as non-solid there, the old-endpoint
+  fallback almost always succeeds, and only a material whose index is itself
+  ≥ 50 can make `LineConnect` return false. The callback trace and object
+  status of the DFA_CONNECT handoff remain with
+  clonk-org/clonk-rs#1243.
 - `solid_mask_graphics` calls the production `C4SolidMaskBitmap.h` helpers used
   by `C4SolidMask`. Its decisive `(219,86)` input is the minimized Goldrush
   frame-184 CTWR Graphics2/SNKE contact: default graphics are transparent,

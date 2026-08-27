@@ -3633,6 +3633,92 @@ static bool oracleConvertTo(int fromType, int toType, int32_t intData, bool fStr
 
 
 // ---------------------------------------------------------------------------
+// C4Shape::LineConnect past its vertex guard (src/C4Shape.cpp:273-331): the
+// landscape-dependent endpoint move, the bend search over three ranges, the
+// old-endpoint fallback that may pass through vehicle material, and the
+// insertion. The body, its InsertVertex, the PathFree family and the ForLine
+// walker underneath them are all lifted whole; only the pixel plane below
+// GBackPix/GBackSolid is scaffolding.
+namespace line_connect
+{
+const int32_t C4D_MaxVertex = 30;
+const int32_t MNone = -1;
+const int32_t MVehic = 3;
+const int32_t GridWdt = 40;
+const int32_t GridHgt = 30;
+
+// Material byte per pixel: 0 empty, 1 solid earth, MVehic vehicle-density.
+int32_t g_grid[GridHgt][GridWdt];
+
+int32_t GBackPix(int32_t x, int32_t y)
+{
+    if (x < 0 || y < 0 || x >= GridWdt || y >= GridHgt) return 0;
+    return g_grid[y][x];
+}
+
+struct LandscapeStub
+{
+    // The oracle grid stores material indices directly, so the pixel byte and
+    // its material are the same value.
+    int32_t GetPixMat(int32_t byPix) { return byPix ? byPix : MNone; }
+};
+
+struct GameStub
+{
+    LandscapeStub Landscape;
+};
+
+static GameStub Game;
+
+bool DensitySolid(int32_t density) { return density >= 50; }
+
+// Earth is solid, vehicle material is solid to an ordinary path check and is
+// exactly what the fallback arm is allowed to cross. `MHighIndex` is solid the
+// same way, but its *index* is what makes it block the fallback too: see the
+// note on PathFreeIgnoreVehiclePix below.
+const int32_t MHighIndex = 60;
+
+int32_t MatDensity(int32_t mat)
+{
+    if (mat == 1) return 50;
+    if (mat == MVehic) return 100;
+    if (mat == MHighIndex) return 100;
+    return 0;
+}
+
+bool GBackSolid(int32_t x, int32_t y)
+{
+    const int32_t pix = GBackPix(x, y);
+    return pix != 0 && DensitySolid(MatDensity(pix));
+}
+
+#include "for_line.inc"
+
+// The optional intersection outputs are defaulted in the header, not at the
+// definitions the lift takes (src/C4Landscape.h:266-267), and LineConnect uses
+// both the four- and six-argument forms.
+bool PathFree(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t *ix = nullptr, int32_t *iy = nullptr);
+bool PathFreeIgnoreVehicle(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t *ix = nullptr, int32_t *iy = nullptr);
+
+#include "path_free.inc"
+
+struct C4Shape
+{
+    int32_t VtxNum{0};
+    int32_t VtxX[C4D_MaxVertex]{};
+    int32_t VtxY[C4D_MaxVertex]{};
+
+    bool InsertVertex(int32_t iPos, int32_t tx, int32_t ty);
+    bool LineConnect(int32_t tx, int32_t ty, int32_t cvtx, int32_t ld, int32_t oldx, int32_t oldy);
+};
+
+#include "shape_insert_vertex.inc"
+#include "shape_line_connect.inc"
+
+} // namespace line_connect
+
+
+// ---------------------------------------------------------------------------
 // C4PXSSystem slot allocation (src/C4PXS.cpp). `New` and `Delete` touch only
 // the chunk table, so the real bodies run here against this state and nothing
 // else: no landscape, no material map, no RNG. Allocation order is what the
@@ -16119,6 +16205,121 @@ int main()
     // 14c. Exact later DFA_CONNECT geometry-break branch: LineBreak() has no
     //      argument, then follows the same AssignRemoval lifecycle.
     printConnectGeometryBreakCase();
+    printf(",\n");
+
+    // 14d. The landscape-aware half of C4Shape::LineConnect
+    //      (src/C4Shape.cpp:273-331), which 14c only reaches the guard of: the
+    //      endpoint move when the new path is free, the three-range bend
+    //      search seeded from ForLine's reported intersection, the
+    //      old-endpoint fallback that may cross vehicle material, the
+    //      C4D_MaxVertex refusal, and the ordered vertex list each produces.
+    arr_begin("line_connect_routing");
+    {
+        using namespace line_connect;
+
+        struct Vertex
+        {
+            int32_t x, y;
+        };
+        struct Wall
+        {
+            int32_t x, y, w, h, material;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t tx, ty;
+            int32_t cvtx, ld;
+            int32_t vertex_count;
+            Vertex vertices[8];
+            int32_t wall_count;
+            Wall walls[4];
+        };
+
+        const Case cases[] = {
+            // The unmodified early return: the endpoint already sits on the
+            // target, so no path is even checked.
+            {"unmodified_endpoint", 10, 10, 0, +1, 2, {{10, 10}, {20, 10}}, 0, {}},
+            // A free path simply moves the endpoint, in both link directions.
+            {"free_path_moves_first_vertex", 6, 10, 0, +1, 2, {{10, 10}, {20, 10}}, 0, {}},
+            {"free_path_moves_last_vertex", 26, 10, 1, -1, 2, {{10, 10}, {20, 10}}, 0, {}},
+            // A wall between target and neighbour forces the bend search; the
+            // gap above it is reachable at the smallest range.
+            {"blocked_path_bends_near", 6, 10, 0, +1, 2, {{10, 10}, {20, 10}},
+             1, {{12, 8, 2, 14, 1}}},
+            // A taller wall pushes the usable candidate out to a wider range.
+            {"blocked_path_bends_far", 6, 14, 0, +1, 2, {{10, 14}, {20, 14}},
+             1, {{12, 10, 2, 16, 1}}},
+            // Vehicle material blocks an ordinary PathFree but is exactly what
+            // the old-endpoint fallback is allowed to cross.
+            {"vehicle_wall_takes_old_endpoint_fallback", 6, 10, 0, +1, 2,
+             {{10, 10}, {20, 10}}, 1, {{12, 0, 2, line_connect::GridHgt, line_connect::MVehic}}},
+            // Ordinary earth does *not* produce an unrecoverable break, because
+            // PathFreeIgnoreVehiclePix compares a material *index* against
+            // C4M_Solid = 50 (C4Landscape.cpp:2044-2048; C4Wrappers.h:68-71;
+            // C4Material.h:201): every material a real scenario declares has a
+            // low index, so the ignore-vehicle check reports free and the
+            // old-endpoint fallback succeeds.
+            {"earth_wall_still_takes_the_old_endpoint_fallback", 6, 10, 0, +1, 2,
+             {{10, 10}, {20, 10}},
+             2, {{12, 0, 2, line_connect::GridHgt, 1}, {0, 0, 40, 4, 1}}},
+            // The only way to reach `return false`: a material whose index is
+            // itself >= C4M_Solid, so the ignore-vehicle check blocks as well
+            // and no bend or fallback survives.
+            {"high_index_material_breaks_the_line", 6, 10, 0, +1, 2,
+             {{10, 10}, {20, 10}},
+             2, {{8, 0, 2, line_connect::GridHgt, line_connect::MHighIndex},
+                 {12, 0, 2, line_connect::GridHgt, line_connect::MHighIndex}}},
+            // The same geometry from the other end, so the ld < 0 insertion
+            // arm and its cvtx increment are exercised too.
+            {"blocked_path_bends_from_last_vertex", 26, 10, 1, -1, 2,
+             {{10, 10}, {20, 10}}, 1, {{22, 8, 2, 14, 1}}},
+        };
+
+        for (const auto &c : cases)
+        {
+            sep();
+            for (int32_t gy = 0; gy < GridHgt; ++gy)
+                for (int32_t gx = 0; gx < GridWdt; ++gx)
+                    g_grid[gy][gx] = 0;
+            for (int32_t w = 0; w < c.wall_count; ++w)
+            {
+                const Wall &wall = c.walls[w];
+                for (int32_t gy = wall.y; gy < wall.y + wall.h && gy < GridHgt; ++gy)
+                    for (int32_t gx = wall.x; gx < wall.x + wall.w && gx < GridWdt; ++gx)
+                        if (gx >= 0 && gy >= 0) g_grid[gy][gx] = wall.material;
+            }
+
+            C4Shape shape;
+            shape.VtxNum = c.vertex_count;
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+            {
+                shape.VtxX[v] = c.vertices[v].x;
+                shape.VtxY[v] = c.vertices[v].y;
+            }
+            const int32_t oldx = shape.VtxX[c.cvtx];
+            const int32_t oldy = shape.VtxY[c.cvtx];
+
+            const bool connected = shape.LineConnect(c.tx, c.ty, c.cvtx, c.ld, oldx, oldy);
+
+            printf("{\"name\":\"%s\",\"tx\":%d,\"ty\":%d,\"cvtx\":%d,\"ld\":%d,"
+                   "\"start_vertices\":[",
+                   c.name, c.tx, c.ty, c.cvtx, c.ld);
+            for (int32_t v = 0; v < c.vertex_count; ++v)
+                printf("%s{\"x\":%d,\"y\":%d}", v ? "," : "", c.vertices[v].x, c.vertices[v].y);
+            printf("],\"walls\":[");
+            for (int32_t w = 0; w < c.wall_count; ++w)
+                printf("%s{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"material\":%d}",
+                       w ? "," : "", c.walls[w].x, c.walls[w].y, c.walls[w].w,
+                       c.walls[w].h, c.walls[w].material);
+            printf("],\"connected\":%d,\"vertex_count\":%d,\"vertices\":[",
+                   connected ? 1 : 0, shape.VtxNum);
+            for (int32_t v = 0; v < shape.VtxNum; ++v)
+                printf("%s{\"x\":%d,\"y\":%d}", v ? "," : "", shape.VtxX[v], shape.VtxY[v]);
+            printf("]}");
+        }
+    }
+    arr_end();
     printf(",\n");
 
     // 15. C4SolidMask active graphics sampling. The variant_2 case is the
