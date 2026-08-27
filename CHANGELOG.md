@@ -4,6 +4,111 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-08-27
+
+### Bug fixes
+
+- Match pinned loader behavior for invalid or nonpositive Graphics.Scale (#1361)
+- Route update transfers through the reusable download dialog (#1355)
+- Route debug global actions through custom gamepad bindings (#1353)
+- Promise layout parity where compatibility mode renders port assets (#1352)
+- Localize enhanced scenario-search presentation (#1283)
+- Raise the game on a ready-check toast body click instead of ending the prompt (#1338)
+- Route a detached viewport middle release to the tool picker (#1337)
+- Present the network statistics chart in a console child window (#1336)
+- Route every compat path through the compat dev-check plan (#1334)
+- Stop refusing loader draws C++ cannot refuse (#1332)
+- Dispatch the remaining console-scope actions from both devices (#1331)
+- Route the network globals through gamepad bindings (#1318)
+- Hide a ready-check notification when its check ends (#1317)
+- Toast every ready check the config enables (#1316)
+- Stop the c4group parity fixtures leaking into the checkout (#1313)
+- Remember the console scoreboard window geometry (#1311)
+- Submit ready-check answers from notification actions (#1309)
+- Fold a SectMain.c4g section name onto main like C++ (#1307)
+- Hit-test script menus with unresolved inline images like C++ (#1303)
+- Route remaining fullscreen global actions through custom gamepad bindings (#1287)
+- Render C++ menu decorations with out-of-range geometry (#1300)
+- Enforce IRC transcript limits on wrapped display lines (#1296)
+- Keep unreadable offline runtime-player joins nonfatal (#1293)
+- Resolve Extra.c4g only from the mapped executable data root (#1286)
+- Consume unresolved inline images in scoreboards (#1292)
+- Consume unresolved inline images while drawing script menus (#1291)
+- Leave unresolved menu-decoration facets empty like C++ (#1290)
+- Refresh live menu decorations after definition reload (#1288)
+- Close a missing live goal- or rule-object menu action like C++ (#1289)
+- Forward detached viewport keyboard input to the global dispatcher (#1285)
+- Apply FolderMap title font zoom (#1279)
+- Honor old-save Game.txt definition overrides (#1273)
+- Refuse a second player join from a file already in use (#1271)
+- Route FullscreenPauseToggle through custom gamepad bindings (#1269)
+- Count only active objects in the sector shape sum (#1171)
+- Drop the third solid-mask update from the initial DoCon (#1169)
+- Give script-created objects the initial DoCon solid-mask update (#1168)
+
+### Documentation
+
+- Accept the normalized scenario-section discovery order (#1348)
+- Retire stale status inventories (#1270)
+- Retire menu parity inventory into issues (#1188)
+- Record that the shadow diff never compares the landscape (#1170)
+
+### Features
+
+- Lay out the client list for a console child window (#1330)
+- Add multi-selection to the developer object list (#1329)
+- Add the property page script entry and completion (#1328)
+- Make the developer pane scroll bars interactive (#1327)
+- Make the detached viewport scroll bars interactive (#1326)
+- Add keyboard navigation to the developer object list (#1325)
+- Give the developer object tree expand and collapse state (#1323)
+- Retain the developer property output scroll position (#1322)
+- Retain the developer object list scroll position (#1320)
+- Add the property page reload-definition button (#1319)
+- Dispatch the console-scope C4ToolsDlg keys (#1314)
+- Present the scoreboard in console mode (#1305)
+- Add the IRC nick-list scrollbar (#1304)
+- Advertise and enforce the compatibility profile between port peers (#1272)
+- Publish scenario-search accessibility semantics through AccessKit (#1268)
+
+### Performance
+
+- Finalize live saves outside the lockstep thread (#1299)
+
+### Refactoring
+
+- Group the app control recording state behind one type (#1360)
+- Group the app player and roster state behind one type (#1359)
+- Group the app live input state behind one type (#1356)
+- Group the app runtime dialog state behind one type (#1354)
+- Group the app startup dialog and view state behind one type (#1351)
+- Group the app configuration state behind one type (#1349)
+- Group the app sound and music state behind one type (#1347)
+- Group the app scenario-selector state behind one type (#1346)
+- Group the app savegame state behind one type (#1345)
+- Group the app chat and IRC state behind one type (#1344)
+- Split direct-control production code into child modules (#1343)
+- Route tail-free compat host-context borrows through the helper (#1342)
+- Group the engine execution list and its live-walk cursor (#1341)
+- Group the engine definition orders and derived caches (#1340)
+- Group the engine scenario-section bookkeeping into one state type (#1339)
+- Move the software compositors into clonk-graphics (#1333)
+- Share repository-root discovery across extracted-crate tests (#1312)
+- Remove the unreachable object-menu boundaries (#1295)
+
+### Testing
+
+- Model shared host uplink contention in the chaos harness (#1358)
+- Differential-check raw child preservation through C4Group rewrites (#1357)
+- Differential-check landscape-aware LineConnect routing (#1350)
+- Run the loopback netgame matrix in both mixed-engine directions (#1335)
+- Add a loopback netgame round harness (#1315)
+- Differential-check the C4Group sort order (#1310)
+- Differential-check the attached movement walk (#1302)
+- Differential-check the exact-save scenario-section sweep (#1280)
+- Record the measured startup presentation capture blockers (#1301)
+- Pin the inert C4S_KEEP_EFFECTS scenario-section flag (#1284)
+
 ## [0.20.2] - 2026-08-26
 
 ### Bug fixes
