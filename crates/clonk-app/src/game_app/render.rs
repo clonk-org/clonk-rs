@@ -4336,7 +4336,7 @@ impl GameApp {
     }
 
     /// `C4EditCursor::Delete` (`:350-359`).
-    fn console_delete_selection(&mut self) {
+    pub(crate) fn console_delete_selection(&mut self) {
         if !self.console_editing_ok() {
             return;
         }
@@ -4705,7 +4705,7 @@ impl GameApp {
     /// `_WIN32`/`WITH_DEVELOPER_MODE` (`C4Console.cpp:841-853`) — so the log is
     /// the port's own choice of surface, the one the save and reload notices
     /// already use.
-    fn console_editing_ok(&mut self) -> bool {
+    pub(crate) fn console_editing_ok(&mut self) -> bool {
         if self.developer_console_editing() {
             return true;
         }
