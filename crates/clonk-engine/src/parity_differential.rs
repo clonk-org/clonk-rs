@@ -13803,6 +13803,94 @@ protected func ContactBottom()
         );
     }
 
+    // 16h1. c4group_sort: `C4Group::Sort` and `C4Group::SortByList`
+    //       (C4Group.cpp:2300-2337,2366-2380), driven through the real linked
+    //       group sources rather than a recorder.
+    //
+    //       Four rules, none readable off the sort list itself:
+    //
+    //         * rank order is DESCENDING — `SortRank` gives an earlier pattern
+    //           a higher number and the sort keeps the higher rank first
+    //           (`:2316-2318`), so reading it as an ascending index inverts
+    //           every group;
+    //         * a name matching no pattern ranks 0 and sinks below every
+    //           listed one, rather than staying where it was;
+    //         * equal ranks break on a case-insensitive comparison of the
+    //           name (`:2320`);
+    //         * the list is chosen by matching the GROUP's own filename
+    //           against `C4CFN_FLS`, so an unlisted group filename sorts
+    //           nothing at all (`SortByList` returns false at `:2368`) — which
+    //           is also what `c4group -s` relies on by passing a null list.
+    //
+    //       A name byte above 0x7f is deliberately absent from the golden:
+    //       `stricmp` is locale-dependent there and the golden is recorded on
+    //       one host and compared on another. `clonk-resources`'
+    //       `secondary_sort_orders_high_bytes_like_native_stricmp` keeps that
+    //       case on the Rust side, where both halves run on the same host.
+    {
+        let rows = golden["c4group_sort"].as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            5,
+            "PARITY DIVERGENCE in `c4group_sort`: the golden must retain its exact 5-row matrix"
+        );
+        for row in rows {
+            let name = row["case"].as_str().unwrap_or("?");
+            let group = row["group"].as_str().unwrap_or("?");
+            let label = format!("c4group_sort[{name}]");
+            let expected: Vec<&str> = row["order"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .collect();
+
+            // The golden carries the fixture's own insertion order, so the
+            // port is fed exactly what C++ was fed. Reconstructing it instead
+            // would be a guess, and a guess that happened to be sorted could
+            // not tell "sorted correctly" from "never sorted at all" — which
+            // is precisely the hole a load-bearing injection found here.
+            let input: Vec<&str> = row["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .collect();
+            let mut group_writer = MutableGroup::new_bytes(group.as_bytes().to_vec());
+            for entry in &input {
+                group_writer
+                    .add_file_bytes_with_metadata(entry.as_bytes().to_vec(), vec![b'x'], 1, false)
+                    .unwrap_or_else(|error| panic!("{label}: could not add `{entry}`: {error}"));
+            }
+
+            // Two different C++ entry points reach "no sort happened", and the
+            // port models them through two different calls. Mapping both onto
+            // `resort_for_filename_bytes` would have compared the wrong thing:
+            //   * a NULL sort list is the caller declining to sort at all
+            //     (`SortByList` returns false at C4Group.cpp:2368) — that is
+            //     `c4group -s`, whose port counterpart is an empty sort list;
+            //   * an unlisted GROUP filename means the table lookup found no
+            //     pattern, which is what `resort_for_filename_bytes` reports by
+            //     returning false.
+            let reordered = if name == "a_null_sort_list_keeps_insertion_order" {
+                group_writer.sort("")
+            } else {
+                group_writer.resort_for_filename_bytes(group.as_bytes().to_vec())
+            };
+            if input == expected {
+                assert!(
+                    !reordered,
+                    "PARITY DIVERGENCE in `{label}`: C++ never reached Sort for this row, so the port must report no reordering"
+                );
+            }
+            let actual = group_writer.entry_names();
+            assert_eq!(
+                actual, expected,
+                "PARITY DIVERGENCE in `{label}` field `order`: C++ golden = {expected:?}, Rust = {actual:?}"
+            );
+        }
+    }
+
     // 16h2. scenario_sections: `C4GameSave::SaveScenarioSections`
     //       (C4GameSave.cpp:111-137) — the one step of the exact-save sweep
     //       `save_runtime_sequence` records reaching and then stubs out.

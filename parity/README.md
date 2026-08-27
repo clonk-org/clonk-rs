@@ -49,6 +49,7 @@ inventory in prose:
 | `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
 | `network_rule_goal_placement` | complete `C4SGame::ConvertGoals` and `C4Game::InitRules`/`InitGoals` bodies (`src/C4Scenario.cpp:506-556`; `src/C4Game.cpp:4056-4076`) | HarpoonRace's authored RVLR plus default energy realism becomes authoritative RVLR+ENRG parameters; rules use `max(count, 1)`, goals use the exact count, and local scenario lists cannot replace synchronized JoinData lists |
 | `player_join_capacity` | complete `C4PlayerList::GetCount` plus the mechanically extracted capacity block from `C4PlayerList::Join` (`src/C4PlayerList.cpp:172-178,288-294`) | all linked players count, zero is a closed limit, one remaining slot admits exactly one named player, and rejection leaves the ordered roster unchanged |
+| `c4group_sort` | complete `C4Group::Sort` and `SortByList` through the linked `src/C4Group.cpp` | descending rank order, unlisted names sinking below listed ones, the case-insensitive tie-break, and the two ways C++ reaches "no sort at all" |
 | `scenario_sections` | complete `C4GameSave::SaveScenarioSections` plus the `C4ScenarioSection` constructor and accessors that build the list it walks (`src/C4GameSave.cpp:111-137`; `src/C4Scenario.cpp:555-566,649-657`) | the exact-save section sweep runs in **reverse** construction order, deletes the current section without re-adding it, and discards `Add`'s result |
 | `contents_list_order` | complete `C4ObjectList::Add`, `Remove`, `GetLink`, `RemoveLink`, `InsertLink`, and `ShiftContents` bodies (`src/C4ObjectList.cpp:110-268,310-318,614-636,815-831`) | exact category/id insertion, StaticBack/line/unsorted exceptions, tail-add, link-preserving rotation, fresh-link reinsertion, and iterator repair |
 | `container_lifecycle` | complete `C4Object::Enter`, `Exit`, and `Collect` bodies (`src/C4Object.cpp:1532-1637,5693-5717`) | callback and reentrant mutation order, both containment directions, controller transfer, final status, and raw fixed motion |
@@ -230,6 +231,25 @@ construction rules and examples:
   roster. The C++ scaffold executes and validates the diagnostic call, but the
   Rust differential deliberately makes no logging claim: application-level
   presentation is covered by the join-control tests.
+- `c4group_sort` is the first section driven through **linked** engine sources
+  rather than an extracted snippet: `src/C4Group.cpp` and the file layer beneath
+  it (`C4Strings`, `StdFile`, `CStdFile`, `StdGzCompressedFile`, `StdBuf`,
+  `C4InputValidation`) are compiled into the oracle whole, so `Sort`,
+  `SortRank`, `SortByList` and `WildcardMatch` are the real ones. That link is
+  also why the C4Strings helpers are no longer lifted — the copies would be
+  duplicate symbols beside the real translation unit — and why the oracle is
+  built at `-std=c++23` with `-DZLIB_CONST`; both were verified to reproduce the
+  committed golden byte-for-byte before this section was added. SHA1 is stubbed,
+  reached only by the `Original` author signature that no section verifies.
+  `Sort` reorders the in-memory entry list, so this section needs no file bytes
+  and touches none of the three host-dependent values a group rewrite would —
+  the creation stamp, a file mtime, and the `#ifdef __linux__` executable bit.
+  A name byte above 0x7f is deliberately excluded for the same reason:
+  `stricmp` is locale-dependent there and the golden has no platform axis.
+  The golden carries each fixture's insertion order as well as its result,
+  because a comparator that reconstructs the input cannot distinguish "sorted
+  correctly" from "never sorted at all" — an injection proved exactly that hole
+  before the input was emitted.
 - `scenario_sections` compiles the complete production
   `C4GameSave::SaveScenarioSections` body beside the real `C4ScenarioSection`
   constructor, both of its accessors, and the `C4Strings` helpers that splice a
