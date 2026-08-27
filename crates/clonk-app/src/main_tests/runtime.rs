@@ -10051,6 +10051,98 @@ fn unbound_network_globals_claim_no_gamepad_code() {
     runtime_assert!(!app.graphics.debug_draw_flags().show_net_status);
 }
 
+// The four debug toggles are registered between the message board and the
+// playback-speed pair (src/C4Game.cpp:3385-3389), so a custom gamepad code
+// reaches each of them exactly as the keyboard route does.
+#[test]
+fn debug_global_gamepad_overrides_reach_every_debug_toggle() {
+    for (name, button, expected) in [
+        ("DbgModeToggle", 0_u8, RuntimeDebugKey::Mode),
+        ("DbgShowVtxToggle", 1, RuntimeDebugKey::Vertices),
+        ("DbgShowActionToggle", 2, RuntimeDebugKey::ActionCycle),
+        ("DbgShowSolidMaskToggle", 3, RuntimeDebugKey::SolidMask),
+    ] {
+        let mut app = new_running_sandbox_app();
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                format!("[Keys]\n{name}=\\x0042000{:x}\n", 10 + button).as_bytes(),
+            )
+            .test_value()))
+            .test_value();
+        runtime_assert_eq!(
+            app.runtime_custom_gamepad_button_action(0, button) =>
+            Some(RuntimeCustomGamepadAction::Debug(expected)),
+            "{name} must reach its debug toggle",
+        );
+        for other in 0..4_u8 {
+            if other != button {
+                runtime_assert_eq!(
+                    app.runtime_custom_gamepad_button_action(0, other) => None,
+                    "{name} claims only its own button",
+                );
+            }
+        }
+    }
+}
+
+// The message board registers before the debug block (src/C4Game.cpp:3381-3389),
+// so a code bound to both goes to the earlier registration — the same
+// first-match walk the keyboard route performs.
+#[test]
+fn an_earlier_registration_outranks_a_debug_gamepad_override() {
+    let mut app = new_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nMsgBoardScrollUp=\\x0042000a\nDbgModeToggle=\\x0042000a\n",
+        )
+        .test_value()))
+        .test_value();
+    runtime_assert_eq!(
+        app.runtime_custom_gamepad_button_action(0, 0) =>
+        Some(RuntimeCustomGamepadAction::MessageBoardScroll { up: true }),
+        "the message board owns the shared code",
+    );
+}
+
+// `C4Game::ToggleDebugMode` refuses while the round disallows debug mode, and
+// the other three refuse while debug mode is off; each refusal flashes instead
+// of toggling. The gamepad route reaches the same callback, so it produces the
+// refusal rather than skipping the registration.
+#[test]
+fn a_refused_debug_gamepad_override_flashes_without_toggling() {
+    let mut app = new_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nDbgShowVtxToggle=\\x0042000a\n",
+        )
+        .test_value()))
+        .test_value();
+    runtime_assert!(
+        !app.engine.debug_mode(),
+        "a sandbox round starts outside debug mode"
+    );
+    let before = app.graphics.debug_draw_flags();
+
+    app.handle_gamepad_button(
+        GamepadSlot::new(0),
+        LegacyGamepadButton::new(0),
+        ElementState::Pressed,
+    )
+    .test_value();
+
+    runtime_assert_eq!(
+        app.graphics.debug_draw_flags() => before,
+        "a refused toggle changes no draw flag",
+    );
+    runtime_assert!(
+        app.runtime_flash_message.is_some(),
+        "the refusal says why, exactly as the keyboard route does"
+    );
+}
+
 // `FilmNextPlayer` is KEYSCOPE_FilmView and the free-view scrolls are
 // KEYSCOPE_FreeView (src/C4Game.cpp:3415, 3423-3426), so a bound gamepad code
 // is inert while an owned viewport holds the screen — the same scope gate the

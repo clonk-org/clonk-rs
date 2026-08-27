@@ -2653,6 +2653,10 @@ pub(crate) enum RuntimeCustomGamepadAction {
     MessageBoardScroll {
         up: bool,
     },
+    /// The four debug toggles registered between the message board and the
+    /// playback-speed pair (C4Game.cpp:3385-3389). A refused toggle is not an
+    /// error: the native callback returns false after its own flash text.
+    Debug(RuntimeDebugKey),
     /// `C4GraphicsSystem::ViewportNextPlayer` in film view (C4Game.cpp:3415).
     FilmNextPlayer,
     /// `C4GraphicsSystem::FreeScroll` with its registered vector
