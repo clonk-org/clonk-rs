@@ -15,7 +15,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // content/Objects.c4d/Vehicles.c4d/Catapult.c4d/Script.c:39-77,121-147;
     // planet/System.c4g/JumpAndRun.c:53-119).
     let mut app = real_tutorial_app(5, "Tutorial 5 app virtual player");
-    let constructor = app.engine.test_crew_cursor(app.local_owner);
+    let constructor = app.engine.test_crew_cursor(app.players.local_owner);
     let elevator = app_object_with_definition(&app, "ELEV").test_value();
     let valley_cata = app_object_with_definition_near_x(&app, "CATA", 240).test_value();
     let hill_cata = app_object_with_definition_near_x(&app, "CATA", 540).test_value();
@@ -37,7 +37,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         },
     );
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    let valley = app.engine.test_crew_cursor(app.local_owner);
+    let valley = app.engine.test_crew_cursor(app.players.local_owner);
     main_assert_ne!(valley => constructor);
     main_assert!(
         app.engine.object_snapshot(valley).is_some_and(|object| {
@@ -207,7 +207,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // state (src/C4GameObjects.cpp:155-196). Keep both operations behind
     // the app's E/Z/C keyboard mapping.
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    let catapult_clonk = app.engine.test_crew_cursor(app.local_owner);
+    let catapult_clonk = app.engine.test_crew_cursor(app.players.local_owner);
     main_assert_ne!(catapult_clonk => constructor);
     main_assert_ne!(catapult_clonk => valley);
     main_assert!(
@@ -456,7 +456,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // only when they cross the selected crew's collection rectangle
     // (src/C4Player.cpp:1261-1275; src/C4GameObjects.cpp:140-196).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor), "third physical CursorRight must wrap to Tutorial05's constructor CLNK");
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(constructor), "third physical CursorRight must wrap to Tutorial05's constructor CLNK");
     advance_app_until(
         &mut app,
         "Tutorial05 asks the constructor CLNK to collect the delivered material",
@@ -613,7 +613,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // movement/collection (src/C4Player.cpp:1261-1275,1522-1536;
     // src/C4Object.cpp:3520-3567; src/C4GameObjects.cpp:140-196).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(valley));
     if app
         .engine
         .object_snapshot(valley)
@@ -744,7 +744,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // from Projectile (Catapult.c4d/Script.c:31-77,121-163;
     // src/C4Object.cpp:3520-3567).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(catapult_clonk));
     if app
         .engine
         .object_snapshot(catapult_clonk)
@@ -864,7 +864,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // ELEC (src/C4Object.cpp:1682-1762; src/C4ObjectCom.cpp:573-589;
     // Elevator.c4d/DefCore.txt:16; Elevator.c4d/Script.c:8-15).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(constructor));
     advance_app_until(
         &mut app,
         "second-relay METL settles on the cabin hill",
@@ -1033,7 +1033,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // 1453-1553; C4Object.cpp:3406-3556).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(catapult_clonk));
     hold_app_key_until(
         &mut app,
         VirtualKeyCode::KeyZ,
@@ -1127,7 +1127,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
 
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(valley));
     hold_app_key_until(
         &mut app,
         VirtualKeyCode::KeyZ,
@@ -1201,7 +1201,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         })
     });
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(catapult_clonk));
     hold_app_key_until(
         &mut app,
         VirtualKeyCode::KeyC,
@@ -1234,7 +1234,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         },
     );
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(constructor));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyX);
     if app
         .engine
@@ -1261,7 +1261,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         keyboard.tap(VirtualKeyCode::KeyW);
         keyboard.tap(VirtualKeyCode::KeyW);
     }
-    let mut selected = app.engine.selected_crew(app.local_owner);
+    let mut selected = app.engine.selected_crew(app.players.local_owner);
     selected.sort_by_key(|object| object.as_u64());
     let mut expected = vec![constructor, valley, catapult_clonk];
     expected.sort_by_key(|object| object.as_u64());
@@ -1303,7 +1303,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         (valley, "valley CLNK"),
         (catapult_clonk, "right-hill CLNK"),
     ] {
-        main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(clonk));
+        main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(clonk));
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.tap(VirtualKeyCode::KeyX);
@@ -1355,7 +1355,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         },
     );
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(constructor));
     {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
         keyboard.press(VirtualKeyCode::KeyZ);
@@ -1387,7 +1387,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         },
     );
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(valley));
     hold_app_key_until(
         &mut app,
         VirtualKeyCode::KeyC,
@@ -1430,11 +1430,11 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         keyboard.tap(VirtualKeyCode::KeyW);
         keyboard.tap(VirtualKeyCode::KeyW);
     }
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(constructor));
     main_assert!(
         [constructor, valley, catapult_clonk]
             .into_iter()
-            .all(|clonk| app.engine.selected_crew(app.local_owner).contains(&clonk)),
+            .all(|clonk| app.engine.selected_crew(app.players.local_owner).contains(&clonk)),
         "all exact Tutorial05 Clonks must be reselected on the plateau"
     );
 
@@ -1498,7 +1498,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // crew member before HUT3 opens its context menu (Hut3.c4d/
     // DefCore.txt:18; C4ObjectCom.cpp:335-350; C4Command.cpp:545-617).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(valley));
     if app
         .engine
         .object_snapshot(valley)
@@ -1517,7 +1517,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         );
     }
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(catapult_clonk));
     if app
         .engine
         .object_snapshot(catapult_clonk)
@@ -1536,7 +1536,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         );
     }
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(constructor));
     if app
         .engine
         .object_snapshot(constructor)
@@ -1556,10 +1556,10 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     }
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyS);
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(valley));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyS);
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
+    main_assert_eq!(app.engine.crew_cursor(app.players.local_owner) => Some(catapult_clonk));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyS);
     advance_app_until(
         &mut app,
@@ -1783,7 +1783,7 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
     // C4Object.cpp:3682-3724; Wipf.c4d/Script.c:263-271;
     // Lorry.c4d/Script.c:65-78).
     let mut app = real_tutorial_app(8, "Tutorial 8 app virtual player");
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let clonk = app.engine.test_crew_cursor(owner);
     let lorry = app_object_with_definition(&app, "LORY").test_value();
     let hut = app_object_with_definition(&app, "HUT3").test_value();
@@ -2237,7 +2237,7 @@ fn running_modal_key_up_does_not_swallow_the_next_airbike_steering_press() {
         "Airbike modal pilot",
     );
     wait_for_running(&mut app);
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.engine
         .player_mut(owner)
         .expect("local player")

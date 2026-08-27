@@ -1586,7 +1586,7 @@ impl GameApp {
         )?;
 
         let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
-        let exact_teams = self.network_team_assignment.as_mut().map(|assignment| {
+        let exact_teams = self.players.team_assignment.as_mut().map(|assignment| {
             self.control_player_infos
                 .recheck_team_players(assignment.teams_mut());
             let metadata = assignment.teams().clone();

@@ -778,7 +778,7 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
-        if player == self.local_owner {
+        if player == self.players.local_owner {
             self.close_object_menu();
         }
         self.ingame_menu.replace(
@@ -794,7 +794,7 @@ impl GameApp {
     /// `C4MainMenu::ActivateMain` conditions (C4MainMenu.cpp:643-715) from
     /// the running app state.
     pub(crate) fn main_menu_conditions(&self) -> MainMenuConditions {
-        self.main_menu_conditions_for(self.local_owner)
+        self.main_menu_conditions_for(self.players.local_owner)
     }
 
     pub(crate) fn main_menu_conditions_for(&self, player: i32) -> MainMenuConditions {
@@ -2391,8 +2391,8 @@ impl GameApp {
         self.offline_control_input.clear();
         self.sync_checks.clear();
         self.network_control_clock = None;
-        self.host_local_alternate_colors_by_resource.clear();
-        self.host_local_player_info_ids.clear();
+        self.players.host_local_alternate_colors.clear();
+        self.players.host_local_info_ids.clear();
         self.network_is_league = false;
         self.network_league_name.clear();
         self.network_stream_address = LegacyCString::default();
@@ -2663,8 +2663,8 @@ impl GameApp {
                 }
                 if purpose == StartupNetworkPurpose::Join {
                     self.pending_network_join = None;
-                    self.host_local_alternate_colors_by_resource.clear();
-                    self.host_local_player_info_ids.clear();
+                    self.players.host_local_alternate_colors.clear();
+                    self.players.host_local_info_ids.clear();
                 }
                 // InitNetwork constructs a fresh C4Network2Client list; no
                 // activity timestamp survives into the new socket session.
@@ -2734,9 +2734,9 @@ impl GameApp {
                             );
                         }
                     }
-                    self.host_local_alternate_colors_by_resource =
+                    self.players.host_local_alternate_colors =
                         initial_host_local_alternate_colors(Some(&mode));
-                    self.host_local_player_info_ids =
+                    self.players.host_local_info_ids =
                         initial_host_local_player_info_ids(Some(&mode));
                     self.prune_host_local_alternate_colors();
                     if self.staged_network_host_scenario.is_none()
@@ -2754,7 +2754,7 @@ impl GameApp {
                             // lobby projection.
                             let mut lobby = NetworkLobbyState::new(
                                 manager.local_client_id(),
-                                self.player_name.clone(),
+                                self.players.local_name.clone(),
                                 true,
                             )
                             .with_external_chat(self.startup_irc_client_active())
@@ -2790,9 +2790,9 @@ impl GameApp {
                                 &self.network_league_name,
                                 &self.control_player_infos,
                             );
-                            self.network_team_assignment = initial_network_team_assignment(
+                            self.players.team_assignment = initial_network_team_assignment(
                                 Some(&mode),
-                                &self.generated_team_name_template,
+                                &self.players.generated_team_name_template,
                             );
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
@@ -2838,9 +2838,9 @@ impl GameApp {
                                 &self.network_league_name,
                                 &self.control_player_infos,
                             );
-                            self.network_team_assignment = initial_network_team_assignment(
+                            self.players.team_assignment = initial_network_team_assignment(
                                 Some(&mode),
-                                &self.generated_team_name_template,
+                                &self.players.generated_team_name_template,
                             );
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
@@ -2884,7 +2884,7 @@ impl GameApp {
                         .and_then(|client_id| control_clients.state(client_id))
                         .filter(|client| !client.name.is_empty())
                         .map(|client| legacy_presentation_text(client.name.as_bytes()))
-                        .unwrap_or_else(|| self.player_name.clone());
+                        .unwrap_or_else(|| self.players.local_name.clone());
                     let lobby =
                         NetworkLobbyState::new(manager.local_client_id(), local_name, false)
                             .with_external_chat(self.startup_irc_client_active())
@@ -2917,7 +2917,7 @@ impl GameApp {
                     self.network_mode = Some(mode);
                     self.network = Some(manager);
                     self.network_control_running = false;
-                    self.network_team_assignment = None;
+                    self.players.team_assignment = None;
                     self.network_lobby = Some(lobby);
                     self.classic_host_lobby = None;
                     self.host_lobby_countdown = None;
@@ -3314,7 +3314,7 @@ impl GameApp {
             file.set_activated(enabled);
             model.activated = enabled;
         }
-        self.selected_player_file = active.iter().find_map(|reference| {
+        self.players.selected_file = active.iter().find_map(|reference| {
             self.startup
                 .player_files
                 .iter()
@@ -3894,7 +3894,7 @@ impl GameApp {
             .map(|player| player.render_model.clone())
             .collect();
         self.startup.player_files = players;
-        self.selected_player_file = selected_index
+        self.players.selected_file = selected_index
             .and_then(|index| self.startup.player_files.get(index))
             .filter(|player| player.render_model.activated)
             .or_else(|| {
@@ -4007,7 +4007,7 @@ impl GameApp {
             .map(|player| player.render_model.clone())
             .collect();
         self.startup.player_files = players;
-        self.selected_player_file = saved_index
+        self.players.selected_file = saved_index
             .and_then(|index| self.startup.player_files.get(index))
             .filter(|player| player.render_model.activated)
             .or_else(|| {
@@ -5150,8 +5150,8 @@ impl GameApp {
             self.sync_checks.clear();
             self.clear_blocking_resource_wait();
             self.admission_resources.clear();
-            self.host_local_alternate_colors_by_resource.clear();
-            self.host_local_player_info_ids.clear();
+            self.players.host_local_alternate_colors.clear();
+            self.players.host_local_info_ids.clear();
             self.executing_ready_tick = None;
             self.control_player_infos = ControlPlayerInfoRegistry::default();
             self.network_is_league = false;
@@ -5440,7 +5440,7 @@ impl GameApp {
             .iter()
             .map(|player| player.render_model.clone())
             .collect();
-        self.selected_player_file = players
+        self.players.selected_file = players
             .iter()
             .find(|player| player.render_model.activated)
             .map(|player| player.player_file.clone());

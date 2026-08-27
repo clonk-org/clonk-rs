@@ -1430,7 +1430,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         .line_height;
     let mut preferred = scoreboard_preferred_rect(
         app.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let mut runtime = RuntimeClientListDialog::new(
         "Network clients",
@@ -1510,7 +1510,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     main_assert!(!app.dialogs.client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
     preferred = scoreboard_preferred_rect(
         app.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let retained_after_resize = app
         .dialogs.client_list
@@ -1891,7 +1891,7 @@ fn visible_ingame_menu_without_exact_resources_fails_before_rendering() {
     }
     Arc::make_mut(&mut assets.hud_graphics).captain = None;
     app.ingame_menu.replace(
-        app.local_owner,
+        app.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
     app.dialogs.scoreboard_initial_reconcile_pending = true;
@@ -2400,7 +2400,7 @@ fn synchronized_player_file_with_empty_filename_never_resolves_the_install_root(
 
     let mut app = new_state_only_synthetic_crew_running_sandbox_app();
     app.app_paths = Some(paths);
-    let player_number = app.local_owner;
+    let player_number = app.players.local_owner;
     let info_id = 603;
     let mut state = app.engine.capture_state();
     let player = state
@@ -2745,7 +2745,7 @@ fn host_direct_player_info_rebalances_random_teams_and_broadcasts_changed_packet
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&metadata));
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.control_player_infos.replace_snapshot(
         30,
         [clonk_engine::PlayerInfoControlData::new(
@@ -2775,7 +2775,7 @@ fn host_direct_player_info_rebalances_random_teams_and_broadcasts_changed_packet
         .test_value();
     app.test_network_events();
 
-    let teams = app.network_team_assignment.test_ref().teams();
+    let teams = app.players.team_assignment.test_ref().teams();
     main_assert_eq!(teams.teams[0].player_ids => vec![20, 30]);
     main_assert_eq!(teams.teams[1].player_ids => vec![10]);
     main_assert_eq!(app.control_player_infos.get(10).unwrap().team => 2);
@@ -2874,7 +2874,7 @@ fn synchronized_client_remove_rebalances_random_teams_and_broadcasts_changed_pac
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&metadata));
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     let player = |id, team, color, original_color, projected_gain, name: &[u8], forced: &[u8]| {
         let mut player = set_control_test_player(id, team, 0);
         player.color = color;
@@ -2924,7 +2924,7 @@ fn synchronized_client_remove_rebalances_random_teams_and_broadcasts_changed_pac
 
     main_assert!(!app.control_clients.contains(4));
     main_assert!(app.control_player_infos.get(40).is_none());
-    let teams = app.network_team_assignment.test_ref().teams();
+    let teams = app.players.team_assignment.test_ref().teams();
     main_assert_eq!(teams.teams[0].player_ids => vec![20, 30]);
     main_assert_eq!(teams.teams[1].player_ids => vec![10]);
     main_assert_eq!(app.control_player_infos.get(10).unwrap().team => 2);
@@ -3167,7 +3167,7 @@ fn unloadable_resource_join_is_unavailable_and_does_not_stall_tick() {
     let initial_frame = app.engine.frame();
     let info_id = 17;
     let resource_id = 61;
-    let local_owner = app.local_owner;
+    let local_owner = app.players.local_owner;
     let resource = netresources_fixture!(
         resource_resource_type_id_loadable_filename:
             3,
@@ -3366,7 +3366,7 @@ fn a_script_menu_with_an_unresolved_image_still_owns_its_pointer() {
     let mut app = new_classic_running_sandbox_app();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     let mut menu = two_item_script_menu(cursor);
     menu.caption = "{{MISS}} unavailable".to_string();
     app.engine
@@ -3421,12 +3421,12 @@ fn script_menu_pointer_requires_global_resources_before_fallback_layout() {
     let mut app = new_running_sandbox_app();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(app.local_owner).test_value();
+    let viewport = app.graphics.viewport_rect(app.players.local_owner).test_value();
     let point = PhysicalPosition::new(
         f64::from(viewport.x) + f64::from(viewport.width) / 2.0,
         f64::from(viewport.y) + f64::from(viewport.height) / 2.0,
     );
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     app.engine
         .apply_object_update(
             cursor,
@@ -3609,9 +3609,9 @@ fn runtime_f3_and_ingame_music_action_install_the_localized_flash() {
         .as_ref()
         .map(|audio| audio.borrow().options.music_enabled);
     menu.ingame_menu.replace(
-        menu.local_owner,
+        menu.players.local_owner,
         Some(IngameMenuState::options_menu(
-            &menu.option_flags(menu.local_owner),
+            &menu.option_flags(menu.players.local_owner),
             1,
             &IngameMenuLabels::default(),
         )),

@@ -8403,7 +8403,7 @@ pub(crate) fn run_integration_test(
         for (when, event) in &scripted_input {
             if *when == frame {
                 println!("  test input at frame {frame}: {event:?}");
-                let owner = app.local_owner;
+                let owner = app.players.local_owner;
                 app.dispatch_control_event_for_owner(owner, *event)
                     .map_err(|error| anyhow::anyhow!("scripted input failed: {error}"))?;
             }
@@ -8415,7 +8415,7 @@ pub(crate) fn run_integration_test(
         if !scripted_input.is_empty() {
             if let Some(snapshot) = app
                 .engine
-                .crew_cursor(app.local_owner)
+                .crew_cursor(app.players.local_owner)
                 .and_then(|cursor| app.engine.object_snapshot(cursor))
             {
                 if last_action.as_deref() != Some(snapshot.action.name.as_str()) {
@@ -8433,7 +8433,7 @@ pub(crate) fn run_integration_test(
     }
 
     // Forensics for scripted-input runs: where did the cursor crew end up?
-    if let Some(cursor) = app.engine.crew_cursor(app.local_owner) {
+    if let Some(cursor) = app.engine.crew_cursor(app.players.local_owner) {
         if let Some(snapshot) = app.engine.object_snapshot(cursor) {
             println!(
                 "  cursor crew: def={} action={} pos=({}, {}) comdir={:?}",

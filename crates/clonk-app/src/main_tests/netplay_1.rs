@@ -1017,18 +1017,18 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
         }) if modules == &[expected_definition.as_ref()]
     ));
 
-    main_assert_eq!(app.local_owner => 0, "local owner adopts the joined number");
+    main_assert_eq!(app.players.local_owner => 0, "local owner adopts the joined number");
     let crew: Vec<_> = app
         .snapshot
         .objects
         .iter()
-        .filter(|object| object.crew_member && object.owner == app.local_owner)
+        .filter(|object| object.crew_member && object.owner == app.players.local_owner)
         .collect();
     main_assert_eq!(crew.len() => 2, "Crew=GOOD=2 joins with two crew members");
     let selection = app
         .snapshot
         .crew_selection
-        .get(&app.local_owner)
+        .get(&app.players.local_owner)
         .test_value();
     let cursor = selection.cursor.test_value();
     // Cursor->DoSelect selects only the cursor (C4Player.cpp:1255-1257).
@@ -1454,7 +1454,7 @@ fn scale_three_target_message_commits_through_native_viewport_projection() {
         kind: MessageKind::TargetPlayer,
         lines: vec!["A".to_string()],
         target: Some(target),
-        player: Some(app.local_owner),
+        player: Some(app.players.local_owner),
         offset: Vector2::new(0, shape_height / 2 + 5),
         color: 0xffff_ffff,
         flags: FLAG_NO_BREAK,
@@ -1484,7 +1484,7 @@ fn scale_three_target_message_commits_through_native_viewport_projection() {
         .graphics
         .active_viewport_projections()
         .into_iter()
-        .find(|viewport| viewport.owner == app.local_owner)
+        .find(|viewport| viewport.owner == app.players.local_owner)
         .test_value()
         .rect;
     let physical_viewport = Rect::new(
@@ -2998,7 +2998,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
         .test_value();
     snapshot.parameters.teams = clonk_network::join_team_list_snapshot(metadata.clone());
     app.host_join_snapshot = Some(snapshot);
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.control_player_infos.replace_snapshot(
         3,
         [n1_fixture!(player_data {
@@ -3026,7 +3026,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
     let (player_infos, snapshots) = commands.take_team_control_updates();
     main_assert_eq!(player_infos.len() => 1);
     main_assert_eq!(snapshots.len() => 1);
-    let teams = app.network_team_assignment.as_ref().test_value().teams();
+    let teams = app.players.team_assignment.as_ref().test_value().teams();
     main_assert_eq!(teams.random_team_count => 2);
     main_assert_eq!(teams.teams.len() => 2);
     main_assert_eq!(app.host_join_snapshot.as_ref().unwrap().parameters.teams.random_team_count => 2);
@@ -4437,7 +4437,7 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
         render_model: overflow.clone(),
     });
     app.startup.player_models.push(overflow);
-    app.selected_player_file = Some(PlayerFile {
+    app.players.selected_file = Some(PlayerFile {
         name: "Overflow".to_string(),
         ..PlayerFile::default()
     });
@@ -4448,7 +4448,7 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
             .activated
     );
     main_assert!(!app.startup.player_models[overflow_index].activated);
-    main_assert_eq!(app.selected_player_file.as_ref().map(|player| player.name.as_str()) => Some("Alpha"));
+    main_assert_eq!(app.players.selected_file.as_ref().map(|player| player.name.as_str()) => Some("Alpha"));
     main_assert_eq!(app.dialogs.messages.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
@@ -5220,7 +5220,7 @@ fn startup_status_boundary_precedes_native_main_text_pixels() {
 #[test]
 fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
     let mut app = new_state_only_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let primary_team = app
         .engine
         .player(primary)
@@ -5296,7 +5296,7 @@ fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
 #[test]
 fn hostility_menu_lists_other_players_and_toggles_hostility() {
     let mut app = new_state_only_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let ada = 17;
     let bot = 18;
     let hidden = 19;

@@ -31,7 +31,7 @@ fn advance_app_until_erased(
         "timed out after {max_ticks} app ticks waiting for {milestone} at frame {}; cursor={:?}",
         app.engine.frame(),
         app.engine
-            .crew_cursor(app.local_owner)
+            .crew_cursor(app.players.local_owner)
             .and_then(|cursor| app.engine.object_snapshot(cursor))
     );
 }
@@ -158,7 +158,7 @@ fn app_tutorial09_system_names_preserve_cpp_ready_conkit_route(
     // (C4Game.cpp:2767-2792; C4InfoCore.cpp:34-55;
     // C4Player.cpp:481-520).
     let mut app = prepared.instantiate("Tutorial 9 app name parity", false);
-    let clonk = app.engine.test_crew_cursor(app.local_owner);
+    let clonk = app.engine.test_crew_cursor(app.players.local_owner);
     main_assert_eq!(
         app.engine
             .object_snapshot(clonk)

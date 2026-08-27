@@ -390,7 +390,7 @@ impl GameApp {
             let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
                 OWNER_NONE
             } else {
-                self.local_owner
+                self.players.local_owner
             };
             self.show_abort_dialog(dialog_owner);
             return;
@@ -1116,7 +1116,7 @@ impl GameApp {
             .expect("network chart resources were preflighted before rendering");
         let preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         dialog.render(
             self.graphics.surface_mut(),
@@ -1141,7 +1141,7 @@ impl GameApp {
         let assets = Arc::clone(&self.assets);
         let preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let keyboard_active = self.runtime_client_list_draw_active();
         let mouse_active = self.runtime_client_list_mouse_active();
@@ -1192,7 +1192,7 @@ impl GameApp {
             .expect("runtime client-list resources were preflighted before rendering");
         let preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         dialog.render_tooltip(
             self.graphics.surface_mut(),
@@ -1993,7 +1993,7 @@ impl GameApp {
                     .map(|state| &state.motion)
                     .filter(|motion| motion.moved && motion.selection_frame)
             })?;
-        (motion.start.owner == self.local_owner).then(|| {
+        (motion.start.owner == self.players.local_owner).then(|| {
             (
                 self.ingame_selection_candidates(*motion),
                 ingame_pointer_world_pixel(motion.start),
@@ -5382,7 +5382,8 @@ impl GameApp {
                 )
                 .map_err(report_classic_parity_boundary)?;
         }
-        if viewport_overlays_visible && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
+        if viewport_overlays_visible
+            && self.menu_owner_has_unsuppressed_viewport(self.players.local_owner)
         {
             if let Some(menu) = self.object_menu.as_ref() {
                 let boundary = report_classic_parity_boundary(
@@ -5544,13 +5545,16 @@ impl GameApp {
         if viewport_overlays_visible
             && self.display_flags.show_commands
             && self.object_menu.is_none()
-            && self.engine.cursor_object_menu(self.local_owner).is_none()
+            && self
+                .engine
+                .cursor_object_menu(self.players.local_owner)
+                .is_none()
         {
             let cursor_id = self
                 .snapshot
                 .players
                 .iter()
-                .find(|player| player.id == self.local_owner)
+                .find(|player| player.id == self.players.local_owner)
                 .and_then(|player| player.cursor);
             if let Some(cursor_id) = cursor_id {
                 let flash_command = self
@@ -5569,7 +5573,7 @@ impl GameApp {
                     draw_commands::build_cursor_commands(&self.snapshot, cursor_id, &ctx);
                 if let Some(overlay) = players
                     .iter_mut()
-                    .find(|player| player.owner == self.local_owner)
+                    .find(|player| player.owner == self.players.local_owner)
                 {
                     overlay.commands = commands;
                     // C4Object::DrawCommand looks up FlashCom through the
@@ -6318,12 +6322,12 @@ impl GameApp {
             if let Some((selection, down_world, current_screen)) = self.ingame_selection_frame() {
                 self.graphics.draw_mouse_selection_marks(
                     &self.snapshot,
-                    self.local_owner,
+                    self.players.local_owner,
                     &selection,
                     Some(&frame_gamma),
                 );
                 self.graphics.draw_mouse_selection_frame(
-                    self.local_owner,
+                    self.players.local_owner,
                     down_world,
                     current_screen,
                     Some(&frame_gamma),

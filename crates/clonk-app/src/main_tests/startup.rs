@@ -2146,7 +2146,7 @@ fn startup_status_boundary_precedes_supported_view_pixels() {
 #[test]
 fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
     let mut app = new_state_only_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.engine.set_teams(vec![
         clonk_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
         clonk_engine::TeamInfo::new(2, "Blue", 0x0000_00f4),
@@ -2240,7 +2240,7 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
 #[test]
 fn crew_name_label_respects_display_flags() {
     let mut app = new_state_only_running_sandbox_app();
-    let viewer = app.local_owner;
+    let viewer = app.players.local_owner;
     let focus = app.engine.test_crew_cursor(viewer);
     let focus_state = app.engine.test_object_snapshot(focus);
     let remote = viewer + 1;
@@ -3971,7 +3971,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     // src/C4GraphicsSystem.cpp:445-459; src/C4GUI.cpp:802-845;
     // src/C4Menu.cpp:1114-1121; src/C4Viewport.cpp:1549-1563).
     let mut app = new_classic_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = primary + 1;
     let primary_crew = app.engine.test_crew_cursor(primary);
     let primary_crew_state = app.engine.test_object_snapshot(primary_crew);
@@ -4255,7 +4255,7 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
 
-    let menu = app.ingame_menu.get(app.local_owner).test_value();
+    let menu = app.ingame_menu.get(app.players.local_owner).test_value();
     main_assert_eq!(
         menu.items()
             .iter()

@@ -1403,7 +1403,7 @@ impl GameApp {
         };
         let preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let action = self
             .dialogs
@@ -1449,7 +1449,7 @@ impl GameApp {
         };
         let preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         dialog.pointer_move(point, preferred, resources)
     }
@@ -2288,7 +2288,7 @@ impl GameApp {
         let font = &self.assets.clonk_fonts.as_deref()?.text;
         let preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         dialog.prepare_info_lines(preferred, font);
         Some((preferred, font.line_height))
@@ -3681,7 +3681,7 @@ impl GameApp {
                     let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
                         OWNER_NONE
                     } else {
-                        self.local_owner
+                        self.players.local_owner
                     };
                     self.show_abort_dialog(dialog_owner);
                 }
@@ -4953,11 +4953,11 @@ impl GameApp {
                     }
                     if self.object_menu.is_some() {
                         self.close_object_menu();
-                    } else if self.ingame_menu_belongs_to(self.local_owner) {
+                    } else if self.ingame_menu_belongs_to(self.players.local_owner) {
                         // Route through TryClose so submenus run their close
                         // command back to the main menu (C4Menu.cpp:317-334).
                         self.handle_menu_command_failsafe(
-                            self.local_owner,
+                            self.players.local_owner,
                             ControlCommand::MenuClose,
                             CommandKind::Press,
                         )?;
@@ -4973,7 +4973,7 @@ impl GameApp {
                         let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
                             OWNER_NONE
                         } else {
-                            self.local_owner
+                            self.players.local_owner
                         };
                         self.show_abort_dialog(dialog_owner);
                     }
@@ -7133,7 +7133,7 @@ impl GameApp {
                 }
                 AppMode::Running => {
                     if state == ElementState::Pressed {
-                        if self.ingame_menu_belongs_to(self.local_owner) {
+                        if self.ingame_menu_belongs_to(self.players.local_owner) {
                             self.close_ingame_menu_by_user()?;
                         } else {
                             self.open_ingame_menu()?;
@@ -8296,7 +8296,7 @@ impl GameApp {
             .then(|| {
                 self.graphics.object_at_point_with_ocf(
                     &self.snapshot,
-                    self.local_owner,
+                    self.players.local_owner,
                     pointer.screen,
                     clonk_engine::ocf::CONTAINER,
                 )
@@ -8306,10 +8306,10 @@ impl GameApp {
             if let Some(target) = put_target {
                 return Some(IngameRegionDragCursor::Put(target));
             }
-            return match self
-                .engine
-                .mouse_drag_carryable_command(self.local_owner, ingame_pointer_world_pixel(pointer))
-            {
+            return match self.engine.mouse_drag_carryable_command(
+                self.players.local_owner,
+                ingame_pointer_world_pixel(pointer),
+            ) {
                 Some(CommandId::Drop) => Some(IngameRegionDragCursor::Drop),
                 Some(CommandId::Throw) => Some(IngameRegionDragCursor::Throw),
                 _ => None,
@@ -9985,11 +9985,11 @@ impl GameApp {
                 self.ingame_right_mouse_state = None;
                 return Ok(());
             };
-            if pointer.owner != self.local_owner {
+            if pointer.owner != self.players.local_owner {
                 self.ingame_right_mouse_state = None;
                 return Ok(());
             }
-            let region = self.ingame_viewport_region(self.local_owner, pointer.screen);
+            let region = self.ingame_viewport_region(self.players.local_owner, pointer.screen);
             let region_target = region.and_then(|region| match region {
                 IngameViewportRegion::Inventory(target) => Some(target),
                 IngameViewportRegion::Command(_) | IngameViewportRegion::ViewportButton(_) => None,
@@ -10020,7 +10020,7 @@ impl GameApp {
 
         let drag = self.ingame_right_mouse_state.take();
         if let Some(drag) = drag {
-            if drag.motion.start.owner != self.local_owner {
+            if drag.motion.start.owner != self.players.local_owner {
                 self.ingame_dragged_objects.clear();
                 return Ok(());
             }
@@ -10057,7 +10057,7 @@ impl GameApp {
         let Some(pointer) = self.live_input.ingame_pointer else {
             return Ok(());
         };
-        if pointer.owner != self.local_owner {
+        if pointer.owner != self.players.local_owner {
             return Ok(());
         }
         // RightUpDragNone sends the copied DownRegion.RightCom whenever the
@@ -10065,11 +10065,11 @@ impl GameApp {
         // COM_None, so they consume the click without opening world context
         // or cycling crew (C4MouseControl.cpp:1230-1237).
         if self
-            .ingame_viewport_region(self.local_owner, pointer.screen)
+            .ingame_viewport_region(self.players.local_owner, pointer.screen)
             .is_some()
         {
             return self.dispatch_control_event_for_local_player(
-                self.local_owner,
+                self.players.local_owner,
                 ControlEvent::RawPlayerControl {
                     command: 0,
                     data: 0,
@@ -10079,7 +10079,7 @@ impl GameApp {
         let primary_target = self.retained_ingame_mouse_target();
         let context_target = primary_target.or_else(|| {
             self.graphics
-                .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
+                .object_at_point(&self.snapshot, self.players.local_owner, pointer.screen)
         });
         // RightUpDragNone makes one exact-object exclusion pass for the
         // windmill wing. Do not loop: another WWNG behind it is the target.
@@ -10093,7 +10093,7 @@ impl GameApp {
                 // C++ does not re-run its fog gate after the excluded pick.
                 self.graphics.object_at_point_excluding(
                     &self.snapshot,
-                    self.local_owner,
+                    self.players.local_owner,
                     pointer.screen,
                     target,
                 )
@@ -10103,11 +10103,11 @@ impl GameApp {
         self.live_input.ingame_mouse_target = context_target;
         let select_next = self
             .engine
-            .player_mouse_select_next_object(self.local_owner);
+            .player_mouse_select_next_object(self.players.local_owner);
         if self.ingame_pointer_fog_blocked(pointer) {
             if let Some(next) = select_next {
                 self.submit_or_execute_player_select(PlayerSelectControlData {
-                    player: self.local_owner,
+                    player: self.players.local_owner,
                     objects: vec![next.as_u64() as i32],
                     by_client: -1,
                 })?;
@@ -10119,7 +10119,7 @@ impl GameApp {
         // cannot let MouseSelection callbacks change this event's target.
         if self.live_input.ingame_mouse_caption.cursor == IngameMouseCursorKind::Select {
             self.submit_or_execute_player_select(PlayerSelectControlData {
-                player: self.local_owner,
+                player: self.players.local_owner,
                 objects: self
                     .ingame_dragged_objects
                     .iter()
@@ -10147,11 +10147,11 @@ impl GameApp {
                 .graphics
                 .active_viewport_projections()
                 .into_iter()
-                .find(|viewport| viewport.owner == self.local_owner)
+                .find(|viewport| viewport.owner == self.players.local_owner)
                 .map(|viewport| ingame_pointer_viewport_pixel(pointer, viewport))
                 .unwrap_or((pointer.world.x as i32, pointer.world.y as i32));
             self.submit_or_execute_player_command(PlayerCommandControlData {
-                player: self.local_owner,
+                player: self.players.local_owner,
                 command: CommandId::Context as i32,
                 x,
                 y,
@@ -10166,7 +10166,7 @@ impl GameApp {
             // queuing a one-object CID_PlrSelect packet.
             if let Some(next) = select_next {
                 self.submit_or_execute_player_select(PlayerSelectControlData {
-                    player: self.local_owner,
+                    player: self.players.local_owner,
                     objects: vec![next.as_u64() as i32],
                     by_client: -1,
                 })?;
@@ -10181,7 +10181,7 @@ impl GameApp {
         &self,
         point: GuiPoint,
     ) -> Result<Option<EngineScriptMenuPointerTarget>, EngineError> {
-        self.script_menu_pointer_target_for_owner(self.local_owner, point)
+        self.script_menu_pointer_target_for_owner(self.players.local_owner, point)
     }
 
     pub(crate) fn script_menu_pointer_target_for_owner(

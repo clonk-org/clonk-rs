@@ -246,7 +246,7 @@ fn mouse_target_fixture(
     row: &MouseTargetEventGolden,
 ) -> (GameApp, HashMap<i32, ObjectId>, ViewportPointer) {
     let mut app = mouse_target_app(row);
-    main_assert_eq!(app.local_owner => row.player, "{} event player", row.case);
+    main_assert_eq!(app.players.local_owner => row.player, "{} event player", row.case);
     let owner = row.player;
     let landscape_width = row
         .viewport_width

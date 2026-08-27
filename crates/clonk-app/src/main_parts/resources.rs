@@ -4258,7 +4258,7 @@ pub(crate) fn build_network_host_preparation(
         (name, nick)
     } else {
         let name = sanitize_classic_lobby_name(
-            &sanitize_classic_lobby_name(&app.player_name, "host network name", false)?,
+            &sanitize_classic_lobby_name(&app.players.local_name, "host network name", false)?,
             "host network name",
             false,
         )?;
@@ -4385,7 +4385,7 @@ pub(crate) fn build_network_host_preparation(
         network_comment,
         netpuncher_address: raw_value("Network", "PuncherAddress")
             .unwrap_or_else(|| "netpuncher.openclonk.org:11115".to_string()),
-        generated_team_name_template: app.generated_team_name_template.clone(),
+        generated_team_name_template: app.players.generated_team_name_template.clone(),
         player_sources,
         config: prepared_host_bootstrap::PreparedHostBootstrapConfig {
             // CNM_Async, diverging from C++'s CNM_Decentral default (C++ ships 0

@@ -112,7 +112,7 @@ fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
     // NewPlayer without an Eliminated gate when capacity allows
     // (src/C4MainMenu.cpp:643-687).
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.snapshot = app.engine.snapshot();
     app.snapshot
         .players
@@ -140,7 +140,7 @@ fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
 #[test]
 fn help_suppresses_open_ingame_menu_and_right_up_exits() {
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.activate_ingame_main_menu_for_player(owner).test_value();
     render_mouse_test_app(&mut app);
     let (width, height) = {
@@ -179,7 +179,7 @@ fn help_suppresses_open_ingame_menu_and_right_up_exits() {
 #[test]
 fn help_right_up_exits_without_context_or_crew_cycle() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let (_target, point) = install_mouse_help_target(&mut app, "HLP3", "Right target", None);
     let (empty, _) = mouse_test_empty_point(&mut app, owner, point, None);
     let cursor = app.engine.crew_cursor(owner);
@@ -220,7 +220,7 @@ fn help_right_up_exits_without_context_or_crew_cycle() {
 #[test]
 fn viewport_buttons_dispatch_help_and_player_menu_locally() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     render_mouse_test_app(&mut app);
     main_assert_eq!(app.local_controls.mouse_owner() => Some(owner));
 
@@ -270,7 +270,7 @@ fn viewport_buttons_dispatch_help_and_player_menu_locally() {
 #[test]
 fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     let mut app = new_classic_running_sandbox_app();
-    let removed_owner = app.local_owner;
+    let removed_owner = app.players.local_owner;
     app.engine.remove_player(removed_owner).test_value();
     app.engine.set_local_players([]);
     app.local_controls = LocalControlRegistry::default();
@@ -456,7 +456,7 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
     app.test_render(&mut baseline);
     app.engine.test_tick();
 
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let snapshot = app.engine.snapshot();
     let captain = snapshot
         .objects
@@ -607,7 +607,7 @@ fn a_menu_row_with_an_unresolved_inline_image_still_renders_in_every_style() {
     for (style, name) in [(0, "Normal"), (1, "Context"), (2, "Info"), (3, "Dialog")] {
         let mut app = new_synthetic_running_sandbox_app();
         install_classic_test_assets(&mut app);
-        let cursor = app.engine.test_crew_cursor(app.local_owner);
+        let cursor = app.engine.test_crew_cursor(app.players.local_owner);
         let mut menu = two_item_script_menu(cursor);
         menu.style = style;
         menu.items[0].caption = "before {{MISS}} after".to_string();
@@ -2140,7 +2140,7 @@ fn player_context_root_matches_cpp_entry_gates() {
     main_assert_eq!(ordinary[1].hotkey => Some('C'));
     main_assert_eq!(ordinary[1].action => Some(AppContextMenuCommand::LobbyPlayerNewColor {client_id: 0, player_id: 7,}));
 
-    app.network_team_assignment
+    app.players.team_assignment
         .as_mut()
         .test_value()
         .teams_mut()
@@ -2429,7 +2429,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
     let reset_world_pointer = app.live_input.ingame_pointer.test_value();
     main_assert!(app.classic_gui_cursor_request().is_some(), "GUI cursor remains independently drawable after the reset");
     app.dialogs.help_visible = true;
-    app.close_ingame_menu_for_player(app.local_owner);
+    app.close_ingame_menu_for_player(app.players.local_owner);
     main_assert!(app.live_input.gui_mouse_owned, "Dialog::Close leaves ownership for C4GraphicsSystem::Execute");
     app.reconcile_running_mouse_after_last_gui_close(false)
         .test_value();
@@ -2458,8 +2458,8 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         non_cursor_menu_object,
         two_item_script_menu(non_cursor_menu_object),
     );
-    main_assert_ne!(app.engine.crew_cursor(app.local_owner) => Some(non_cursor_menu_object));
-    app.close_ingame_menu_for_player(app.local_owner);
+    main_assert_ne!(app.engine.crew_cursor(app.players.local_owner) => Some(non_cursor_menu_object));
+    app.close_ingame_menu_for_player(app.players.local_owner);
     app.test_render(&mut frame);
     main_assert!(app.live_input.gui_mouse_owned);
     main_assert!(!app.live_input.world_mouse_owned);
@@ -2533,7 +2533,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             .rebind(ControlBindingId::Left, VirtualKeyCode::KeyC);
         runtime_app.test_modifiers(modifiers);
         runtime_app.dialogs.menu_title_drag = Some(MenuTitleDrag::Ingame {
-            player: runtime_app.local_owner,
+            player: runtime_app.players.local_owner,
             start_pointer: GuiPoint::new(20.0, 20.0),
             start_location: (40, 50),
         });
@@ -2546,14 +2546,14 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
 
         runtime_app
             .engine
-            .test_player_mut(runtime_app.local_owner)
+            .test_player_mut(runtime_app.players.local_owner)
             .control
             .pressed_coms = 1 << clonk_engine::COM_LEFT;
         runtime_app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
         main_assert_ne!(
             runtime_app
                 .engine
-                .player(runtime_app.local_owner)
+                .player(runtime_app.players.local_owner)
                 .expect("local sandbox player")
                 .control
                 .pressed_coms
@@ -3475,7 +3475,7 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
     main_assert_eq!(pages.len() => 10, "MenuPage exhaustiveness changed");
     for (label, page) in pages {
         let mut app = new_running_sandbox_app();
-        app.ingame_menu.replace(app.local_owner, Some(page));
+        app.ingame_menu.replace(app.players.local_owner, Some(page));
         check(app, label);
     }
 
@@ -3489,7 +3489,7 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
 
     for style in 0..=3 {
         let mut app = new_running_sandbox_app();
-        let cursor = app.engine.test_crew_cursor(app.local_owner);
+        let cursor = app.engine.test_crew_cursor(app.players.local_owner);
         let mut menu = two_item_script_menu(cursor);
         menu.style = style;
         app.engine
@@ -3569,11 +3569,11 @@ fn ingame_menu_abort_routes_to_the_same_confirmation() {
         .position(|item| item.action == MenuAction::Abort)
         .test_value();
     menu.set_selection(abort);
-    app.ingame_menu.replace(app.local_owner, Some(menu));
+    app.ingame_menu.replace(app.players.local_owner, Some(menu));
     app.status_text.clear();
 
     app.handle_menu_command_failsafe(
-        app.local_owner,
+        app.players.local_owner,
         ControlCommand::MenuEnter,
         CommandKind::Press,
     )
@@ -3618,7 +3618,7 @@ fn engine_owned_object_menu_requests_are_consumed_and_stale_ones_ignored() {
         app.object_menu = None;
         app.snapshot.menu_requests = vec![clonk_engine::MenuRequest {
             crew_id,
-            owner: app.local_owner,
+            owner: app.players.local_owner,
             kind: kind.clone(),
         }];
         app.handle_menu_requests()
@@ -3659,7 +3659,7 @@ fn activate_savegame_opens_classic_ten_slot_menu() {
 
     // C4MainMenu::ActivateSavegame constructs slots 1..10 before returning
     // to the main menu (C4MainMenu.cpp:422-500).
-    let menu = app.ingame_menu.get(app.local_owner).test_value();
+    let menu = app.ingame_menu.get(app.players.local_owner).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::Savegame);
     main_assert_eq!(menu.items().len() => 10);
     main_assert!(menu.items().iter().enumerate().all(|(index, item)| item.action == MenuAction::SaveSlot((index + 1) as u8)));
@@ -4417,7 +4417,7 @@ fn configured_gamepad_button10_routes_player_menu_to_control_set_five_owner() {
     app.gamepad_bindings = GamepadBindings::from_config(&config);
     app.local_controls = LocalControlRegistry::default();
     app.local_controls
-        .initialize(test_local_control_init(app.local_owner, 5, false, false));
+        .initialize(test_local_control_init(app.players.local_owner, 5, false, false));
 
     app.test_gamepad_events([gamepad_button_event(
         GamepadSlot::new(1),

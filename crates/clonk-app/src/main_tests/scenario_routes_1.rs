@@ -143,7 +143,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
     // menu (C4MouseControl.cpp:1230-1263; C4Command.cpp:1076-1090;
     // MagiClonk.c4d/Script.c:190-199).
     let mut app = prepared.instantiate("Alchemy mouse context parity", false);
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let mage = app.engine.test_crew_cursor(owner);
     main_assert_eq!(app.engine.object_snapshot(mage).expect("mage remains live").definition_id => "MCLK");
     main_assert_eq!(
@@ -361,7 +361,7 @@ fn real_alchemy_right_drag_rectangle_replaces_crew_selection(
     // 1160-1171). Exercise the actual app pointer/button path so the
     // platform event split cannot collapse the drag back into RightUp.
     let mut app = prepared.instantiate("Alchemy right drag parity", false);
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let original = app.engine.test_crew_cursor(owner);
     advance_app_until(
         &mut app,
@@ -461,7 +461,7 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
     // C4Player.cpp:1397-1450). Exercise the physical app events twice so
     // neither selection nor moving can collapse into a context click.
     let mut app = prepared.instantiate("Alchemy object drag parity", false);
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let mage = app.engine.test_crew_cursor(owner);
     advance_app_until(
         &mut app,
@@ -633,7 +633,7 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
     // dragged object (C4MouseControl.cpp:833-850,1171-1201). Exercise the
     // physical pointer/modifier/button route with shipped ALC_/AHUT defs.
     let mut app = prepared.instantiate("Alchemy control-drag Put parity", false);
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let mage = app.engine.test_crew_cursor(owner);
     advance_app_until(
         &mut app,
@@ -766,7 +766,7 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
     // is ignored (C4FullScreen.cpp:327-350; C4MouseControl.cpp:817-830,
     // 982-1004,1101-1155).
     let mut app = prepared.instantiate("Alchemy mouse pickup parity", false);
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let mage = app.engine.test_crew_cursor(owner);
     advance_app_until(
         &mut app,
@@ -887,7 +887,7 @@ fn real_tutorial06_elevator_rider_view_target_and_camera_stay_continuous() {
     // -> viewport -> renderer path, while opening only the test shaft so
     // the carriage can run for a small deterministic frame window.
     let mut app = real_tutorial_app(6, "Tutorial 6 elevator camera");
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let rider = app.engine.test_crew_cursor(owner);
     advance_app_until(
         &mut app,
@@ -1100,7 +1100,7 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
         .test_value()
         .clone();
     main_assert_eq!(message.kind => MessageKind::GlobalPlayer);
-    main_assert_eq!(message.player => Some(app.local_owner));
+    main_assert_eq!(message.player => Some(app.players.local_owner));
     main_assert_eq!(message.target => None);
     main_assert_eq!(message.lines => ["Welcome to the world of Clonk."]);
     main_assert_eq!(message.offset => Vector2::new(50, 50));
@@ -1167,7 +1167,7 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
         .graphics
         .active_viewport_projections()
         .into_iter()
-        .find(|viewport| viewport.owner == app.local_owner)
+        .find(|viewport| viewport.owner == app.players.local_owner)
         .test_value()
         .rect;
     main_assert_eq!(viewport => Rect::new(216, 56, 720, 560));
@@ -1279,7 +1279,7 @@ fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base(
         .graphics
         .active_viewport_projections()
         .into_iter()
-        .find(|viewport| viewport.owner == app.local_owner)
+        .find(|viewport| viewport.owner == app.players.local_owner)
         .test_value()
         .rect;
     let physical_viewport = Rect::new(
@@ -1377,7 +1377,7 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
         .snapshot
         .players
         .iter()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .and_then(|player| player.cursor)
         .test_value();
     let object = app.snapshot.object(clonk).test_value();
@@ -1402,7 +1402,7 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
     };
     let crew = overlays
         .iter()
-        .find(|player| player.owner == app.local_owner)
+        .find(|player| player.owner == app.players.local_owner)
         .and_then(|player| player.crew.iter().find(|crew| crew.object_id == clonk))
         .test_value();
     main_assert_eq!(crew.breath => 50_000);
@@ -1488,7 +1488,7 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
     app.render_running(&mut frame, false).test_value();
     main_assert_eq!(frame => without_breath, "the stationary real frame is otherwise deterministic");
 
-    let viewport = app.graphics.viewport_rect(app.local_owner).test_value();
+    let viewport = app.graphics.viewport_rect(app.players.local_owner).test_value();
     let bar_x = viewport.x + 14;
     let bar_y = viewport.y + 55;
     let bar_height = viewport.height as i32 - 95;
@@ -1571,7 +1571,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
     // SCRG fulfills (Tutorial01/Script.c:61-182; C4Player.cpp:1213-1229,
     // 1490-1554; C4Object.cpp:3618-3628,3645-3651,3743-3754).
     let mut app = real_tutorial_app(1, "Tutorial 1 app virtual player");
-    let clonk = app.engine.test_crew_cursor(app.local_owner);
+    let clonk = app.engine.test_crew_cursor(app.players.local_owner);
     let hut = app_object_with_definition(&app, "HUT2").test_value();
 
     advance_app_until(
@@ -1690,7 +1690,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
     // a world Throw while this cursor menu is active.
     advance_app_until(&mut app, "HUT2 context Put menu", 20, |app| {
         app.engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| {
                 menu.selection == 0 && menu.items.first().is_some_and(|item| item.caption == "Put")
             })
@@ -1704,7 +1704,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
     advance_app_until(&mut app, "FLAG makes HUT2 the player base", 80, |app| {
         app.engine
             .object_snapshot(hut)
-            .is_some_and(|object| object.base == app.local_owner)
+            .is_some_and(|object| object.base == app.players.local_owner)
     });
     advance_app_until(
         &mut app,
@@ -1714,7 +1714,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
             app_tutorial_message_contains(app, "select 'Exit'")
                 && app
                     .engine
-                    .cursor_object_menu(app.local_owner)
+                    .cursor_object_menu(app.players.local_owner)
                     .is_some_and(|(_, menu)| menu.items.iter().any(|item| item.caption == "Exit"))
         },
     );
@@ -1724,7 +1724,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
     // rather than selecting Exit by index or mutating menu state.
     let context_items = app
         .engine
-        .cursor_object_menu(app.local_owner)
+        .cursor_object_menu(app.players.local_owner)
         .test_value()
         .1
         .items
@@ -1732,7 +1732,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
     for _ in 0..=context_items {
         let exit_selected = app
             .engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .and_then(|(_, menu)| {
                 usize::try_from(menu.selection)
                     .ok()
@@ -1747,7 +1747,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
     }
     main_assert!(
         app.engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .and_then(|(_, menu)| usize::try_from(menu.selection)
                 .ok()
                 .map(|index| (menu, index)))
@@ -1959,7 +1959,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     // Tutorial02.c4s/Script.c:58-214).
     let mut app = real_tutorial_app(2, "Tutorial 2 virtual player");
 
-    let clonk = app.engine.test_crew_cursor(app.local_owner);
+    let clonk = app.engine.test_crew_cursor(app.players.local_owner);
     let balloon = app
         .engine
         .snapshot()
@@ -2321,7 +2321,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     }
     advance_app_until(&mut app, "LOAM opens LMMS", 10, |app| {
         app.engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| menu.identification == loam_menu_identification)
     });
     advance_app_until(&mut app, "Tutorial02 Diagonal left prompt", 180, |app| {
@@ -2333,7 +2333,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyZ);
     let selected = app
         .engine
-        .cursor_object_menu(app.local_owner)
+        .cursor_object_menu(app.players.local_owner)
         .and_then(|(_, menu)| {
             usize::try_from(menu.selection)
                 .ok()
@@ -2409,14 +2409,14 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     }
     advance_app_until(&mut app, "LOAM2 opens LMMS", 20, |app| {
         app.engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| menu.identification == loam_menu_identification)
     });
-    main_assert_eq!(app.engine.cursor_object_menu(app.local_owner).map(|(_, menu)| menu.selection) => Some(7));
+    main_assert_eq!(app.engine.cursor_object_menu(app.players.local_owner).map(|(_, menu)| menu.selection) => Some(7));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyZ);
     main_assert_eq!(
         app.engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .and_then(|(_, menu)| {
                 usize::try_from(menu.selection)
                     .ok()
@@ -2507,14 +2507,14 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     }
     advance_app_until(&mut app, "LOAM3 opens LMMS", 20, |app| {
         app.engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| menu.identification == loam_menu_identification)
     });
-    main_assert_eq!(app.engine.cursor_object_menu(app.local_owner).map(|(_, menu)| menu.selection) => Some(7));
+    main_assert_eq!(app.engine.cursor_object_menu(app.players.local_owner).map(|(_, menu)| menu.selection) => Some(7));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyZ);
     main_assert_eq!(
         app.engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .and_then(|(_, menu)| {
                 usize::try_from(menu.selection)
                     .ok()
@@ -2704,7 +2704,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     // (C4Player.cpp:1502-1513; C4ObjectMenu.cpp:335-359).
     advance_app_until(&mut app, "HUT3 auto-context Put row", 20, |app| {
         app.engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| {
                 menu.selection == 0 && menu.items.first().is_some_and(|item| item.caption == "Put")
             })
@@ -2721,7 +2721,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     advance_app_until(&mut app, "HUT3 restores the player base", 80, |app| {
         app.engine
             .object_snapshot(hut)
-            .is_some_and(|object| object.base == app.local_owner)
+            .is_some_and(|object| object.base == app.players.local_owner)
     });
     advance_app_until(&mut app, "Tutorial02 selects Tutorial03", 180, |app| {
         app.engine.next_mission().path == r"Tutorial.c4f\Tutorial03.c4s"
@@ -2753,9 +2753,9 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
             !app.mouse_control,
             "Tutorial03 DisableMouse=1 must suppress player mouse control and the menu close X like C++ (C4Player.cpp:1907-1912; C4Menu.cpp:1270-1276)"
         );
-    main_assert!(!app.option_flags(app.local_owner).mouse_shown, "DisableMouse must remove the in-game Options entry like C++ (C4MainMenu.cpp:563-571)");
+    main_assert!(!app.option_flags(app.players.local_owner).mouse_shown, "DisableMouse must remove the in-game Options entry like C++ (C4MainMenu.cpp:563-571)");
 
-    let clonk = app.engine.test_crew_cursor(app.local_owner);
+    let clonk = app.engine.test_crew_cursor(app.players.local_owner);
     let hut = app
         .engine
         .snapshot()
@@ -2768,7 +2768,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         let ready =
             app.engine
                 .object_snapshot(hut)
-                .is_some_and(|object| object.base == app.local_owner)
+                .is_some_and(|object| object.base == app.players.local_owner)
                 && app.engine.object_snapshot(clonk).is_some_and(|object| {
                     object.container.is_none() && object.action.name == "Walk"
                 });
@@ -2780,7 +2780,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     main_assert!(
         app.engine
             .object_snapshot(hut)
-            .is_some_and(|object| { object.base == app.local_owner }),
+            .is_some_and(|object| { object.base == app.players.local_owner }),
         "Tutorial03 ready HUT3 must become the local player's base"
     );
     main_assert!(
@@ -2824,12 +2824,12 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     main_assert_eq!(app.engine.object_snapshot(clonk).expect("CLNK after physical S").container => Some(hut), "physical C/S route must enter HUT3 through GameApp");
 
     for _ in 0..20 {
-        if app.engine.cursor_object_menu(app.local_owner).is_some() {
+        if app.engine.cursor_object_menu(app.players.local_owner).is_some() {
             break;
         }
         app.test_update();
     }
-    let (_, menu) = app.engine.cursor_object_menu(app.local_owner).test_value();
+    let (_, menu) = app.engine.cursor_object_menu(app.players.local_owner).test_value();
     let context_identification =
         serde_json::from_value(serde_json::json!({ "Int": 14 })).test_value();
     let buy_identification = serde_json::from_value(serde_json::json!({ "Int": 4 })).test_value();
@@ -2858,14 +2858,14 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     for _ in 0..20 {
         let buy_menu_open = app
             .engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| menu.identification == buy_identification);
         if buy_menu_open {
             break;
         }
         app.test_update();
     }
-    let (_, buy_menu) = app.engine.cursor_object_menu(app.local_owner).test_value();
+    let (_, buy_menu) = app.engine.cursor_object_menu(app.players.local_owner).test_value();
     main_assert_eq!(buy_menu.identification => buy_identification);
     main_assert_eq!(
         buy_menu.title_symbol =>
@@ -2909,7 +2909,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         if bought
             && app
                 .engine
-                .player(app.local_owner)
+                .player(app.players.local_owner)
                 .is_some_and(|player| player.wealth() == 5)
         {
             break;
@@ -2925,10 +2925,10 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         .test_value()
         .id;
     main_assert_eq!(app.engine.object_snapshot(lorry).expect("bought LORY").container => Some(hut));
-    let player = app.engine.test_player(app.local_owner);
+    let player = app.engine.test_player(app.players.local_owner);
     main_assert_eq!(player.wealth() => 5);
     main_assert_eq!(player.home_base_material().get("LORY") => Some(&0));
-    let (_, buy_menu) = app.engine.cursor_object_menu(app.local_owner).test_value();
+    let (_, buy_menu) = app.engine.cursor_object_menu(app.players.local_owner).test_value();
     main_assert_eq!(buy_menu.identification => buy_identification);
     main_assert_eq!(buy_menu.items[0].count => 0);
     advance_app_until(&mut app, "Tutorial03 close-Buy prompt", 240, |app| {
@@ -2946,7 +2946,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     for _ in 0..20 {
         if app
             .engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| menu.identification == context_identification)
         {
             break;
@@ -2963,14 +2963,14 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     for _ in 0..20 {
         if app
             .engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| menu.identification == contents_identification)
         {
             break;
         }
         app.test_update();
     }
-    let (_, contents_menu) = app.engine.cursor_object_menu(app.local_owner).test_value();
+    let (_, contents_menu) = app.engine.cursor_object_menu(app.players.local_owner).test_value();
     main_assert_eq!(contents_menu.items.iter().map(|item| (item.caption.as_str(), item.item_id.as_str())).collect::<Vec<_>>() => vec![("Activate Lorry", "LORY")]);
     // Typed C4GameMessage rejection has its own regression; isolate this
     // Contents-render assertion from that unported overlay.
@@ -3009,7 +3009,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     for _ in 0..20 {
         if app
             .engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .is_some_and(|(_, menu)| menu.identification == context_identification)
         {
             break;
@@ -3042,10 +3042,10 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         &mut app,
         "Tutorial03 closes HUT3's cursor menu",
         20,
-        |app| app.engine.cursor_object_menu(app.local_owner).is_none(),
+        |app| app.engine.cursor_object_menu(app.players.local_owner).is_none(),
     );
-    main_assert!(app.engine.cursor_object_menu(app.local_owner).is_none(), "no engine cursor menu may intercept the first world X");
-    main_assert!(!app.menu_controls_active_for(app.local_owner), "no app menu may intercept the first world X");
+    main_assert!(app.engine.cursor_object_menu(app.players.local_owner).is_none(), "no engine cursor menu may intercept the first world X");
+    main_assert!(!app.menu_controls_active_for(app.players.local_owner), "no app menu may intercept the first world X");
     let sawmill = app_object_with_definition(&app, "SAWM").test_value();
     let foundry = app_object_with_definition(&app, "FNDR").test_value();
     let tree = app
@@ -3223,8 +3223,8 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
             })
     });
     AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyZ);
-    main_assert!(app.engine.cursor_object_menu(app.local_owner).is_none(), "no engine cursor menu may intercept the world A throw");
-    main_assert!(!app.menu_controls_active_for(app.local_owner), "no app menu may intercept the world A throw");
+    main_assert!(app.engine.cursor_object_menu(app.players.local_owner).is_none(), "no engine cursor menu may intercept the world A throw");
+    main_assert!(!app.menu_controls_active_for(app.players.local_owner), "no app menu may intercept the world A throw");
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyA);
     advance_app_until(&mut app, "ORE1 enters LORY", 180, |app| {
         app.engine

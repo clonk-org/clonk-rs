@@ -322,23 +322,23 @@ impl GameApp {
     }
 
     pub(crate) fn ensure_local_player_registered(&mut self) -> Result<(), EngineError> {
-        if self.engine.player(self.local_owner).is_some() {
+        if self.engine.player(self.players.local_owner).is_some() {
             return Ok(());
         }
         let control = self.local_controls.initialize(LocalControlInit {
-            owner: self.local_owner,
+            owner: self.players.local_owner,
             preferred_set: 0,
             prefers_mouse: true,
             gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         });
-        let config = PlayerConfig::new(self.local_owner, self.player_name.clone());
+        let config = PlayerConfig::new(self.players.local_owner, self.players.local_name.clone());
         if let Err(error) = self
             .engine
             .register_player_with_runtime_control(config, control.runtime_control())
         {
-            self.remove_local_control_assignment(self.local_owner);
+            self.remove_local_control_assignment(self.players.local_owner);
             return Err(error);
         }
         self.mouse_control = self.local_controls.mouse_owner().is_some();
@@ -575,7 +575,7 @@ impl GameApp {
                 return Ok(());
             }
             if self.ingame_menu_belongs_to(owner)
-                || (owner == self.local_owner && self.object_menu.is_some())
+                || (owner == self.players.local_owner && self.object_menu.is_some())
             {
                 return Ok(());
             }
@@ -774,7 +774,7 @@ impl GameApp {
             }
             return;
         }
-        if owner == self.local_owner {
+        if owner == self.players.local_owner {
             self.close_object_menu();
         }
         self.ingame_menu.replace(
@@ -1381,7 +1381,7 @@ impl GameApp {
             .0
             .wrapping_add(1);
         let restore_players = Vec::new();
-        let admission = match self.network_team_assignment.as_mut() {
+        let admission = match self.players.team_assignment.as_mut() {
             Some(team_assignment) => team_assignment
                 .admit_request_with_alternate_colors(
                     &mut self.control_player_infos,
@@ -1395,7 +1395,7 @@ impl GameApp {
                 .map_err(|error| error.to_string())?,
             None => {
                 let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
-                    self.generated_team_name_template.clone(),
+                    self.players.generated_team_name_template.clone(),
                 );
                 self.control_player_infos
                     .admit_request_with_attributes_and_alternate_colors(
@@ -1444,7 +1444,7 @@ impl GameApp {
     /// for each item construction, while authoritative state still waits for
     /// the network echo.
     pub(crate) fn submit_restart_restore_team_updates_for_new_roster_items(&mut self) {
-        if self.restart_restore_infos.what & RESTART_RESTORE_PLAYER_TEAMS == 0
+        if self.players.restart_restore_infos.what & RESTART_RESTORE_PLAYER_TEAMS == 0
             || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
             || self.network.is_none()
             || (self.classic_host_lobby.is_none() && self.network_lobby.is_none())
@@ -1468,7 +1468,8 @@ impl GameApp {
                     .then_some((*client_id, player.id))
             }));
         }
-        self.restart_restore_roster_items
+        self.players
+            .restart_restore_roster_items
             .retain(|item| visible_items.contains(item));
 
         let mut requests = Vec::new();
@@ -1487,6 +1488,7 @@ impl GameApp {
                         | clonk_engine::PLAYER_INFO_FLAG_INVISIBLE)
                     != 0
                     || !self
+                        .players
                         .restart_restore_roster_items
                         .insert((client_id, player.id))
                     || player.player_type != clonk_engine::PLAYER_INFO_TYPE_USER
@@ -1494,7 +1496,8 @@ impl GameApp {
                     continue;
                 }
                 let lobby_name = restart_restore_lobby_name(player);
-                let Some(restore) = self.restart_restore_infos.players.get(&lobby_name) else {
+                let Some(restore) = self.players.restart_restore_infos.players.get(&lobby_name)
+                else {
                     continue;
                 };
                 if restore.team == player.team {
@@ -1512,14 +1515,14 @@ impl GameApp {
         }
 
         let mut generated_team = false;
-        if let Some(assignment) = self.network_team_assignment.as_mut() {
+        if let Some(assignment) = self.players.team_assignment.as_mut() {
             for team in restored_teams {
                 generated_team |= assignment.generate_team_for_id(team);
             }
         }
         if generated_team {
             if let (Some(assignment), Some(snapshot)) = (
-                self.network_team_assignment.as_ref(),
+                self.players.team_assignment.as_ref(),
                 self.host_join_snapshot.as_mut(),
             ) {
                 snapshot.parameters.teams =
@@ -1661,7 +1664,7 @@ impl GameApp {
         &mut self,
         players: &[clonk_engine::ControlPlayerInfoEntry],
     ) {
-        let Some(assignment) = self.network_team_assignment.as_mut() else {
+        let Some(assignment) = self.players.team_assignment.as_mut() else {
             return;
         };
         for team in players
@@ -1692,7 +1695,7 @@ impl GameApp {
             && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host)
             && self.engine.is_control_host();
         let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
-        let exact_metadata = self.network_team_assignment.as_mut().map(|assignment| {
+        let exact_metadata = self.players.team_assignment.as_mut().map(|assignment| {
             if recheck_memberships {
                 self.control_player_infos
                     .recheck_team_players(assignment.teams_mut());

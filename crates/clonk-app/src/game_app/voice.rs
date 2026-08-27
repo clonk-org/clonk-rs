@@ -19,9 +19,9 @@ impl GameApp {
             crate::voice_chat::authenticated_selected_voice_crew(
                 &self.snapshot,
                 client_id,
-                self.local_owner,
+                self.players.local_owner,
             )?;
-            return Some((client_id, self.local_owner));
+            return Some((client_id, self.players.local_owner));
         }
         (self.network_lobby_voice_active() && self.control_clients.contains(client_id))
             .then_some((client_id, crate::voice_chat::LOBBY_VOICE_PLAYER_ID))

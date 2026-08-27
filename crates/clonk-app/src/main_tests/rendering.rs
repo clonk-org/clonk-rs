@@ -4,7 +4,7 @@
 macro_rules! rendering_fixture {
     (edge_scroll_app: $app:ident, $owner:ident, $focus:ident $(,)?) => {
         let mut $app = new_running_sandbox_app();
-        let $owner = $app.local_owner;
+        let $owner = $app.players.local_owner;
         let $focus = $app.engine.test_crew_cursor($owner);
         $app.engine
             .replace_player_viewports(
@@ -322,7 +322,7 @@ fn running_graphics_recreation_keeps_script_particle_catalog() {
 #[test]
 fn viewport_buttons_use_only_the_exact_mouse_viewport() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let focus = app.engine.test_crew_cursor(owner);
     app.engine
         .replace_player_viewports(
@@ -1439,7 +1439,7 @@ fn running_render_draws_supported_globals_and_ignores_remote_or_missing_targets(
     let mut remote = visible.clone();
     remote.id = 2;
     remote.kind = MessageKind::GlobalPlayer;
-    remote.player = Some(app.local_owner + 1);
+    remote.player = Some(app.players.local_owner + 1);
     let mut missing_target = visible.clone();
     missing_target.id = 3;
     missing_target.kind = MessageKind::Target;
@@ -1465,7 +1465,7 @@ fn same_owner_split_checks_target_in_second_exact_viewport() {
         .snapshot
         .players
         .iter_mut()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .test_value();
     // This probe isolates exact-viewport geometry. Runtime mouse setup
     // correctly enables FoW, whose missing visibility bitmap is tested by
@@ -1481,7 +1481,7 @@ fn same_owner_split_checks_target_in_second_exact_viewport() {
         kind: MessageKind::TargetPlayer,
         lines: vec!["A".to_string()],
         target: Some(target_id),
-        player: Some(app.local_owner),
+        player: Some(app.players.local_owner),
         offset: Vector2::ZERO,
         color: 0xffff_ffff,
         flags: 0,
@@ -1533,7 +1533,7 @@ fn same_owner_split_checks_target_in_second_exact_viewport() {
 #[test]
 fn live_temporary_physicals_feed_all_integer_hud_bar_ranges() {
     let mut app = new_state_only_running_sandbox_app();
-    let crew = app.engine.test_crew_cursor(app.local_owner);
+    let crew = app.engine.test_crew_cursor(app.players.local_owner);
     let mut update = ObjectUpdate::new();
     update.energy = Some(1);
     update.magic_energy = Some(1_000);
@@ -1572,7 +1572,7 @@ fn live_temporary_physicals_feed_all_integer_hud_bar_ranges() {
 
     let crew = overlays
         .iter()
-        .find(|player| player.owner == app.local_owner)
+        .find(|player| player.owner == app.players.local_owner)
         .and_then(|player| player.crew.iter().find(|entry| entry.object_id == crew))
         .test_value();
     main_assert_eq!((crew.energy, crew.energy_capacity) => (1, 2));
@@ -1645,7 +1645,7 @@ fn live_temporary_physicals_feed_all_integer_hud_bar_ranges() {
 #[test]
 fn player_overlay_projects_transient_hud_flags() {
     let mut app = new_lightweight_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let player = app
         .snapshot
         .players
@@ -1697,7 +1697,7 @@ fn player_overlay_projects_transient_hud_flags() {
 #[test]
 fn viewport_overlay_collection_skips_unpresented_remote_players() {
     let mut app = new_lightweight_running_sandbox_app();
-    let local_owner = app.local_owner;
+    let local_owner = app.players.local_owner;
     let remote_owner = local_owner + 77;
     let mut remote_player = app.snapshot.players.first().test_value().clone();
     remote_player.id = remote_owner;
@@ -1985,7 +1985,7 @@ fn running_render_draws_resolved_world_cursor() {
         .graphics
         .active_viewport_projections()
         .into_iter()
-        .find(|viewport| viewport.owner == app.local_owner)
+        .find(|viewport| viewport.owner == app.players.local_owner)
         .test_value();
     let point = GuiPoint::new(
         (viewport.rect.x + viewport.rect.width as i32 / 2) as f32,
@@ -2073,7 +2073,7 @@ fn running_render_draws_throw_point_and_shift_add_marker() {
         .graphics
         .active_viewport_projections()
         .into_iter()
-        .find(|viewport| viewport.owner == app.local_owner)
+        .find(|viewport| viewport.owner == app.players.local_owner)
         .test_value();
     let point = GuiPoint::new(
         (viewport.rect.x + viewport.rect.width as i32 / 2) as f32,
@@ -2401,7 +2401,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
 
     let mut message = new_running_sandbox_app();
     message.ingame_menu.replace(
-        message.local_owner,
+        message.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
     message.live_input.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
@@ -2421,7 +2421,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
 
     let mut game_over = new_running_sandbox_app();
     game_over.ingame_menu.replace(
-        game_over.local_owner,
+        game_over.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
     game_over.dialogs.scoreboard_initial_reconcile_pending = true;
@@ -3518,7 +3518,7 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
     // (C4GraphicsSystem.cpp:476-484; C4MouseControl.cpp:147-155,
     // 203-216,1148-1152,1216-1227).
     let mut app = new_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = primary + 1;
     let primary_crew = app.engine.test_crew_cursor(primary);
     let primary_crew_state = app.engine.test_object_snapshot(primary_crew);
@@ -3648,7 +3648,7 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     // command calls ResetCursorView (C4MouseControl.cpp:133-145,664-692;
     // C4Player.cpp:926-928,1491-1521,1692-1715).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.display_flags.scroll_smooth = 1;
     app.graphics.set_scroll_smooth(1);
     let focus = app.engine.test_crew_cursor(owner);
@@ -3874,7 +3874,7 @@ fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
     while app.engine.frame() % 5 != 4 {
         app.test_update();
     }
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let focus = app.engine.test_crew_cursor(owner);
     let focus_position = app.engine.test_object_snapshot(focus).position;
     app.engine
@@ -3953,7 +3953,7 @@ fn mouse_viewport_corner_pans_both_axes_and_uses_diagonal_cursor() {
 #[test]
 fn fullscreen_mouse_edge_pan_uses_the_forty_pixel_overflow_bound() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let focus = app.engine.test_crew_cursor(owner);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
@@ -3994,7 +3994,7 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
     // viewport without changing the sandbox engine's player records
     // (C4MouseControl.cpp:244-257,1328-1345).
     let mut app = new_running_sandbox_app();
-    let engine_viewports = app.engine.test_player(app.local_owner).viewports().to_vec();
+    let engine_viewports = app.engine.test_player(app.players.local_owner).viewports().to_vec();
     app.local_controls = LocalControlRegistry::default();
     let snapshot = app.snapshot.clone();
     let focus = snapshot.objects.first().test_value();
@@ -4022,7 +4022,7 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
     main_assert_eq!(app.live_input.ingame_edge_scroll.expect("passive edge state remains live").edge.cursor => clonk_frontend::MouseCursorPhase::Left);
     main_assert_eq!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("sandbox player remains")
             .viewports() =>
         engine_viewports.as_slice(),
@@ -4058,7 +4058,7 @@ fn zero_object_observer_uses_anchor_free_ownerless_viewport() {
 #[test]
 fn focusless_scrolling_player_uses_anchor_free_owned_viewport() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let player = app
         .snapshot
         .players
@@ -4092,7 +4092,7 @@ fn automatic_retirement_closes_viewport_and_releases_local_control() {
     // C4PlayerList::Retire takes the same viewport-close path as an
     // explicit CID_RemovePlr (C4Player.cpp:2015-2021, 930-970).
     let mut app = new_lightweight_running_sandbox_app();
-    let player = app.local_owner;
+    let player = app.players.local_owner;
     let secondary = player + 1;
     let primary_crew = app.engine.test_crew_cursor(player);
     let primary_crew_state = app.engine.test_object_snapshot(primary_crew);
@@ -4219,7 +4219,7 @@ fn construction_drop_uses_cached_last_phase_without_release_recheck() {
 #[test]
 fn title_drag_is_captured_exactly_and_resize_resets_location() {
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 8));
     let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -4266,7 +4266,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
     main_assert_eq!(app.script_menu_presentations.get(&owner).and_then(|state| state.location) => None, "viewport ResetLocation restores anchored placement");
 
     let mut player_app = new_classic_running_sandbox_app();
-    let player = player_app.local_owner;
+    let player = player_app.players.local_owner;
     let players = (0..8)
         .map(|index| NewPlayerEntry {
             file: format!("Player{index}.c4p"),
@@ -4446,13 +4446,13 @@ fn debug_keys_toggle_render_flags_and_exact_flashes() {
     app.bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F5);
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .control
         .pressed_coms = 1 << clonk_engine::COM_LEFT;
     app.test_key(VirtualKeyCode::F5, ElementState::Released);
     main_assert_ne!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -4628,7 +4628,7 @@ fn runtime_f1_help_toggles_on_each_down_renders_and_release_falls_through() {
 #[test]
 fn ownerless_escape_opens_fullscreen_abort_confirmation() {
     let mut app = new_running_sandbox_app();
-    let removed_owner = app.local_owner;
+    let removed_owner = app.players.local_owner;
     app.engine.remove_player(removed_owner).test_value();
     app.engine.set_local_players([]);
     app.local_controls = LocalControlRegistry::default();
@@ -4639,7 +4639,7 @@ fn ownerless_escape_opens_fullscreen_abort_confirmation() {
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
     main_assert!(app.ingame_menu.is_none());
-    main_assert!(!app.ingame_menu_belongs_to(app.local_owner));
+    main_assert!(!app.ingame_menu_belongs_to(app.players.local_owner));
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(!app.take_exit_request());
 }

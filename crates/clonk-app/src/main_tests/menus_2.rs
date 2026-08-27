@@ -18,7 +18,7 @@ macro_rules! menus2_fixture {
     (script_menu_app: $app:ident, $owner:ident, $cursor:ident, $frame:ident, $item_count:expr $(,)?) => {
         let mut $app = new_classic_running_sandbox_app();
         $app.resize(640, 480).test_value();
-        let $owner = $app.local_owner;
+        let $owner = $app.players.local_owner;
         let $cursor = $app.engine.test_crew_cursor($owner);
         install_test_cursor_menu(&mut $app, $cursor, long_script_menu($cursor, $item_count));
         let mut $frame = vec![0_u8; 640 * 480 * 4];
@@ -843,7 +843,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
 
     app.live_input.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .control
         .pressed_coms = 1 << clonk_engine::COM_LEFT;
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
@@ -860,7 +860,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     .test_value();
     main_assert!(app.context_menu.is_some());
     main_assert!(app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
-    main_assert_ne!(app.engine.player(app.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+    main_assert_ne!(app.engine.player(app.players.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     app.test_text_input('!');
@@ -930,7 +930,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
 #[test]
 fn observer_menu_lists_players_and_live_previews_selection() {
     let mut app = new_state_only_running_sandbox_app();
-    let first = app.local_owner;
+    let first = app.players.local_owner;
     let first_info = app.engine.test_player(first).player_info_id();
     let second = first + 1;
     let hidden = first + 2;
@@ -1042,12 +1042,12 @@ fn real_regicide_opens_initial_team_menu_and_hides_disabled_switch() {
     wait_for_running(&mut app);
 
     main_assert!(!app.engine.team_configuration().allow_team_switch, "Regicide's parsed Teams.txt keeps mid-round switching disabled");
-    main_assert_eq!(app.engine.player(app.local_owner).map(clonk_engine::Player::status) => Some(PlayerStatus::TeamSelection));
-    let menu = app.ingame_menu.get(app.local_owner).test_value();
+    main_assert_eq!(app.engine.player(app.players.local_owner).map(clonk_engine::Player::status) => Some(PlayerStatus::TeamSelection));
+    let menu = app.ingame_menu.get(app.players.local_owner).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::TeamSelection);
     main_assert_eq!(menu.items().iter().map(|item| item.action.clone()).collect::<Vec<_>>() => [MenuAction::SelectTeam(1), MenuAction::SelectTeam(2)]);
 
-    let local_owner = app.local_owner;
+    let local_owner = app.players.local_owner;
     let outcome = app
         .ingame_menu
         .get_mut(local_owner)
@@ -1056,13 +1056,13 @@ fn real_regicide_opens_initial_team_menu_and_hides_disabled_switch() {
         .test_value();
     app.execute_ingame_menu_outcome(outcome).test_value();
 
-    let player = app.engine.test_player(app.local_owner);
+    let player = app.engine.test_player(app.players.local_owner);
     main_assert_eq!(player.status() => PlayerStatus::Active);
     main_assert_eq!(player.team() => Some(1));
-    main_assert!(app.engine.crew_cursor(app.local_owner).is_some(), "Regicide selection must leave the player with usable crew");
+    main_assert!(app.engine.crew_cursor(app.players.local_owner).is_some(), "Regicide selection must leave the player with usable crew");
     main_assert!(app.ingame_menu.is_none());
 
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.activate_ingame_main_menu_for_player(owner).test_value();
     main_assert!(!app.ingame_menu.as_ref().expect("main menu").items().iter().any(|item| item.action == MenuAction::ActivateTeamSelection));
 }
@@ -1075,7 +1075,7 @@ fn secondary_local_player_controls_own_initial_team_menu() {
     // (pristine 9ffa0a5d src/C4Player.h:85;
     // src/C4Game.cpp:3572-3624; src/C4MainMenu.cpp:899-908).
     let mut app = new_synthetic_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let primary_before = app
         .engine
         .player(primary)
@@ -1150,7 +1150,7 @@ fn secondary_local_player_controls_own_initial_team_menu() {
 #[test]
 fn rules_menu_uses_engine_definition_description_as_tooltip() {
     let mut app = new_running_sandbox_app();
-    let player = app.local_owner;
+    let player = app.players.local_owner;
     let mut rule = test_definition("IRUL", "Integrated Rule", "#strict 3\n");
     rule.set_category(C4D_RULE);
     rule.set_description(Some("Keep to the rule".to_string()));
@@ -1185,7 +1185,7 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     main_assert!(app.ingame_menu_gfx.as_ref().is_some_and(|gfx| gfx.show_close_button), "the controlling mouse player's title renders its close button");
 
     let close_rect = |app: &GameApp| {
-        let player = app.local_owner;
+        let player = app.players.local_owner;
         let area = app.graphics.viewport_rect(player).test_value();
         menus2_fixture!(hud_font: app, fallback, font);
         let gfx = menus2_fixture!(ingame_graphics: app.display_flags.show_commands);
@@ -1207,7 +1207,7 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     app.test_right_button(ElementState::Released);
     main_assert_eq!(
         app.ingame_menu
-            .get(app.local_owner)
+            .get(app.players.local_owner)
             .map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Options),
         "right-click must not invoke Dialog::OnUserClose"
@@ -1224,7 +1224,7 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     app.test_left_button(ElementState::Released);
     main_assert_eq!(
         app.ingame_menu
-            .get(app.local_owner)
+            .get(app.players.local_owner)
             .map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Options),
         "release-over must not close unless the close button retained left-down"
@@ -1235,29 +1235,29 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     app.test_left_button(ElementState::Pressed);
     main_assert_eq!(
         app.ingame_menu
-            .get(app.local_owner)
+            .get(app.players.local_owner)
             .map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Options),
         "IconButton closes on button-up, not button-down"
     );
     main_assert!(commands.take_submitted_local().is_empty());
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ingame_menu.get(app.local_owner).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Main), "Options close command reactivates Main");
-    main_assert_eq!(commands.take_submitted_local() => vec![(app.local_owner, ControlEvent::ClearPressed, tick)]);
+    main_assert_eq!(app.ingame_menu.get(app.players.local_owner).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Main), "Options close command reactivates Main");
+    main_assert_eq!(commands.take_submitted_local() => vec![(app.players.local_owner, ControlEvent::ClearPressed, tick)]);
 
     app.test_cursor(close_point(&app));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.ingame_menu.contains(app.local_owner));
+    main_assert!(app.ingame_menu.contains(app.players.local_owner));
     main_assert!(commands.take_submitted_local().is_empty());
     app.test_left_button(ElementState::Released);
-    main_assert!(!app.ingame_menu.contains(app.local_owner), "Main has no close action and remains closed");
-    main_assert_eq!(commands.take_submitted_local() => vec![(app.local_owner, ControlEvent::ClearPressed, tick)]);
+    main_assert!(!app.ingame_menu.contains(app.players.local_owner), "Main has no close action and remains closed");
+    main_assert_eq!(commands.take_submitted_local() => vec![(app.players.local_owner, ControlEvent::ClearPressed, tick)]);
 }
 
 #[test]
 fn player_menu_title_close_visibility_follows_mouse_owner_and_disable_mouse() {
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.open_ingame_menu().test_value();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
@@ -1491,7 +1491,7 @@ fn queued_cursor_menu_actions_cannot_fire_after_the_menu_closes() {
         ("QDIG", ControlCommand::Dig, "dig_count"),
     ] {
         let mut app = new_state_only_running_sandbox_app();
-        let owner = app.local_owner;
+        let owner = app.players.local_owner;
         let script = r#"#strict
 local throw_count, dig_count;
 func ControlThrow() { throw_count = 1; return(1); }
@@ -1576,7 +1576,7 @@ fn engine_script_menu_is_visible_and_consumes_raw_player_controls() {
     // mandatory Dragon Rock difficulty/type menu path.
     clonk_logging::init();
     let mut app = new_classic_running_sandbox_app();
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     let menu = two_item_script_menu(cursor);
 
     let mut baseline = vec![0u8; 320 * 200 * 4];
@@ -1634,7 +1634,7 @@ fn first_local_menu_press_reveals_progressive_text_before_navigation() {
     // raw press may become COM_MenuShowText; synchronized controls must
     // not recalculate the choice from client-specific text progress.
     let mut app = new_state_only_running_sandbox_app();
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     let mut menu = two_item_script_menu(cursor);
     menu.text_progressing = true;
     for item in &mut menu.items {
@@ -1671,7 +1671,7 @@ fn normal_menu_render_draws_no_symbol_for_an_unresolved_item_picture() {
     // drops the client out of a running network game instead.
     fn render_first_item_recipe(image: clonk_engine::ObjectMenuImage) -> Vec<u8> {
         let mut app = new_classic_running_sandbox_app();
-        let cursor = app.engine.test_crew_cursor(app.local_owner);
+        let cursor = app.engine.test_crew_cursor(app.players.local_owner);
         let mut menu = two_item_script_menu(cursor);
         menu.style = 0;
         menu.items[0].item_id = "MISS".to_string();
@@ -1705,7 +1705,7 @@ fn normal_menu_render_draws_no_symbol_for_an_unresolved_item_picture() {
 #[test]
 fn engine_dialog_menu_renders_classic_style_instead_of_fallback() {
     let mut app = new_classic_running_sandbox_app();
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     let mut menu = two_item_script_menu(cursor);
     menu.caption.clear();
     menu.style = 3;
@@ -1731,7 +1731,7 @@ fn engine_context_menu_is_visible_and_navigable_through_the_app() {
     // 2044-2062; C4Viewport.cpp:983-995; C4Player.cpp:1502-1513).
     clonk_logging::init();
     let mut app = new_classic_running_sandbox_app();
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     let mut menu = two_item_script_menu(cursor);
     menu.caption = "Hut".to_string();
     menu.identification = serde_json::from_value(serde_json::json!({ "Int": 14 })).test_value();
@@ -1768,8 +1768,8 @@ fn engine_context_menu_is_visible_and_navigable_through_the_app() {
 fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
     clonk_logging::init();
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let owner = app.players.local_owner;
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     let mut menu = two_item_script_menu(cursor);
     menu.caption = "Information".to_string();
     menu.style = 2;
@@ -1827,7 +1827,7 @@ fn context_style_script_menu_reaches_command2_by_right_click_and_special2() {
     clonk_logging::init();
     for use_keyboard in [false, true] {
         let mut app = new_classic_running_sandbox_app();
-        let cursor = app.engine.test_crew_cursor(app.local_owner);
+        let cursor = app.engine.test_crew_cursor(app.players.local_owner);
         let mut menu = two_item_script_menu(cursor);
         menu.style = 1; // C4MN_Style_Context (C4Menu.h:40)
         menu.items[1].command2 = "SetComDir(COMD_Right())".to_string();
@@ -1842,7 +1842,7 @@ fn context_style_script_menu_reaches_command2_by_right_click_and_special2() {
 
         let second_item = {
             menus2_fixture!(hud_font: app, fallback, font);
-            let area = app.graphics.viewport_rect(app.local_owner).test_value();
+            let area = app.graphics.viewport_rect(app.players.local_owner).test_value();
             object_menu::engine_script_menu_layout(
                 area,
                 &font,
@@ -1892,7 +1892,7 @@ fn engine_script_menu_pointer_selects_enters_and_closes_like_cpp() {
     // (C4Menu.cpp:213-242, 1237-1262; C4ObjectMenu.cpp:461-478).
     clonk_logging::init();
     let mut app = new_classic_running_sandbox_app();
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     let menu = two_item_script_menu(cursor);
     app.engine
         .apply_object_update(
@@ -1905,7 +1905,7 @@ fn engine_script_menu_pointer_selects_enters_and_closes_like_cpp() {
 
     let (second_item, close_button) = {
         menus2_fixture!(hud_font: app, fallback, font);
-        let area = app.graphics.viewport_rect(app.local_owner).test_value();
+        let area = app.graphics.viewport_rect(app.players.local_owner).test_value();
         let layout = object_menu::engine_script_menu_layout(
             area,
             &font,
@@ -1965,7 +1965,7 @@ fn script_menu_pre_first_draw_discards_explicit_rows() {
     // row count from the item set (C4Menu.cpp:635-640,713-721,796-797).
     let mut app = new_classic_running_sandbox_app();
     app.resize(640, 480).test_value();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     let mut menu = long_script_menu(cursor, 4);
     menu.lines = 1;
@@ -2189,7 +2189,7 @@ fn context_menu_shrink_refill_recomputes_explicit_rows_and_scrollbar() {
     // (C4Menu.cpp:713-721,755-780).
     let mut app = new_classic_running_sandbox_app();
     app.resize(640, 480).test_value();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     let mut initial_menu = long_script_menu(cursor, 4);
     initial_menu.style = 1;
@@ -2279,7 +2279,7 @@ fn script_menu_viewport_resize_recomputes_explicit_rows_and_hit_regions() {
 #[test]
 fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     let menu = long_script_menu(cursor, 12);
     install_test_cursor_menu(&mut app, cursor, menu);
@@ -2384,7 +2384,7 @@ fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
 #[test]
 fn script_menu_scroll_and_drag_state_is_per_viewport_owner() {
     let mut app = new_classic_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = primary + 1;
     let primary_cursor = app.engine.test_crew_cursor(primary);
     let primary_state = app.engine.test_object_snapshot(primary_cursor);
@@ -2578,7 +2578,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
     rebound_app
         .engine
-        .test_player_mut(rebound_app.local_owner)
+        .test_player_mut(rebound_app.players.local_owner)
         .control
         .control_style = true;
     let mut sound_app = new_classic_lightweight_running_sandbox_app();
@@ -2595,7 +2595,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
 
         default_app
             .ingame_menu
-            .replace(default_app.local_owner, Some(default_menu));
+            .replace(default_app.players.local_owner, Some(default_menu));
         prime_music_toggle_off(&mut default_app, &default_music);
         default_app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
         let draws_before = default_app.runtime_flash_message.test_ref().remaining_draws;
@@ -2609,17 +2609,17 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
 
         rebound_app
             .ingame_menu
-            .replace(rebound_app.local_owner, Some(rebound_menu));
+            .replace(rebound_app.players.local_owner, Some(rebound_menu));
         rebound_app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
         main_assert!(rebound_app.runtime_flash_message.is_none(), "page {page:?}");
         main_assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
         rebound_app.test_key(VirtualKeyCode::F3, ElementState::Released);
         main_assert!(!rebound_app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F3));
-        main_assert_eq!(rebound_app.engine.player(rebound_app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+        main_assert_eq!(rebound_app.engine.player(rebound_app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 
         sound_app
             .ingame_menu
-            .replace(sound_app.local_owner, Some(sound_menu));
+            .replace(sound_app.players.local_owner, Some(sound_menu));
         let sound_before = sound_app.test_audio_ref().options.sound_enabled;
         sound_app.test_modifiers(ModifiersState::CONTROL);
         sound_app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
@@ -2639,14 +2639,14 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
     rebound
         .engine
-        .test_player_mut(rebound.local_owner)
+        .test_player_mut(rebound.players.local_owner)
         .control
         .control_style = true;
     let mut sound = new_classic_lightweight_running_sandbox_app();
     for style in 0..=3 {
         for text_progressing in [false, true] {
             let install_menu = |app: &mut GameApp| {
-                let cursor = app.engine.test_crew_cursor(app.local_owner);
+                let cursor = app.engine.test_crew_cursor(app.players.local_owner);
                 let mut menu = two_item_script_menu(cursor);
                 menu.style = style;
                 menu.text_progressing = text_progressing;
@@ -2665,16 +2665,16 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
                 panic!("render style {style}, progress {text_progressing}: {error:#}")
             });
             main_assert_eq!(default_app.runtime_flash_message.as_ref().expect("music text lasts more than one draw").remaining_draws => draws_before - 1);
-            main_assert!(default_app.engine.cursor_object_menu(default_app.local_owner).is_some());
+            main_assert!(default_app.engine.cursor_object_menu(default_app.players.local_owner).is_some());
             default_app.test_key(VirtualKeyCode::F3, ElementState::Released);
 
             install_menu(&mut rebound);
             rebound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
             main_assert!(rebound.runtime_flash_message.is_none());
-            main_assert!(rebound.engine.cursor_object_menu(rebound.local_owner).is_some());
+            main_assert!(rebound.engine.cursor_object_menu(rebound.players.local_owner).is_some());
             rebound.test_key(VirtualKeyCode::F3, ElementState::Released);
             main_assert!(!rebound.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F3));
-            main_assert_eq!(rebound.engine.player(rebound.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+            main_assert_eq!(rebound.engine.player(rebound.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 
             install_menu(&mut sound);
             let before = sound.test_audio_ref().options.sound_enabled;
@@ -2682,7 +2682,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
             sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
             main_assert_eq!(sound.test_audio_ref().options.sound_enabled => !before);
             main_assert!(sound.runtime_flash_message.is_none());
-            main_assert!(sound.engine.cursor_object_menu(sound.local_owner).is_some());
+            main_assert!(sound.engine.cursor_object_menu(sound.players.local_owner).is_some());
             sound.test_key(VirtualKeyCode::F3, ElementState::Released);
             sound.test_modifiers(ModifiersState::empty());
         }
@@ -2844,7 +2844,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     rebound_app
         .engine
-        .test_player_mut(rebound_app.local_owner)
+        .test_player_mut(rebound_app.players.local_owner)
         .control
         .control_style = true;
     let mut covered_pages = [false; 13];
@@ -2856,7 +2856,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
 
         default_app
             .ingame_menu
-            .replace(default_app.local_owner, Some(default_menu));
+            .replace(default_app.players.local_owner, Some(default_menu));
         default_app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
         main_assert!(default_app.dialogs.help_visible, "page {page:?}");
         main_assert_eq!(default_app.ingame_menu.as_ref().map(IngameMenuState::page) => Some(page));
@@ -2867,24 +2867,24 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
 
         rebound_app
             .ingame_menu
-            .replace(rebound_app.local_owner, Some(rebound_menu));
+            .replace(rebound_app.players.local_owner, Some(rebound_menu));
         rebound_app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
         main_assert!(!rebound_app.dialogs.help_visible, "page {page:?}");
         main_assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
         rebound_app.test_key(VirtualKeyCode::F1, ElementState::Released);
         main_assert!(!rebound_app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F1));
-        main_assert_eq!(rebound_app.engine.player(rebound_app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+        main_assert_eq!(rebound_app.engine.player(rebound_app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     }
     main_assert!(covered_pages.into_iter().all(|covered| covered));
 
     let mut observer = new_classic_running_sandbox_app();
     observer
         .engine
-        .remove_player(observer.local_owner)
+        .remove_player(observer.players.local_owner)
         .test_value();
     observer.snapshot = observer.engine.snapshot();
     observer.ingame_menu.replace(
-        observer.local_owner,
+        observer.players.local_owner,
         IngameMenuState::main_menu(
             &MainMenuConditions {
                 has_player: false,
@@ -2908,7 +2908,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     object
         .engine
-        .test_player_mut(object.local_owner)
+        .test_player_mut(object.players.local_owner)
         .control
         .control_style = true;
     object.test_key(VirtualKeyCode::F1, ElementState::Pressed);
@@ -3031,14 +3031,14 @@ fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     rebound
         .engine
-        .test_player_mut(rebound.local_owner)
+        .test_player_mut(rebound.players.local_owner)
         .control
         .control_style = true;
     let mut menu_only = vec![0_u8; 320 * 200 * 4];
     let mut menu_and_help = vec![0_u8; 320 * 200 * 4];
     for style in 0..=3 {
         for text_progressing in [false, true] {
-            let cursor = app.engine.test_crew_cursor(app.local_owner);
+            let cursor = app.engine.test_crew_cursor(app.players.local_owner);
             let mut menu = two_item_script_menu(cursor);
             menu.style = style;
             menu.text_progressing = text_progressing;
@@ -3053,13 +3053,13 @@ fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
             app.test_render(&mut menu_and_help);
             main_assert!(app.dialogs.help_visible, "style {style}, progress {text_progressing}");
             main_assert_ne!(menu_and_help => menu_only);
-            main_assert!(app.engine.cursor_object_menu(app.local_owner).is_some());
+            main_assert!(app.engine.cursor_object_menu(app.players.local_owner).is_some());
             app.test_key(VirtualKeyCode::F1, ElementState::Released);
             app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
             app.test_key(VirtualKeyCode::F1, ElementState::Released);
             main_assert!(!app.dialogs.help_visible);
 
-            let rebound_cursor = rebound.engine.test_crew_cursor(rebound.local_owner);
+            let rebound_cursor = rebound.engine.test_crew_cursor(rebound.players.local_owner);
             let mut rebound_menu = two_item_script_menu(rebound_cursor);
             rebound_menu.style = style;
             rebound_menu.text_progressing = text_progressing;
@@ -3073,10 +3073,10 @@ fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
             rebound.snapshot = rebound.engine.snapshot();
             rebound.test_key(VirtualKeyCode::F1, ElementState::Pressed);
             main_assert!(!rebound.dialogs.help_visible);
-            main_assert!(rebound.engine.cursor_object_menu(rebound.local_owner).is_some());
+            main_assert!(rebound.engine.cursor_object_menu(rebound.players.local_owner).is_some());
             rebound.test_key(VirtualKeyCode::F1, ElementState::Released);
             main_assert!(!rebound.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F1));
-            main_assert_eq!(rebound.engine.player(rebound.local_owner).expect("local rebound player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+            main_assert_eq!(rebound.engine.player(rebound.players.local_owner).expect("local rebound player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
         }
     }
 }
@@ -3217,7 +3217,7 @@ fn window_close_confirms_running_round_and_nonrunning_close_exits() {
 #[test]
 fn window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
     let mut observer = new_running_sandbox_app();
-    let removed_owner = observer.local_owner;
+    let removed_owner = observer.players.local_owner;
     observer.engine.remove_player(removed_owner).test_value();
     observer.engine.set_local_players([]);
     observer.local_controls = LocalControlRegistry::default();
@@ -3252,7 +3252,7 @@ fn bare_escape_opens_abort_confirmation_without_exiting() {
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(!app.take_exit_request());
     main_assert!(app.status_text.is_empty());
-    main_assert!(!app.show_abort_dialog(app.local_owner));
+    main_assert!(!app.show_abort_dialog(app.players.local_owner));
     main_assert_eq!(app.dialogs.messages.len() => 1);
 }
 
@@ -3260,9 +3260,9 @@ fn bare_escape_opens_abort_confirmation_without_exiting() {
 fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
     let mut unpaused = new_running_sandbox_app();
     main_assert_eq!(unpaused.offline_halt_count => 0);
-    main_assert!(unpaused.show_abort_dialog(unpaused.local_owner));
+    main_assert!(unpaused.show_abort_dialog(unpaused.players.local_owner));
     main_assert_eq!(unpaused.offline_halt_count => 1);
-    main_assert!(!unpaused.show_abort_dialog(unpaused.local_owner), "the singleton abort dialog cannot acquire a second halt lease");
+    main_assert!(!unpaused.show_abort_dialog(unpaused.players.local_owner), "the singleton abort dialog cannot acquire a second halt lease");
     main_assert_eq!(unpaused.offline_halt_count => 1);
     finish_abort_dialog(
         &mut unpaused,
@@ -3274,12 +3274,12 @@ fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
     app.set_runtime_pause(true);
     main_assert_eq!(app.offline_halt_count => 1);
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .control
         .pressed_coms = 1 << clonk_engine::COM_LEFT;
     let frozen_frame = app.engine.frame();
 
-    main_assert!(app.show_abort_dialog(app.local_owner));
+    main_assert!(app.show_abort_dialog(app.players.local_owner));
     main_assert_eq!(app.offline_halt_count => 2);
     main_assert!(app.runtime_halt_active());
     app.test_update();
@@ -3291,9 +3291,9 @@ fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
     );
     main_assert_eq!(app.offline_halt_count => 1);
     main_assert!(app.runtime_halt_active(), "the prior pause remains owned");
-    main_assert_eq!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms => 0, "decline clears every local player's pressed commands");
+    main_assert_eq!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms => 0, "decline clears every local player's pressed commands");
 
-    main_assert!(app.show_abort_dialog(app.local_owner));
+    main_assert!(app.show_abort_dialog(app.players.local_owner));
     main_assert_eq!(app.offline_halt_count => 2);
     let index = app.dialogs.messages.len() - 1;
     app.remove_message_dialog_at(index).test_value();
@@ -3303,7 +3303,7 @@ fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
 
     let mut network = new_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut network, 0, 0, 1);
-    main_assert!(network.show_abort_dialog(network.local_owner));
+    main_assert!(network.show_abort_dialog(network.players.local_owner));
     main_assert_eq!(network.offline_halt_count => 0);
     finish_abort_dialog(
         &mut network,

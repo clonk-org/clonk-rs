@@ -2914,14 +2914,19 @@ impl GameApp {
             network_client_activity: NetworkClientActivity::default(),
             control_player_infos,
             local_player_profile_paths: HashMap::new(),
-            restart_restore_infos: RestartRestoreInfos::default(),
+            players: PlayerState {
+                local_owner: runtime.player_owner,
+                local_name: player_name.clone(),
+                selected_file: selected_player_file,
+                restart_restore_infos: RestartRestoreInfos::default(),
+                restart_restore_roster_items: HashSet::new(),
+                host_local_info_ids: host_local_player_info_ids,
+                host_local_alternate_colors: host_local_alternate_colors_by_resource,
+                team_assignment: network_team_assignment,
+                generated_team_name_template,
+            },
             abort_restart_pending: false,
-            restart_restore_roster_items: HashSet::new(),
             pending_host_rejoin: None,
-            host_local_alternate_colors_by_resource,
-            host_local_player_info_ids,
-            generated_team_name_template,
-            network_team_assignment,
             admission_resources: AdmissionResourceStore::default(),
             blocking_resource_wait: None,
             aborted_player_resource_joins: HashSet::new(),
@@ -2944,9 +2949,6 @@ impl GameApp {
             recording: None,
             runtime_record_requested: false,
             control_playback: None,
-            local_owner: runtime.player_owner,
-            player_name: player_name.clone(),
-            selected_player_file,
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
@@ -4162,7 +4164,7 @@ impl GameApp {
         let resources = assets.scoreboard_resources(&font_images)?;
         let live_preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let preferred = self
             .dialogs
@@ -4202,7 +4204,7 @@ impl GameApp {
         if self.dialogs.scoreboard_runtime.layout_revision != layout_revision {
             let preferred = scoreboard_preferred_rect(
                 self.graphics
-                    .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                    .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
             );
             self.dialogs.scoreboard_runtime.preferred = Some(preferred);
             self.dialogs
@@ -4436,7 +4438,7 @@ impl GameApp {
     }
 
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
-        self.dispatch_control_event_for_local_player(self.local_owner, event)
+        self.dispatch_control_event_for_local_player(self.players.local_owner, event)
     }
 
     fn dispatch_control_event_for_owner(
@@ -4444,14 +4446,14 @@ impl GameApp {
         owner: i32,
         event: ControlEvent,
     ) -> Result<(), EngineError> {
-        if self.ingame_menu_belongs_to(owner) || owner == self.local_owner {
+        if self.ingame_menu_belongs_to(owner) || owner == self.players.local_owner {
             if let ControlEvent::Command { command, kind } = event {
                 if self.handle_menu_command_failsafe(owner, command, kind)? {
                     return Ok(());
                 }
             }
             if self.ingame_menu_belongs_to(owner)
-                || (owner == self.local_owner && self.object_menu.is_some())
+                || (owner == self.players.local_owner && self.object_menu.is_some())
             {
                 return Ok(());
             }
@@ -4501,8 +4503,8 @@ impl GameApp {
 
     fn clear_local_controls(&mut self) -> Result<(), EngineError> {
         let mut owners = self.local_controls.owners().collect::<Vec<_>>();
-        if owners.is_empty() && self.engine.player(self.local_owner).is_some() {
-            owners.push(self.local_owner);
+        if owners.is_empty() && self.engine.player(self.players.local_owner).is_some() {
+            owners.push(self.players.local_owner);
         }
         for owner in owners {
             self.clear_local_control(owner)?;
@@ -4847,7 +4849,7 @@ impl GameApp {
     /// Restart the running round (C4AbortGameDialog's Restart button:
     /// `Application.SetNextMission` + `Game.Abort`, C4GameDialogs.cpp:116-120).
     fn retain_restart_restore_mask_for_restart(&mut self) {
-        self.restart_restore_infos.what = self.engine.restart_restore_info_mask();
+        self.players.restart_restore_infos.what = self.engine.restart_restore_info_mask();
     }
 
     fn load_saved_game_from_path(&mut self, path: &Path) -> Result<()> {
@@ -5789,16 +5791,16 @@ impl GameApp {
             IngameDragSelectionKind::Crew => Some((
                 IngameDragSelectionKind::Crew,
                 self.engine
-                    .mouse_drag_crew_in_rect(self.local_owner, first, second),
+                    .mouse_drag_crew_in_rect(self.players.local_owner, first, second),
             )),
             IngameDragSelectionKind::Objects => Some((
                 IngameDragSelectionKind::Objects,
                 self.engine.mouse_drag_carryables_in_rect(first, second),
             )),
             IngameDragSelectionKind::Unknown => {
-                let crew = self
-                    .engine
-                    .mouse_drag_crew_in_rect(self.local_owner, first, second);
+                let crew =
+                    self.engine
+                        .mouse_drag_crew_in_rect(self.players.local_owner, first, second);
                 if !crew.is_empty() {
                     return Some((IngameDragSelectionKind::Crew, crew));
                 }
@@ -6167,7 +6169,7 @@ impl GameApp {
         selected: usize,
     ) -> Result<(), EngineError> {
         self.ingame_dragged_objects.clear();
-        if motion.last.owner != self.local_owner {
+        if motion.last.owner != self.players.local_owner {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(motion.last);
@@ -6175,7 +6177,7 @@ impl GameApp {
         let mut add_mode = 1;
         for _ in 0..selected {
             self.submit_or_execute_player_command(PlayerCommandControlData {
-                player: self.local_owner,
+                player: self.players.local_owner,
                 command: 0,
                 x: position.x,
                 y: position.y,
@@ -6203,7 +6205,7 @@ impl GameApp {
             return self.finish_ingame_noop_drag(motion, selected.len());
         }
         self.ingame_dragged_objects.clear();
-        if motion.last.owner != self.local_owner {
+        if motion.last.owner != self.players.local_owner {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(motion.last);
@@ -6255,7 +6257,7 @@ impl GameApp {
                 None => unreachable!("no-command drag handled above"),
             };
             self.submit_or_execute_player_command(PlayerCommandControlData {
-                player: self.local_owner,
+                player: self.players.local_owner,
                 command,
                 x,
                 y,
@@ -6288,7 +6290,7 @@ impl GameApp {
             self.ingame_dragged_objects.clear();
             vec![down_target]
         };
-        if drag.motion.last.owner != self.local_owner {
+        if drag.motion.last.owner != self.players.local_owner {
             return Ok(());
         }
         if self.ingame_pointer_fog_blocked(drag.motion.last) {
@@ -6301,7 +6303,7 @@ impl GameApp {
             .flatten();
         let command = if !put_cursor {
             self.engine
-                .mouse_drag_carryable_command(self.local_owner, position)
+                .mouse_drag_carryable_command(self.players.local_owner, position)
         } else {
             None
         };
@@ -6326,7 +6328,7 @@ impl GameApp {
                 continue;
             };
             self.submit_or_execute_player_command(PlayerCommandControlData {
-                player: self.local_owner,
+                player: self.players.local_owner,
                 command: command as i32,
                 x,
                 y,
@@ -6352,7 +6354,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         self.ingame_dragged_objects.clear();
         let selected = region_selection.unwrap_or_else(|| vec![down_target]);
-        if drag.motion.last.owner != self.local_owner {
+        if drag.motion.last.owner != self.players.local_owner {
             return Ok(());
         }
         if self.ingame_pointer_fog_blocked(drag.motion.last) {
@@ -6368,7 +6370,7 @@ impl GameApp {
         let shift_append = self.live_input.modifiers.shift_key();
         for vehicle in selected {
             self.submit_or_execute_player_command(PlayerCommandControlData {
-                player: self.local_owner,
+                player: self.players.local_owner,
                 command: CommandId::PushTo as i32,
                 x: position.x,
                 y: position.y,
@@ -6507,8 +6509,8 @@ impl GameApp {
             &load_native_config_bytes(self.app_paths.as_ref()),
         );
         let generated_team_name_template = generated_team_name_template(&table);
-        self.generated_team_name_template = generated_team_name_template.clone();
-        if let Some(assignment) = self.network_team_assignment.as_mut() {
+        self.players.generated_team_name_template = generated_team_name_template.clone();
+        if let Some(assignment) = self.players.team_assignment.as_mut() {
             assignment.set_generated_team_name_template(generated_team_name_template);
         }
         let charset = table
@@ -6816,7 +6818,7 @@ impl GameApp {
             3 => {
                 let host_team_update = if executes_control_host_team_logic {
                     let has_or_will_have_lobby = self.has_or_will_have_network_lobby();
-                    let Some(team_assignment) = self.network_team_assignment.as_mut() else {
+                    let Some(team_assignment) = self.players.team_assignment.as_mut() else {
                         let detail = "prepared host team state is unavailable for TeamDistribution";
                         tracing::error!(detail, "cannot execute exact TeamDistribution control");
                         self.status_text = detail.to_string();
@@ -6902,9 +6904,9 @@ impl GameApp {
                     })
                     .unwrap_or_default();
                 let host_team_update = if executes_control_host_team_logic {
-                    let alternate_colors = &self.host_local_alternate_colors_by_resource;
-                    let local_player_info_ids = &self.host_local_player_info_ids;
-                    let Some(team_assignment) = self.network_team_assignment.as_mut() else {
+                    let alternate_colors = &self.players.host_local_alternate_colors;
+                    let local_player_info_ids = &self.players.host_local_info_ids;
+                    let Some(team_assignment) = self.players.team_assignment.as_mut() else {
                         let detail = "prepared host team state is unavailable for TeamColors";
                         tracing::error!(detail, "cannot execute exact TeamColors control");
                         self.status_text = detail.to_string();
@@ -7661,7 +7663,7 @@ impl GameApp {
                 let definition_load = self.active_definition_load.clone();
                 // C4GameOverDlg preserves restart infos only for Restart;
                 // actual Next Mission clears them as soon as it closes.
-                self.restart_restore_infos = RestartRestoreInfos::default();
+                self.players.restart_restore_infos = RestartRestoreInfos::default();
                 let Some(scenario) = resolve_next_mission_scenario(&self.scensel.catalog, &path)
                 else {
                     self.status_text = format!("Next scenario is unavailable: {path}");
@@ -8436,7 +8438,7 @@ impl GameApp {
         // C4Player runtime objects are recreated from their linked
         // C4PlayerInfo entries. Keep process-local input assignments keyed by
         // that stable identity rather than by the old round's player number.
-        let previous_local_owner = self.local_owner;
+        let previous_local_owner = self.players.local_owner;
         let previous_primary_info_id = self
             .engine
             .player(previous_local_owner)
@@ -8514,7 +8516,7 @@ impl GameApp {
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
             .set_fire_particles(self.display_flags.fire_particles);
-        self.engine.set_local_players([self.local_owner]);
+        self.engine.set_local_players([self.players.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_network_control_mode(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
@@ -8922,7 +8924,7 @@ impl GameApp {
         );
         self.install_local_controls(rebound_local_controls);
         if let Some(owner) = restored_primary_owner.or_else(|| local_players.first().copied()) {
-            self.local_owner = owner;
+            self.players.local_owner = owner;
         }
         self.engine.set_local_players(local_players);
         self.engine
@@ -9096,8 +9098,8 @@ impl GameApp {
             self.control_player_infos = ControlPlayerInfoRegistry::default();
             self.clear_blocking_resource_wait();
             self.admission_resources.clear();
-            self.host_local_alternate_colors_by_resource.clear();
-            self.host_local_player_info_ids.clear();
+            self.players.host_local_alternate_colors.clear();
+            self.players.host_local_info_ids.clear();
         }
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
@@ -9163,7 +9165,7 @@ impl GameApp {
             .snapshot()
             .players
             .iter()
-            .find(|state| state.id == self.local_owner)
+            .find(|state| state.id == self.players.local_owner)
             .map(|state| player_join_board_line(&state.name));
         if let Some(line) = join_line {
             let line = self.timestamp_log_line(line);
@@ -9178,7 +9180,7 @@ impl GameApp {
         if let Some(cursor) = self
             .snapshot
             .crew_selection
-            .get(&self.local_owner)
+            .get(&self.players.local_owner)
             .and_then(|selection| selection.cursor)
             .filter(|cursor| {
                 self.snapshot
@@ -9192,7 +9194,7 @@ impl GameApp {
             return;
         }
         if let Some((object_id, owner, crew_member)) =
-            select_focus_candidate(&self.snapshot, self.local_owner)
+            select_focus_candidate(&self.snapshot, self.players.local_owner)
         {
             self.focus_id = Some(object_id);
             if crew_member && owner >= 0 {

@@ -646,7 +646,7 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
     direct
         .apply_ingame_menu_action(MenuAction::ActivateHostDisconnect)
         .test_value();
-    let owner = direct.local_owner;
+    let owner = direct.players.local_owner;
     let menu = direct.ingame_menu.get(owner).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::HostDisconnect);
     main_assert_eq!(menu.caption() => "Disconnect client");
@@ -726,7 +726,7 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
     league
         .apply_ingame_menu_action(MenuAction::ActivateHostDisconnect)
         .test_value();
-    let owner = league.local_owner;
+    let owner = league.players.local_owner;
     league
         .ingame_menu
         .get_mut(owner)
@@ -1302,7 +1302,7 @@ fn forced_recording_writes_replay_group_and_league_sha() {
     let output_path = directory.path().join("001-Scenario.c4s");
     let mut app = new_state_only_running_sandbox_app();
     app.network_is_league = true;
-    let game_number = app.local_owner;
+    let game_number = app.players.local_owner;
     app.control_player_infos.replace_snapshot(
         17,
         [league_fixture!(player_data:
@@ -1335,7 +1335,7 @@ fn forced_recording_writes_replay_group_and_league_sha() {
     let initial = Group::open(&output_path).test_value();
     main_assert_eq!(initial.read_file("Sentinel.txt").expect("copied component") => b"preserved");
     main_assert_eq!(initial.read_file("CtrlRec.c4b").expect("open CtrlRec") => Vec::<u8>::new());
-    let packet = recorded_right_control(app.local_owner);
+    let packet = recorded_right_control(app.players.local_owner);
     app.apply_ready_controls(
         0,
         vec![network::network_control_for_packet(packet.clone()).expect("supported control")],
@@ -1826,7 +1826,7 @@ fn exclusive_vote_outside_hit_still_reaches_exposed_chart() {
     let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
         app.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let chart_layout = app
         .dialogs.chart
@@ -1868,7 +1868,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     // gameplay gate (src/C4Game.cpp:3595-3622). The port exposes only that
     // app-owned re-entry surface; script/object and save menus remain hidden.
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     app.display_flags.show_commands = false;
     app.engine.test_player_mut(owner).set_name("Ada");
@@ -1897,7 +1897,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     app.ingame_menu.clear();
 
     let mut retargeted = new_classic_running_sandbox_app();
-    let local_owner = retargeted.local_owner;
+    let local_owner = retargeted.players.local_owner;
     let eliminated_target = local_owner + 1;
     let retargeted_cursor = retargeted.engine.test_crew_cursor(local_owner);
     retargeted
@@ -3611,7 +3611,7 @@ fn league_client_desync_reports_joined_local_players_before_change_to_local() {
     let local_client = 7;
     let local_info = 55;
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     app.control_clients = ControlClientRegistry::default();
     app.control_clients.register(0, true, false);
@@ -3953,7 +3953,7 @@ fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
             set_control_test_team(2, Vec::new(), 0),
         ],
     );
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
         team_metadata.clone(),
     ));
     app.engine
@@ -4185,7 +4185,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     let mut host = new_running_sandbox_app();
     let (_host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
     host.network_is_league = true;
-    main_assert!(host.show_abort_dialog(host.local_owner));
+    main_assert!(host.show_abort_dialog(host.players.local_owner));
     finish_abort_dialog(
         &mut host,
         clonk_frontend::message_dialog::MessageDialogResult::Yes,
@@ -4197,7 +4197,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     let (_restart_events, mut restart_commands) =
         install_running_network_stub(&mut restart_host, 0, 0, 1);
     restart_host.network_is_league = true;
-    main_assert!(restart_host.show_abort_dialog(restart_host.local_owner));
+    main_assert!(restart_host.show_abort_dialog(restart_host.players.local_owner));
     finish_abort_dialog(
         &mut restart_host,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
@@ -4222,7 +4222,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     let (_client_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 1);
     client.engine.set_control_host(false);
     client.network_is_league = true;
-    main_assert!(client.show_abort_dialog(client.local_owner));
+    main_assert!(client.show_abort_dialog(client.players.local_owner));
     finish_abort_dialog(
         &mut client,
         clonk_frontend::message_dialog::MessageDialogResult::Yes,
@@ -4270,7 +4270,7 @@ fn network_surrender_menu_queues_the_next_authenticated_control_tick() {
     // control packet captures the local client as iByClient
     // (src/C4MainMenu.cpp:790-795; src/C4Control.cpp:38-56).
     let mut app = new_running_sandbox_app();
-    let player = app.local_owner;
+    let player = app.players.local_owner;
     app.engine
         .test_player_mut(player)
         .set_at_client(clonk_engine::PlayerAtClient::new(3));
@@ -4294,7 +4294,7 @@ fn non_league_network_part_continues_the_running_round_locally() {
     // src/C4GameControl.cpp:93-127; src/C4Client.cpp:124-128,306-317;
     // src/C4PlayerList.cpp:466-476).
     let mut app = new_running_sandbox_app();
-    let local_player = app.local_owner;
+    let local_player = app.players.local_owner;
     let local_client = 3;
     let remote_player = 17;
     let remote_info = 73;
@@ -4429,7 +4429,7 @@ fn league_network_part_submits_authenticated_self_kick_vote() {
     let mut app = new_running_sandbox_app();
     let local_client = 7;
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client as i32));
     let (manager, _events, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client);
@@ -4520,7 +4520,7 @@ fn rate_limited_own_vote_opens_surrender_but_active_duplicate_does_not() {
 
     let mut app = new_running_sandbox_app();
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client as i32));
     let (manager, _events, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client);
@@ -4603,7 +4603,7 @@ fn host_single_joined_player_approves_first_vote() {
     // (src/C4Control.cpp:1366-1442).
     let mut app = new_state_only_running_sandbox_app();
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
     app.control_clients = ControlClientRegistry::default();
     app.control_clients.register(0, true, false);
@@ -4761,7 +4761,7 @@ fn approved_self_kick_clears_network_and_ends_local_round() {
     let mut app = new_classic_running_sandbox_app();
     let local_client = 7;
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
     app.network = Some(manager);
@@ -4783,7 +4783,7 @@ fn approved_self_kick_clears_network_and_ends_local_round() {
 
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.engine.player(app.local_owner).expect("local player remains for evaluation").surrendered());
+    main_assert!(app.engine.player(app.players.local_owner).expect("local player remains for evaluation").surrendered());
     app.test_update();
     main_assert!(app.snapshot.game_over);
 }
@@ -4798,7 +4798,7 @@ fn eligible_client_vote_prompt_defaults_no_and_yes_submits_ballot() {
     let mut app = new_running_sandbox_app();
     let local_client = 7;
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
@@ -4855,7 +4855,7 @@ fn rejected_own_self_kick_opens_default_no_surrender_prompt() {
     let mut app = new_running_sandbox_app();
     let local_client = 7;
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
     app.network = Some(manager);
@@ -4900,7 +4900,7 @@ fn accepting_league_surrender_clears_network_and_aborts_round() {
     let mut app = new_running_sandbox_app();
     let local_client = 7;
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, _events, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(local_client as u32);
@@ -4956,7 +4956,7 @@ fn approved_cancel_vote_end_aborts_network_round() {
     let mut app = new_state_only_running_sandbox_app();
     let local_client = 7;
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
     app.network = Some(manager);
@@ -4988,7 +4988,7 @@ fn host_vote_pause_lifecycle_matches_pause_vote_result() {
     let mut pause_app = new_state_only_running_sandbox_app();
     pause_app
         .engine
-        .test_player_mut(pause_app.local_owner)
+        .test_player_mut(pause_app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
     let (pause_snapshot, pause_reference) = default_exact_host_reference();
     pause_app.control_clients = ControlClientRegistry::default();
@@ -5017,7 +5017,7 @@ fn host_vote_pause_lifecycle_matches_pause_vote_result() {
     let mut unpause_app = new_state_only_running_sandbox_app();
     unpause_app
         .engine
-        .test_player_mut(unpause_app.local_owner)
+        .test_player_mut(unpause_app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
     let (unpause_snapshot, unpause_reference) = default_exact_host_reference();
     unpause_app.control_clients = ControlClientRegistry::default();
@@ -5055,7 +5055,7 @@ fn league_observer_part_uses_ordinary_network_clear_path() {
     // (src/C4MainMenu.cpp:820-831).
     let mut app = new_running_sandbox_app();
     let local_client = 7;
-    app.engine.remove_player(app.local_owner).test_value();
+    app.engine.remove_player(app.players.local_owner).test_value();
     let (manager, _events, commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client);
     app.network = Some(manager);
@@ -5090,7 +5090,7 @@ fn synchronized_surrender_executes_only_for_the_runtime_player_owner() {
     // runtime C4Player::AtClient to equal iByClient
     // (src/C4Control.cpp:93-109,1546-1578).
     let mut app = new_state_only_running_sandbox_app();
-    let player = app.local_owner;
+    let player = app.players.local_owner;
     app.engine
         .test_player_mut(player)
         .set_at_client(clonk_engine::PlayerAtClient::new(3));

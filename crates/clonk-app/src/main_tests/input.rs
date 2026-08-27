@@ -210,7 +210,7 @@ fn install_l067_context_stack(
     definitions_back_to_front: &[&str],
     selectable_windwing: bool,
 ) -> (Vec<ObjectId>, GuiPoint) {
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app
         .engine
         .crew_cursor(owner)
@@ -280,7 +280,7 @@ fn install_l067_context_stack(
 #[test]
 fn right_click_wwng_targets_the_closed_container_behind_it() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let (objects, point) = install_l067_context_stack(&mut app, &["M67C", "WWNG"], false);
     let [container, _windwing] = objects.as_slice() else {
         panic!("expected container and windwing, got {objects:?}");
@@ -308,7 +308,7 @@ fn right_click_retains_the_last_move_target_until_the_next_refill() {
     // TargetObject and Cursor without another hit-test
     // (C4MouseControl.cpp:259-315,982-1023,1230-1259).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let crew = app.engine.test_object_snapshot(crew);
     let shared = Vector2::new(crew.position.x - 60, crew.position.y);
@@ -399,7 +399,7 @@ fn mouse_clicks_retain_selection_across_same_frame_ocf_mutation() {
     // event observes both cached identities even if the object's OCF changes
     // before dispatch (C4MouseControl.cpp:647-662,979,1106-1155,1230-1259).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     let cursor_snapshot = app.engine.test_object_snapshot(cursor);
     let position = Vector2::new(cursor_snapshot.position.x - 60, cursor_snapshot.position.y);
@@ -469,7 +469,7 @@ fn ordinary_moves_clear_single_mouse_selection_over_region_help_and_scroll() {
     // Help updates; moving off a single crew or MouseSelect object clears it
     // (C4MouseControl.cpp:440-453,647-662,893-980).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     let cursor_snapshot = app.engine.test_object_snapshot(cursor);
     let position = Vector2::new(cursor_snapshot.position.x - 60, cursor_snapshot.position.y);
@@ -529,7 +529,7 @@ fn ordinary_moves_clear_single_mouse_selection_over_region_help_and_scroll() {
 #[test]
 fn right_click_lone_wwng_falls_through_to_select_next() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let (_objects, point) = install_l067_context_stack(&mut app, &["WWNG"], false);
     let expected_next = app
         .engine
@@ -552,7 +552,7 @@ fn right_click_lone_wwng_falls_through_to_select_next() {
 #[test]
 fn right_click_excludes_only_the_front_wwng() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let (objects, point) = install_l067_context_stack(&mut app, &["WWNG", "WWNG"], false);
     let [rear_windwing, _front_windwing] = objects.as_slice() else {
         panic!("expected two windwings, got {objects:?}");
@@ -575,7 +575,7 @@ fn right_click_excludes_only_the_front_wwng() {
 #[test]
 fn selectable_wwng_selects_before_falling_through_to_select_next() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let (objects, point) = install_l067_context_stack(&mut app, &["WWNG"], true);
     let [windwing] = objects.as_slice() else {
         panic!("expected one selectable windwing, got {objects:?}");
@@ -601,7 +601,7 @@ fn selectable_wwng_selects_before_falling_through_to_select_next() {
 #[test]
 fn help_click_describes_ocf_all_target_without_commands_or_drag() {
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let (target, point) =
         install_mouse_help_target(&mut app, "HLP1", "Named target", Some("Helpful details."));
     let (empty, _) = mouse_test_empty_point(&mut app, owner, point, None);
@@ -717,7 +717,7 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
 #[test]
 fn shift_left_clicks_append_and_sample_release_modifiers() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     render_mouse_test_app(&mut app);
     let viewport = app.graphics.viewport_rect(owner).test_value();
@@ -805,7 +805,7 @@ fn shift_left_clicks_append_and_sample_release_modifiers() {
 #[test]
 fn shift_double_get_samples_the_second_press_event() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let crew_state = app.engine.test_object_snapshot(crew);
     let mut item = test_definition("M43G", "Shift Get target", "#strict\n");
@@ -851,7 +851,7 @@ fn configure_mouse_fog(
     app: &mut GameApp,
     range: i32,
 ) -> (i32, ObjectId, Vector2, Option<ObjectId>) {
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     // The fixture's own repeller is added below through the ordinary
     // SetPlrViewRange path, so the enabling edge's rebuild is a no-op here.
@@ -1513,7 +1513,7 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
 #[test]
 fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
     let mut app = new_state_only_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     // Disabling never owes the repeller rebuild.
     let _ = app.engine.test_player_mut(owner).set_fog_of_war(false);
     app.snapshot = app.engine.snapshot();
@@ -1558,7 +1558,7 @@ fn physical_left_drag_carryable_queues_object_drop_without_direct_controls() {
     // for the cursor's unrelated inventory (C4MouseControl.cpp:909-932,
     // 833-891,1171-1201).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let mut landscape = Landscape::flat(480, 180);
     landscape.set_world_height(200);
@@ -1616,7 +1616,7 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
     // container in Target2 (C4MouseControl.cpp:934-961,882-890,
     // 1171-1201).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let crew_position = app.engine.test_object_snapshot(crew).position;
     let layer = app.engine.test_object_snapshot(crew).layer;
@@ -1720,7 +1720,7 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     // group in C++ main-list order, using Set then Append
     // (C4MouseControl.cpp:626-645,795-817,1158-1201).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let mut landscape = Landscape::flat(480, 180);
     landscape.set_world_height(200);
@@ -1823,7 +1823,7 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
     // down cursor, so moving that target never enters C4MC_Drag_Moving
     // (C4MouseControl.cpp:893-980,1158-1201).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let crew_snapshot = app.engine.test_object_snapshot(crew);
     let mut hybrid = test_definition("MLEN", "Mouse left entrance", "#strict\n");
@@ -1933,7 +1933,7 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
     // Target at the release coordinates (C4MouseControl.cpp:934-941,
     // 882-890,1171-1227).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
@@ -2012,7 +2012,7 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
 #[test]
 fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let crew = app.engine.test_object_snapshot(crew);
     let mut vehicle = test_definition("MHOV", "Hover wagon", "#strict\n");
@@ -2081,7 +2081,7 @@ fn inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
 fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
     for vehicle_drag in [false, true] {
         let mut app = new_running_sandbox_app();
-        let owner = app.local_owner;
+        let owner = app.players.local_owner;
         let crew = app.engine.test_crew_cursor(owner);
         let crew_state = app.engine.test_object_snapshot(crew);
         let mut dragged = test_definition(
@@ -2235,7 +2235,7 @@ fn group_put_caption_uses_remaining_live_selection() {
 #[test]
 fn world_origin_put_caption_uses_dragged_object_name() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let crew_state = app.engine.test_object_snapshot(crew);
     let mut item = test_definition("M54W", "World parcel", "#strict\n");
@@ -2382,7 +2382,7 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
 #[test]
 fn inventory_region_left_drag_vehicle_queues_single_push_to() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let mut vehicle = test_definition("MIVH", "Inventory vehicle", "#strict\n");
     vehicle.set_category(clonk_engine::CATEGORY_VEHICLE);
@@ -2787,7 +2787,7 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
     app.engine
         .register_script_definition("PHST", "Portrait host", "")
         .test_value();
-    let viewed_owner = app.local_owner + 1;
+    let viewed_owner = app.players.local_owner + 1;
     app.engine
         .register_player(
             PlayerConfig::new(viewed_owner, "Viewed").with_color(Some(RgbColor::new(255, 0, 0))),
@@ -2845,7 +2845,7 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
     );
     let viewport_player = players
         .iter_mut()
-        .find(|player| player.owner == app.local_owner)
+        .find(|player| player.owner == app.players.local_owner)
         .test_value();
     let crew = viewport_player.crew.first_mut().test_value();
     crew.object_id = viewed_object;
@@ -2854,7 +2854,7 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
 
     let portrait = players
         .iter()
-        .find(|player| player.owner == app.local_owner)
+        .find(|player| player.owner == app.players.local_owner)
         .and_then(|player| {
             player
                 .crew
@@ -3168,7 +3168,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         prepared: None,
     }));
     {
-        let metadata = app.network_team_assignment.test_mut().teams_mut();
+        let metadata = app.players.team_assignment.test_mut().teams_mut();
         let target = metadata
             .teams
             .iter_mut()
@@ -3269,7 +3269,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         .test_mut()
         .controller
         .apply_countdown_packet(clonk_frontend::game_lobby::LobbyCountdownPacket::Abort);
-    app.network_team_assignment
+    app.players.team_assignment
         .test_mut()
         .teams_mut()
         .teams
@@ -3283,7 +3283,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
     .test_value();
     main_assert!(commands.take_player_info_updates().is_empty(), "bulk selection is unavailable when every team is full");
 
-    app.network_team_assignment
+    app.players.team_assignment
         .test_mut()
         .teams_mut()
         .team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
@@ -5284,7 +5284,7 @@ fn false_startup_config_never_polls_gamepad_manager() {
 #[test]
 fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
     let mut app = new_running_sandbox_app();
-    let original_owner = app.local_owner;
+    let original_owner = app.players.local_owner;
     app.local_controls = LocalControlRegistry::default();
     app.local_controls.initialize(test_local_control_init(
         original_owner,
@@ -5315,7 +5315,7 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
 
     app.engine.remove_player(original_owner).test_value();
     app.local_controls.remove(original_owner);
-    app.selected_player_file = Some(PlayerFile {
+    app.players.selected_file = Some(PlayerFile {
         name: "Gamepad preference".to_string(),
         pref_control: GamepadSlot::new(0).control_set(),
         pref_mouse: false,
@@ -5324,7 +5324,7 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
     app.config.gamepads_enabled = false;
 
     app.join_local_player().test_value();
-    let player = app.engine.test_player(app.local_owner);
+    let player = app.engine.test_player(app.players.local_owner);
     main_assert_eq!(player.control_set() => 0);
     main_assert_eq!(player.control_preferences() => (4, false));
     main_assert_eq!(app.local_controls.owner_for_set(4) => None);
@@ -5339,7 +5339,7 @@ fn unconfigured_gamepad_button_emits_no_gameplay_control() {
     let mut app = new_running_sandbox_app();
     app.local_controls = LocalControlRegistry::default();
     app.local_controls
-        .initialize(test_local_control_init(app.local_owner, 5, false, false));
+        .initialize(test_local_control_init(app.players.local_owner, 5, false, false));
     main_assert!(app.ingame_menu.is_none());
 
     app.test_gamepad_events([pressed_gamepad_button(
@@ -5460,7 +5460,7 @@ fn chart_gamepad_high_close_respects_player_control_priority() {
     let mut player = new_running_sandbox_app();
     player.local_controls = LocalControlRegistry::default();
     player.local_controls.initialize(test_local_control_init(
-        player.local_owner,
+        player.players.local_owner,
         slot.control_set(),
         false,
         false,
@@ -5474,7 +5474,7 @@ fn chart_gamepad_high_close_respects_player_control_priority() {
         pressed_gamepad_action(slot, GamepadActionType::Cancel),
     ]);
     main_assert!(player.dialogs.chart.is_some());
-    main_assert_ne!(player.engine.player(player.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+    main_assert_ne!(player.engine.player(player.players.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 }
 
 #[test]
@@ -5498,7 +5498,7 @@ fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
     main_assert!(app.engine.definition_picture_image("NPOR").is_some(), "fixture must carry a definition picture");
     let object = app
         .engine
-        .spawn_test_object(SpawnConfig::new("NPOR").with_owner(app.local_owner));
+        .spawn_test_object(SpawnConfig::new("NPOR").with_owner(app.players.local_owner));
     app.snapshot = app.engine.snapshot();
 
     let mut players = collect_player_overlays(
@@ -5531,7 +5531,7 @@ fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
 #[test]
 fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let view_mode = |app: &GameApp| {
         app.engine
             .snapshot()
@@ -5603,7 +5603,7 @@ fn mouse_option_phase(app: &GameApp, player: i32) -> Option<u8> {
 #[test]
 fn options_mouse_entry_is_on_for_requesting_holder() {
     let mut app = new_running_sandbox_app();
-    let holder = app.local_owner;
+    let holder = app.players.local_owner;
 
     let flags = app.option_flags(holder);
     main_assert_eq!((flags.mouse_shown, flags.mouse) => (true, true), "holder sees the on entry");
@@ -5617,7 +5617,7 @@ fn options_mouse_entry_is_on_for_requesting_holder() {
 #[test]
 fn options_mouse_entry_is_hidden_for_non_holder_while_taken() {
     let mut app = new_running_sandbox_app();
-    let holder = app.local_owner;
+    let holder = app.players.local_owner;
     let other = add_secondary_local_player_for_mouse_option_test(&mut app);
     main_assert_eq!(app.local_controls.mouse_owner() => Some(holder));
 
@@ -5641,7 +5641,7 @@ fn options_mouse_entry_is_hidden_for_non_holder_while_taken() {
 #[test]
 fn unclaimed_mouse_entry_is_off_for_each_local_player() {
     let mut app = new_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = add_secondary_local_player_for_mouse_option_test(&mut app);
 
     app.apply_ingame_menu_action_for_player(primary, MenuAction::ToggleMouseControl)
@@ -5665,7 +5665,7 @@ fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
     // Game.MouseControl and does not promote another player's surviving
     // raw field (pristine 9ffa0a5d src/C4Player.cpp:778-786,2296-2315).
     let mut app = new_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = primary + 1;
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
@@ -5712,7 +5712,7 @@ fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
 #[test]
 fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
     let mut app = new_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = primary + 1;
     let primary_crew = app.engine.test_crew_cursor(primary);
     let primary_crew_state = app.engine.test_object_snapshot(primary_crew);
@@ -5796,7 +5796,7 @@ fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
 fn establish_free_scroll_test_viewport(
     app: &mut GameApp,
 ) -> (i32, GuiPoint, GuiPoint, Vector2, Vector2) {
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let focus = app.engine.test_crew_cursor(owner);
     app.engine
         .replace_player_viewports(
@@ -5904,7 +5904,7 @@ fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
     // viewport (pristine 9ffa0a5d src/C4MouseControl.cpp:147-155,
     // 1040-1046).
     let mut app = new_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = primary + 1;
     let primary_crew = app.engine.test_crew_cursor(primary);
     let primary_crew_state = app.engine.test_object_snapshot(primary_crew);
@@ -5980,7 +5980,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     );
 
     let mut app = new_running_sandbox_app();
-    let first = app.local_owner;
+    let first = app.players.local_owner;
     let second = first + 1;
     app.engine
         .register_player(PlayerConfig::new(second, "Second observer target"))
@@ -6025,7 +6025,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
 
     app.ingame_menu.replace(
-        app.local_owner,
+        app.players.local_owner,
         IngameMenuState::main_menu(
             &MainMenuConditions {
                 has_player: false,
@@ -6063,7 +6063,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
 #[test]
 fn reused_player_number_gets_a_distinct_physical_camera_identity() {
     let mut app = new_lightweight_running_sandbox_app();
-    let original = app.local_owner;
+    let original = app.players.local_owner;
     let film_target = original + 1;
     app.engine
         .register_player(PlayerConfig::new(film_target, "Film target"))
@@ -6123,7 +6123,7 @@ fn sandbox_pointer_at_world(app: &mut GameApp, owner: i32, world: Vector2) -> Vi
 #[test]
 fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let mut landscape = clonk_engine::Landscape::flat(640, 50);
     landscape.set_world_height(200);
     app.engine.set_landscape(landscape);
@@ -6191,7 +6191,7 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
 #[test]
 fn mouse_jump_zone_click_queues_exact_jump_control() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     let position = app.engine.test_object_snapshot(cursor).position;
     let click = Vector2::new(position.x + 8, position.y - 15);
@@ -6233,7 +6233,7 @@ fn mouse_jump_zone_click_queues_exact_jump_control() {
 fn mouse_jump_zone_contained_or_non_walk_falls_back_to_move_to() {
     for contained in [true, false] {
         let mut app = new_running_sandbox_app();
-        let owner = app.local_owner;
+        let owner = app.players.local_owner;
         let cursor = app.engine.test_crew_cursor(owner);
         let position = app.engine.test_object_snapshot(cursor).position;
         let click = Vector2::new(position.x + 8, position.y - 15);
@@ -6274,7 +6274,7 @@ fn mouse_jump_zone_contained_or_non_walk_falls_back_to_move_to() {
 #[test]
 fn mouse_jump_zone_overrides_overlapping_crew_selection() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     let cursor_snapshot = app.engine.test_object_snapshot(cursor);
     let click = Vector2::new(
@@ -6386,7 +6386,7 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
     app.bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .control
         .control_style = false;
     app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
@@ -6401,7 +6401,7 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     release_only
         .engine
-        .test_player_mut(release_only.local_owner)
+        .test_player_mut(release_only.players.local_owner)
         .control
         .control_style = false;
     main_assert!(release_only.show_startup_hint);
@@ -6726,7 +6726,7 @@ const C4D_FOREGROUND: i32 = 1 << 23;
 #[test]
 fn overlapping_mouse_candidates_pick_the_frontmost_regardless_of_foreground() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let crew_position = app.engine.test_object_snapshot(crew).position;
     let layer = app.engine.test_object_snapshot(crew).layer;
@@ -6772,7 +6772,7 @@ fn overlapping_mouse_candidates_pick_the_frontmost_regardless_of_foreground() {
     // on position, not on category. Without this half the test would pass
     // against a port that simply always ignored foreground objects.
     let mut swapped = new_running_sandbox_app();
-    let owner = swapped.local_owner;
+    let owner = swapped.players.local_owner;
     let crew = swapped.engine.test_crew_cursor(owner);
     let crew_position = swapped.engine.test_object_snapshot(crew).position;
     let layer = swapped.engine.test_object_snapshot(crew).layer;
