@@ -3383,6 +3383,23 @@ impl GameApp {
     ///
     /// Returns `None` when the board cannot be laid out at all, which is the
     /// same condition that keeps `CreateConsoleWindow` from being reached.
+    /// The console chart window's title and size.
+    ///
+    /// Unlike the scoreboard's, the chart's bounds are fixed
+    /// (`NETWORK_CHART_DIALOG_WIDTH`/`_HEIGHT`), so the window never has to
+    /// follow a live resize — `Dialog::UpdateSize` has nothing to report.
+    /// The title is the dialog's own caption, which is `IDS_NET_STATISTICS`
+    /// resolved through the runtime resource table.
+    pub(crate) fn console_network_chart_window_chrome(&self) -> Option<(String, u32, u32)> {
+        if !self.console_network_chart_window_open() {
+            return None;
+        }
+        let dialog = self.network_chart_dialog.as_ref()?;
+        let (width, height) =
+            clonk_frontend::network_chart::NetworkChartDialog::console_window_extent();
+        Some((dialog.caption().to_owned(), width, height))
+    }
+
     pub(crate) fn console_scoreboard_window_chrome(&self) -> Option<(String, u32, u32)> {
         let layout = self.console_scoreboard_layout()?.0;
         Some((
@@ -3430,6 +3447,73 @@ impl GameApp {
         .ok()?;
         layout.translate(-layout.bounds.x, -layout.bounds.y);
         Some((layout, font_images))
+    }
+
+    /// Draw the console chart at its window's extent.
+    ///
+    /// `Dialog::Draw` clears the separate window and draws the dialog into it
+    /// (`C4GuiDialogs.cpp:479-489`), so the whole window *is* the dialog:
+    /// `console_layout` takes the extent as its bounds rather than placing a
+    /// dialog inside it, and the caption and close icon the chrome supplies
+    /// are not drawn again.
+    ///
+    /// Like the object list's rows, the layout is rebuilt per call. A console
+    /// window has no drag and no cached placement to preserve, so the
+    /// snapshot is the layout.
+    pub(crate) fn render_console_network_chart(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Option<clonk_graphics::Surface> {
+        if !self.console_network_chart_window_open() {
+            return None;
+        }
+        self.refresh_network_chart_dialog();
+        let dialog = self.network_chart_dialog.as_ref()?;
+        let assets = Arc::clone(&self.assets);
+        let resources = assets.network_chart_resources()?;
+        let mut surface = clonk_graphics::Surface::new(
+            width.max(1),
+            height.max(1),
+            clonk_graphics::PixelFormat::Rgba8888,
+        );
+        let extent = clonk_frontend::classic_gui::IntRect::new(
+            0,
+            0,
+            surface.width() as i32,
+            surface.height() as i32,
+        );
+        dialog
+            .render_console(&mut surface, extent, resources, None)
+            .ok()?;
+        Some(surface)
+    }
+
+    /// A press inside the console chart window, in its own coordinates.
+    ///
+    /// The window chrome owns moving and closing, so the only element the
+    /// dialog still answers for is a sheet tab.
+    pub(crate) fn console_network_chart_pointer_down(
+        &mut self,
+        point: clonk_frontend::GuiPoint,
+    ) -> bool {
+        if !self.console_network_chart_window_open() {
+            return false;
+        }
+        let assets = Arc::clone(&self.assets);
+        let Some(resources) = assets.network_chart_resources() else {
+            return false;
+        };
+        let (width, height) =
+            clonk_frontend::network_chart::NetworkChartDialog::console_window_extent();
+        let extent = clonk_frontend::classic_gui::IntRect::new(0, 0, width as i32, height as i32);
+        let Some(dialog) = self.network_chart_dialog.as_mut() else {
+            return false;
+        };
+        !matches!(
+            dialog.console_pointer_down(point, extent, resources),
+            clonk_frontend::network_chart::NetworkChartDialogAction::Ignored
+        )
     }
 
     /// Draw the console scoreboard at its window's extent.

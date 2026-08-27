@@ -5722,9 +5722,12 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
             .network_chart_dialog
             .test_ref()
             .layout(preferred, resources);
+        let caption = layout
+            .caption
+            .expect("the fullscreen chart draws its own caption");
         GuiPoint::new(
-            layout.caption.x.saturating_add(8) as f32,
-            layout.caption.y.saturating_add(layout.caption.h / 2) as f32,
+            caption.x.saturating_add(8) as f32,
+            caption.y.saturating_add(caption.h / 2) as f32,
         )
     };
     app.running_pointer_position = Some(chart_point);
@@ -5922,9 +5925,12 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
         .layout(preferred, resources);
     main_assert_eq!((layout.bounds.x, layout.bounds.y) => (preferred.x + 30, preferred.y + 30));
 
+    let caption_rect = layout
+        .caption
+        .expect("the fullscreen chart draws its own caption");
     let caption = GuiPoint::new(
-        (layout.caption.x + 8) as f32,
-        (layout.caption.y + layout.caption.h / 2) as f32,
+        (caption_rect.x + 8) as f32,
+        (caption_rect.y + caption_rect.h / 2) as f32,
     );
     app.running_pointer_position = Some(caption);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
@@ -5949,9 +5955,12 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
     main_assert!(!app.network_chart_pointer_capture, "chart body clicks are consumed without becoming a drag element");
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Released));
 
+    let close_button = moved_layout
+        .close_button
+        .expect("the fullscreen chart draws its own close icon");
     let close = GuiPoint::new(
-        (moved_layout.close_button.x + moved_layout.close_button.w / 2) as f32,
-        (moved_layout.close_button.y + moved_layout.close_button.h / 2) as f32,
+        (close_button.x + close_button.w / 2) as f32,
+        (close_button.y + close_button.h / 2) as f32,
     );
     app.running_pointer_position = Some(close);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
@@ -15291,4 +15300,91 @@ fn a_join_from_a_different_player_file_is_not_refused() {
             .filter(|player| [8, 9].contains(&player.player_info_id))
             .count() => 2
     );
+}
+
+/// `C4ChartDialog` passes `fViewportDlg = false`, so `Dialog::Show`'s console
+/// arm — `if (!Application.isFullScreen && !IsViewportDialog())
+/// CreateConsoleWindow()` (`C4GuiDialogs.cpp:659-661`) — gives it a real child
+/// window of the console, and `Dialog::Close` destroys that window again
+/// (`:677`). The port's console branch returns before every dialog layer, so
+/// the window request is what the console runner reconciles against.
+#[test]
+fn console_network_chart_owns_a_child_window_only_while_its_dialog_is_open() {
+    // Fullscreen draws the chart into the primary window, so it never asks
+    // for a child one however the dialog was opened.
+    let mut fullscreen = new_running_sandbox_app();
+    fullscreen.toggle_network_chart();
+    main_assert!(fullscreen.network_chart_dialog.is_some());
+    main_assert!(!fullscreen.console_network_chart_window_open());
+
+    let mut console = new_running_sandbox_app();
+    console.console_mode = true;
+    main_assert!(!console.console_network_chart_window_open());
+
+    console.toggle_network_chart();
+    main_assert!(console.network_chart_dialog.is_some());
+    main_assert!(console.console_network_chart_window_open());
+
+    // The chrome is the dialog's own fixed extent: `Dialog::UpdateSize` sizes
+    // the window from the dialog's bounds (`C4GuiDialogs.cpp:445-473`).
+    let (title, width, height) = console.console_network_chart_window_chrome().test_value();
+    main_assert_eq!(title.as_str() => "Statistics");
+    main_assert_eq!(
+        (width, height) =>
+        clonk_frontend::network_chart::NetworkChartDialog::console_window_extent()
+    );
+
+    // The same toggle closes it, and the window request goes with the dialog.
+    console.toggle_network_chart();
+    main_assert!(console.network_chart_dialog.is_none());
+    main_assert!(!console.console_network_chart_window_open());
+    main_assert!(console.console_network_chart_window_chrome().is_none());
+}
+
+/// `Dialog::Draw` clears the separate window and draws the dialog into it
+/// (`C4GuiDialogs.cpp:479-489`), so the console chart paints its own
+/// framebuffer at the window's extent rather than a layer of the main frame —
+/// which is the layer the port's console branch returns before reaching.
+#[test]
+fn the_console_network_chart_paints_its_own_window_framebuffer() {
+    let mut console = new_running_sandbox_app();
+    console.console_mode = true;
+    main_assert!(console.render_console_network_chart(400, 300).is_none());
+
+    console.toggle_network_chart();
+    let surface = console.render_console_network_chart(400, 300).test_value();
+    main_assert_eq!((surface.width(), surface.height()) => (400, 300));
+
+    // Something was actually drawn: a cleared surface is uniform, and the
+    // dialog frame, sheet tabs and axes are not.
+    let first = surface.get_pixel(0, 0).test_value();
+    main_assert!(
+        (0..surface.width()).any(|x| (0..surface.height())
+            .any(|y| surface.get_pixel(x, y) != Some(first))),
+        "the window framebuffer holds a rendered dialog rather than a clear"
+    );
+
+    // Tab selection is the one input the window chrome does not own, and it
+    // reaches the dialog through the window's own pointer route.
+    main_assert_eq!(console.network_chart_dialog.test_ref().active_tab_index() => 0);
+    main_assert!(console.console_network_chart_pointer_down(GuiPoint::new(
+        console_network_chart_tab_center(&console, 2).0,
+        console_network_chart_tab_center(&console, 2).1,
+    )));
+    main_assert_eq!(console.network_chart_dialog.test_ref().active_tab_index() => 2);
+}
+
+/// The middle of one console sheet tab, in the window's own coordinates.
+fn console_network_chart_tab_center(app: &GameApp, index: usize) -> (f32, f32) {
+    let resources = app.assets.network_chart_resources().test_value();
+    let (width, height) = clonk_frontend::network_chart::NetworkChartDialog::console_window_extent();
+    let layout = app.network_chart_dialog.test_ref().console_layout(
+        clonk_frontend::classic_gui::IntRect::new(0, 0, width as i32, height as i32),
+        resources,
+    );
+    let bounds = layout.tabs[index].bounds;
+    (
+        (bounds.x + bounds.w / 2) as f32,
+        (bounds.y + bounds.h / 2) as f32,
+    )
 }
