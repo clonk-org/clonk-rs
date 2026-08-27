@@ -3309,7 +3309,12 @@ impl GameApp {
         // One continuation per check, created with the prompt so the dialog,
         // the countdown and any toast all resolve through the same claim.
         let continuation = crate::ready_check_notification::ReadyCheckContinuation::new();
-        if self.ready_check_toasts_enabled && !self.window_active {
+        // `ReadyCheckDialog::UpdateText` gates the toast on
+        // `Config.Toasts.ReadyCheck` alone (`src/C4Network2.cpp:152-171`).
+        // Raising the window for an unfocused client is the separate
+        // `NotifyUserIfInactive` request the same handler makes
+        // (`src/C4Network2.cpp:1670`), which the lobby already models.
+        if self.ready_check_toasts_enabled {
             continuation.show(
                 self.lobby_ready_check_sink.as_ref(),
                 &self.lobby_ready_check_actions(),
