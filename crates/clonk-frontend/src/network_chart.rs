@@ -560,8 +560,37 @@ impl NetworkChartDialog {
         resources: NetworkChartResources<'_>,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
+        self.render_with_layout(surface, self.layout(preferred, resources), resources, gamma)
+    }
+
+    /// The same dialog drawn into a console child window's own framebuffer.
+    ///
+    /// `Dialog::Draw` clears that window and draws the dialog into it
+    /// (`C4GuiDialogs.cpp:479-489`), so `extent` is the whole dialog and the
+    /// caption and close icon the window chrome carries are not drawn again.
+    pub fn render_console(
+        &self,
+        surface: &mut Surface,
+        extent: IntRect,
+        resources: NetworkChartResources<'_>,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        self.render_with_layout(
+            surface,
+            self.console_layout(extent, resources),
+            resources,
+            gamma,
+        )
+    }
+
+    fn render_with_layout(
+        &self,
+        surface: &mut Surface,
+        layout: NetworkChartLayout,
+        resources: NetworkChartResources<'_>,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
         resources.validate()?;
-        let layout = self.layout(preferred, resources);
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
         // A layout without these widgets is one whose host window draws them,
         // so there is nothing to paint rather than an empty rect to paint into.

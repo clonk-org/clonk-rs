@@ -486,7 +486,8 @@ fn present_child(
             | DeveloperHost::Toolbox(_)
             | DeveloperHost::ObjectList(_)
             | DeveloperHost::ComponentEditor(_)
-            | DeveloperHost::Scoreboard(_),
+            | DeveloperHost::Scoreboard(_)
+            | DeveloperHost::NetworkChart(_),
         )
         | None => None,
     }

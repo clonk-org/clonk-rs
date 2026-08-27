@@ -59,6 +59,7 @@ mod local_control;
 use clonk_app_netplay::network;
 mod network_team_assignment;
 use clonk_app_menus::object_menu;
+mod network_chart_window_host;
 mod object_list_window_host;
 mod offline_savegame;
 mod offline_startup;
@@ -1194,6 +1195,15 @@ fn run() -> Result<()> {
                     &mut next_developer_window_key,
                     event_target,
                 );
+                // `C4ChartDialog` is a non-viewport dialog too, so the same
+                // console arm gives it its own window — and the same console
+                // render branch is why that window is its whole presentation.
+                console_toolbox_window::reconcile_console_network_chart_window(
+                    &mut app,
+                    &mut developer_windows,
+                    &mut next_developer_window_key,
+                    event_target,
+                );
             }
             // Every viewport window redraws with the shell and only with it, the
             // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
@@ -1255,6 +1265,17 @@ fn run() -> Result<()> {
                         == Some(key)
                     {
                         console_toolbox_window::handle_console_scoreboard_event(
+                            key,
+                            &event,
+                            &mut app,
+                            &mut developer_windows,
+                        );
+                        return;
+                    }
+                    if console_toolbox_window::network_chart_window_key(&developer_windows)
+                        == Some(key)
+                    {
+                        console_toolbox_window::handle_console_network_chart_event(
                             key,
                             &event,
                             &mut app,

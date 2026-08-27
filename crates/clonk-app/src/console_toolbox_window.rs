@@ -549,6 +549,213 @@ pub(crate) fn handle_console_scoreboard_event(
     }
 }
 
+/// The console chart's registry key, if its dialog has a window.
+pub(crate) fn network_chart_window_key(
+    windows: &DeveloperWindows<DeveloperHost>,
+) -> Option<WindowId> {
+    windows.find_key(|host| matches!(host, DeveloperHost::NetworkChart(_)))
+}
+
+/// Open or close the console chart window to match its dialog.
+///
+/// The same shape as the scoreboard above: `Dialog::Show` creates the window
+/// and `Dialog::Close` destroys it (`C4GuiDialogs.cpp:659-661,677`), so this
+/// reconciles against `GameApp::console_network_chart_window_open` rather than
+/// being commanded. The chart's bounds are fixed, so the resize arm only
+/// restores a size something else changed.
+pub(crate) fn reconcile_console_network_chart_window(
+    app: &mut crate::GameApp,
+    windows: &mut DeveloperWindows<DeveloperHost>,
+    next_key: &mut u64,
+    target: &winit::event_loop::ActiveEventLoop,
+) {
+    use crate::developer_windows::HostPurpose;
+    use crate::network_chart_window_host::build_network_chart_window;
+
+    let key = network_chart_window_key(windows);
+    let chrome = app.console_network_chart_window_chrome();
+    match (chrome, key) {
+        (Some((title, width, height)), None) => {
+            let restored = crate::load_console_dialog_window_position(
+                app.app_paths.as_ref(),
+                crate::network_chart_window_host::NETWORK_CHART_DIALOG_ID,
+            )
+            .and_then(crate::console_window_position::ConsoleWindowPlacement::position);
+            match build_network_chart_window(target, &title, width, height, restored) {
+                Ok(host) => {
+                    let key = WindowId(*next_key);
+                    *next_key += 1;
+                    tracing::debug!("opened the console network chart window");
+                    windows.insert(
+                        key,
+                        HostPurpose::NetworkChart,
+                        DeveloperHost::NetworkChart(host),
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to open the console network chart");
+                    // `Dialog::Show` returns false without showing when
+                    // `CreateConsoleWindow` fails, and the dialog is deleted
+                    // (`C4GuiDialogs.cpp:661`). Leaving it open would retry the
+                    // failed build every pass.
+                    app.toggle_network_chart();
+                }
+            }
+        }
+        (Some((title, width, height)), Some(key)) => {
+            if let Some(chart) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_network_chart_mut)
+            {
+                chart.set_chrome(&title, width, height);
+            }
+        }
+        (None, Some(key)) => {
+            store_console_network_chart_geometry(app, windows, key);
+            windows.close(key);
+            // `Dialog::Close` hands focus back to the parent console.
+            windows.show_and_focus(crate::developer_windows::SHELL_WINDOW);
+        }
+        (None, None) => {}
+    }
+}
+
+/// Remember where the chart window was before it is destroyed.
+fn store_console_network_chart_geometry(
+    app: &crate::GameApp,
+    windows: &DeveloperWindows<DeveloperHost>,
+    key: WindowId,
+) {
+    let Some(paths) = app.app_paths.as_ref() else {
+        return;
+    };
+    let Some(chart) = windows.host(key).and_then(|host| match host {
+        DeveloperHost::NetworkChart(chart) => Some(chart),
+        _ => None,
+    }) else {
+        return;
+    };
+    let Some((x, y)) = chart.position() else {
+        return;
+    };
+    let (width, height) = chart.surface_extent();
+    if let Err(error) = crate::store_console_dialog_window_position(
+        paths,
+        crate::network_chart_window_host::NETWORK_CHART_DIALOG_ID,
+        x,
+        y,
+        width as i32,
+        height as i32,
+    ) {
+        tracing::warn!(%error, "failed to store the console network chart geometry");
+    }
+}
+
+/// The console chart window's own events.
+///
+/// Unlike the scoreboard, this dialog *is* mouse-controlled: `C4GUI::Tabular`
+/// selects a sheet on button down, and that is the one element the window
+/// chrome does not already own.
+pub(crate) fn handle_console_network_chart_event(
+    key: WindowId,
+    event: &winit::event::Event<crate::NetworkEventWake>,
+    app: &mut crate::GameApp,
+    windows: &mut DeveloperWindows<DeveloperHost>,
+) {
+    use crate::developer_windows::DeveloperWindowPresenter;
+    use winit::event::{Event, WindowEvent};
+
+    match event {
+        // `DialogWinProc`'s `WM_CLOSE` arm is `dialog->Close(false)`
+        // (`C4GuiDialogs.cpp:236`), and closing the chart dialog is what the
+        // toggle already does.
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
+            store_console_network_chart_geometry(app, windows, key);
+            app.toggle_network_chart();
+            windows.close(key);
+            windows.show_and_focus(crate::developer_windows::SHELL_WINDOW);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::Resized(size),
+            ..
+        } => {
+            windows.resize(key, size.width.max(1), size.height.max(1));
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::ScaleFactorChanged { .. },
+            ..
+        } => {
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. },
+            ..
+        } => {
+            if let Some(chart) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_network_chart_mut)
+            {
+                chart.surface.last_pointer = (position.x as i32, position.y as i32);
+            }
+        }
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Pressed,
+                    button: winit::event::MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            let Some(chart) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_network_chart_mut)
+            else {
+                return;
+            };
+            let (x, y) = chart.surface.last_pointer;
+            if app.console_network_chart_pointer_down(clonk_frontend::GuiPoint::new(
+                x as f32, y as f32,
+            )) {
+                windows.request_redraw(key);
+            }
+        }
+        // `DialogWinProc` forwards the dialog window's keys to
+        // `Game.DoKeyboardInput` (`C4GuiDialogs.cpp:219-228`), so the chart
+        // toggle pressed on this window closes it.
+        Event::WindowEvent {
+            event: WindowEvent::KeyboardInput {
+                event: key_event, ..
+            },
+            ..
+        } => {
+            if let Some(legacy) =
+                crate::legacy_virtual_key_from_event(key_event, app.keyboard_modifiers)
+            {
+                if let Err(error) = app.handle_key(legacy, key_event.state) {
+                    tracing::error!(%error, "console network chart key dispatch failed");
+                }
+            }
+        }
+        Event::WindowEvent {
+            event: WindowEvent::RedrawRequested,
+            ..
+        } => {
+            if let Some(host) = windows.host_mut(key) {
+                if let Err(error) = host.present(app) {
+                    tracing::error!(%error, "console network chart present failed");
+                    app.toggle_network_chart();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The component editor's registry key, if one is open.
 pub(crate) fn component_editor_window_key(
     windows: &DeveloperWindows<DeveloperHost>,

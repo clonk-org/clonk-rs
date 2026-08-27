@@ -10,6 +10,7 @@
 
 use crate::component_editor_window_host::ComponentEditorWindowHost;
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
+use crate::network_chart_window_host::NetworkChartWindowHost;
 use crate::object_list_window_host::ObjectListWindowHost;
 use crate::scoreboard_window_host::ScoreboardWindowHost;
 use crate::shell_window_host::ShellWindowHost;
@@ -32,6 +33,9 @@ pub enum DeveloperHost {
     /// The `C4ScoreboardDlg` console window, destroyed by `Dialog::Close`
     /// along with the dialog itself (`C4GuiDialogs.cpp:677`).
     Scoreboard(ScoreboardWindowHost),
+    /// The `C4ChartDialog` console window, destroyed by `Dialog::Close`
+    /// along with the dialog itself (`C4GuiDialogs.cpp:677`).
+    NetworkChart(NetworkChartWindowHost),
 }
 
 impl DeveloperHost {
@@ -45,7 +49,8 @@ impl DeveloperHost {
             | Self::Toolbox(_)
             | Self::ObjectList(_)
             | Self::ComponentEditor(_)
-            | Self::Scoreboard(_) => None,
+            | Self::Scoreboard(_)
+            | Self::NetworkChart(_) => None,
         }
     }
 
@@ -58,7 +63,8 @@ impl DeveloperHost {
             | Self::Viewport(_)
             | Self::ObjectList(_)
             | Self::ComponentEditor(_)
-            | Self::Scoreboard(_) => None,
+            | Self::Scoreboard(_)
+            | Self::NetworkChart(_) => None,
         }
     }
 
@@ -70,12 +76,25 @@ impl DeveloperHost {
             | Self::Viewport(_)
             | Self::Toolbox(_)
             | Self::ComponentEditor(_)
-            | Self::Scoreboard(_) => None,
+            | Self::Scoreboard(_)
+            | Self::NetworkChart(_) => None,
         }
     }
 
     /// The console scoreboard's concrete state, for the title and size its
     /// dialog asks the window to follow.
+    pub fn as_network_chart_mut(&mut self) -> Option<&mut NetworkChartWindowHost> {
+        match self {
+            Self::NetworkChart(chart) => Some(chart),
+            Self::Shell(_)
+            | Self::Viewport(_)
+            | Self::Toolbox(_)
+            | Self::ObjectList(_)
+            | Self::ComponentEditor(_)
+            | Self::Scoreboard(_) => None,
+        }
+    }
+
     pub fn as_scoreboard_mut(&mut self) -> Option<&mut ScoreboardWindowHost> {
         match self {
             Self::Scoreboard(board) => Some(board),
@@ -83,7 +102,8 @@ impl DeveloperHost {
             | Self::Viewport(_)
             | Self::Toolbox(_)
             | Self::ObjectList(_)
-            | Self::ComponentEditor(_) => None,
+            | Self::ComponentEditor(_)
+            | Self::NetworkChart(_) => None,
         }
     }
 
@@ -95,7 +115,8 @@ impl DeveloperHost {
             | Self::Toolbox(_)
             | Self::ObjectList(_)
             | Self::ComponentEditor(_)
-            | Self::Scoreboard(_) => None,
+            | Self::Scoreboard(_)
+            | Self::NetworkChart(_) => None,
         }
     }
 
@@ -108,6 +129,7 @@ impl DeveloperHost {
             Self::ObjectList(list) => &list.surface.window,
             Self::ComponentEditor(editor) => &editor.surface.window,
             Self::Scoreboard(board) => &board.surface.window,
+            Self::NetworkChart(chart) => &chart.surface.window,
         }
     }
 }
@@ -121,6 +143,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::ObjectList(list) => list.resize(width, height),
             Self::ComponentEditor(editor) => editor.resize(width, height),
             Self::Scoreboard(board) => board.resize(width, height),
+            Self::NetworkChart(chart) => chart.resize(width, height),
         }
     }
 
@@ -132,6 +155,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::ObjectList(list) => list.request_redraw(),
             Self::ComponentEditor(editor) => editor.request_redraw(),
             Self::Scoreboard(board) => board.request_redraw(),
+            Self::NetworkChart(chart) => chart.request_redraw(),
         }
     }
 
@@ -147,6 +171,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::ObjectList(list) => list.set_visible(visible),
             Self::ComponentEditor(editor) => editor.set_visible(visible),
             Self::Scoreboard(board) => board.set_visible(visible),
+            Self::NetworkChart(chart) => chart.set_visible(visible),
         }
     }
 
@@ -158,6 +183,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::ObjectList(list) => list.visible(),
             Self::ComponentEditor(editor) => editor.visible(),
             Self::Scoreboard(board) => board.visible(),
+            Self::NetworkChart(chart) => chart.visible(),
         }
     }
 }
@@ -171,6 +197,7 @@ impl DeveloperWindowPresenter<GameApp> for DeveloperHost {
             Self::ObjectList(list) => list.present(app),
             Self::ComponentEditor(editor) => editor.present(app),
             Self::Scoreboard(board) => board.present(app),
+            Self::NetworkChart(chart) => chart.present(app),
         }
     }
 }

@@ -48,6 +48,9 @@ pub enum HostPurpose {
     /// (`C4GuiDialogs.cpp:677`), and the dialog it belongs to is deleted with
     /// it, so this is a destroy rather than a hide.
     Scoreboard,
+    /// The `C4ChartDialog` console window, destroyed by `Dialog::Close` for
+    /// the same reason the scoreboard's is.
+    NetworkChart,
 }
 
 /// One window's surface lifecycle. Implementations own the real window, pixel
@@ -283,7 +286,8 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
             HostPurpose::Viewport { .. }
             | HostPurpose::ObjectList
             | HostPurpose::ComponentEditor
-            | HostPurpose::Scoreboard => {
+            | HostPurpose::Scoreboard
+            | HostPurpose::NetworkChart => {
                 self.records.remove(&id);
                 CloseOutcome::Destroyed
             }

@@ -514,6 +514,16 @@ impl GameApp {
         self.console_mode && self.scoreboard_dialog.is_some()
     }
 
+    /// Whether the chart wants a console child window.
+    ///
+    /// `C4ChartDialog` is built through `C4GUI::Dialog` without
+    /// `fViewportDlg`, so it takes the same console arm as the scoreboard
+    /// above (`C4GuiDialogs.cpp:659-661`) and its window lives exactly as long
+    /// as the dialog does.
+    pub(crate) fn console_network_chart_window_open(&self) -> bool {
+        self.console_mode && self.network_chart_dialog.is_some()
+    }
+
     pub(crate) fn close_scoreboard_dialog(&mut self) -> bool {
         let closed = self.scoreboard_dialog.take().is_some();
         self.scoreboard_pointer_left();
