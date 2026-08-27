@@ -5190,6 +5190,98 @@ fn press_console_key(app: &mut GameApp, key: VirtualKeyCode, modifiers: Modifier
         .test_value();
 }
 
+/// The last two console-scope keys, and why they never fought the shell.
+///
+/// `EditCursorModeToggle` (`K_SPACE`) and `EditCursorDelete` (`K_DELETE`) are
+/// registered beside the `C4ToolsDlg` actions (`C4Game.cpp:3432,3440`). I had
+/// recorded them as contending with the console shell's text editing; they do
+/// not. The shell's own window routes keys to `DeveloperConsole::handle_key`
+/// and only reaches `handle_key` for a message dialog, while these fire from a
+/// **viewport** window, whose handler calls `Game.DoKeyboardInput` for every
+/// key (`C4Viewport.cpp:89`). Two windows, two routes, no contention.
+///
+/// `ToggleMode` steps Play -> Edit -> Draw -> Play and `Delete` removes the
+/// selection, both behind `EditingOK` (`C4EditCursor.cpp:350-359,530-545,
+/// 673-682`).
+#[test]
+fn console_edit_cursor_keys_cycle_the_mode_and_delete_the_selection() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+
+    for expected in [
+        ConsoleEditMode::Edit,
+        ConsoleEditMode::Draw,
+        ConsoleEditMode::Play,
+    ] {
+        press_console_key(&mut app, VirtualKeyCode::Space, ModifiersState::empty());
+        runtime_assert_eq!(app.developer_console_edit_mode => expected);
+    }
+
+    // `EditingOK` is the gate on both: a replay edits nothing.
+    app.developer_console_editing_enabled = false;
+    press_console_key(&mut app, VirtualKeyCode::Space, ModifiersState::empty());
+    runtime_assert_eq!(
+        app.developer_console_edit_mode => ConsoleEditMode::Play,
+        "ToggleMode refuses without Console.Editing",
+    );
+
+    // Fullscreen is not KEYSCOPE_Console: neither key acts there.
+    let mut fullscreen = new_lightweight_running_sandbox_app();
+    fullscreen.developer_console_edit_mode = ConsoleEditMode::Play;
+    press_console_key(&mut fullscreen, VirtualKeyCode::Space, ModifiersState::empty());
+    runtime_assert_eq!(
+        fullscreen.developer_console_edit_mode => ConsoleEditMode::Play,
+        "KEYSCOPE_Console actions are inert outside the console",
+    );
+}
+
+/// The console-scope actions are reachable from a gamepad too.
+///
+/// Every one of them is a `C4CustomKey` like the globals, and
+/// `LoadCustomConfig` replaces its code with whatever `[Keys]` holds
+/// (`C4Game.cpp:3481-3482`), so a configured button has to reach the same
+/// callback the keyboard does.
+#[test]
+fn console_scope_gamepad_overrides_reach_the_edit_cursor_and_tools() {
+    let bound = |name: &str, console: bool| {
+        let source = format!("[Keys]\n{name}=\\x0042000a\n");
+        let mut app = new_running_sandbox_app();
+        app.console_mode = console;
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(source.as_bytes()).test_value()))
+            .test_value();
+        app
+    };
+    let press = |app: &mut GameApp| {
+        app.handle_gamepad_button(
+            GamepadSlot::new(0),
+            LegacyGamepadButton::new(0),
+            ElementState::Pressed,
+        )
+        .test_value();
+    };
+
+    // `ToggleIFT` is the simplest C4ToolsDlg callback to observe.
+    let mut ift = bound("ToolsDlgIFTToggle", true);
+    let before = ift.developer_tools.ift();
+    press(&mut ift);
+    runtime_assert_eq!(ift.developer_tools.ift() => !before);
+
+    // `ToggleMode` steps the cursor mode.
+    let mut mode = bound("EditCursorModeToggle", true);
+    mode.developer_console_edit_mode = ConsoleEditMode::Play;
+    press(&mut mode);
+    runtime_assert_eq!(mode.developer_console_edit_mode => ConsoleEditMode::Edit);
+
+    // And the scope still holds: none of them act in fullscreen.
+    let mut fullscreen = bound("ToolsDlgIFTToggle", false);
+    let untouched = fullscreen.developer_tools.ift();
+    press(&mut fullscreen);
+    runtime_assert_eq!(fullscreen.developer_tools.ift() => untouched);
+}
+
 /// `C4Game.cpp:3433-3439` registers the C4ToolsDlg actions at
 /// `KEYSCOPE_Console`, so they act only in console mode. `ChangeGrade` clamps
 /// into `[C4TLS_GradeMin, C4TLS_GradeMax]` and has no availability gate of its

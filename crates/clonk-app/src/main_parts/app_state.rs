@@ -2523,6 +2523,10 @@ pub(crate) enum RuntimeDebugKey {
 /// (`C4Game.cpp:3433-3439`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConsoleToolsAction {
+    /// `C4EditCursor::ToggleMode` (`C4Game.cpp:3432`).
+    ToggleCursorMode,
+    /// `C4EditCursor::Delete` (`C4Game.cpp:3440`).
+    DeleteSelection,
     GradeUp,
     GradeDown,
     PopMaterial,
@@ -2560,6 +2564,10 @@ pub(crate) enum RuntimeCustomGamepadAction {
     /// `C4GraphicsSystem::FreeScroll` with its registered vector
     /// (C4Game.cpp:3423-3426).
     FreeViewScroll(Vector2),
+    /// The console-scope `C4EditCursor`/`C4ToolsDlg` block, which the
+    /// keyboard route resolves as [`ConsoleToolsAction`] (C4Game.cpp:
+    /// 3432-3440). A gamepad reaches the same callbacks.
+    ConsoleTools(ConsoleToolsAction),
     /// `C4Network2::ToggleClientListDlg` (C4Game.cpp:3379).
     ClientList,
     /// `C4GraphicsSystem::ViewportNextPlayer` at KEYSCOPE_FreeView — the

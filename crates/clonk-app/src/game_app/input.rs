@@ -2699,9 +2699,12 @@ impl GameApp {
         // key, and lose the same way to a rebound player control.
         //
         // `EditCursorModeToggle` (`K_SPACE`) and `EditCursorDelete`
-        // (`K_DELETE`) register in the same block and are deliberately absent:
-        // the console shell owns both for text editing, and reproducing C++'s
-        // GTK edit-box ownership is its own change (clonk-org/clonk-rs#1222).
+        // (`K_DELETE`) belong to the same block. They never contended with the
+        // console shell's text editing: the shell's own window routes keys to
+        // `DeveloperConsole::handle_key` and reaches this dispatcher only for a
+        // message dialog, while these fire from a viewport window, whose
+        // handler offers every key to `Game.DoKeyboardInput`
+        // (`C4Viewport.cpp:89`).
         let tools_action = self
             .console_mode
             .then(|| self.console_tools_key_action(key, c4_modifiers))
@@ -3425,6 +3428,14 @@ impl GameApp {
         }) {
             return Some(RuntimeCustomGamepadAction::Pause);
         }
+        // The console block registers immediately after the pause key
+        // (C4Game.cpp:3432-3440) and only acts in console mode, which is
+        // what its scope means.
+        if self.console_mode {
+            if let Some(action) = self.console_tools_gamepad_action(&matches) {
+                return Some(RuntimeCustomGamepadAction::ConsoleTools(action));
+            }
+        }
         if matches("ChartToggle") {
             return Some(RuntimeCustomGamepadAction::Chart);
         }
@@ -3475,6 +3486,11 @@ impl GameApp {
         let bare = c4_modifiers.is_empty();
         [
             (
+                "EditCursorModeToggle",
+                ConsoleToolsAction::ToggleCursorMode,
+                key == VirtualKeyCode::Space && bare,
+            ),
+            (
                 "ToolsDlgGradeUp",
                 ConsoleToolsAction::GradeUp,
                 key == VirtualKeyCode::NumpadAdd && bare,
@@ -3504,12 +3520,41 @@ impl GameApp {
                 ConsoleToolsAction::ToggleTool,
                 key == VirtualKeyCode::KeyW && control,
             ),
+            (
+                "EditCursorDelete",
+                ConsoleToolsAction::DeleteSelection,
+                key == VirtualKeyCode::Delete && bare,
+            ),
         ]
         .into_iter()
         .find_map(|(name, action, default_matches)| {
             self.runtime_keyboard_binding_matches(name, key, default_matches)
                 .then_some(action)
         })
+    }
+
+    /// Which console-scope action a gamepad code names, in the order
+    /// `C4Game::InitKeyboard` registers them.
+    ///
+    /// The keyboard route resolves the same names against a key; this resolves
+    /// them against whatever `[Keys]` bound, which for a `C4CustomKey` is the
+    /// same list either device reads.
+    fn console_tools_gamepad_action(
+        &self,
+        matches: &impl Fn(&str) -> bool,
+    ) -> Option<ConsoleToolsAction> {
+        [
+            ("EditCursorModeToggle", ConsoleToolsAction::ToggleCursorMode),
+            ("ToolsDlgGradeUp", ConsoleToolsAction::GradeUp),
+            ("ToolsDlgGradeDown", ConsoleToolsAction::GradeDown),
+            ("ToolsDlgPopMaterial", ConsoleToolsAction::PopMaterial),
+            ("ToolsDlgPopTextures", ConsoleToolsAction::PopTextures),
+            ("ToolsDlgIFTToggle", ConsoleToolsAction::ToggleIft),
+            ("ToolsDlgToolToggle", ConsoleToolsAction::ToggleTool),
+            ("EditCursorDelete", ConsoleToolsAction::DeleteSelection),
+        ]
+        .into_iter()
+        .find_map(|(name, action)| matches(name).then_some(action))
     }
 
     /// Run one, with the availability its C++ callback checks for itself.
@@ -3522,6 +3567,22 @@ impl GameApp {
             // of its own (`C4ToolsDlg.cpp:739-745`). `change_grade` takes the
             // step count and applies `GRADE_KEY_STEP` per step, which is the
             // five grades the key registrations pass.
+            // `ToggleMode` steps Play -> Edit -> Draw -> Play behind `EditingOK`
+            // (`C4EditCursor.cpp:530-545`), so a replay changes nothing.
+            ConsoleToolsAction::ToggleCursorMode => {
+                if self.console_editing_ok() {
+                    let next = match self.developer_console_edit_mode {
+                        ConsoleEditMode::Play => ConsoleEditMode::Edit,
+                        ConsoleEditMode::Edit => ConsoleEditMode::Draw,
+                        ConsoleEditMode::Draw => ConsoleEditMode::Play,
+                    };
+                    let previous = self.console_cursor_mode();
+                    self.developer_console_edit_mode = next;
+                    self.apply_developer_cursor_mode_change(previous);
+                }
+            }
+            // `Delete` carries its own `EditingOK` (`:350-359`).
+            ConsoleToolsAction::DeleteSelection => self.console_delete_selection(),
             ConsoleToolsAction::GradeUp => self.developer_tools.change_grade(1),
             ConsoleToolsAction::GradeDown => self.developer_tools.change_grade(-1),
             ConsoleToolsAction::ToggleIft => self.developer_tools.toggle_ift(),
@@ -3616,6 +3677,9 @@ impl GameApp {
             }
             RuntimeCustomGamepadAction::StatsToggle => {
                 self.display_flags.show_stats = !self.display_flags.show_stats;
+            }
+            RuntimeCustomGamepadAction::ConsoleTools(action) => {
+                self.execute_console_tools_action(action);
             }
             RuntimeCustomGamepadAction::ClientList => self.toggle_runtime_client_list()?,
             RuntimeCustomGamepadAction::ObserverNextPlayer => {
