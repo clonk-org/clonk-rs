@@ -13,7 +13,7 @@ impl GameApp {
             self.classic_command_line.league_server_signup,
         );
         if let Some(fair_crew) = self.classic_command_line.fair_crew {
-            self.startup_view_flags.fair_crew = fair_crew;
+            self.startup.view_flags.fair_crew = fair_crew;
             self.scenario_game_options
                 .set_lobby_fair_crew(fair_crew, false);
         }
@@ -98,7 +98,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::Options
+            || self.startup.view != StartupView::Options
             || key != VirtualKeyCode::Tab
         {
             return Ok(false);
@@ -123,7 +123,8 @@ impl GameApp {
             return Ok(true);
         };
         let actions = if state == ElementState::Pressed {
-            self.startup_options_dialog
+            self.startup
+                .options_dialog
                 .as_mut()
                 .map(|dialog| {
                     if cycle_sheet {
@@ -142,7 +143,7 @@ impl GameApp {
 
     pub(crate) fn options_modified_gui_key_is_inert(&self, key: VirtualKeyCode) -> bool {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::Options
+            || self.startup.view != StartupView::Options
             || key == VirtualKeyCode::Tab
             || map_key_code(key).is_none()
         {
@@ -156,7 +157,7 @@ impl GameApp {
         if modifiers == ModifiersState::ALT
             && matches!(key, VirtualKeyCode::ArrowDown | VirtualKeyCode::Space)
             && self
-                .startup_options_dialog
+                .startup.options_dialog
                 .as_ref()
                 .is_some_and(|dialog| {
                     matches!(
@@ -364,7 +365,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::ScenarioBrowser
+            || self.startup.view != StartupView::ScenarioBrowser
             || self.game_option_input_dialog.is_some()
             || self.context_menu.is_some()
         {
@@ -489,7 +490,7 @@ impl GameApp {
         if !self.bindings.rebind_for_set(target.set, id, key) {
             return Ok(true);
         }
-        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+        if let Some(dialog) = self.startup.options_dialog.as_mut() {
             dialog
                 .controls_mut()
                 .set_label(target, format_key_label(key));
@@ -646,14 +647,14 @@ impl GameApp {
 
     fn open_options_language_combo(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::Options
+            || self.startup.view != StartupView::Options
             || !self.message_dialogs.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
         {
             return Ok(false);
         }
-        let Some((anchor, entries)) = self.startup_options_dialog.as_ref().and_then(|dialog| {
+        let Some((anchor, entries)) = self.startup.options_dialog.as_ref().and_then(|dialog| {
             let anchor = dialog.language_combo_anchor()?;
             let entries = dialog
                 .program()
@@ -674,7 +675,7 @@ impl GameApp {
 
     fn open_options_font_face_combo(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::Options
+            || self.startup.view != StartupView::Options
             || !self.message_dialogs.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
@@ -682,7 +683,8 @@ impl GameApp {
             return Ok(false);
         }
         let Some(anchor) = self
-            .startup_options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .and_then(|dialog| dialog.font_face_combo_anchor())
         else {
@@ -701,7 +703,7 @@ impl GameApp {
 
     fn open_options_font_size_combo(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::Options
+            || self.startup.view != StartupView::Options
             || !self.message_dialogs.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
@@ -709,7 +711,8 @@ impl GameApp {
             return Ok(false);
         }
         let Some(anchor) = self
-            .startup_options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .and_then(|dialog| dialog.font_size_combo_anchor())
         else {
@@ -729,14 +732,15 @@ impl GameApp {
     fn open_options_display_mode_combo(&mut self) -> Result<bool, EngineError> {
         use clonk_frontend::startup_options_graphics::GraphicsDisplayMode;
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::Options
+            || self.startup.view != StartupView::Options
             || !self.message_dialogs.is_empty()
             || self.context_menu.is_some()
         {
             return Ok(false);
         }
         let Some(anchor) = self
-            .startup_options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .and_then(|dialog| dialog.graphics_display_combo_anchor())
         else {
@@ -889,9 +893,9 @@ impl GameApp {
         // `~ControlConfigArea` deletes it (`C4StartupOptionsDlg.cpp:251,
         // 344-352,988-991`). So the claim tracks the dialog's lifetime and the
         // selected set, not which sheet happens to be shown.
-        let selected = self.startup_options_dialog.as_ref().and_then(|dialog| {
+        let selected = self.startup.options_dialog.as_ref().and_then(|dialog| {
             (self.mode == AppMode::Menu
-                && self.startup_view == StartupView::Options
+                && self.startup.view == StartupView::Options
                 && self.config.gamepads_enabled)
                 .then(|| dialog.controls().selected_set(ControlDevice::Gamepad))
         });
@@ -913,7 +917,8 @@ impl GameApp {
             match action {
                 OptionsDlgAction::Back => {
                     let validation = self
-                        .startup_options_dialog
+                        .startup
+                        .options_dialog
                         .as_ref()
                         .map(|dialog| dialog.network().validate_ports())
                         .unwrap_or(Ok(()));
@@ -1057,8 +1062,8 @@ impl GameApp {
                 }
                 OptionsDlgAction::GamepadDeviceSelected(set) => {
                     let valid_selection = self.mode == AppMode::Menu
-                        && self.startup_view == StartupView::Options
-                        && self.startup_options_dialog.as_ref().is_some_and(|dialog| {
+                        && self.startup.view == StartupView::Options
+                        && self.startup.options_dialog.as_ref().is_some_and(|dialog| {
                             dialog.active_sheet() == OptionsSheet::Gamepad
                                 && dialog.controls().selected_set(
                                     clonk_frontend::startup_options_controls::ControlDevice::Gamepad,
@@ -1081,7 +1086,8 @@ impl GameApp {
                     // — every other child, including both `ControlConfigArea`s,
                     // is rebuilt from Config.
                     let return_sheet = self
-                        .startup_options_dialog
+                        .startup
+                        .options_dialog
                         .as_ref()
                         .map(|dialog| dialog.active_sheet());
                     self.startup_tooltip.pointer_left();
@@ -1090,7 +1096,7 @@ impl GameApp {
                     self.begin_startup_dialog_fade(StartupDialog::Options);
                     self.open_options_menu();
                     if let (Some(dialog), Some(sheet)) =
-                        (self.startup_options_dialog.as_mut(), return_sheet)
+                        (self.startup.options_dialog.as_mut(), return_sheet)
                     {
                         dialog.restore_sheet(sheet);
                     }
@@ -1105,10 +1111,10 @@ impl GameApp {
                 OptionsDlgAction::NetworkCheckboxChanged { id, checked } => {
                     self.play_ui_sound("ArrowHit");
                     if id == NetworkCheckboxId::UseAlternateServer && checked {
-                        let hidden = self
-                            .startup_options_dialog
-                            .as_ref()
-                            .is_some_and(|dialog| dialog.network().hide_no_official_league_notice);
+                        let hidden =
+                            self.startup.options_dialog.as_ref().is_some_and(|dialog| {
+                                dialog.network().hide_no_official_league_notice
+                            });
                         if !hidden {
                             self.show_options_alternate_server_notice()?;
                         }
@@ -1138,7 +1144,7 @@ impl GameApp {
         system_fonts: &dyn system_fonts::SystemFontProvider,
     ) -> Result<(), EngineError> {
         let Some((current_face, current_size)) =
-            self.startup_options_dialog.as_ref().map(|dialog| {
+            self.startup.options_dialog.as_ref().map(|dialog| {
                 (
                     dialog.program().font_face.clone(),
                     dialog
@@ -1185,20 +1191,20 @@ impl GameApp {
             }
         };
 
-        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+        if let Some(dialog) = self.startup.options_dialog.as_mut() {
             dialog.program_mut().set_font(face.clone(), size);
         }
         match self.persist_open_options_config() {
             Some(Ok(())) => {}
             Some(Err(error)) => {
                 tracing::warn!(%error, "failed to save selected options font");
-                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                if let Some(dialog) = self.startup.options_dialog.as_mut() {
                     dialog.program_mut().set_font(current_face, current_size);
                 }
                 return self.show_options_font_error();
             }
             None => {
-                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                if let Some(dialog) = self.startup.options_dialog.as_mut() {
                     dialog.program_mut().set_font(current_face, current_size);
                 }
                 return self.show_options_font_error();
@@ -1224,7 +1230,7 @@ impl GameApp {
             assets.options_book_fonts = Some(startup.options);
             assets.plrsel_book_fonts = Some(startup.player_selection);
         }
-        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+        if let Some(dialog) = self.startup.player_dialog.as_mut() {
             dialog.set_layout_fonts(fonts.as_ref(), player_selection_fonts.as_ref());
         }
         self.graphics.set_clonk_fonts(Some(fonts.clone()));
@@ -1330,7 +1336,8 @@ impl GameApp {
             }
         }
         let return_sheet = self
-            .startup_options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .map(|dialog| dialog.active_sheet())
             .unwrap_or_default();
@@ -1357,7 +1364,7 @@ impl GameApp {
             self.graphics.surface().width() as i32,
             self.graphics.surface().height() as i32,
         );
-        self.startup_options_advanced_dialog = Some(PendingOptionsAdvancedDialog {
+        self.startup.options_advanced_dialog = Some(PendingOptionsAdvancedDialog {
             controller,
             return_sheet,
         });
@@ -1401,9 +1408,9 @@ impl GameApp {
         self.startup_refresh_delay_ms =
             crate::effective_max_refresh_delay_ms(&native_config, self.display_refresh_period_ms);
         let record = load_recording_flag(paths);
-        self.startup_view_flags.record = record;
+        self.startup.view_flags.record = record;
         self.recording_enabled = record && self.recordings_dir.is_some();
-        self.startup_view_flags.fair_crew = load_fair_crew_flag(paths);
+        self.startup.view_flags.fair_crew = load_fair_crew_flag(paths);
         self.graphics_smoke_level = load_graphics_smoke_level(paths);
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
@@ -1467,7 +1474,7 @@ impl GameApp {
             self.configure_native_startup_fonts(config.application_scale(), point_filtering);
         }
         self.menu_backdrop_cache = StartupBackdropCache::default();
-        self.startup_dialog_fade = None;
+        self.startup.dialog_fade = None;
     }
 
     pub(crate) fn process_options_advanced_actions(
@@ -1477,7 +1484,8 @@ impl GameApp {
         use clonk_frontend::startup_options_advanced::AdvancedConfigAction;
 
         let sounds = self
-            .startup_options_advanced_dialog
+            .startup
+            .options_advanced_dialog
             .as_mut()
             .map(|pending| pending.controller.take_sound_events())
             .unwrap_or_default();
@@ -1494,11 +1502,12 @@ impl GameApp {
             match action {
                 AdvancedConfigAction::Cancel => {
                     self.startup_tooltip.pointer_left();
-                    self.startup_options_advanced_dialog = None;
+                    self.startup.options_advanced_dialog = None;
                 }
                 AdvancedConfigAction::Save => {
                     let Some((changes, return_sheet)) = self
-                        .startup_options_advanced_dialog
+                        .startup
+                        .options_advanced_dialog
                         .as_ref()
                         .map(|pending| (pending.controller.changes(), pending.return_sheet))
                     else {
@@ -1508,10 +1517,10 @@ impl GameApp {
                     match saved {
                         Ok(()) => {
                             self.startup_tooltip.pointer_left();
-                            self.startup_options_advanced_dialog = None;
+                            self.startup.options_advanced_dialog = None;
                             self.synchronize_advanced_options_runtime();
                             self.open_options_menu();
-                            if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                            if let Some(dialog) = self.startup.options_dialog.as_mut() {
                                 dialog.restore_sheet(return_sheet);
                             }
                             self.sync_options_gamepad_device();
@@ -1588,7 +1597,8 @@ impl GameApp {
         // key button draws beside its cap (C4StartupOptionsDlg.cpp:162-173,
         // 176-177, 242), not a separate hand-written name.
         let control = self
-            .startup_options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .and_then(|dialog| dialog.labels().control_keys.get(target.control))
             .map(String::as_str)
@@ -1695,7 +1705,7 @@ impl GameApp {
             audio.options.voice_push_to_talk = key;
         }
         let label = format_key_label(key);
-        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+        if let Some(dialog) = self.startup.options_dialog.as_mut() {
             dialog.set_voice_push_to_talk_label(label);
         }
         self.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)?;
@@ -1726,7 +1736,7 @@ impl GameApp {
         use clonk_frontend::startup_options_controls::{
             ControlCaptureTarget, CONTROL_KEY_COUNT, CONTROL_SET_COUNT,
         };
-        let Some(dialog) = self.startup_options_dialog.as_mut() else {
+        let Some(dialog) = self.startup.options_dialog.as_mut() else {
             return;
         };
         for set in 0..CONTROL_SET_COUNT {
@@ -1779,7 +1789,8 @@ impl GameApp {
             self.assets.input_dialog_resources().map(|_| ()),
         )?;
         let Some(network) = self
-            .startup_options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .map(|dialog| dialog.network())
         else {
@@ -1828,7 +1839,8 @@ impl GameApp {
             self.assets.input_dialog_resources().map(|_| ()),
         )?;
         let Some(scale) = self
-            .startup_options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .map(|dialog| dialog.graphics().proposed_scale_percent)
         else {
@@ -1855,7 +1867,7 @@ impl GameApp {
 
     pub(crate) fn open_options_menu(&mut self) {
         self.close_context_menu_silently();
-        self.startup_options_advanced_dialog = None;
+        self.startup.options_advanced_dialog = None;
         // Recreating the dialog destroys its ControlConfigArea before the
         // replacement starts on the Program sheet.
         self.gamepads.set_options_open_slot(None);
@@ -1888,7 +1900,7 @@ impl GameApp {
                 book,
             );
         }
-        self.startup_options_dialog = Some(dialog);
+        self.startup.options_dialog = Some(dialog);
         self.replace_startup_dialog(StartupView::Options, StartupDialog::Options);
         self.status_text.clear();
     }
@@ -1970,7 +1982,7 @@ impl GameApp {
 
     pub(crate) fn persist_open_options_config(&self) -> Option<io::Result<()>> {
         let paths = self.app_paths.as_ref()?;
-        let dialog = self.startup_options_dialog.as_ref()?;
+        let dialog = self.startup.options_dialog.as_ref()?;
         let audio = borrow_audio_context(self.sound.context.as_ref());
         Some(persist_startup_options_config(
             paths,
@@ -1985,7 +1997,7 @@ impl GameApp {
     }
 
     pub(crate) fn apply_open_options_config(&self, config: &mut Config) -> Option<()> {
-        let dialog = self.startup_options_dialog.as_ref()?;
+        let dialog = self.startup.options_dialog.as_ref()?;
         let audio = borrow_audio_context(self.sound.context.as_ref());
         apply_startup_options_config(
             config,
@@ -2141,7 +2153,7 @@ impl GameApp {
                 _,
             )) = self.remove_message_dialog_at(prompt_index)
             {
-                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                if let Some(dialog) = self.startup.options_dialog.as_mut() {
                     dialog.graphics_mut().revert_scale_test();
                 }
                 self.queue_options_display_request(OptionsDisplayRequest::SetScale {
@@ -2416,7 +2428,7 @@ impl GameApp {
                     );
                 }
                 GameOptionAction::FairCrewPreferenceChanged(enabled) => {
-                    self.startup_view_flags.fair_crew = enabled;
+                    self.startup.view_flags.fair_crew = enabled;
                     // `OnBtnFairCrew` outside the lobby "simply changes config
                     // setting" — an in-memory flip with no `Config.Save()`,
                     // exactly like the `OnBtnRecord` beside it
@@ -2430,7 +2442,7 @@ impl GameApp {
                     );
                 }
                 GameOptionAction::RecordPreferenceChanged(enabled) => {
-                    self.startup_view_flags.record = enabled;
+                    self.startup.view_flags.record = enabled;
                     self.recording_enabled = enabled && self.recordings_dir.is_some();
                     self.persist_game_option_value(
                         "General",
@@ -2697,7 +2709,7 @@ impl GameApp {
                         PendingInputDialogPurpose::OptionsGraphicsScale => {
                             if let Ok(value) = text.trim().parse::<i32>() {
                                 let test_action =
-                                    self.startup_options_dialog.as_mut().and_then(|dialog| {
+                                    self.startup.options_dialog.as_mut().and_then(|dialog| {
                                         let graphics = dialog.graphics_mut();
                                         let _ = graphics.set_scale_spinbox_value(value);
                                         graphics.request_scale_test()
@@ -2712,7 +2724,7 @@ impl GameApp {
                             }
                         }
                         PendingInputDialogPurpose::OptionsNetwork(field) => {
-                            if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                            if let Some(dialog) = self.startup.options_dialog.as_mut() {
                                 dialog.network_mut().set_text(field, text);
                             }
                         }
@@ -2841,7 +2853,7 @@ impl GameApp {
     }
 
     pub(crate) fn options_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
-        let dialog = self.startup_options_dialog.as_ref()?;
+        let dialog = self.startup.options_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let book = self.assets.options_book_fonts.as_deref()?;
         let surface = self.graphics.surface();

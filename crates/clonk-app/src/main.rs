@@ -2710,27 +2710,29 @@ impl GameApp {
             next_startup_direct_reference_query_id: 0,
             network_game_advertiser: None,
             advertised_game_reference: None,
-            startup_player_dialog: None,
-            startup_player_properties_dialog: None,
-            startup_user_portraits_written: false,
-            startup_last_portrait_folder_index: None,
-            startup_player_files,
-            startup_player_models,
-            startup_crew_files: Vec::new(),
-            startup_crew_models: Vec::new(),
-            startup_crew_player_index: None,
-            startup_crew_rename: None,
-            startup_options_dialog: None,
-            startup_options_advanced_dialog: None,
-            startup_about_dialog: None,
-            startup_view: StartupView::MainMenu,
-            startup_dialog_fade: None,
-            last_startup_dialog: StartupDialog::MainMenu,
-            startup_scenario_back_dialog: None,
-            startup_view_flags: StartupViewFlags {
-                fair_crew: load_fair_crew_flag(paths),
-                record: load_recording_flag(paths),
+            startup: StartupDialogState {
+                player_dialog: None,
+                player_properties_dialog: None,
+                user_portraits_written: false,
+                last_portrait_folder_index: None,
+                player_files: startup_player_files,
+                player_models: startup_player_models,
+                crew_files: Vec::new(),
+                crew_models: Vec::new(),
+                crew_player_index: None,
+                crew_rename: None,
+                options_dialog: None,
+                options_advanced_dialog: None,
+                about_dialog: None,
+                view: StartupView::MainMenu,
+                dialog_fade: None,
+                scenario_back_dialog: None,
+                view_flags: StartupViewFlags {
+                    fair_crew: load_fair_crew_flag(paths),
+                    record: load_recording_flag(paths),
+                },
             },
+            last_startup_dialog: StartupDialog::MainMenu,
             scenario_game_options,
             object_menu: None,
             ingame_menu: PlayerIngameMenus::default(),
@@ -3391,10 +3393,11 @@ impl GameApp {
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         let restart_same_dialog_fade = self
-            .startup_dialog_fade
+            .startup
+            .dialog_fade
             .as_ref()
             .and_then(|fade| (fade.outgoing == Some(fade.incoming)).then_some(fade.incoming));
-        self.startup_dialog_fade = None;
+        self.startup.dialog_fade = None;
         self.close_context_menu_silently();
         // Native resize tears down/repositions dialog elements and therefore
         // clears CMouse's owned hover element. A retained screen coordinate
@@ -3482,7 +3485,7 @@ impl GameApp {
                 dialog.resize(width as i32, height as i32);
                 dialog.pointer_left();
             }
-            if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            if let Some(dialog) = self.startup.player_dialog.as_mut() {
                 if let (Some(fonts), Some(book)) = (
                     self.assets.clonk_fonts.as_deref(),
                     self.assets.plrsel_book_fonts.as_deref(),
@@ -3494,7 +3497,8 @@ impl GameApp {
                 dialog.pointer_left();
             }
             let portrait_actions = self
-                .startup_player_properties_dialog
+                .startup
+                .player_properties_dialog
                 .as_mut()
                 .map(|pending| {
                     let actions = pending.controller.cancel_interaction();
@@ -3504,19 +3508,19 @@ impl GameApp {
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(portrait_actions);
             if let (Some(dialog), Some(fonts), Some(book)) = (
-                self.startup_options_dialog.as_mut(),
+                self.startup.options_dialog.as_mut(),
                 self.assets.clonk_fonts.as_deref(),
                 self.assets.options_book_fonts.as_deref(),
             ) {
                 dialog.resize(width as i32, height as i32, fonts, book);
                 dialog.pointer_left();
             }
-            if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+            if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                 pending.controller.resize(width as i32, height as i32);
                 pending.controller.cancel_interaction();
             }
             if let (Some(dialog), Some(fonts)) = (
-                self.startup_about_dialog.as_mut(),
+                self.startup.about_dialog.as_mut(),
                 self.assets.clonk_fonts.as_deref(),
             ) {
                 dialog.resize(width as i32, height as i32, fonts);
@@ -4366,13 +4370,14 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.keyboard_modifiers = ModifiersState::empty();
         self.running_pointer_position = None;
-        if let Some(rename) = self.startup_crew_rename.as_mut() {
+        if let Some(rename) = self.startup.crew_rename.as_mut() {
             rename.edit.cancel_pointer_selection();
             rename.last_click = None;
             rename.ignore_pointer_up = false;
         }
         let portrait_actions = self
-            .startup_player_properties_dialog
+            .startup
+            .player_properties_dialog
             .as_mut()
             .map(|pending| pending.controller.cancel_interaction())
             .unwrap_or_default();
@@ -5124,7 +5129,7 @@ impl GameApp {
             });
             return;
         }
-        if self.startup_view == StartupView::NetworkLobby {
+        if self.startup.view == StartupView::NetworkLobby {
             if let Some(lobby) = self.network_lobby.as_mut() {
                 lobby.push_log(LobbyLogLine {
                     text: line,
@@ -5550,8 +5555,8 @@ impl GameApp {
             || self.network_chart_dialog.is_some()
             || self.runtime_client_list.is_some()
             || self.chat.external_dialog_visible
-            || self.startup_options_advanced_dialog.is_some()
-            || self.startup_player_properties_dialog.is_some()
+            || self.startup.options_advanced_dialog.is_some()
+            || self.startup.player_properties_dialog.is_some()
             || self
                 .network_start_wait
                 .as_ref()
@@ -5607,7 +5612,7 @@ impl GameApp {
             || !self.window_active
             || !routing_still_active
             || !self.message_dialogs.is_empty()
-            || self.startup_player_properties_dialog.is_some()
+            || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
             || self.context_menu.is_some()
             || self.game_option_input_dialog.is_some()
@@ -6400,7 +6405,8 @@ impl GameApp {
 
     fn cancel_underlying_interaction(&mut self) {
         let portrait_actions = self
-            .startup_player_properties_dialog
+            .startup
+            .player_properties_dialog
             .as_mut()
             .map(|pending| pending.controller.cancel_interaction())
             .unwrap_or_default();
@@ -6423,14 +6429,14 @@ impl GameApp {
             return;
         }
         if matches!(self.mode, AppMode::Menu) {
-            match self.startup_view {
+            match self.startup.view {
                 StartupView::NetworkGame => {
                     if let Some(dialog) = self.startup_network_dialog.as_mut() {
                         dialog.cancel_interaction();
                     }
                 }
                 StartupView::PlayerSelection => {
-                    if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                    if let Some(dialog) = self.startup.player_dialog.as_mut() {
                         dialog.cancel_interaction();
                     }
                 }
@@ -8028,7 +8034,7 @@ impl GameApp {
     }
 
     fn about_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
-        let dialog = self.startup_about_dialog.as_ref()?;
+        let dialog = self.startup.about_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.graphics.surface();
         let layout = clonk_frontend::startup_about_dlg::about_layout(
@@ -8168,11 +8174,11 @@ impl GameApp {
         }
         if self.mode == AppMode::Menu
             && matches!(
-                self.startup_view,
+                self.startup.view,
                 StartupView::ScenarioBrowser | StartupView::NetworkLobby
             )
         {
-            if self.startup_view == StartupView::NetworkLobby && self.classic_host_lobby.is_some() {
+            if self.startup.view == StartupView::NetworkLobby && self.classic_host_lobby.is_some() {
                 check(
                     self.assets.game_lobby_resources().map(|_| ()),
                     "C4GameLobby",

@@ -216,7 +216,7 @@ fn runtime_join_data_tracks_slow_resource_then_cancel_aborts_without_status_pack
     let (manager, event_tx, _commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
 
     let resource = |resource_type: clonk_network::HostResourceType, id, name: &[u8]| {
@@ -302,7 +302,7 @@ fn runtime_join_data_tracks_slow_resource_then_cancel_aborts_without_status_pack
     main_assert!(app.blocking_resource_wait.is_none());
     main_assert!(app.admission_resources.resources.is_empty());
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.message_dialogs.iter().all(|dialog| !matches!(dialog.continuation, MessageDialogContinuation::BlockingResourceWait { .. })));
     let [failure] = app.message_dialogs.as_slice() else {
         panic!("Cancel should report one startup-network failure");
@@ -398,7 +398,7 @@ fn ordinary_client_go_tracks_slow_resource_then_cancel_aborts() {
     main_assert!(app.pending_client_start_status.is_none());
     main_assert!(app.blocking_resource_wait.is_none());
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     let [failure] = app.message_dialogs.as_slice() else {
         panic!("Cancel should report one startup-network failure");
     };
@@ -485,7 +485,7 @@ fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging
     settings.group_maker =
         clonk_engine::LegacyCString::from_bytes(b"M\x81ker".to_vec()).test_value();
     app.network_mode = Some(NetworkMode::Client(settings));
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     event_tx
         .send(NetworkEvent::JoinData(join_data.clone()))
@@ -869,7 +869,7 @@ fn plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
                 .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 4 && player.color == expected_color)));
 
     let mut client = new_menu_app(640, 480);
-    client.startup_view = StartupView::NetworkLobby;
+    client.startup.view = StartupView::NetworkLobby;
     client.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     client.control_clients.replace_snapshot([
         message_client(0, b"Exact Host"),
@@ -897,7 +897,7 @@ fn generic_client_resource_save_hit_target_emits_the_resource_id() {
     fs::write(&source, b"payload").test_value();
 
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     let mut settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client");
     settings.resource_directory = work.clone();
     app.network_mode = Some(NetworkMode::Client(settings));
@@ -1375,7 +1375,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         (layout.caption.y + layout.caption.h / 2) as f32,
     );
     let _ = controller.handle_pointer_move(title_point);
-    app.startup_options_advanced_dialog = Some(PendingOptionsAdvancedDialog {
+    app.startup.options_advanced_dialog = Some(PendingOptionsAdvancedDialog {
         controller,
         return_sheet: OptionsSheet::Program,
     });
@@ -1390,7 +1390,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         (layout.close_button.y + 1) as f32,
     );
     let _ = app
-        .startup_options_advanced_dialog
+        .startup.options_advanced_dialog
         .test_mut()
         .controller
         .handle_pointer_move(close_point);
@@ -1559,7 +1559,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     );
 
     app.runtime_client_list = None;
-    app.startup_options_advanced_dialog = None;
+    app.startup.options_advanced_dialog = None;
     let mut definition =
         clonk_frontend::definition_sel::DefinitionSelController::new("", Vec::new(), Vec::new());
     let (definition_width, definition_height) = {
@@ -1866,7 +1866,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
         .test_value();
     failure.poll_loading().test_value();
     main_assert_eq!(failure.mode => AppMode::Menu);
-    main_assert_eq!(failure.startup_view => StartupView::MainMenu);
+    main_assert_eq!(failure.startup.view => StartupView::MainMenu);
     main_assert!(failure.loading_state.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
@@ -2126,7 +2126,7 @@ fn client_network_settings_supply_the_local_system_resource_candidate() {
 #[test]
 fn player_context_menu_missing_global_resources_fails_typed_without_selection_mutation() {
     let mut app = new_menu_app(640, 480);
-    app.startup_player_models
+    app.startup.player_models
         .push(clonk_frontend::startup_plrsel::PlrSelPlayer {
             name: "No Assets".to_string(),
             activated: false,
@@ -2142,7 +2142,7 @@ fn player_context_menu_missing_global_resources_fails_typed_without_selection_mu
         });
     app.open_player_selection_dialog();
     let layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_pointer_position(Some(GuiPoint::new(
             (layout.list_client.x + 2) as f32,
@@ -2150,13 +2150,13 @@ fn player_context_menu_missing_global_resources_fails_typed_without_selection_mu
         )));
 
     remove_global_gui_sheet(&mut app, "GUISpinBoxArrow.png");
-    let selected_before = app.startup_player_dialog.test_ref().selected_index();
+    let selected_before = app.startup.player_dialog.test_ref().selected_index();
     let error = app
         .open_startup_player_context_menu(false)
         .expect_err("missing process-global resource must fail typed");
     main_assert!(matches!(error, EngineError::ClassicMenuParityBoundary { ref detail } if detail.contains("GUISpinBoxArrow")));
     main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player controller").selected_index() => selected_before);
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player controller").selected_index() => selected_before);
 }
 
 #[test]

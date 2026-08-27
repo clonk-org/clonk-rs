@@ -1412,17 +1412,18 @@ impl GameApp {
                 // C4GUI::ScrollBar repeats held arrows from DrawElement, so
                 // advance once per presentation rather than per update.
                 let _ = self
-                    .startup_player_properties_dialog
+                    .startup
+                    .player_properties_dialog
                     .as_mut()
                     .is_some_and(|pending| pending.controller.tick_portrait_selector_scrollbar());
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
-                if self.startup_view == StartupView::NetworkLobby
+                if self.startup.view == StartupView::NetworkLobby
                     && self.classic_host_lobby.is_none()
                 {
                     self.close_stale_classic_lobby_team_combo();
                 }
-                if self.startup_view == StartupView::NetworkGame
+                if self.startup.view == StartupView::NetworkGame
                     && !self.startup_network_transition_active()
                 {
                     // C4GUI::ScrollBar repeats held arrows from DrawElement,
@@ -1432,25 +1433,28 @@ impl GameApp {
                         .as_mut()
                         .is_some_and(|dialog| dialog.tick_scrollbar());
                 }
-                if self.startup_view == StartupView::PlayerSelection
+                if self.startup.view == StartupView::PlayerSelection
                     && self
-                        .startup_player_dialog
+                        .startup
+                        .player_dialog
                         .as_mut()
                         .is_some_and(|dialog| dialog.tick_scrollbar())
                 {
                     // Book-scrollbar arrows repeat once per presentation.
                     self.plrsel_last_click = None;
                 }
-                if self.startup_view == StartupView::About {
+                if self.startup.view == StartupView::About {
                     // About TextWindow arrows repeat from ScrollBar::DrawElement.
                     let _ = self
-                        .startup_about_dialog
+                        .startup
+                        .about_dialog
                         .as_mut()
                         .is_some_and(|dialog| dialog.tick_scrollbar());
                 }
-                if self.startup_view == StartupView::Options {
+                if self.startup.view == StartupView::Options {
                     let actions = self
-                        .startup_options_dialog
+                        .startup
+                        .options_dialog
                         .as_mut()
                         .map(|dialog| dialog.advance_frame())
                         .unwrap_or_default();
@@ -1458,7 +1462,7 @@ impl GameApp {
                         self.process_options_dialog_actions(actions)?;
                     }
                 }
-                if self.startup_view == StartupView::NetworkLobby
+                if self.startup.view == StartupView::NetworkLobby
                     && self.classic_host_lobby.is_some()
                 {
                     self.render_classic_host_lobby()?;
@@ -1572,7 +1576,7 @@ impl GameApp {
                 let expected_len = width as usize * height as usize * 4;
                 let visible_dialog = self.visible_startup_dialog();
                 let retained_fade = self.graphics.surface().is_gpu_scene_capture_active();
-                let fade_compatible = self.startup_dialog_fade.as_ref().is_some_and(|fade| {
+                let fade_compatible = self.startup.dialog_fade.as_ref().is_some_and(|fade| {
                     Some(fade.incoming) == visible_dialog
                         && (frame.len() == expected_len || retained_fade)
                         && fade.width == width
@@ -1591,15 +1595,16 @@ impl GameApp {
                             || (fade.underlay_gpu_recorder.is_some()
                                 && (fade.outgoing.is_none() || fade.outgoing_gpu_plan.is_some())))
                 });
-                if self.startup_dialog_fade.is_some() && !fade_compatible {
-                    self.startup_dialog_fade = None;
+                if self.startup.dialog_fade.is_some() && !fade_compatible {
+                    self.startup.dialog_fade = None;
                 }
                 let fade_was_active = fade_compatible;
-                if let Some(fade) = self.startup_dialog_fade.as_mut() {
+                if let Some(fade) = self.startup.dialog_fade.as_mut() {
                     fade.step = fade.step.saturating_add(1).min(STARTUP_DIALOG_FADE_STEPS);
                 }
                 let fade_draw_inactive = self
-                    .startup_dialog_fade
+                    .startup
+                    .dialog_fade
                     .as_ref()
                     .is_some_and(|fade| fade.step < STARTUP_DIALOG_FADE_STEPS);
                 let definition_selector_open = self.definition_selector.is_some();
@@ -1608,7 +1613,7 @@ impl GameApp {
                 // A fading C4GUI::Dialog is inactive even when it retains its
                 // focused control. Reuse the renderer's inactive-focus path.
                 let context_menu_open = self.context_menu.is_some()
-                    || self.startup_player_properties_dialog.is_some()
+                    || self.startup.player_properties_dialog.is_some()
                     || league_signup_open
                     || self.chat.external_dialog_visible
                     || self.runtime_client_list.is_some()
@@ -1633,10 +1638,10 @@ impl GameApp {
                     &self.scensel.entry_enabled,
                     scenario_loading_label.as_deref(),
                     self.startup_network_dialog.as_ref(),
-                    self.startup_player_dialog.as_ref(),
-                    &self.startup_player_models,
-                    &self.startup_crew_models,
-                    self.startup_crew_rename.as_mut(),
+                    self.startup.player_dialog.as_ref(),
+                    &self.startup.player_models,
+                    &self.startup.crew_models,
+                    self.startup.crew_rename.as_mut(),
                     base_context_menu,
                     context_menu_open,
                     definition_selector_open,
@@ -1644,15 +1649,16 @@ impl GameApp {
                     !self.message_dialogs.is_empty() || league_signup_open,
                     &self.scenario_game_options,
                     self.scensel.mode,
-                    self.startup_options_dialog.as_ref(),
-                    self.startup_options_advanced_dialog
+                    self.startup.options_dialog.as_ref(),
+                    self.startup
+                        .options_advanced_dialog
                         .as_mut()
                         .map(|pending| &mut pending.controller),
                     options_draw_focus,
-                    self.startup_about_dialog.as_ref(),
-                    self.startup_view,
+                    self.startup.about_dialog.as_ref(),
+                    self.startup.view,
                     network_lobby,
-                    self.startup_view_flags,
+                    self.startup.view_flags,
                     &mut self.menu_backdrop_cache,
                     defer_native_main_text && !fade_was_active,
                     menu_gamma,
@@ -1660,7 +1666,8 @@ impl GameApp {
                 )?;
                 if fade_was_active {
                     let fade = self
-                        .startup_dialog_fade
+                        .startup
+                        .dialog_fade
                         .take()
                         .expect("compatible startup fade must still be present");
                     if ordered_native || retained_fade {
@@ -1768,7 +1775,7 @@ impl GameApp {
                             .copy_from_slice(frame);
                     }
                     if fade.step < STARTUP_DIALOG_FADE_STEPS {
-                        self.startup_dialog_fade = Some(fade);
+                        self.startup.dialog_fade = Some(fade);
                     }
                 }
                 if ordered_native && !fade_was_active {
@@ -1780,11 +1787,13 @@ impl GameApp {
                 let point_filtering = self.graphics.point_filtering();
                 let application_scale = self.graphics.presentation_scale();
                 let portrait_selector_open = self
-                    .startup_player_properties_dialog
+                    .startup
+                    .player_properties_dialog
                     .as_ref()
                     .is_some_and(|pending| pending.controller.portrait_selector().is_some());
                 let portrait_location_popup_open = self
-                    .startup_player_properties_dialog
+                    .startup
+                    .player_properties_dialog
                     .as_ref()
                     .and_then(|pending| pending.controller.portrait_selector())
                     .is_some_and(|selector| selector.is_location_popup_open());
@@ -1793,7 +1802,7 @@ impl GameApp {
                     startup_assets.clonk_fonts.as_deref(),
                     startup_assets.options_book_fonts.as_deref(),
                 ) {
-                    if let Some(pending) = self.startup_player_properties_dialog.as_ref() {
+                    if let Some(pending) = self.startup.player_properties_dialog.as_ref() {
                         clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render_player_form(
                             self.graphics.surface_mut(),
                             &properties_assets,
@@ -1806,7 +1815,8 @@ impl GameApp {
                         self.next_pending_native_overlay();
                     }
                     if let Some(pending) = self
-                        .startup_player_properties_dialog
+                        .startup
+                        .player_properties_dialog
                         .as_mut()
                         .filter(|_| portrait_selector_open)
                     {
@@ -1864,7 +1874,7 @@ impl GameApp {
                     if let (Some(properties_assets), Some(fonts), Some(pending)) = (
                         startup_assets.plrprop_assets(point_filtering, application_scale),
                         startup_assets.clonk_fonts.as_deref(),
-                        self.startup_player_properties_dialog.as_ref(),
+                        self.startup.player_properties_dialog.as_ref(),
                     ) {
                         clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render_portrait_location_popup(
                             self.graphics.surface_mut(),
@@ -1918,7 +1928,7 @@ impl GameApp {
                 if !ordered_native
                     && !self.graphics.surface().is_gpu_scene_capture_active()
                     && (fade_was_active
-                        || self.startup_player_properties_dialog.is_some()
+                        || self.startup.player_properties_dialog.is_some()
                         || definition_selector_open
                         || game_option_input_open
                         || league_signup_open

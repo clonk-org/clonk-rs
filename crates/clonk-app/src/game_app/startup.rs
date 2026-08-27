@@ -100,7 +100,7 @@ impl GameApp {
 
     pub(crate) fn can_defer_native_main_menu_text(&self, scale: f32) -> bool {
         self.mode == AppMode::Menu
-            && self.startup_view == StartupView::MainMenu
+            && self.startup.view == StartupView::MainMenu
             && !self.startup_dialog_fade_active()
             && self.message_dialogs.is_empty()
             && self.context_menu.is_none()
@@ -176,7 +176,7 @@ impl GameApp {
     }
 
     pub(crate) fn startup_dialog_fade_active(&self) -> bool {
-        self.mode == AppMode::Menu && self.startup_dialog_fade.is_some()
+        self.mode == AppMode::Menu && self.startup.dialog_fade.is_some()
     }
 
     fn begin_startup_host_league_auth(
@@ -229,13 +229,14 @@ impl GameApp {
     }
 
     pub(crate) fn startup_crew_rename_rect(&self) -> Option<clonk_frontend::classic_gui::IntRect> {
-        let rename = self.startup_crew_rename.as_ref()?;
-        let current = self.startup_crew_files.get(rename.index)?;
+        let rename = self.startup.crew_rename.as_ref()?;
+        let current = self.startup.crew_files.get(rename.index)?;
         if current.file_name != rename.file_name || current.player_path != rename.player_path {
             return None;
         }
         let dialog = self
-            .startup_player_dialog
+            .startup
+            .player_dialog
             .as_ref()
             .filter(|dialog| dialog.is_crew_mode())?;
         let layout = dialog.layout();
@@ -255,8 +256,8 @@ impl GameApp {
         point: GuiPoint,
         require_inside: bool,
     ) -> Option<usize> {
-        let rename = self.startup_crew_rename.as_ref()?;
-        let dialog = self.startup_player_dialog.as_ref()?;
+        let rename = self.startup.crew_rename.as_ref()?;
+        let dialog = self.startup.player_dialog.as_ref()?;
         let layout = dialog.layout();
         let rect = self.startup_crew_rename_rect()?;
         let inside_rect = point.x >= rect.x as f32
@@ -279,7 +280,7 @@ impl GameApp {
             return false;
         };
         let now = Instant::now();
-        if let Some(rename) = self.startup_crew_rename.as_mut() {
+        if let Some(rename) = self.startup.crew_rename.as_mut() {
             let double_click = rename
                 .last_click
                 .is_some_and(|last| now.duration_since(last) < CPP_DOUBLE_CLICK_INTERVAL);
@@ -298,14 +299,15 @@ impl GameApp {
 
     pub(crate) fn handle_startup_crew_rename_pointer_move(&mut self, point: GuiPoint) -> bool {
         if !self
-            .startup_crew_rename
+            .startup
+            .crew_rename
             .as_ref()
             .is_some_and(|rename| rename.edit.is_dragging())
         {
             return false;
         }
         if let Some(position) = self.startup_crew_rename_char_pos(point, false) {
-            if let Some(rename) = self.startup_crew_rename.as_mut() {
+            if let Some(rename) = self.startup.crew_rename.as_mut() {
                 rename.edit.drag_pointer_selection(position);
             }
         }
@@ -314,14 +316,16 @@ impl GameApp {
 
     pub(crate) fn handle_startup_crew_rename_pointer_up(&mut self, point: GuiPoint) -> bool {
         if self
-            .startup_crew_rename
+            .startup
+            .crew_rename
             .as_mut()
             .is_some_and(|rename| std::mem::take(&mut rename.ignore_pointer_up))
         {
             return true;
         }
         if !self
-            .startup_crew_rename
+            .startup
+            .crew_rename
             .as_ref()
             .is_some_and(|rename| rename.edit.is_dragging())
         {
@@ -330,12 +334,13 @@ impl GameApp {
         let position = self
             .startup_crew_rename_char_pos(point, false)
             .or_else(|| {
-                self.startup_crew_rename
+                self.startup
+                    .crew_rename
                     .as_ref()
                     .map(|rename| rename.edit.caret())
             })
             .unwrap_or(0);
-        if let Some(rename) = self.startup_crew_rename.as_mut() {
+        if let Some(rename) = self.startup.crew_rename.as_mut() {
             rename.edit.end_pointer_selection(position);
         }
         true
@@ -349,7 +354,7 @@ impl GameApp {
         let Some(position) = self.startup_crew_rename_char_pos(point, true) else {
             return false;
         };
-        if let Some(rename) = self.startup_crew_rename.as_mut() {
+        if let Some(rename) = self.startup.crew_rename.as_mut() {
             rename.edit.begin_pointer_selection(position);
             rename.edit.end_pointer_selection(position);
             if let Some(primary) = primary {
@@ -364,7 +369,7 @@ impl GameApp {
         key: KeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        match self.startup_view {
+        match self.startup.view {
             StartupView::NetworkGame => {
                 let actions = self
                     .startup_network_dialog
@@ -378,7 +383,8 @@ impl GameApp {
             }
             StartupView::PlayerSelection => {
                 let actions = self
-                    .startup_player_dialog
+                    .startup
+                    .player_dialog
                     .as_mut()
                     .map(|dialog| match state {
                         ElementState::Pressed => dialog.handle_key_down(key),
@@ -389,7 +395,8 @@ impl GameApp {
             }
             StartupView::Options => {
                 let actions = self
-                    .startup_options_dialog
+                    .startup
+                    .options_dialog
                     .as_mut()
                     .map(|dialog| match state {
                         ElementState::Pressed => dialog.handle_key_down(key),
@@ -400,7 +407,8 @@ impl GameApp {
             }
             StartupView::About => {
                 let actions = self
-                    .startup_about_dialog
+                    .startup
+                    .about_dialog
                     .as_mut()
                     .map(|dialog| match state {
                         ElementState::Pressed => dialog.handle_key_down(key),
@@ -422,20 +430,20 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || key != VirtualKeyCode::Tab
             || !matches!(
-                self.startup_view,
+                self.startup.view,
                 StartupView::NetworkGame | StartupView::PlayerSelection | StartupView::About
             )
         {
             return Ok(false);
         }
-        if self.startup_view == StartupView::PlayerSelection && self.startup_crew_rename.is_some() {
+        if self.startup.view == StartupView::PlayerSelection && self.startup.crew_rename.is_some() {
             // RenameEdit owns Tab as a focus-loss commit. Its FinishRename
             // restores the saved control and cancels this traversal.
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
-        if self.startup_view == StartupView::NetworkGame
+        if self.startup.view == StartupView::NetworkGame
             && (modifiers == ModifiersState::CONTROL
                 || modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT))
             && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
@@ -468,7 +476,7 @@ impl GameApp {
         if state == ElementState::Released {
             return Ok(true);
         }
-        match self.startup_view {
+        match self.startup.view {
             StartupView::NetworkGame => {
                 let actions = self
                     .startup_network_dialog
@@ -481,7 +489,8 @@ impl GameApp {
             }
             StartupView::PlayerSelection => {
                 let actions = self
-                    .startup_player_dialog
+                    .startup
+                    .player_dialog
                     .as_mut()
                     .map(|dialog| {
                         dialog.handle_key_down_with_tab_direction(KeyCode::Tab, backwards)
@@ -491,7 +500,8 @@ impl GameApp {
             }
             StartupView::About => {
                 let actions = self
-                    .startup_about_dialog
+                    .startup
+                    .about_dialog
                     .as_mut()
                     .map(|dialog| {
                         dialog.handle_key_down_with_tab_direction(KeyCode::Tab, backwards)
@@ -512,7 +522,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.game_over_dialog.is_some()
             || !matches!(
-                self.startup_view,
+                self.startup.view,
                 StartupView::MainMenu
                     | StartupView::PlayerSelection
                     | StartupView::Options
@@ -539,7 +549,7 @@ impl GameApp {
         let Some(character) = startup_dialog_hotkey(key) else {
             return Ok(suppress_plain_gui_key);
         };
-        let captured = match self.startup_view {
+        let captured = match self.startup.view {
             StartupView::MainMenu => {
                 let Some(actions) = self.main_menu_state.menu.handle_hotkey(character) else {
                     return Ok(suppress_plain_gui_key);
@@ -551,7 +561,8 @@ impl GameApp {
             }
             StartupView::PlayerSelection => {
                 let Some(actions) = self
-                    .startup_player_dialog
+                    .startup
+                    .player_dialog
                     .as_mut()
                     .and_then(|dialog| dialog.handle_hotkey(character))
                 else {
@@ -565,7 +576,8 @@ impl GameApp {
                     return Ok(suppress_plain_gui_key);
                 }
                 let Some(actions) = self
-                    .startup_options_dialog
+                    .startup
+                    .options_dialog
                     .as_mut()
                     .and_then(|dialog| dialog.handle_hotkey(character))
                 else {
@@ -580,7 +592,8 @@ impl GameApp {
             }
             StartupView::About => {
                 let Some(actions) = self
-                    .startup_about_dialog
+                    .startup
+                    .about_dialog
                     .as_mut()
                     .and_then(|dialog| dialog.handle_hotkey(character))
                 else {
@@ -611,7 +624,7 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.startup_view != StartupView::PlayerSelection || self.startup_crew_rename.is_none() {
+        if self.startup.view != StartupView::PlayerSelection || self.startup.crew_rename.is_none() {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
@@ -643,7 +656,8 @@ impl GameApp {
         match key {
             VirtualKeyCode::F2 if modifiers.is_empty() => {
                 let index = self
-                    .startup_crew_rename
+                    .startup
+                    .crew_rename
                     .as_ref()
                     .map(|rename| rename.index)
                     .expect("active crew rename remains installed");
@@ -657,50 +671,50 @@ impl GameApp {
                 self.commit_startup_crew_rename(false)?;
             }
             VirtualKeyCode::Backspace if cursor_modifiers => {
-                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                if let Some(rename) = self.startup.crew_rename.as_mut() {
                     rename.edit.backspace(ctrl, shift);
                 }
             }
             VirtualKeyCode::Delete if cursor_modifiers => {
-                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                if let Some(rename) = self.startup.crew_rename.as_mut() {
                     rename.edit.delete(ctrl, shift);
                 }
             }
             VirtualKeyCode::ArrowLeft if cursor_modifiers => {
-                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                if let Some(rename) = self.startup.crew_rename.as_mut() {
                     rename
                         .edit
                         .move_cursor(RenameEditCursorOperation::Left, ctrl, shift);
                 }
             }
             VirtualKeyCode::ArrowRight if cursor_modifiers => {
-                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                if let Some(rename) = self.startup.crew_rename.as_mut() {
                     rename
                         .edit
                         .move_cursor(RenameEditCursorOperation::Right, ctrl, shift);
                 }
             }
             VirtualKeyCode::Home if cursor_modifiers => {
-                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                if let Some(rename) = self.startup.crew_rename.as_mut() {
                     rename
                         .edit
                         .move_cursor(RenameEditCursorOperation::Home, ctrl, shift);
                 }
             }
             VirtualKeyCode::End if cursor_modifiers => {
-                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                if let Some(rename) = self.startup.crew_rename.as_mut() {
                     rename
                         .edit
                         .move_cursor(RenameEditCursorOperation::End, ctrl, shift);
                 }
             }
             VirtualKeyCode::KeyA if modifiers == ModifiersState::CONTROL => {
-                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                if let Some(rename) = self.startup.crew_rename.as_mut() {
                     rename.edit.select_all();
                 }
             }
             VirtualKeyCode::KeyC if modifiers == ModifiersState::CONTROL => {
-                let result = self.startup_crew_rename.as_mut().map(|rename| {
+                let result = self.startup.crew_rename.as_mut().map(|rename| {
                     transfer_edit_selection(&mut rename.edit, false, |selected| {
                         arboard::Clipboard::new()
                             .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
@@ -711,7 +725,7 @@ impl GameApp {
                 }
             }
             VirtualKeyCode::KeyX if modifiers == ModifiersState::CONTROL => {
-                let result = self.startup_crew_rename.as_mut().map(|rename| {
+                let result = self.startup.crew_rename.as_mut().map(|rename| {
                     transfer_edit_selection(&mut rename.edit, true, |selected| {
                         arboard::Clipboard::new()
                             .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
@@ -724,7 +738,7 @@ impl GameApp {
             VirtualKeyCode::KeyV if modifiers == ModifiersState::CONTROL => {
                 match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
                     Ok(text) => {
-                        if let Some(rename) = self.startup_crew_rename.as_mut() {
+                        if let Some(rename) = self.startup.crew_rename.as_mut() {
                             rename.edit.insert_text(&text);
                         }
                     }
@@ -740,9 +754,9 @@ impl GameApp {
 
     pub(crate) fn startup_options_dialog_has_focus_owner(&self) -> bool {
         self.mode == AppMode::Menu
-            && self.startup_view == StartupView::Options
-            && self.startup_options_dialog.is_some()
-            && self.startup_options_advanced_dialog.is_none()
+            && self.startup.view == StartupView::Options
+            && self.startup.options_dialog.is_some()
+            && self.startup.options_advanced_dialog.is_none()
             && self.message_dialogs.is_empty()
             && self.context_menu.is_none()
             && self.definition_selector.is_none()
@@ -1900,7 +1914,7 @@ impl GameApp {
     fn startup_irc_chat_visible(&self) -> bool {
         self.chat.external_dialog_visible
             || (self.mode == AppMode::Menu
-                && self.startup_view == StartupView::NetworkGame
+                && self.startup.view == StartupView::NetworkGame
                 && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
                     dialog.mode() == clonk_frontend::startup_netdlg::NetDlgMode::Chat
                 }))
@@ -2947,10 +2961,10 @@ impl GameApp {
         keyboard_trigger: bool,
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::PlayerSelection
+            || self.startup.view != StartupView::PlayerSelection
             || !self.message_dialogs.is_empty()
             || self.game_over_dialog.is_some()
-            || self.startup_player_properties_dialog.is_some()
+            || self.startup.player_properties_dialog.is_some()
             || self.game_option_input_dialog.is_some()
             || self.definition_selector.is_some()
             || self.context_menu.is_some()
@@ -2958,7 +2972,7 @@ impl GameApp {
             return Ok(false);
         }
         let Some((index, anchor, crew_mode)) =
-            self.startup_player_dialog.as_ref().and_then(|dialog| {
+            self.startup.player_dialog.as_ref().and_then(|dialog| {
                 if keyboard_trigger {
                     let (index, anchor) = dialog.keyboard_context_target()?;
                     Some((index, anchor, dialog.is_crew_mode()))
@@ -2972,7 +2986,7 @@ impl GameApp {
         else {
             return Ok(false);
         };
-        if let Some(rename_index) = self.startup_crew_rename.as_ref().map(|rename| rename.index) {
+        if let Some(rename_index) = self.startup.crew_rename.as_ref().map(|rename| rename.index) {
             if keyboard_trigger {
                 return Ok(false);
             }
@@ -2987,7 +3001,8 @@ impl GameApp {
         )?;
         if !keyboard_trigger
             && !self
-                .startup_player_dialog
+                .startup
+                .player_dialog
                 .as_mut()
                 .is_some_and(|dialog| dialog.select_for_context(index))
         {
@@ -3051,7 +3066,7 @@ impl GameApp {
 
     pub(crate) fn open_startup_participants_context_menu(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::MainMenu
+            || self.startup.view != StartupView::MainMenu
             || !self.message_dialogs.is_empty()
             || self.game_over_dialog.is_some()
         {
@@ -3239,7 +3254,7 @@ impl GameApp {
     }
 
     fn startup_network_dialog_is_covered_by_message(&self) -> bool {
-        self.startup_view == StartupView::NetworkGame
+        self.startup.view == StartupView::NetworkGame
             && self.startup_network_dialog.is_some()
             && !self.message_dialogs.is_empty()
     }
@@ -3288,9 +3303,10 @@ impl GameApp {
             .and_then(|paths| startup_participant_references(paths).ok())
             .unwrap_or_default();
         for (file, model) in self
-            .startup_player_files
+            .startup
+            .player_files
             .iter_mut()
-            .zip(self.startup_player_models.iter_mut())
+            .zip(self.startup.player_models.iter_mut())
         {
             let enabled = active
                 .iter()
@@ -3299,14 +3315,16 @@ impl GameApp {
             model.activated = enabled;
         }
         self.selected_player_file = active.iter().find_map(|reference| {
-            self.startup_player_files
+            self.startup
+                .player_files
                 .iter()
                 .find(|player| player.file_name.eq_ignore_ascii_case(reference))
                 .map(|player| player.player_file.clone())
         });
-        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+        if let Some(dialog) = self.startup.player_dialog.as_mut() {
             dialog.set_player_activations(
-                self.startup_player_models
+                self.startup
+                    .player_models
                     .iter()
                     .map(|player| player.activated)
                     .collect(),
@@ -3386,14 +3404,14 @@ impl GameApp {
             classic_safe_random(8),
             classic_safe_random(5),
         );
-        self.startup_player_properties_dialog =
+        self.startup.player_properties_dialog =
             Some(PendingStartupPlayerProperties { origin, controller });
         self.status_text.clear();
     }
 
     pub(crate) fn open_existing_startup_player_properties(&mut self, index: usize) {
         let Some((path, was_activated, player, comment, portrait, big_icon)) =
-            self.startup_player_files.get(index).map(|entry| {
+            self.startup.player_files.get(index).map(|entry| {
                 (
                     entry.path.clone(),
                     entry.render_model.activated,
@@ -3417,7 +3435,7 @@ impl GameApp {
             self.graphics.surface().width() as i32,
             self.graphics.surface().height() as i32,
         );
-        self.startup_player_properties_dialog = Some(PendingStartupPlayerProperties {
+        self.startup.player_properties_dialog = Some(PendingStartupPlayerProperties {
             origin: StartupPlayerPropertiesOrigin::SelectionEdit {
                 path,
                 was_activated,
@@ -3437,7 +3455,7 @@ impl GameApp {
             match action {
                 PlayerPropertiesAction::Cancel => {
                     self.startup_tooltip.pointer_left();
-                    self.startup_player_properties_dialog = None;
+                    self.startup.player_properties_dialog = None;
                     self.status_text.clear();
                 }
                 PlayerPropertiesAction::ChoosePicture => {
@@ -3447,7 +3465,7 @@ impl GameApp {
                     self.reload_startup_player_portrait_location(index, &path);
                 }
                 PlayerPropertiesAction::PortraitSelectorClosed { location_index } => {
-                    self.startup_last_portrait_folder_index = Some(location_index);
+                    self.startup.last_portrait_folder_index = Some(location_index);
                     if let Some(paths) = self.app_paths.as_ref() {
                         if let Err(error) = persist_startup_portrait_location(paths, location_index)
                         {
@@ -3483,7 +3501,7 @@ impl GameApp {
     pub(crate) fn reload_startup_player_portrait_location(&mut self, index: usize, path: &Path) {
         match clonk_frontend::startup_portraitsel::portrait_files_in_location(path) {
             Ok(entries) => {
-                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
                     pending
                         .controller
                         .replace_portrait_location_entries(index, entries);
@@ -3491,7 +3509,7 @@ impl GameApp {
             }
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "failed to scan portrait location");
-                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
                     pending.controller.fail_portrait_location_entries(
                         index,
                         format!("failed to scan {}: {error}", path.display()),
@@ -3524,7 +3542,8 @@ impl GameApp {
         use clonk_frontend::startup_portraitsel::PortraitChoice;
 
         let color = self
-            .startup_player_properties_dialog
+            .startup
+            .player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.player().pref_color_dw)
             .unwrap_or_default();
@@ -3560,7 +3579,7 @@ impl GameApp {
                 }
             }
         };
-        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+        if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
             pending.controller.apply_picture_selection(
                 portrait,
                 big_icon,
@@ -3574,7 +3593,8 @@ impl GameApp {
 
     pub(crate) fn advance_startup_player_portrait_thumbnail(&mut self) {
         let request = self
-            .startup_player_properties_dialog
+            .startup
+            .player_properties_dialog
             .as_mut()
             .and_then(|pending| pending.controller.advance_portrait_selector_idle());
         let Some(request) = request else {
@@ -3582,7 +3602,7 @@ impl GameApp {
         };
         let thumbnail = load_startup_portrait_image(&request.path)
             .map(|image| resize_startup_player_image(&image, 100));
-        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+        if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
             pending
                 .controller
                 .complete_portrait_thumbnail(&request, thumbnail);
@@ -3591,7 +3611,8 @@ impl GameApp {
 
     fn save_open_startup_player_properties(&mut self) {
         let Some((origin, player, comment, portrait, big_icon)) = self
-            .startup_player_properties_dialog
+            .startup
+            .player_properties_dialog
             .as_ref()
             .map(|pending| {
                 (
@@ -3643,7 +3664,7 @@ impl GameApp {
                     ),
                     _ => unreachable!("guarded player-name validation error"),
                 };
-                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
                     pending.controller.clear_validation_error();
                 }
                 self.status_text.clear();
@@ -3733,7 +3754,7 @@ impl GameApp {
         // persistence. The error dialog therefore belongs to the screen and
         // never leaves the properties form alive underneath it.
         self.startup_tooltip.pointer_left();
-        self.startup_player_properties_dialog = None;
+        self.startup.player_properties_dialog = None;
         self.reconcile_startup_player_list_after_properties_failure(origin, submitted_name);
         self.status_text.clear();
 
@@ -3757,7 +3778,8 @@ impl GameApp {
         submitted_name: &str,
     ) {
         let previous_players = self
-            .startup_player_files
+            .startup
+            .player_files
             .iter()
             .map(|player| {
                 (
@@ -3768,10 +3790,11 @@ impl GameApp {
             })
             .collect::<Vec<_>>();
         let previous_selected = self
-            .startup_player_dialog
+            .startup
+            .player_dialog
             .as_ref()
             .and_then(|dialog| dialog.selected_index())
-            .and_then(|index| self.startup_player_files.get(index))
+            .and_then(|index| self.startup.player_files.get(index))
             .map(|player| (player.path.clone(), player.file_name.clone()));
         let submitted_filename = player_group_filename(submitted_name).ok();
         let edit_paths = match (origin, submitted_filename.as_deref()) {
@@ -3866,24 +3889,26 @@ impl GameApp {
                 .position(|player| player.render_model.activated)
         })
         .or_else(|| (!players.is_empty()).then_some(0));
-        self.startup_player_models = players
+        self.startup.player_models = players
             .iter()
             .map(|player| player.render_model.clone())
             .collect();
-        self.startup_player_files = players;
+        self.startup.player_files = players;
         self.selected_player_file = selected_index
-            .and_then(|index| self.startup_player_files.get(index))
+            .and_then(|index| self.startup.player_files.get(index))
             .filter(|player| player.render_model.activated)
             .or_else(|| {
-                self.startup_player_files
+                self.startup
+                    .player_files
                     .iter()
                     .find(|player| player.render_model.activated)
             })
             .map(|player| player.player_file.clone());
-        if let Some(dialog) = self.startup_player_dialog.as_mut() {
-            dialog.set_player_count(self.startup_player_models.len());
+        if let Some(dialog) = self.startup.player_dialog.as_mut() {
+            dialog.set_player_count(self.startup.player_models.len());
             dialog.set_player_activations(
-                self.startup_player_models
+                self.startup
+                    .player_models
                     .iter()
                     .map(|player| player.activated)
                     .collect(),
@@ -3898,7 +3923,7 @@ impl GameApp {
     }
 
     fn record_startup_player_properties_save_failure(&mut self, error: String) {
-        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+        if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
             pending.controller.set_validation_error(Some(error.clone()));
         }
         self.status_text = error;
@@ -3910,7 +3935,8 @@ impl GameApp {
         origin: StartupPlayerPropertiesOrigin,
     ) {
         let previous_activations = self
-            .startup_player_files
+            .startup
+            .player_files
             .iter()
             .map(|player| (player.file_name.clone(), player.render_model.activated))
             .collect::<Vec<_>>();
@@ -3926,7 +3952,7 @@ impl GameApp {
         }
         let Some(paths) = self.app_paths.as_ref() else {
             self.startup_tooltip.pointer_left();
-            self.startup_player_properties_dialog = None;
+            self.startup.player_properties_dialog = None;
             self.status_text = "Player saved, but application paths are unavailable".to_string();
             return;
         };
@@ -3935,7 +3961,7 @@ impl GameApp {
             Err(error) => {
                 tracing::error!(%error, "failed to refresh startup players after save");
                 self.startup_tooltip.pointer_left();
-                self.startup_player_properties_dialog = None;
+                self.startup.player_properties_dialog = None;
                 self.refresh_participants_label();
                 self.status_text =
                     format!("Player saved, but the list could not be refreshed: {error}");
@@ -3976,24 +4002,26 @@ impl GameApp {
             Ok(refusals) => (None, refusals),
             Err(error) => (Some(error), Vec::new()),
         };
-        self.startup_player_models = players
+        self.startup.player_models = players
             .iter()
             .map(|player| player.render_model.clone())
             .collect();
-        self.startup_player_files = players;
+        self.startup.player_files = players;
         self.selected_player_file = saved_index
-            .and_then(|index| self.startup_player_files.get(index))
+            .and_then(|index| self.startup.player_files.get(index))
             .filter(|player| player.render_model.activated)
             .or_else(|| {
-                self.startup_player_files
+                self.startup
+                    .player_files
                     .iter()
                     .find(|player| player.render_model.activated)
             })
             .map(|player| player.player_file.clone());
-        if let Some(dialog) = self.startup_player_dialog.as_mut() {
-            dialog.set_player_count(self.startup_player_models.len());
+        if let Some(dialog) = self.startup.player_dialog.as_mut() {
+            dialog.set_player_count(self.startup.player_models.len());
             dialog.set_player_activations(
-                self.startup_player_models
+                self.startup
+                    .player_models
                     .iter()
                     .map(|player| player.activated)
                     .collect(),
@@ -4001,7 +4029,7 @@ impl GameApp {
             dialog.set_selected_index(saved_index);
         }
         self.startup_tooltip.pointer_left();
-        self.startup_player_properties_dialog = None;
+        self.startup.player_properties_dialog = None;
         self.refresh_participants_label();
         if let Some(error) = persistence_error {
             tracing::error!(%error, "failed to refresh participants after player save");
@@ -4044,9 +4072,10 @@ impl GameApp {
         index: usize,
     ) -> Result<(), EngineError> {
         let delete = self
-            .startup_player_files
+            .startup
+            .player_files
             .get(index)
-            .zip(self.startup_player_models.get(index))
+            .zip(self.startup.player_models.get(index))
             .map(|(player_file, player)| {
                 (
                     player_file.path.clone(),
@@ -4075,7 +4104,7 @@ impl GameApp {
         player_index: usize,
     ) -> Result<(), EngineError> {
         self.abort_startup_crew_rename();
-        let Some(player) = self.startup_player_files.get(player_index) else {
+        let Some(player) = self.startup.player_files.get(player_index) else {
             tracing::error!(player_index, "crew action references a stale player row");
             return Ok(());
         };
@@ -4104,7 +4133,7 @@ impl GameApp {
             .iter()
             .map(|entry| entry.render_model.participating)
             .collect();
-        let entered = self.startup_player_dialog.as_mut().is_some_and(|dialog| {
+        let entered = self.startup.player_dialog.as_mut().is_some_and(|dialog| {
             dialog.enter_crew_mode(player_index, player_name, participations)
         });
         if !entered {
@@ -4113,12 +4142,12 @@ impl GameApp {
         }
         // UpdatePlayerList replaces the row controls on this same dialog.
         self.startup_tooltip.pointer_left();
-        self.startup_crew_models = crew
+        self.startup.crew_models = crew
             .iter()
             .map(|entry| entry.render_model.clone())
             .collect();
-        self.startup_crew_files = crew;
-        self.startup_crew_player_index = Some(player_index);
+        self.startup.crew_files = crew;
+        self.startup.crew_player_index = Some(player_index);
         self.plrsel_last_click = None;
         self.status_text.clear();
         self.play_ui_sound("DoorOpen");
@@ -4129,7 +4158,8 @@ impl GameApp {
         self.abort_startup_crew_rename();
         self.close_context_menu_silently();
         if self
-            .startup_player_dialog
+            .startup
+            .player_dialog
             .as_mut()
             .and_then(|dialog| dialog.leave_crew_mode())
             .is_none()
@@ -4137,21 +4167,21 @@ impl GameApp {
             return;
         }
         self.startup_tooltip.pointer_left();
-        self.startup_crew_files.clear();
-        self.startup_crew_models.clear();
-        self.startup_crew_player_index = None;
+        self.startup.crew_files.clear();
+        self.startup.crew_models.clear();
+        self.startup.crew_player_index = None;
         self.plrsel_last_click = None;
         self.play_ui_sound("DoorClose");
     }
 
     fn reload_startup_crew_list(&mut self, select_file: Option<&str>) -> io::Result<()> {
-        let player_index = self.startup_crew_player_index.ok_or_else(|| {
+        let player_index = self.startup.crew_player_index.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "startup crew player is unavailable",
             )
         })?;
-        let player = self.startup_player_files.get(player_index).ok_or_else(|| {
+        let player = self.startup.player_files.get(player_index).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "startup crew player row is stale")
         })?;
         let mut crew = discover_crew_files(player)?;
@@ -4161,20 +4191,21 @@ impl GameApp {
             crew.iter()
                 .position(|entry| entry.file_name.eq_ignore_ascii_case(file_name))
         });
-        self.startup_crew_models = crew
+        self.startup.crew_models = crew
             .iter()
             .map(|entry| entry.render_model.clone())
             .collect();
-        self.startup_crew_files = crew;
-        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+        self.startup.crew_files = crew;
+        if let Some(dialog) = self.startup.player_dialog.as_mut() {
             dialog.set_crew_participations(
-                self.startup_crew_models
+                self.startup
+                    .crew_models
                     .iter()
                     .map(|entry| entry.participating)
                     .collect(),
             );
             dialog.set_selected_index(
-                selected.or_else(|| (!self.startup_crew_models.is_empty()).then_some(0)),
+                selected.or_else(|| (!self.startup.crew_models.is_empty()).then_some(0)),
             );
         }
         self.plrsel_last_click = None;
@@ -4202,7 +4233,8 @@ impl GameApp {
         participating: bool,
     ) -> Result<(), EngineError> {
         let Some((player_path, file_name)) = self
-            .startup_crew_files
+            .startup
+            .crew_files
             .get(index)
             .map(|entry| (entry.player_path.clone(), entry.file_name.clone()))
         else {
@@ -4216,19 +4248,20 @@ impl GameApp {
             self.process_group_maker.as_bytes(),
         ) {
             Ok(()) => {
-                if let Some(entry) = self.startup_crew_files.get_mut(index) {
+                if let Some(entry) = self.startup.crew_files.get_mut(index) {
                     entry.crew_info.participation = i32::from(participating);
                     entry.render_model.participating = participating;
                 }
-                if let Some(model) = self.startup_crew_models.get_mut(index) {
+                if let Some(model) = self.startup.crew_models.get_mut(index) {
                     model.participating = participating;
                 }
             }
             Err(error) => {
                 tracing::error!(%error, path = %player_path.display(), %file_name, "failed to rewrite crew participation");
-                if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                if let Some(dialog) = self.startup.player_dialog.as_mut() {
                     dialog.set_crew_participations(
-                        self.startup_crew_models
+                        self.startup
+                            .crew_models
                             .iter()
                             .map(|entry| entry.participating)
                             .collect(),
@@ -4245,7 +4278,7 @@ impl GameApp {
         &mut self,
         index: usize,
     ) -> Result<(), EngineError> {
-        let delete = self.startup_crew_files.get(index).map(|entry| {
+        let delete = self.startup.crew_files.get(index).map(|entry| {
             (
                 entry.player_path.clone(),
                 entry.file_name.clone(),
@@ -4278,7 +4311,7 @@ impl GameApp {
     ) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
         use clonk_frontend::startup_netdlg::NetDlgEditContextCommand as Command;
 
-        let Some(edit) = self.startup_crew_rename.as_ref().map(|rename| &rename.edit) else {
+        let Some(edit) = self.startup.crew_rename.as_ref().map(|rename| &rename.edit) else {
             return Vec::new();
         };
         let item = |command, label_key, label, tooltip_key, tooltip| {
@@ -4342,7 +4375,7 @@ impl GameApp {
         &mut self,
         anchor: GuiPoint,
     ) -> Result<bool, EngineError> {
-        if self.startup_crew_rename.is_none() {
+        if self.startup.crew_rename.is_none() {
             return Ok(false);
         }
         let entries = self.startup_crew_rename_context_entries(clipboard_text_available());
@@ -4355,7 +4388,7 @@ impl GameApp {
     ) {
         use clonk_frontend::startup_netdlg::NetDlgEditContextCommand as Command;
 
-        let Some(rename) = self.startup_crew_rename.as_mut() else {
+        let Some(rename) = self.startup.crew_rename.as_mut() else {
             tracing::error!(?command, "stale startup crew rename context command");
             return;
         };
@@ -4387,13 +4420,14 @@ impl GameApp {
     }
 
     pub(crate) fn start_startup_crew_rename(&mut self, index: usize) -> Result<(), EngineError> {
-        if self.startup_crew_rename.is_some() {
+        if self.startup.crew_rename.is_some() {
             return Ok(());
         }
         let Some((initial_text, player_path, file_name)) = self
-            .startup_crew_models
+            .startup
+            .crew_models
             .get(index)
-            .zip(self.startup_crew_files.get(index))
+            .zip(self.startup.crew_files.get(index))
             .map(|(model, file)| {
                 (
                     model.name.clone(),
@@ -4406,7 +4440,8 @@ impl GameApp {
             return Ok(());
         };
         let Some(previous_focus) = self
-            .startup_player_dialog
+            .startup
+            .player_dialog
             .as_ref()
             .filter(|dialog| dialog.is_crew_mode())
             .map(|dialog| dialog.focused_control())
@@ -4416,7 +4451,7 @@ impl GameApp {
         };
         self.close_context_menu_silently();
         self.startup_tooltip.pointer_left();
-        self.startup_crew_rename = Some(StartupCrewRenameState {
+        self.startup.crew_rename = Some(StartupCrewRenameState {
             index,
             player_path,
             file_name,
@@ -4428,7 +4463,7 @@ impl GameApp {
     }
 
     pub(crate) fn restore_startup_crew_focus(&mut self, focus: Option<PlrSelControl>) {
-        if let (Some(dialog), Some(focus)) = (self.startup_player_dialog.as_mut(), focus) {
+        if let (Some(dialog), Some(focus)) = (self.startup.player_dialog.as_mut(), focus) {
             if dialog.is_crew_mode() {
                 dialog.restore_focus(focus);
             }
@@ -4436,7 +4471,7 @@ impl GameApp {
     }
 
     pub(crate) fn abort_startup_crew_rename(&mut self) -> bool {
-        let Some(mut rename) = self.startup_crew_rename.take() else {
+        let Some(mut rename) = self.startup.crew_rename.take() else {
             return false;
         };
         rename.edit.abort();
@@ -4446,14 +4481,15 @@ impl GameApp {
     }
 
     fn resolve_startup_crew_rename(&mut self, result: RenameEditResult) -> bool {
-        let Some(rename) = self.startup_crew_rename.as_mut() else {
+        let Some(rename) = self.startup.crew_rename.as_mut() else {
             return false;
         };
         if rename.edit.resolve(result) == RenameEditResolution::KeepEditing {
             return false;
         }
         let mut rename = self
-            .startup_crew_rename
+            .startup
+            .crew_rename
             .take()
             .expect("finished crew rename state remains installed");
         let previous_focus = rename.edit.take_previous_focus();
@@ -4466,7 +4502,7 @@ impl GameApp {
         focus_lost: bool,
     ) -> Result<bool, EngineError> {
         let Some((index, player_path, old_file_name, original_name, action)) =
-            self.startup_crew_rename.as_mut().map(|rename| {
+            self.startup.crew_rename.as_mut().map(|rename| {
                 (
                     rename.index,
                     rename.player_path.clone(),
@@ -4608,20 +4644,21 @@ impl GameApp {
         allow_index_fallback: bool,
     ) {
         let row = self
-            .startup_crew_files
+            .startup
+            .crew_files
             .iter()
             .position(|entry| {
                 entry.player_path == player_path
                     && entry.file_name.eq_ignore_ascii_case(persisted_file_name)
             })
             .or_else(|| {
-                self.startup_crew_files.iter().position(|entry| {
+                self.startup.crew_files.iter().position(|entry| {
                     entry.player_path == player_path
                         && entry.file_name.eq_ignore_ascii_case(old_file_name)
                 })
             })
             .or_else(|| {
-                (allow_index_fallback && original_index < self.startup_crew_files.len())
+                (allow_index_fallback && original_index < self.startup.crew_files.len())
                     .then_some(original_index)
             });
 
@@ -4631,15 +4668,15 @@ impl GameApp {
                 core_name.truncate(nul);
             }
             core_name.truncate(30);
-            if let Some(entry) = self.startup_crew_files.get_mut(index) {
+            if let Some(entry) = self.startup.crew_files.get_mut(index) {
                 entry.file_name = persisted_file_name.to_string();
                 entry.crew_info.name = clonk_script::c4_string_from_bytes(&core_name);
                 entry.render_model.name = new_name.to_string();
             }
-            if let Some(model) = self.startup_crew_models.get_mut(index) {
+            if let Some(model) = self.startup.crew_models.get_mut(index) {
                 model.name = new_name.to_string();
             }
-            if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            if let Some(dialog) = self.startup.player_dialog.as_mut() {
                 dialog.set_selected_index(Some(index));
             }
         } else {
@@ -4656,7 +4693,7 @@ impl GameApp {
         &mut self,
         index: usize,
     ) -> Result<(), EngineError> {
-        let Some(initial_text) = self.startup_crew_files.get(index).map(|entry| {
+        let Some(initial_text) = self.startup.crew_files.get(index).map(|entry| {
             clonk_resources::decode_legacy_script_text(&clonk_script::c4_string_bytes(
                 &entry.crew_info.death_message,
             ))
@@ -4699,7 +4736,8 @@ impl GameApp {
         match action {
             PendingCrewInputAction::SetDeathMessage { index } => {
                 let Some((player_path, file_name)) = self
-                    .startup_crew_files
+                    .startup
+                    .crew_files
                     .get(index)
                     .map(|entry| (entry.player_path.clone(), entry.file_name.clone()))
                 else {
@@ -4796,7 +4834,7 @@ impl GameApp {
     }
 
     pub(crate) fn visible_startup_dialog(&self) -> Option<StartupDialog> {
-        match self.startup_view {
+        match self.startup.view {
             StartupView::MainMenu => Some(StartupDialog::MainMenu),
             StartupView::ScenarioBrowser => Some(StartupDialog::ScenarioBrowser(self.scensel.mode)),
             StartupView::NetworkGame => Some(StartupDialog::NetworkGame),
@@ -4819,10 +4857,10 @@ impl GameApp {
             &self.scensel.entry_enabled,
             scenario_loading_label.as_deref(),
             self.startup_network_dialog.as_ref(),
-            self.startup_player_dialog.as_ref(),
-            &self.startup_player_models,
-            &self.startup_crew_models,
-            self.startup_crew_rename.as_mut(),
+            self.startup.player_dialog.as_ref(),
+            &self.startup.player_models,
+            &self.startup.crew_models,
+            self.startup.crew_rename.as_mut(),
             None,
             true,
             true,
@@ -4830,13 +4868,13 @@ impl GameApp {
             true,
             &self.scenario_game_options,
             self.scensel.mode,
-            self.startup_options_dialog.as_ref(),
+            self.startup.options_dialog.as_ref(),
             None,
             false,
-            self.startup_about_dialog.as_ref(),
-            self.startup_view,
+            self.startup.about_dialog.as_ref(),
+            self.startup.view,
             None,
-            self.startup_view_flags,
+            self.startup.view_flags,
             &mut self.menu_backdrop_cache,
             false,
             &gamma,
@@ -4926,7 +4964,7 @@ impl GameApp {
                 return;
             }
         };
-        self.startup_dialog_fade = Some(StartupDialogFade {
+        self.startup.dialog_fade = Some(StartupDialogFade {
             outgoing: Some(outgoing),
             incoming,
             step: 0,
@@ -4972,7 +5010,7 @@ impl GameApp {
             &mut ignored_underlay_pixel,
         );
         let underlay_gpu_recorder = self.graphics.surface_mut().take_gpu_scene_capture();
-        self.startup_dialog_fade = Some(StartupDialogFade {
+        self.startup.dialog_fade = Some(StartupDialogFade {
             outgoing: None,
             incoming,
             step: 0,
@@ -4995,19 +5033,19 @@ impl GameApp {
         // otherwise invent a target in the new view without mouse input.
         self.startup_tooltip.pointer_left();
         if view != StartupView::Options {
-            self.startup_options_advanced_dialog = None;
+            self.startup.options_advanced_dialog = None;
             self.gamepads.set_options_open_slot(None);
         }
         if view != StartupView::ScenarioBrowser {
             self.cancel_scenario_selector_discovery();
         }
-        self.startup_view = view;
+        self.startup.view = view;
         let keeps_pending_fade = self
             .visible_startup_dialog()
-            .zip(self.startup_dialog_fade.as_ref())
+            .zip(self.startup.dialog_fade.as_ref())
             .is_some_and(|(dialog, fade)| dialog == fade.incoming);
         if !keeps_pending_fade {
-            self.startup_dialog_fade = None;
+            self.startup.dialog_fade = None;
         }
     }
 
@@ -5022,13 +5060,13 @@ impl GameApp {
             // its first-player prompt. Native DoStartup constructs only the
             // remembered non-Main dialog, so that Main-only child must not
             // leak above the restored screen.
-            self.startup_player_properties_dialog = None;
+            self.startup.player_properties_dialog = None;
         }
         match dialog {
             StartupDialog::MainMenu => {}
             StartupDialog::ScenarioBrowser(mode) => {
                 self.open_scenario_browser_with_mode(mode);
-                self.startup_scenario_back_dialog = None;
+                self.startup.scenario_back_dialog = None;
             }
             StartupDialog::NetworkGame => self.open_network_game_dialog(),
             StartupDialog::Options => self.open_options_menu(),
@@ -5054,7 +5092,7 @@ impl GameApp {
         self.message_input_history.clear();
         self.close_context_menu_silently();
         self.abort_startup_crew_rename();
-        self.startup_player_properties_dialog = None;
+        self.startup.player_properties_dialog = None;
         self.game_option_input_dialog = None;
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
@@ -5090,7 +5128,7 @@ impl GameApp {
         self.runtime_network_committed_control_mode = None;
         self.runtime_network_committed_status = None;
         self.runtime_network_join_allowed = None;
-        if self.startup_view == StartupView::NetworkLobby {
+        if self.startup.view == StartupView::NetworkLobby {
             self.control_messages.clear_clients();
             self.network_lobby = None;
             self.classic_host_lobby = None;
@@ -5133,7 +5171,7 @@ impl GameApp {
                 GameOptionButtons::new(GameOptionContext::LocalSelector, values);
             self.sync_scenario_game_option_bounds();
         }
-        self.startup_scenario_back_dialog = None;
+        self.startup.scenario_back_dialog = None;
         self.replace_startup_dialog(StartupView::MainMenu, StartupDialog::MainMenu);
         self.scensel.mode = ScenarioSelectorMode::Local;
         self.main_menu_state.pointer_left();
@@ -5160,13 +5198,13 @@ impl GameApp {
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             dialog.pointer_left();
         }
-        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+        if let Some(dialog) = self.startup.player_dialog.as_mut() {
             dialog.pointer_left();
         }
-        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+        if let Some(dialog) = self.startup.options_dialog.as_mut() {
             dialog.pointer_left();
         }
-        if let Some(dialog) = self.startup_about_dialog.as_mut() {
+        if let Some(dialog) = self.startup.about_dialog.as_mut() {
             dialog.pointer_left();
         }
         match self.app_paths.as_ref().map(startup_player_file_exists) {
@@ -5398,7 +5436,7 @@ impl GameApp {
                 Vec::new()
             }
         };
-        self.startup_player_models = players
+        self.startup.player_models = players
             .iter()
             .map(|player| player.render_model.clone())
             .collect();
@@ -5406,10 +5444,11 @@ impl GameApp {
             .iter()
             .find(|player| player.render_model.activated)
             .map(|player| player.player_file.clone());
-        self.startup_player_files = players;
-        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+        self.startup.player_files = players;
+        if let Some(dialog) = self.startup.player_dialog.as_mut() {
             dialog.set_player_activations(
-                self.startup_player_models
+                self.startup
+                    .player_models
                     .iter()
                     .map(|player| player.activated)
                     .collect(),
@@ -5445,13 +5484,13 @@ impl GameApp {
             || self.definition_selector.is_some()
             || self.game_option_input_dialog.is_some()
             || self.league_signup_dialog.is_some()
-            || self.startup_options_advanced_dialog.is_some()
+            || self.startup.options_advanced_dialog.is_some()
             || self.chat.external_dialog_visible
             || self.runtime_client_list.is_some()
         {
             return None;
         }
-        if let Some(properties) = self.startup_player_properties_dialog.as_ref() {
+        if let Some(properties) = self.startup.player_properties_dialog.as_ref() {
             let book = self.assets.options_book_fonts.as_deref()?;
             return properties.controller.tooltip_at(point, &book.book_small);
         }
@@ -5459,7 +5498,7 @@ impl GameApp {
             return None;
         }
 
-        match self.startup_view {
+        match self.startup.view {
             StartupView::MainMenu => self.main_menu_state.tooltip_at(point),
             StartupView::ScenarioBrowser => self.scenario_browser_tooltip_target_at(point),
             StartupView::NetworkGame => self.network_game_tooltip_target_at(point),
@@ -5507,7 +5546,7 @@ impl GameApp {
 
     pub(crate) fn render_startup_tooltips(&mut self) -> Result<bool> {
         let mut rendered = self.render_startup_element_tooltip()?;
-        match self.startup_view {
+        match self.startup.view {
             StartupView::NetworkLobby
                 if self.classic_host_lobby.is_none()
                     && self.runtime_client_list.is_none()
@@ -5516,7 +5555,7 @@ impl GameApp {
                     && self.game_option_input_dialog.is_none()
                     && self.league_signup_dialog.is_none()
                     && self.message_dialogs.is_empty()
-                    && self.startup_player_properties_dialog.is_none()
+                    && self.startup.player_properties_dialog.is_none()
                     && !self.chat.external_dialog_visible
                     && self
                         .network_start_wait
@@ -5576,7 +5615,7 @@ impl GameApp {
         let gamma = self.startup_fragment_gamma();
         self.preflight_startup_presentation()?;
         self.preflight_visible_gui_overlay_resources()?;
-        if self.startup_view != StartupView::MainMenu {
+        if self.startup.view != StartupView::MainMenu {
             return Ok(());
         }
         let Some(fonts) = self.native_startup_fonts.as_deref() else {
@@ -5638,7 +5677,7 @@ impl GameApp {
         if self.game_over_dialog.is_some() {
             return Err(anyhow::Error::new(report_classic_parity_boundary(
                 ClassicParityBoundary::StartupGameOver {
-                    view: self.startup_view,
+                    view: self.startup.view,
                 },
             )));
         }
@@ -5688,17 +5727,17 @@ impl GameApp {
     }
 
     fn reject_missing_startup_model(&self) -> Result<()> {
-        let missing = match self.startup_view {
+        let missing = match self.startup.view {
             StartupView::NetworkGame if self.startup_network_dialog.is_none() => {
                 Some("C4StartupNetDlg")
             }
-            StartupView::PlayerSelection if self.startup_player_dialog.is_none() => {
+            StartupView::PlayerSelection if self.startup.player_dialog.is_none() => {
                 Some("C4StartupPlrSelDlg")
             }
-            StartupView::Options if self.startup_options_dialog.is_none() => {
+            StartupView::Options if self.startup.options_dialog.is_none() => {
                 Some("C4StartupOptionsDlg")
             }
-            StartupView::About if self.startup_about_dialog.is_none() => Some("C4StartupAboutDlg"),
+            StartupView::About if self.startup.about_dialog.is_none() => Some("C4StartupAboutDlg"),
             _ => None,
         };
         let Some(missing) = missing else {
@@ -5706,16 +5745,16 @@ impl GameApp {
         };
         Err(anyhow::Error::new(report_classic_parity_boundary(
             ClassicParityBoundary::StartupModel {
-                view: self.startup_view,
+                view: self.startup.view,
                 missing,
             },
         )))
     }
 
     fn reject_unported_startup_subscreen(&self) -> Result<()> {
-        if self.startup_view == StartupView::Options
+        if self.startup.view == StartupView::Options
             && self.sound.context.is_none()
-            && self.startup_options_dialog.as_ref().is_some_and(|dialog| {
+            && self.startup.options_dialog.as_ref().is_some_and(|dialog| {
                 dialog.active_sheet() == clonk_frontend::startup_options_dlg::OptionsSheet::Sound
             })
         {
@@ -5725,7 +5764,7 @@ impl GameApp {
                 },
             )));
         }
-        let subscreen = match self.startup_view {
+        let subscreen = match self.startup.view {
             StartupView::Options => None,
             StartupView::About => None,
             StartupView::NetworkGame => None,
@@ -5745,14 +5784,14 @@ impl GameApp {
         }
         Err(anyhow::Error::new(report_classic_parity_boundary(
             ClassicParityBoundary::StartupStatusOverlay {
-                view: self.startup_view,
+                view: self.startup.view,
                 status: self.status_text.clone(),
             },
         )))
     }
 
     fn reject_generic_startup_view(&self) -> Result<()> {
-        if self.startup_view != StartupView::NetworkLobby
+        if self.startup.view != StartupView::NetworkLobby
             || self.classic_host_lobby.is_some()
             || self.network_lobby.is_some()
         {
@@ -5760,7 +5799,7 @@ impl GameApp {
         }
         Err(anyhow::Error::new(report_classic_parity_boundary(
             ClassicParityBoundary::StartupScreen {
-                view: self.startup_view,
+                view: self.startup.view,
             },
         )))
     }

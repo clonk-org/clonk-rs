@@ -87,7 +87,8 @@ impl GameApp {
             return Some(path);
         }
         if let Some(path) = self
-            .startup_player_files
+            .startup
+            .player_files
             .iter()
             .find(|player| {
                 clonk_script::c4_string_bytes(&player.file_name)
@@ -1008,7 +1009,7 @@ impl GameApp {
             let Some(info) = self.control_player_infos.get(info_id).cloned() else {
                 continue;
             };
-            if let Some(startup) = self.startup_player_files.iter().find(|startup| {
+            if let Some(startup) = self.startup.player_files.iter().find(|startup| {
                 clonk_script::c4_string_bytes(&startup.file_name) == info.filename.as_bytes()
             }) {
                 if let Some(icon) = startup.render_model.big_icon.clone() {
@@ -1068,7 +1069,8 @@ impl GameApp {
             .filter(|player| player.is_joined() && !player.filename.is_empty())
             .map(|player| PathBuf::from(player.filename.to_string_lossy().into_owned()))
             .collect::<Vec<_>>();
-        self.startup_player_files
+        self.startup
+            .player_files
             .iter()
             .filter(|player| {
                 player.path.is_file()
@@ -1779,7 +1781,7 @@ impl GameApp {
         &self,
         point: GuiPoint,
     ) -> Option<StartupTooltip> {
-        let dialog = self.startup_player_dialog.as_ref()?;
+        let dialog = self.startup.player_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let layout = dialog.layout();
         let title = match dialog.mode() {
@@ -1804,14 +1806,16 @@ impl GameApp {
         if dialog.is_crew_mode() {
             dialog.tooltip_at(
                 point,
-                self.startup_crew_models
+                self.startup
+                    .crew_models
                     .iter()
                     .map(|crew| crew.name.as_str()),
             )
         } else {
             dialog.tooltip_at(
                 point,
-                self.startup_player_models
+                self.startup
+                    .player_models
                     .iter()
                     .map(|player| player.name.as_str()),
             )

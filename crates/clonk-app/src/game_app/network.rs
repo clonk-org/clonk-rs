@@ -1161,8 +1161,8 @@ impl GameApp {
     pub(crate) fn runtime_modal_above_network_chart(&self) -> bool {
         self.league_signup_dialog.is_some()
             || self.definition_selector.is_some()
-            || self.startup_options_advanced_dialog.is_some()
-            || self.startup_player_properties_dialog.is_some()
+            || self.startup.options_advanced_dialog.is_some()
+            || self.startup.player_properties_dialog.is_some()
             || self
                 .network_start_wait
                 .as_ref()
@@ -4780,7 +4780,7 @@ impl GameApp {
                         .flatten();
                         if let Some(local_client_id) = local_client_id {
                             let host_lost_in_lobby = self.mode == AppMode::Menu
-                                && self.startup_view == StartupView::NetworkLobby;
+                                && self.startup.view == StartupView::NetworkLobby;
                             let host_lost_during_final_init = self.mode == AppMode::Loading
                                 && (self
                                     .loading_state
@@ -5186,7 +5186,7 @@ impl GameApp {
         command: clonk_frontend::startup_netdlg::NetDlgEditContextCommand,
     ) -> Result<(), EngineError> {
         if !self.chat.external_dialog_visible
-            && (self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkGame)
+            && (self.mode != AppMode::Menu || self.startup.view != StartupView::NetworkGame)
         {
             tracing::error!(?command, "stale join-address context command");
             return Ok(());

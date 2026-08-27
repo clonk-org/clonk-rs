@@ -135,7 +135,7 @@ fn networked_client_lobby(
 }
 
 fn joined_client_app(mut app: GameApp) -> GameApp {
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     networked_client_lobby(
         app,
         "Client",
@@ -145,7 +145,7 @@ fn joined_client_app(mut app: GameApp) -> GameApp {
 }
 
 fn joined_client_app_with_events(mut app: GameApp) -> (GameApp, network::NetworkEventSender) {
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     networked_client_lobby(
         app,
         "Client",
@@ -156,7 +156,7 @@ fn joined_client_app_with_events(mut app: GameApp) -> (GameApp, network::Network
 fn joined_client_app_with_commands(
     mut app: GameApp,
 ) -> (GameApp, crate::network::TestNetworkCommands) {
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     let (app, _events, commands) = networked_client_lobby_with_commands(
         app,
         "Client",
@@ -569,7 +569,7 @@ fn classic_command_line_network_scenario_skips_unrequested_lobby() {
 
     main_assert!(some(&app.lobby_preload_task).start_host_when_ready);
     main_assert_eq!(app.mode => AppMode::Loading);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
 }
 
 #[test]
@@ -803,7 +803,7 @@ fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
     app.poll_startup_network_connection().test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network.is_some());
     main_assert!(app.network_lobby.is_none());
     main_assert!(app.status_text.is_empty());
@@ -832,7 +832,7 @@ fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
 fn joined_lobby_tooltips_survive_frames_and_use_shared_delay() {
     let mut app = new_menu_app(640, 480);
     app.network_lobby = Some(client_lobby_state().with_preloading(false, LobbyLabels::default()));
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.sync_network_lobby_game_option_state();
     let assets = Arc::clone(&app.assets);
     let layout = app_lobby_mut(&mut app.network_lobby)
@@ -1197,7 +1197,7 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert!(app.network_client_activity.last_frame.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(
         app.network.is_some(),
         "host listener remains owned by lobby"
@@ -1347,7 +1347,7 @@ fn staged_host_installs_activated_participant_before_building_lobby_roster() {
     admission.test_join();
 
     main_assert!(app.status_text.is_empty(), "{}", app.status_text);
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_none());
     main_assert_eq!(
         app.host_local_alternate_colors_by_resource => expected_alternate_colors,
@@ -1976,7 +1976,7 @@ fn classic_lobby_fair_crew_control_echoes_and_countdown_or_force_gate_it() {
 
     process_lobby_game_option(&mut app, LobbyGameOptionInput::Hotkey('R'));
     main_assert!(app.scenario_game_options.values().record);
-    main_assert!(app.startup_view_flags.record);
+    main_assert!(app.startup.view_flags.record);
 }
 
 /// `C4PacketCountdown::GetCountdownMsg` (src/C4GameLobby.cpp:50-60): under
@@ -2549,7 +2549,7 @@ fn generic_client_lobby_external_irc_button_is_retained_and_emits_typed_action()
 #[test]
 fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(client_lobby_state());
     {
         let lobby = app_lobby_mut(&mut app.network_lobby);
@@ -3591,7 +3591,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.network_lobby.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
@@ -3599,7 +3599,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     let mut escape = joined_app();
     escape.sound.ui_log.clear();
     escape.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert_eq!(escape.startup_view => StartupView::MainMenu);
+    main_assert_eq!(escape.startup.view => StartupView::MainMenu);
     main_assert!(escape.network_lobby.is_none());
     main_assert!(escape.network.is_none());
     main_assert!(escape.network_mode.is_none());
@@ -3609,7 +3609,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     hotkey.keyboard_modifiers = ModifiersState::ALT;
     hotkey.sound.ui_log.clear();
     hotkey.test_key(VirtualKeyCode::KeyX, ElementState::Pressed);
-    main_assert_eq!(hotkey.startup_view => StartupView::MainMenu);
+    main_assert_eq!(hotkey.startup.view => StartupView::MainMenu);
     main_assert!(hotkey.network_lobby.is_none());
     main_assert!(hotkey.network.is_none());
     main_assert!(hotkey.network_mode.is_none());
@@ -4303,7 +4303,7 @@ fn joined_roster_double_click_is_roster_scoped() {
 #[test]
 fn unstaged_host_retained_roster_routes_script_player_add() {
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(host_lobby_state());
     let (_events, mut commands) = install_client_network_commands(&mut app, 0);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -4434,7 +4434,7 @@ fn joined_lobby_game_option_strip_routes_input() {
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert!(app.scenario_game_options.values().record);
-    main_assert!(app.startup_view_flags.record);
+    main_assert!(app.startup.view_flags.record);
     main_assert_eq!(app.scenario_game_options.focused_button() => None);
     main_assert_eq!(joined_option_controller_focus(&mut app) => LobbyControl::ChatInput);
 
@@ -4650,7 +4650,7 @@ fn network_lobby_game_option_state_matches_role_and_render_focus() {
     // A host-role generic lobby retains the LobbyHost context so the
     // render-time context checks and native enable rules hold.
     let mut host = new_menu_app(640, 480);
-    host.startup_view = StartupView::NetworkLobby;
+    host.startup.view = StartupView::NetworkLobby;
     host.network_lobby = Some(host_lobby_state());
     host.sync_network_lobby_game_option_state();
     main_assert_eq!(host.scenario_game_options.context() => GameOptionContext::LobbyHost);
@@ -4710,7 +4710,7 @@ fn client_info_dialog_shows_unknown_id_and_host_unacknowledged_marker() {
     // The host's own row has no C4Network2Client, so it never carries the
     // marker either (src/C4Network2Dialogs.cpp:62).
     let mut host = new_real_menu_app(640, 480);
-    host.startup_view = StartupView::NetworkLobby;
+    host.startup.view = StartupView::NetworkLobby;
     let _host_events = install_client_network_stub(&mut host, 0);
     host.network_mode = Some(NetworkMode::Host(
         lobby_fixture!(host: 0, "Host".to_string(), None),
@@ -4771,10 +4771,10 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(app.runtime_client_list.is_none());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_some());
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_some());
 
     main_assert!(app
@@ -4794,7 +4794,7 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
         },
     ]);
     main_assert!(app.runtime_client_list.is_none());
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_some());
 }
 
@@ -5509,7 +5509,7 @@ fn lobby_paste_submits_each_line_and_retains_the_tail() {
     main_assert_eq!(app_classic_lobby(&app).controller.chat_edit_view().text => "world");
 
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(client_lobby_state());
     let (_events, mut commands) = install_client_network_commands(&mut app, 7);
     app.paste_network_lobby_chat_text("one\r\ntwo\nthree")
@@ -5684,7 +5684,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.classic_host_lobby.is_none());
     main_assert!(app.network_lobby.is_none());
     main_assert!(app.staged_network_host_scenario.is_none());
@@ -5751,7 +5751,7 @@ fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
 #[test]
 fn generic_client_lobby_chat_submits_private_delivery_message_controls() {
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(client_lobby_state());
     let (_events, mut commands) = install_client_network_commands(&mut app, 7);
 
@@ -5966,7 +5966,7 @@ fn classic_host_lobby_cancel_paths_clear_pressed_activation_latches() {
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.pointer_left().test_value();
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.classic_host_lobby.is_none());
 }
 
@@ -5997,7 +5997,7 @@ fn connected_client_enters_exact_classic_lobby() {
     main_assert!(app.network.is_some());
     main_assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
     main_assert!(app.classic_host_lobby.is_none());
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     let lobby = app_lobby(&app);
     main_assert_eq!(lobby.local_client_id => 7);
     main_assert!(!lobby.is_host);
@@ -6059,7 +6059,7 @@ fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
     )
     .test_value();
     wait_for_menu(&mut app);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(client_lobby_state());
     app.sync_network_lobby_game_option_state();
     let mut frame = vec![0x5a; 640 * 480 * 4];
@@ -6110,7 +6110,7 @@ fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
         .startup_dialog_images
         .remove("GUIButtonDown.png")
         .test_value();
-    assetless.startup_view = StartupView::NetworkLobby;
+    assetless.startup.view = StartupView::NetworkLobby;
     assetless.network_lobby = Some(client_lobby_state());
     let mut untouched = vec![0x3c; 320 * 200 * 4];
     let error = assetless
@@ -6154,7 +6154,7 @@ fn saving_a_file_picture_preserves_an_unchecked_lobby_icon() {
     app.app_paths = Some(paths.clone());
     app.open_new_startup_player_properties();
     let old_icon = ImageData::new(2, 1, vec![4, 5, 6, 255, 7, 8, 9, 255]);
-    let pending = some_mut(&mut app.startup_player_properties_dialog);
+    let pending = some_mut(&mut app.startup.player_properties_dialog);
     pending.controller.set_name("UncheckedIcon");
     pending
         .controller
@@ -6168,7 +6168,7 @@ fn saving_a_file_picture_preserves_an_unchecked_lobby_icon() {
         },
     );
     main_assert_eq!(
-        some(&app.startup_player_properties_dialog)
+        some(&app.startup.player_properties_dialog)
             .controller
             .big_icon_update() =>
         &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Replace(old_icon.clone())
@@ -6190,7 +6190,7 @@ fn saving_a_file_picture_preserves_an_unchecked_lobby_icon() {
 #[test]
 fn network_lobby_renders_live_without_a_deferred_native_text_pass() {
     let mut app = new_real_classic_menu_app(320, 200);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
     app.sync_network_lobby_game_option_state();
     main_assert!(app.status_text.is_empty());
@@ -6231,7 +6231,7 @@ fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
     wait_for_menu(&mut app);
     app.open_options_menu();
 
-    let program = some(&app.startup_options_dialog).program();
+    let program = some(&app.startup.options_dialog).program();
     main_assert_eq!(program.font_face => "Endeavour");
     main_assert_eq!(program.font_size => "14");
     main_assert!(program.white_chat_ingame);
@@ -6242,7 +6242,7 @@ fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
 
     let strength = fair_crew_slider_to_strength(10);
     {
-        let program = some_mut(&mut app.startup_options_dialog).program_mut();
+        let program = some_mut(&mut app.startup.options_dialog).program_mut();
         program.white_chat_ingame = false;
         program.white_chat_lobby = false;
         program.preloading = true;
@@ -7133,7 +7133,7 @@ fn network_lobby_does_not_displace_join_or_host_startup_dialog() {
         .test_value();
     confirm_abort_dialog(&mut joined);
     main_assert!(matches!(joined.mode, AppMode::Menu));
-    main_assert_eq!(joined.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(joined.startup.view => StartupView::NetworkGame);
     main_assert_eq!(joined.last_startup_dialog => StartupDialog::NetworkGame);
 
     let mut hosted = running_browser_sandbox(ScenarioSelectorMode::NetworkHost);
@@ -7141,14 +7141,14 @@ fn network_lobby_does_not_displace_join_or_host_startup_dialog() {
     confirm_abort_dialog(&mut hosted);
     assert_l038_browser_return(&hosted, ScenarioSelectorMode::NetworkHost);
     hosted.scensel_do_back().test_value();
-    main_assert_eq!(hosted.startup_view => StartupView::MainMenu);
+    main_assert_eq!(hosted.startup.view => StartupView::MainMenu);
     main_assert_eq!(hosted.last_startup_dialog => StartupDialog::MainMenu);
 
     let mut reused = new_menu_app(640, 480);
     reused.open_network_game_dialog();
     reused.open_network_host_scenario_browser();
     reused.scensel_do_back().test_value();
-    main_assert_eq!(reused.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(reused.startup.view => StartupView::NetworkGame);
     main_assert_eq!(reused.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost));
     reused.open_network_lobby();
     reused
@@ -8251,7 +8251,7 @@ fn accepting_ready_check_sets_local_ready_and_submits_cpp_ready_reply() {
         "Client",
         client_lobby_state(),
     );
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
     app.test_network_events();
 
@@ -8492,7 +8492,7 @@ fn go_status_request_deletes_client_lobby_and_suppresses_stale_ready_reply() {
     app.loader_render_error = None;
     let (mut app, event_tx, mut commands) =
         networked_client_lobby_with_commands(app, "Client", client_lobby_state());
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
     app.test_network_events();
     app.push_message_dialog(
@@ -8593,7 +8593,7 @@ fn joined_lobby_long_countdown_keeps_game_options_unlocked_and_renderable() {
     let mut app = new_real_menu_app(320, 200);
     app.graphics.set_runtime_sprite_filtering(1.0, false);
     app.configure_native_startup_fonts(1.0, false);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     let event_tx = install_client_network_stub(&mut app, 7);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
     app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
@@ -8638,10 +8638,10 @@ fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
     // values through ten to the active countdown state
     // (src/C4GameLobby.cpp:392-418).
     let mut app = new_menu_app(320, 200);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     let event_tx = install_client_network_stub(&mut app, 7);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.show_log_timestamps = false;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
 
@@ -9101,7 +9101,7 @@ fn client_host_disconnect_aborts_lobby_and_restores_network_dialog() {
     // (src/C4Network2.cpp:477-515,1809-1833;
     // src/C4Game.cpp:405-411).
     let mut app = new_real_classic_menu_app(320, 200);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(client_lobby_state());
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
     app.control_clients.replace_snapshot([
@@ -9121,7 +9121,7 @@ fn client_host_disconnect_aborts_lobby_and_restores_network_dialog() {
     app.test_network_events();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
@@ -9673,11 +9673,11 @@ fn client_join_publishes_selected_players_before_info_and_lobby_ack() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
     app.network_lobby = Some(client_lobby_state());
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     // The visible startup list is deliberately stale: production joining
     // must use Config.General.Participants directly, not this UI model.
-    app.startup_player_files.clear();
-    app.startup_player_models.clear();
+    app.startup.player_files.clear();
+    app.startup.player_models.clear();
     app.selected_player_file = None;
 
     let configured_paths = [bravo, alpha];
@@ -9800,7 +9800,7 @@ fn startup_network_client_enters_and_acknowledges_lobby_when_boot_completes() {
 
     app.poll_boot_loading();
 
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network.is_some());
     main_assert!(app.network_lobby.is_some());
     main_assert_eq!(commands.take_framed_status_acknowledgements() => vec![(clonk_network::NetworkStatus {target_tick: 23,..host_config.initial_status}, 0,)]);
@@ -9818,7 +9818,7 @@ fn client_lobby_acknowledges_join_status_at_the_initialized_control_tick_once() 
         "Observer",
         NetworkLobbyState::new(7, "Observer".to_string(), false),
     );
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.selected_player_file = None;
     for _ in 0..3 {
         app.engine.tick().test_value();
@@ -11150,7 +11150,7 @@ fn frozen_lobby_executes_synchronized_activation_immediately() {
     let event_tx = install_network_stub(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), false));
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.control_clients.register(3, false, false);
     event_tx
         .send(NetworkEvent::ScheduledSync {

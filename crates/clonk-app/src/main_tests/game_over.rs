@@ -159,7 +159,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
     );
 
     let mut client = new_menu_app(640, 480);
-    client.startup_view = StartupView::NetworkLobby;
+    client.startup.view = StartupView::NetworkLobby;
     client.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     client.process_console_command("/start 3").test_value();
     main_assert_eq!(client.network_lobby.as_ref().expect("generic client lobby").logs.last().map(|line| line.text.as_str()) => Some("Host only!"));
@@ -280,10 +280,10 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     app.poll_loading().test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::Local));
-    main_assert_eq!(app.startup_scenario_back_dialog => None);
+    main_assert_eq!(app.startup.scenario_back_dialog => None);
     main_assert!(app.loading_state.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
@@ -302,9 +302,9 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
-    main_assert_eq!(app.startup_scenario_back_dialog => None);
+    main_assert_eq!(app.startup.scenario_back_dialog => None);
     reset_cached_app_paths();
 }
 
@@ -395,7 +395,7 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
         .test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
     main_assert!(app.message_dialogs.is_empty());
     main_assert!(app.status_text.is_empty());
@@ -439,10 +439,10 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
     app.test_key(VirtualKeyCode::End, ElementState::Released);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(app.runtime_client_list.is_none());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(app.startup_restart_diagnostics => StartupRestartDiagnostics::default());
 }
 
@@ -458,7 +458,7 @@ fn empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
         .test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert!(app.runtime_client_list.is_none());
     assert_startup_error_log(&app, "(no error)");
@@ -468,7 +468,7 @@ fn empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.startup_restart_diagnostics => StartupRestartDiagnostics::default());
 }
 
@@ -702,7 +702,7 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
 
     main_assert!(app.network.is_some(), "the live session must survive restart");
     main_assert!(app.classic_host_lobby.is_some(), "the running scenario's effective definitions must rebuild its lobby");
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     let hosted_resource_localities = app
         .admission_resources
         .resources
@@ -1121,9 +1121,9 @@ fn observer_host_round_restart_without_profile_does_not_open_first_player_dialog
     let _commands = restart_completion.join().test_value();
 
     main_assert!(app.classic_host_lobby.is_some());
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(
-        app.startup_player_properties_dialog.is_none(),
+        app.startup.player_properties_dialog.is_none(),
         "the retained observer lobby must not inherit main menu's first-profile creation modal"
     );
 }
@@ -1142,9 +1142,9 @@ fn pump_live_restart_apps_until(
             Instant::now() < deadline,
             "timed out waiting for {description}: host={:?}/{:?} client={:?}/{:?}; host status={:?}; client status={:?}; host clients={:?}; client clients={:?}; host lobby ack={}; client lobby ack={}; client JoinData={}; host resource progress={:?}; client resource progress={:?}",
             host.mode,
-            host.startup_view,
+            host.startup.view,
             client.mode,
-            client.startup_view,
+            client.startup.view,
             host.status_text,
             client.status_text,
             host.control_clients.snapshot(),
@@ -1175,11 +1175,11 @@ fn pump_live_restart_three_apps_until(
             Instant::now() < deadline,
             "timed out waiting for {description}: host={:?}/{:?} retained={:?}/{:?} joining={:?}/{:?}; host status={:?}; retained status={:?}; joining status={:?}; host clients={:?}; retained clients={:?}; joining clients={:?}; joining JoinData={}",
             host.mode,
-            host.startup_view,
+            host.startup.view,
             retained_client.mode,
-            retained_client.startup_view,
+            retained_client.startup.view,
             joining_client.mode,
-            joining_client.startup_view,
+            joining_client.startup.view,
             host.status_text,
             retained_client.status_text,
             joining_client.status_text,
@@ -1391,8 +1391,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
                 && client.control_clients.is_activated(client_id)
         },
     );
-    main_assert_eq!(host.startup_view => StartupView::NetworkLobby);
-    main_assert_eq!(client.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(host.startup.view => StartupView::NetworkLobby);
+    main_assert_eq!(client.startup.view => StartupView::NetworkLobby);
     main_assert!(matches!(host.network_mode, Some(NetworkMode::Host(_))));
     main_assert!(matches!(client.network_mode, Some(NetworkMode::Client(_))));
     main_assert_eq!(host.network.test_ref().local_client_id() => host_local_id);
@@ -2105,7 +2105,7 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
             metrics,
         );
         dialog.resize(800, 600);
-        app.startup_view = StartupView::NetworkGame;
+        app.startup.view = StartupView::NetworkGame;
         app.startup_network_dialog = Some(dialog);
         app.startup_game_search = Some(
             clonk_network::StartupGameSearch::start(clonk_network::NetworkGameSearchConfig {
@@ -2223,7 +2223,7 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
         main_assert_eq!(app.startup_game_references.iter().map(|reference| reference.title.as_str()).collect::<Vec<_>>() => [title]);
         main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len() => 1);
         main_assert!(app.status_text.is_empty(), "result presentation belongs to the native query/game rows");
-        main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+        main_assert_eq!(app.startup.view => StartupView::NetworkGame);
         main_assert!(!app.take_exit_request());
     }
 
@@ -2247,7 +2247,7 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
         metrics,
     );
     dialog.resize(800, 600);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(dialog);
     app.startup_game_search = None;
     app.startup_game_references = vec![clonk_network::NetworkGameReference {
@@ -3027,7 +3027,7 @@ fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
             by_client: 0,
         }],
     );
-    app.startup_player_files.insert(
+    app.startup.player_files.insert(
         0,
         StartupPlayerFile {
             path: PathBuf::from(&file_name),
@@ -3093,7 +3093,7 @@ fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
             by_client: 0,
         }],
     );
-    app.startup_player_files.insert(
+    app.startup.player_files.insert(
         0,
         StartupPlayerFile {
             path: PathBuf::from(&file_name),
@@ -3130,7 +3130,7 @@ fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
 
     // Its player file and resource then depart, so nothing can supply the
     // icon any more.
-    app.startup_player_files.clear();
+    app.startup.player_files.clear();
     app.control_player_infos
         .replace_snapshot(player_info_id + 1, []);
     app.snapshot.round_results.players = vec![clonk_engine::RoundResultsPlayerState {
@@ -3271,15 +3271,15 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
     app.open_player_selection_dialog();
     app.show_main_menu();
     main_assert_eq!(
-        app.startup_options_dialog
+        app.startup.options_dialog
             .as_ref()
             .expect("retained Options model")
             .active_sheet() =>
         clonk_frontend::startup_options_dlg::OptionsSheet::Graphics
     );
-    main_assert_eq!(app.startup_about_dialog.as_ref().expect("retained About model").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
+    main_assert_eq!(app.startup.about_dialog.as_ref().expect("retained About model").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
     main_assert_eq!(app.startup_network_dialog.as_ref().expect("retained Network model").mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
-    main_assert!(app.startup_player_dialog.is_some());
+    main_assert!(app.startup.player_dialog.is_some());
     app.handle_game_over().test_value();
     app.assets
         .require_classic_game_over_resources()
@@ -3289,19 +3289,19 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
         // Exhaustive arms force future startup roots into this lifecycle
         // invariant instead of silently omitting the evaluation dialog.
         match view {
-            StartupView::MainMenu => app.startup_view = StartupView::MainMenu,
+            StartupView::MainMenu => app.startup.view = StartupView::MainMenu,
             StartupView::ScenarioBrowser => {
-                app.startup_view = StartupView::ScenarioBrowser;
+                app.startup.view = StartupView::ScenarioBrowser;
             }
             StartupView::NetworkLobby => {
-                app.startup_view = StartupView::NetworkLobby;
+                app.startup.view = StartupView::NetworkLobby;
                 app.classic_host_lobby = None;
             }
-            StartupView::NetworkGame => app.startup_view = StartupView::NetworkGame,
-            StartupView::Options => app.startup_view = StartupView::Options,
-            StartupView::About => app.startup_view = StartupView::About,
+            StartupView::NetworkGame => app.startup.view = StartupView::NetworkGame,
+            StartupView::Options => app.startup.view = StartupView::Options,
+            StartupView::About => app.startup.view = StartupView::About,
             StartupView::PlayerSelection => {
-                app.startup_view = StartupView::PlayerSelection;
+                app.startup.view = StartupView::PlayerSelection;
             }
         }
         app.status_text = format!("lower-priority status for {view:?}");
@@ -5425,7 +5425,7 @@ fn game_over_raw_high_ends_and_consumes_aliases_after_dialog_close() {
     ]);
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.game_over_dialog.is_none());
     main_assert!(app.ingame_menu.is_none());
     main_assert!(app.status_text.is_empty());
@@ -5505,7 +5505,7 @@ fn game_over_high_capture_ends_at_the_next_raw_physical_cluster() {
     .test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.startup_dialog_fade_active());
     let mut frame = vec![0_u8; 320 * 200 * 4];
     for _ in 0..STARTUP_DIALOG_FADE_STEPS {
@@ -5517,7 +5517,7 @@ fn game_over_high_capture_ends_at_the_next_raw_physical_cluster() {
         .test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(!app.exit_requested);
     main_assert!(app.game_over_dialog.is_none());
 }

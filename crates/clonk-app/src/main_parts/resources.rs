@@ -4304,7 +4304,8 @@ pub(crate) fn build_network_host_preparation(
             })
             .collect()
     } else {
-        app.startup_player_files
+        app.startup
+            .player_files
             .iter()
             .filter(|player| player.render_model.activated)
             .map(|player| {
@@ -4422,13 +4423,13 @@ pub(crate) fn build_network_host_preparation(
             ),
             control_rate: integer("Network", "ControlRate", 2),
             async_max_wait: integer("Network", "AsyncMaxWait", 2),
-            fair_crew: app.startup_view_flags.fair_crew,
+            fair_crew: app.startup.view_flags.fair_crew,
             // C++ substitutes the configured strength only when fair crew is
             // on; the parameter is synchronized, so an unconditional fill
             // publishes a value stock C++ never sends
             // (`crate::settings::session_fair_crew_strength`).
             fair_crew_strength: crate::settings::session_fair_crew_strength(
-                app.startup_view_flags.fair_crew,
+                app.startup.view_flags.fair_crew,
                 integer("General", "DefCrewStrength", 1_000),
             ),
             auto_frame_skip: boolean("Graphics", "AutoFrameSkip", true),

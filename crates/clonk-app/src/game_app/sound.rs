@@ -662,7 +662,7 @@ impl GameApp {
             // Dropping the backdrop while loading or in-game (game over,
             // return to menu) frees its full-screen buffer during play.
             self.menu_backdrop_cache = StartupBackdropCache::default();
-            self.startup_dialog_fade = None;
+            self.startup.dialog_fade = None;
         }
         match self.mode {
             AppMode::Running => {
@@ -1078,11 +1078,13 @@ impl GameApp {
                     .as_mut()
                     .is_some_and(|rename| rename.edit.tick_blink());
                 let _ = self
-                    .startup_crew_rename
+                    .startup
+                    .crew_rename
                     .as_mut()
                     .is_some_and(|rename| rename.edit.tick_blink());
                 let _ = self
-                    .startup_options_advanced_dialog
+                    .startup
+                    .options_advanced_dialog
                     .as_mut()
                     .is_some_and(|dialog| dialog.controller.tick_edit_blink());
                 let _ = self

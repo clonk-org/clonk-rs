@@ -136,7 +136,7 @@ fn open_player_properties<'a>(
     _expectation: &str,
 ) -> &'a mut PlayerPropertiesController {
     app.open_new_startup_player_properties();
-    &mut app.startup_player_properties_dialog.test_mut().controller
+    &mut app.startup.player_properties_dialog.test_mut().controller
 }
 
 fn open_portrait_selector<'a>(
@@ -168,7 +168,7 @@ fn open_default_portrait_selector_on(controller: &mut PlayerPropertiesController
 }
 
 fn portrait_selector<'a>(app: &'a GameApp, _expectation: &str) -> &'a PortraitSelController {
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .test_value()
@@ -3461,7 +3461,7 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
             Vec::new(),
         );
         let selector = app
-            .startup_player_properties_dialog
+            .startup.player_properties_dialog
             .test_mut()
             .controller
             .portrait_selector_mut()
@@ -3560,14 +3560,14 @@ fn portrait_selector_focus_loss_prevents_late_button_release() {
     app.test_left_button(ElementState::Pressed);
     app.handle_focus_lost().test_value();
     let actions = app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .test_mut()
         .controller
         .handle_pointer_up(point);
 
     main_assert!(actions.is_empty(), "focus loss must discard the captured press");
     main_assert!(
-        app.startup_player_properties_dialog
+        app.startup.player_properties_dialog
             .test_ref()
             .controller
             .portrait_selector()
@@ -3916,15 +3916,15 @@ fn portrait_selector_semantics_cover_locales_sizes_and_high_dpi() {
             app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
             app.test_key(VirtualKeyCode::KeyA, ElementState::Released);
             if cancel_has_a_hotkey {
-                main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none(), "{case}: German Alt+A activates Abbrechen");
+                main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none(), "{case}: German Alt+A activates Abbrechen");
             } else {
-                main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some(), "{case}: US Alt+A has no invented Cancel mnemonic");
+                main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some(), "{case}: US Alt+A has no invented Cancel mnemonic");
                 app.test_key(VirtualKeyCode::KeyO, ElementState::Pressed);
                 app.test_key(VirtualKeyCode::KeyO, ElementState::Released);
-                main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none(), "{case}: US Alt+O accepts the null portrait");
+                main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none(), "{case}: US Alt+O accepts the null portrait");
             }
             app.test_modifiers(ModifiersState::empty());
-            main_assert!(app.startup_player_properties_dialog.is_some(), "{case}: closing selector retains parent properties dialog");
+            main_assert!(app.startup.player_properties_dialog.is_some(), "{case}: closing selector retains parent properties dialog");
             main_assert!(app.message_dialogs.is_empty(), "{case}: semantic flow opens no error modal");
             main_assert!(app.sound.ui_log.is_empty(), "{case}: access keys synthesize no pointer sounds");
         }
@@ -4025,7 +4025,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     main_assert_eq!(selector.items()[0].filename() => Some("Custom.PNG"));
     main_assert!(matches!(selector.items()[0].thumbnail(), clonk_frontend::startup_portraitsel::PortraitThumbnail::Pending));
     main_assert_eq!(
-        app.startup_player_properties_dialog
+        app.startup.player_properties_dialog
             .as_ref()
             .expect("properties remain open")
             .controller
@@ -4042,7 +4042,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
 
     for _ in 0..6 {
         let actions = app
-            .startup_player_properties_dialog
+            .startup.player_properties_dialog
             .test_mut()
             .controller
             .handle_key_down(KeyCode::Tab);
@@ -4068,7 +4068,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         ),
     ] {
         let actions = app
-            .startup_player_properties_dialog
+            .startup.player_properties_dialog
             .test_mut()
             .controller
             .handle_key_down(key);
@@ -4078,7 +4078,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         );
     }
     let actions = app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Enter);
@@ -4101,7 +4101,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
             },
         ),
     ]);
-    let controller = &app.startup_player_properties_dialog.test_ref().controller;
+    let controller = &app.startup.player_properties_dialog.test_ref().controller;
     main_assert!(controller.portrait_selector().is_none());
     main_assert_eq!(controller.portrait_update() => &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Clear);
     main_assert_eq!(controller.big_icon_update() => &old_icon_update);
@@ -4113,7 +4113,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
     let actions = app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
@@ -4127,7 +4127,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         "C4FileSelDlg.cpp:575-580 persists the current row when Cancel closes the selector"
     );
     app.process_startup_player_properties_actions(actions);
-    let controller = &app.startup_player_properties_dialog.test_ref().controller;
+    let controller = &app.startup.player_properties_dialog.test_ref().controller;
     main_assert!(controller.portrait_selector().is_none());
     main_assert_eq!(controller.portrait_update() => &before_portrait);
     main_assert_eq!(controller.big_icon_update() => &before_icon);
@@ -4231,7 +4231,7 @@ fn first_portrait_selector_open_extracts_stock_portraits_once() {
     let clonk_path = paths.user_data_dir().join("Clonk.png");
     fs::write(&clonk_path, b"user replacement").test_value();
     let actions = app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
@@ -4275,7 +4275,7 @@ fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
         pressed_gamepad_action(slot, GamepadActionType::Select),
     ]);
 
-    let controller = &app.startup_player_properties_dialog.test_ref().controller;
+    let controller = &app.startup.player_properties_dialog.test_ref().controller;
     main_assert!(controller.portrait_selector().is_none());
     main_assert!(controller.validation_error().is_none());
     main_assert_eq!(controller.portrait_update() => &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Clear);
@@ -4283,13 +4283,13 @@ fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
     main_assert!(app.status_text.is_empty());
 
     open_default_portrait_selector_on(
-        &mut app.startup_player_properties_dialog.test_mut().controller,
+        &mut app.startup.player_properties_dialog.test_mut().controller,
     );
     app.test_gamepad_events([
         pressed_gui_button(slot, GuiButtonClass::High),
         pressed_gamepad_action(slot, GamepadActionType::Cancel),
     ]);
-    let controller = &app.startup_player_properties_dialog.test_ref().controller;
+    let controller = &app.startup.player_properties_dialog.test_ref().controller;
     main_assert!(controller.portrait_selector().is_none());
     main_assert!(controller.validation_error().is_none());
     main_assert!(app.status_text.is_empty());
@@ -4310,9 +4310,9 @@ fn properties_high_cluster_does_not_cancel_the_parent_screen() {
         pressed_gamepad_action(slot, GamepadActionType::MenuToggle),
     ]);
 
-    main_assert!(app.startup_player_properties_dialog.is_none());
-    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
-    main_assert!(app.startup_player_dialog.is_some());
+    main_assert!(app.startup.player_properties_dialog.is_none());
+    main_assert_eq!(app.startup.view => StartupView::PlayerSelection);
+    main_assert!(app.startup.player_dialog.is_some());
     main_assert!(!app.exit_requested);
 }
 
@@ -4332,7 +4332,7 @@ fn portrait_selector_honors_exact_keyboard_modifiers() {
     // `C4FileSelDlg.cpp:118-123`).
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
+    main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
     main_assert!(app.message_dialogs.is_empty());
 
     app.test_modifiers(ModifiersState::SHIFT);
@@ -4363,7 +4363,7 @@ fn portrait_selector_alt_o_activates_the_native_ok_hotkey() {
     app.test_key(VirtualKeyCode::KeyO, ElementState::Pressed);
 
     main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
+    main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
 }
 
 #[test]
@@ -4386,9 +4386,9 @@ fn portrait_selector_cancel_hotkey_follows_the_active_language() {
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
 
-    main_assert!(app.startup_player_properties_dialog.is_some());
+    main_assert!(app.startup.player_properties_dialog.is_some());
     main_assert!(app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .is_none());
@@ -4407,7 +4407,7 @@ fn portrait_selector_does_not_bind_keypad_enter_as_return() {
 
     app.test_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed);
 
-    main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
+    main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
     main_assert!(app.message_dialogs.is_empty());
 }
 
@@ -4437,7 +4437,7 @@ fn portrait_selector_outside_right_down_aborts_the_location_popup() {
     app.test_right_button(ElementState::Pressed);
 
     main_assert!(!app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .expect("selector remains open")
@@ -4499,7 +4499,7 @@ fn portrait_selector_errors_use_screen_owned_modals() {
     open_default_portrait_selector(&mut missing, "new player properties");
 
     missing.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(missing.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
+    main_assert!(missing.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
     main_assert_eq!(missing.message_dialogs.len() => 1);
     main_assert_eq!(missing.message_dialogs[0].state.message() => "Please select a file first!");
 
@@ -4517,7 +4517,7 @@ fn portrait_selector_errors_use_screen_owned_modals() {
     controller.handle_key_down(KeyCode::Down);
 
     broken.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(broken.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none());
+    main_assert!(broken.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none());
     main_assert_eq!(broken.message_dialogs.len() => 1);
     let message = broken.message_dialogs[0].state.message();
     let prefix = format!("Error at graphics file {}: ", corrupt.display());
@@ -4556,7 +4556,7 @@ fn initial_portrait_location_scan_failure_is_silent() {
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
 
-    let pending = app.startup_player_properties_dialog.test_ref();
+    let pending = app.startup.player_properties_dialog.test_ref();
     let selector = pending.controller.portrait_selector().test_value();
     main_assert_eq!(selector.items().len() => 1);
     main_assert_eq!(selector.items()[0].choice() => &clonk_frontend::startup_portraitsel::PortraitChoice::None);
@@ -4602,7 +4602,7 @@ fn portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
 #[test]
 fn escape_on_the_main_menu_never_ends_the_session() {
     let mut app = new_classic_menu_app(640, 480);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert_eq!(app.exit_reason => None);
 
     // Spam it the way the report describes, not once.
@@ -4613,7 +4613,7 @@ fn escape_on_the_main_menu_never_ends_the_session() {
 
     main_assert!(!app.exit_requested);
     main_assert_eq!(app.exit_reason => None);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
 }
 
 /// The Quit item still ends the session and still names itself, which is what
@@ -4643,7 +4643,7 @@ fn keyboard_subscreen_back_reconstructs_main() {
 
     main_assert!(app.status_text.is_empty());
     app.test_key(VirtualKeyCode::Backspace, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
 }
 
 #[test]
@@ -4659,10 +4659,10 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
     app.test_cursor(about_back);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::About);
-    main_assert_eq!(app.startup_about_dialog.as_ref().unwrap().current_page() => clonk_frontend::startup_about_dlg::AboutPage::Credits);
+    main_assert_eq!(app.startup.view => StartupView::About);
+    main_assert_eq!(app.startup.about_dialog.as_ref().unwrap().current_page() => clonk_frontend::startup_about_dlg::AboutPage::Credits);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
 
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
@@ -4686,7 +4686,7 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
 }
 
 #[test]
@@ -4781,7 +4781,7 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
         let mut app = new_classic_menu_app(640, 480);
         app.config.gamepad_gui_control = gamepad_gui_control;
         app.open_about_dialog();
-        app.startup_dialog_fade = None;
+        app.startup.dialog_fade = None;
         app
     };
     let send_direction = |app: &mut GameApp, gamepad: u8, button: ControlButton| {
@@ -4795,7 +4795,7 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
             gamepad_gui_control,
         )
     };
-    let focus = |app: &GameApp| app.startup_about_dialog.test_ref().focused_control();
+    let focus = |app: &GameApp| app.startup.about_dialog.test_ref().focused_control();
 
     let mut disabled = open_about(false);
     send_direction(&mut disabled, 0, ControlButton::Right).test_value();
@@ -4828,7 +4828,7 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
         ElementState::Released,
     )
     .test_value();
-    main_assert_eq!(app.startup_about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Licenses);
+    main_assert_eq!(app.startup.about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Licenses);
 
     send_direction(&mut app, 0, ControlButton::Right).test_value();
     main_assert_eq!(focus(&app) => Some(AboutFocusTarget::LicenseTabs));
@@ -4846,7 +4846,7 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
         ControlButton::Left,
         "Options D-left traverses focus",
     );
-    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.startup.view => StartupView::Options);
 
     app.open_network_game_dialog();
     process_primary_direction(
@@ -4854,10 +4854,10 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
         ControlButton::Left,
         "Network D-left traverses focus",
     );
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_netdlg::NetDlgControl::ChatButton);
 
-    app.startup_player_models
+    app.startup.player_models
         .push(clonk_frontend::startup_plrsel::PlrSelPlayer {
             name: "Gamepad Player".to_string(),
             activated: false,
@@ -4877,15 +4877,15 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
         ControlButton::Right,
         "Player D-right traverses focus without Crew",
     );
-    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
-    main_assert_eq!(app.startup_player_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_plrsel::PlrSelControl::Back);
+    main_assert_eq!(app.startup.view => StartupView::PlayerSelection);
+    main_assert_eq!(app.startup.player_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_plrsel::PlrSelControl::Back);
     process_primary_direction(
         &mut app,
         ControlButton::Left,
         "Player D-left traverses focus without Back",
     );
-    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
-    main_assert_eq!(app.startup_player_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_plrsel::PlrSelControl::PlayerList);
+    main_assert_eq!(app.startup.view => StartupView::PlayerSelection);
+    main_assert_eq!(app.startup.player_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_plrsel::PlrSelControl::PlayerList);
 }
 
 #[test]
@@ -4902,9 +4902,9 @@ fn options_gamepad_device_claim_switches_and_releases() {
         3,
         app.config.gamepad_gui_control,
     );
-    *app.startup_options_dialog.test_mut().controls_mut() = controls;
+    *app.startup.options_dialog.test_mut().controls_mut() = controls;
 
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_mut()
         .test_value()
         .restore_sheet(OptionsSheet::Gamepad);
@@ -4913,7 +4913,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
     main_assert!(app.gamepads.is_options_slot_live(GamepadSlot::new(0)));
 
     for set in [2, 1] {
-        main_assert!(app.startup_options_dialog.as_mut().unwrap().controls_mut().select_set(ControlDevice::Gamepad, set));
+        main_assert!(app.startup.options_dialog.as_mut().unwrap().controls_mut().select_set(ControlDevice::Gamepad, set));
         app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(set)])
             .test_value();
         main_assert_eq!(app.gamepads.options_open_slot() => GamepadSlot::from_index(set));
@@ -4929,7 +4929,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
         .test_value();
     main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
 
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_mut()
         .test_value()
         .restore_sheet(OptionsSheet::Network);
@@ -4940,7 +4940,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
     // (`C4StartupOptionsDlg.cpp:344-352,988-991`).
     main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
 
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_mut()
         .test_value()
         .restore_sheet(OptionsSheet::Gamepad);
@@ -4957,17 +4957,17 @@ fn options_gamepad_device_claim_switches_and_releases() {
     };
     app.process_sourced_gamepad_event_batch([high(2, GamepadSlot::new(2))], false)
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.startup.view => StartupView::Options);
     main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
     app.process_sourced_gamepad_event_batch([high(1, GamepadSlot::new(1))], false)
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.startup.view => StartupView::Options);
     main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
 
     app.config.gamepad_gui_control = true;
     app.process_sourced_gamepad_event_batch([high(0, GamepadSlot::new(0))], true)
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert_eq!(app.gamepads.options_open_slot() => None);
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(1)])
         .test_value();
@@ -4987,14 +4987,14 @@ fn toggling_gamepad_gui_control_recreates_the_options_dialog() {
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
     {
-        let dialog = app.startup_options_dialog.test_mut();
+        let dialog = app.startup.options_dialog.test_mut();
         dialog.restore_sheet(OptionsSheet::Gamepad);
         main_assert!(dialog.controls_mut().select_set(ControlDevice::Keyboard, 2));
     }
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadGuiControlChanged(true)])
         .test_value();
 
-    let dialog = app.startup_options_dialog.test_ref();
+    let dialog = app.startup.options_dialog.test_ref();
     main_assert_eq!(dialog.active_sheet() => OptionsSheet::Gamepad, "SelectSheet(iPage, false) restores the page",);
     main_assert_eq!(dialog.controls().selected_set(ControlDevice::Keyboard) => 0, "the rebuilt ControlConfigArea starts on set 0",);
     main_assert_eq!(dialog.controls().selected_set(ControlDevice::Gamepad) => 0);
@@ -5014,7 +5014,7 @@ fn factory_default_control_sheets_show_empty_captions_for_unbound_slots() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
-    let dialog = app.startup_options_dialog.test_ref();
+    let dialog = app.startup.options_dialog.test_ref();
     for set in 0..CONTROL_SET_COUNT {
         for control in 0..CONTROL_KEY_COUNT {
             main_assert_eq!(
@@ -5090,7 +5090,7 @@ fn control_capture_prompt_quotes_the_sheet_label_for_every_control() {
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
     let labels = app
-        .startup_options_dialog
+        .startup.options_dialog
         .test_ref()
         .labels()
         .control_keys
@@ -5140,7 +5140,7 @@ fn options_voice_key_capture_reuses_the_classic_modal_and_rejects_chords() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
     main_assert_eq!(app.test_audio_ref().options.voice_push_to_talk => VirtualKeyCode::KeyV);
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("options dialog").sound().push_to_talk_key => "V");
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("options dialog").sound().push_to_talk_key => "V");
     main_assert!(app.message_dialogs.is_empty(), "the modal closes on capture");
     app.test_key(VirtualKeyCode::KeyV, ElementState::Released);
 }
@@ -5179,7 +5179,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert_eq!(app.bindings.key_for_set(2, ControlBindingId::Dig) => Some(VirtualKeyCode::Escape));
-    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().controls().label(keyboard_target) => Some("Escape"));
+    main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().controls().label(keyboard_target) => Some("Escape"));
     let mut config = Config::new();
     app.bindings.write_to_config(&mut config);
     main_assert!(config.get_in(Some("Controls"), "Kbd3Key6").is_some());
@@ -5397,8 +5397,8 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
 
     actual_app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(actual_app.message_dialogs.is_empty());
-    main_assert_eq!(actual_app.startup_view => StartupView::About);
-    main_assert_eq!(actual_app.startup_dialog_fade.as_ref().unwrap().step => 1);
+    main_assert_eq!(actual_app.startup.view => StartupView::About);
+    main_assert_eq!(actual_app.startup.dialog_fade.as_ref().unwrap().step => 1);
 
     let mut options = new_real_classic_menu_app(320, 200);
     options.open_options_menu();
@@ -5407,12 +5407,12 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     // else (`C4Config.cpp:400-403`), so the dialog-local edit has to be the
     // opposite of whatever this platform loaded for the revert to be visible.
     let config_preloading = options
-        .startup_options_dialog
+        .startup.options_dialog
         .test_ref()
         .program()
         .preloading;
     options
-        .startup_options_dialog
+        .startup.options_dialog
         .test_mut()
         .program_mut()
         .preloading = !config_preloading;
@@ -5421,7 +5421,7 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
             clonk_frontend::startup_options_dlg::OptionsDlgAction::GamepadGuiControlChanged(true),
         ])
         .test_value();
-    let recreate = options.startup_dialog_fade.test_ref();
+    let recreate = options.startup.dialog_fade.test_ref();
     main_assert_eq!(recreate.outgoing => Some(StartupDialog::Options));
     main_assert_eq!(recreate.incoming => StartupDialog::Options);
     // `OnGUIGamepadCheckChange` calls `RecreateDialog(false)`
@@ -5430,7 +5430,7 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     // edit does not survive (:1325-1334).
     main_assert_eq!(
         options
-            .startup_options_dialog
+            .startup.options_dialog
             .as_ref()
             .expect("recreated Options dialog")
             .program()
@@ -5439,10 +5439,10 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
         "the rebuilt dialog re-reads Config instead of keeping dialog-local state",
     );
     options.resize(400, 300).test_value();
-    let resized = options.startup_dialog_fade.test_ref();
+    let resized = options.startup.dialog_fade.test_ref();
     main_assert_eq!((resized.width, resized.height, resized.step) => (400, 300, 0));
     options.open_network_lobby();
-    main_assert!(options.startup_dialog_fade.is_none(), "C4GameLobby is not a fading startup dialog");
+    main_assert!(options.startup.dialog_fade.is_none(), "C4GameLobby is not a fading startup dialog");
 }
 
 #[test]
@@ -6437,11 +6437,11 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     // An unbound F11 is inert in the startup screens.
     let mut app = new_menu_app(320, 200);
     app.set_display_mode(DisplayMode::Window);
-    let view = app.startup_view;
+    let view = app.startup.view;
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F11, ElementState::Released);
     main_assert!(!app.display_flags.is_fullscreen);
-    main_assert_eq!(app.startup_view => view);
+    main_assert_eq!(app.startup.view => view);
 
     // ... and while running.
     let mut app = new_classic_running_sandbox_app();

@@ -1475,8 +1475,8 @@ pub(crate) fn apply_options_display_requests(
 ) -> Result<()> {
     while let Some(request) = app.pending_options_display_requests.pop_front() {
         let recreate_options = app.mode == AppMode::Menu
-            && app.startup_view == StartupView::Options
-            && app.startup_options_dialog.is_some();
+            && app.startup.view == StartupView::Options
+            && app.startup.options_dialog.is_some();
         match request {
             OptionsDisplayRequest::SetMode(mode) => {
                 let mode = match mode {

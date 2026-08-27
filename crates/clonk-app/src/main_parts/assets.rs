@@ -8223,7 +8223,7 @@ pub(crate) fn run_menu_dump(
             })
             .unwrap_or((0, 0));
         let controller = app.new_startup_player_properties_controller(color, portrait);
-        app.startup_player_properties_dialog = Some(PendingStartupPlayerProperties {
+        app.startup.player_properties_dialog = Some(PendingStartupPlayerProperties {
             origin: StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
             controller,
         });
@@ -8250,7 +8250,8 @@ pub(crate) fn run_menu_dump(
         if let Some(name) = folder_path {
             let sheet = options_sheet_by_name(name)
                 .ok_or_else(|| anyhow::anyhow!("unknown Options sheet `{name}`"))?;
-            app.startup_options_dialog
+            app.startup
+                .options_dialog
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("Options dialog is not open"))?
                 .restore_sheet(sheet);

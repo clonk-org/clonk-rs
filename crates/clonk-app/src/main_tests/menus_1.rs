@@ -1380,7 +1380,7 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     main_assert_eq!(app.menu_state.menu.selected_index() => selected);
     main_assert_eq!(app.menu_state.stack.len() => stack_len);
     main_assert_eq!(app.menu_state.search_text() => "underlying search");
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     main_assert!(app.context_menu.is_some());
@@ -2612,7 +2612,7 @@ fn dialog_hotkeys_use_the_first_sdl_key_name_character() {
 fn netdlg_alt_mnemonics_activate_visible_buttons() {
     let mut app = new_real_classic_menu_app(640, 480);
     app.open_network_game_dialog();
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     let signup = app.startup_network_dialog.test_ref().masterserver_signup();
 
     // Alt+I toggles Internet; Alt+Shift+R toggles Record.
@@ -2630,14 +2630,14 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
     main_assert!(app.startup_network_dialog.as_ref().expect("network dialog").is_chat_mode());
     app.test_key(VirtualKeyCode::KeyD, ElementState::Pressed);
     app.test_key(VirtualKeyCode::KeyJ, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     app.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     main_assert!(!app.startup_network_dialog.as_ref().expect("network dialog").is_chat_mode());
 
     // A covering modal owns the keyboard, so the dialog beneath is inert.
     app.handle_game_over().test_value();
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
 }
 
 #[test]
@@ -2655,12 +2655,12 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
         app.test_key(key, ElementState::Released);
     }
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(!app.exit_requested);
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.view => StartupView::About);
     main_assert!(app.sound.ui_log.is_empty());
     app.show_main_menu();
 
@@ -2673,13 +2673,13 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
         app.test_key(key, ElementState::Pressed);
         app.test_key(key, ElementState::Released);
     }
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(!app.exit_requested);
 
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.sound.ui_log.iter().any(|sound| sound == "Click"));
     app.sound.ui_log.clear();
     app.show_main_menu();
@@ -2689,14 +2689,14 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.sound.ui_log.clear();
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(!app.sound.ui_log.iter().any(|sound| sound == "Click"), "mnemonic dispatch must bypass the button Click sound: {:?}", app.sound.ui_log);
 
     app.show_main_menu();
     app.open_about_dialog();
     app.sound.ui_log.clear();
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
-    main_assert_eq!(app.startup_about_dialog.as_ref().expect("About dialog").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
+    main_assert_eq!(app.startup.about_dialog.as_ref().expect("About dialog").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
     main_assert!(app.sound.ui_log.is_empty());
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
     main_assert_eq!(app.message_dialogs.len() => 1);
@@ -2709,19 +2709,19 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.handle_game_over().test_value();
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
     main_assert!(app.game_over_dialog.is_some());
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
 }
 
 #[test]
 fn player_typeahead_stays_behind_rename_and_modal_dialogs() {
     let mut app = new_classic_menu_app(640, 480);
-    app.startup_player_models = ["Thomas", "tina"]
+    app.startup.player_models = ["Thomas", "tina"]
         .map(|name| menus1_fixture!(player_selection: name.to_string(), 0xff))
         .into_iter()
         .collect();
     app.open_player_selection_dialog();
 
-    app.startup_crew_rename = Some(StartupCrewRenameState {
+    app.startup.crew_rename = Some(StartupCrewRenameState {
         index: 0,
         player_path: PathBuf::from("Player.c4p"),
         file_name: "Crew.c4i".to_string(),
@@ -2730,9 +2730,9 @@ fn player_typeahead_stays_behind_rename_and_modal_dialogs() {
         ignore_pointer_up: false,
     });
     app.test_text_input('T');
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").selected_index() => Some(0), "the covered list must not type-ahead");
-    main_assert_ne!(app.startup_crew_rename.as_ref().expect("inline rename").edit.text() => "Crew");
-    app.startup_crew_rename = None;
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").selected_index() => Some(0), "the covered list must not type-ahead");
+    main_assert_ne!(app.startup.crew_rename.as_ref().expect("inline rename").edit.text() => "Crew");
+    app.startup.crew_rename = None;
 
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -2745,7 +2745,7 @@ fn player_typeahead_stays_behind_rename_and_modal_dialogs() {
     .test_value();
     app.test_text_input('T');
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").selected_index() => Some(0));
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").selected_index() => Some(0));
     main_assert!(app.context_menu.is_none());
 }
 
@@ -2771,14 +2771,14 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     let player_file = PlayerFile::load_from_path(&player_path).test_value();
     let player_model = menus1_fixture!(player_selection: "Ada".to_string(), 255);
     let mut app = new_classic_menu_app(640, 480);
-    app.startup_player_files.push(menus1_fixture!(
+    app.startup.player_files.push(menus1_fixture!(
         startup_player:
             player_path.clone(),
             "Ada.c4p".to_string(),
             player_file,
             player_model.clone(),
     ));
-    app.startup_player_models.push(player_model);
+    app.startup.player_models.push(player_model);
     app.open_player_selection_dialog();
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
@@ -2786,15 +2786,15 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     .test_value();
 
     let alpha_index = app
-        .startup_crew_models
+        .startup.crew_models
         .iter()
         .position(|crew| crew.name == "Alpha")
         .test_value();
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_selected_index(Some(alpha_index));
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    let rename = app.startup_crew_rename.test_ref();
+    let rename = app.startup.crew_rename.test_ref();
     main_assert!(!rename.edit.label_visible());
     main_assert!(rename.edit.is_focused());
     main_assert_eq!(rename.edit.selected_text() => Some("Alpha"));
@@ -2804,7 +2804,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         app.test_text_input(character);
     }
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    main_assert_eq!(app.startup_crew_rename.as_ref().expect("restarted inline rename").edit.selected_text() => Some("Alpha"));
+    main_assert_eq!(app.startup.crew_rename.as_ref().expect("restarted inline rename").edit.selected_text() => Some("Alpha"));
 
     let edit_rect = app.startup_crew_rename_rect().test_value();
     let edit_point = GuiPoint::new(
@@ -2812,14 +2812,14 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         (edit_rect.y + edit_rect.h / 2) as f32,
     );
     main_assert!(app.handle_startup_crew_rename_middle_down(edit_point, None));
-    main_assert!(app.startup_crew_rename.as_ref().expect("middle-clicked inline rename").edit.selection_range().is_none());
+    main_assert!(app.startup.crew_rename.as_ref().expect("middle-clicked inline rename").edit.selection_range().is_none());
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    app.startup_crew_rename.test_mut().last_click = Some(Instant::now());
+    app.startup.crew_rename.test_mut().last_click = Some(Instant::now());
     main_assert!(app.handle_startup_crew_rename_pointer_down(edit_point));
-    main_assert!(!app.startup_crew_rename.as_ref().expect("double-clicked inline rename").edit.is_dragging());
+    main_assert!(!app.startup.crew_rename.as_ref().expect("double-clicked inline rename").edit.is_dragging());
     main_assert!(app.handle_startup_crew_rename_pointer_up(edit_point));
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_pointer_position(Some(edit_point));
     let expected_edit_entries = app.startup_crew_rename_context_entries(false);
@@ -2830,48 +2830,48 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
             ))
     }));
     app.test_right_button(ElementState::Pressed);
-    main_assert!(app.startup_crew_rename.is_some());
+    main_assert!(app.startup.crew_rename.is_some());
     main_assert!(matches!(app.context_menu.as_ref().expect("inline edit context").layout().panels[0].rows.len(), 3 | 4));
     app.close_context_menu_silently();
 
-    let layout = app.startup_player_dialog.test_ref().layout();
+    let layout = app.startup.player_dialog.test_ref().layout();
     let same_row_point = GuiPoint::new(
         (layout.list_viewport.x + layout.item_height / 2) as f32,
         (layout.list_viewport.y + layout.item_pitch * alpha_index as i32
-            - app.startup_player_dialog.test_ref().list_scroll_offset()
+            - app.startup.player_dialog.test_ref().list_scroll_offset()
             + layout.item_height / 2) as f32,
     );
     let inert_row_point = GuiPoint::new(
         (layout.list_viewport.x + layout.item_height + layout.item_height / 2) as f32,
         same_row_point.y,
     );
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_pointer_position(Some(inert_row_point));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.startup_crew_rename.is_some());
+    main_assert!(app.startup.crew_rename.is_some());
 
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_pointer_position(Some(same_row_point));
     app.test_right_button(ElementState::Pressed);
-    main_assert!(app.startup_crew_rename.is_some());
+    main_assert!(app.startup.crew_rename.is_some());
     main_assert_eq!(app.context_menu.as_ref().expect("crew row context").layout().panels[0].rows.len() => 3);
     app.close_context_menu_silently();
 
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_pointer_position(Some(same_row_point));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.startup_crew_rename.is_some());
+    main_assert!(app.startup.crew_rename.is_some());
     app.test_left_button(ElementState::Released);
-    main_assert!(app.startup_crew_rename.is_none());
+    main_assert!(app.startup.crew_rename.is_none());
     main_assert!(player_path.join("Alpha.c4i").exists());
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.startup_crew_rename.is_none());
+    main_assert!(app.startup.crew_rename.is_none());
     main_assert!(player_path.join("Alpha.c4i").exists());
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
@@ -2879,27 +2879,27 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         app.test_text_input(character);
     }
     let taken_index = app
-        .startup_crew_models
+        .startup.crew_models
         .iter()
         .position(|crew| crew.name == "Taken")
         .test_value();
     let other_row_point = GuiPoint::new(
         (layout.list_viewport.x + layout.item_height / 2) as f32,
         (layout.list_viewport.y + layout.item_pitch * taken_index as i32
-            - app.startup_player_dialog.test_ref().list_scroll_offset()
+            - app.startup.player_dialog.test_ref().list_scroll_offset()
             + layout.item_height / 2) as f32,
     );
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_pointer_position(Some(other_row_point));
     app.test_right_button(ElementState::Pressed);
-    main_assert!(app.startup_crew_rename.is_none());
+    main_assert!(app.startup.crew_rename.is_none());
     main_assert!(player_path.join("Alpha.c4i").exists());
     main_assert!(!player_path.join("Discarded.c4i").exists());
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").selected_index() => Some(taken_index));
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").selected_index() => Some(taken_index));
     main_assert!(app.context_menu.is_some());
     app.close_context_menu_silently();
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_selected_index(Some(alpha_index));
 
@@ -2908,7 +2908,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         app.test_text_input(character);
     }
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    let rename = app.startup_crew_rename.test_ref();
+    let rename = app.startup.crew_rename.test_ref();
     main_assert!(rename.edit.is_focused());
     main_assert_eq!(rename.edit.selected_text() => Some("Taken"));
     let collision = app.message_dialogs.last().test_value();
@@ -2921,17 +2921,17 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         app.test_text_input(character);
     }
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(app.startup_crew_rename.is_none());
+    main_assert!(app.startup.crew_rename.is_none());
     main_assert!(!player_path.join("Alpha.c4i").exists());
     main_assert!(player_path.join("Renamed.c4i").exists());
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").focused_control() => PlrSelControl::PlayerList);
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").focused_control() => PlrSelControl::PlayerList);
 
     let renamed_index = app
-        .startup_crew_models
+        .startup.crew_models
         .iter()
         .position(|crew| crew.name == "Renamed")
         .test_value();
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_selected_index(Some(renamed_index));
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
@@ -2941,13 +2941,13 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         app.test_text_input(character);
     }
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    main_assert!(app.startup_crew_rename.is_none());
+    main_assert!(app.startup.crew_rename.is_none());
     main_assert!(!player_path.join("Renamed.c4i").exists());
     main_assert!(player_path.join(&focus_loss_file).exists());
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").focused_control() => PlrSelControl::PlayerList);
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").focused_control() => PlrSelControl::PlayerList);
 
     let focus_loss_index = app
-        .startup_crew_models
+        .startup.crew_models
         .iter()
         .position(|crew| crew.name == focus_loss_name)
         .test_value();
@@ -2956,7 +2956,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
             .expect("read truncated persisted crew core")
             .contains("Name=Blurred crew name exceeds thir")
     );
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_selected_index(Some(focus_loss_index));
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
@@ -2976,15 +2976,15 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         "Partial",
     )
     .test_value();
-    main_assert!(app.startup_crew_rename.is_none());
+    main_assert!(app.startup.crew_rename.is_none());
     let partial_index = app
-        .startup_crew_files
+        .startup.crew_files
         .iter()
         .position(|entry| entry.file_name == "Partial.c4i")
         .test_value();
-    main_assert_eq!(app.startup_crew_models[partial_index].name => "Partial");
-    main_assert_eq!(app.startup_crew_files[partial_index].file_name => "Partial.c4i");
-    main_assert_eq!(app.startup_crew_files[partial_index].crew_info.name => "Partial");
+    main_assert_eq!(app.startup.crew_models[partial_index].name => "Partial");
+    main_assert_eq!(app.startup.crew_files[partial_index].file_name => "Partial.c4i");
+    main_assert_eq!(app.startup.crew_files[partial_index].crew_info.name => "Partial");
     main_assert!(
         fs::read_to_string(player_path.join("Partial.c4i/ObjectInfo.txt"))
             .expect("read stale core after simulated rewrite failure")
@@ -2997,28 +2997,28 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         .test_value();
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    main_assert!(app.startup_crew_rename.is_some());
+    main_assert!(app.startup.crew_rename.is_some());
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
-    main_assert!(app.startup_crew_rename.is_none());
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
+    main_assert!(app.startup.crew_rename.is_none());
 }
 
 #[test]
 fn player_properties_context_closes_and_opens_the_editor() {
     let mut app = new_classic_menu_app(640, 480);
     let model = menus1_fixture!(player_selection: "Context Player".to_string(), 0xff);
-    app.startup_player_files.push(menus1_fixture!(
+    app.startup.player_files.push(menus1_fixture!(
         startup_player:
             PathBuf::from("Context Player.c4p"),
             "Context Player.c4p".to_string(),
             PlayerFile::default(),
             model.clone(),
     ));
-    app.startup_player_models.push(model);
+    app.startup.player_models.push(model);
     app.open_player_selection_dialog();
     let layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
-    app.startup_player_dialog
+    app.startup.player_dialog
         .as_mut()
         .test_value()
         .set_pointer_position(Some(GuiPoint::new(
@@ -3027,8 +3027,8 @@ fn player_properties_context_closes_and_opens_the_editor() {
         )));
     main_assert!(app.open_startup_player_context_menu(false).expect("open exact player context"));
     main_assert!(app.context_menu.is_some());
-    let before_models = app.startup_player_models.len();
-    let before_files = app.startup_player_files.len();
+    let before_models = app.startup.player_models.len();
+    let before_files = app.startup.player_files.len();
 
     app.process_context_menu_outcome(ContextMenuOutcome {
         captured: true,
@@ -3045,15 +3045,15 @@ fn player_properties_context_closes_and_opens_the_editor() {
     .test_value();
     main_assert!(app.context_menu.is_none());
     main_assert!(matches!(
-        app.startup_player_properties_dialog
+        app.startup.player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
     ));
     main_assert!(app.status_text.is_empty());
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_player_models.len() => before_models);
-    main_assert_eq!(app.startup_player_files.len() => before_files);
+    main_assert_eq!(app.startup.player_models.len() => before_models);
+    main_assert_eq!(app.startup.player_files.len() => before_files);
 }
 
 #[test]
@@ -3688,7 +3688,7 @@ fn options_dialog_loads_log_timestamps_from_general_config() {
     app.open_options_menu();
 
     main_assert!(
-        app.startup_options_dialog
+        app.startup.options_dialog
             .as_ref()
             .expect("options dialog")
             .program()
@@ -3718,7 +3718,7 @@ fn options_sound_sheet_fails_typed_before_pixels_without_audio_context() {
             action: "the startup Options Audio sheet",
         },
     );
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("retained options model").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Sound);
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("retained options model").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Sound);
 
     let mut frame = vec![0xa5; 320 * 200 * 4];
     let error = app
@@ -3749,8 +3749,8 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     )
     .test_value();
     wait_for_menu(&mut app);
-    app.startup_player_files.clear();
-    app.startup_player_models.clear();
+    app.startup.player_files.clear();
+    app.startup.player_models.clear();
     let main_layout = clonk_frontend::main_menu_layout(1280, 720);
     let click_main_button = |app: &mut GameApp, index: usize| {
         let button = main_layout.buttons[index];
@@ -3764,18 +3764,18 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     };
     let settle_startup_fade = |app: &mut GameApp| {
         main_assert!(app.startup_dialog_fade_active());
-        app.startup_dialog_fade.test_mut().step = STARTUP_DIALOG_FADE_STEPS - 1;
+        app.startup.dialog_fade.test_mut().step = STARTUP_DIALOG_FADE_STEPS - 1;
         let mut frame = vec![0_u8; 1280 * 720 * 4];
         app.test_render(&mut frame);
         main_assert!(!app.startup_dialog_fade_active());
     };
 
     click_main_button(&mut app, 0);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     app.show_main_menu();
 
     click_main_button(&mut app, 1);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     settle_startup_fade(&mut app);
     let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics {
         caption_back_extent: 51,
@@ -3793,20 +3793,20 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     app.test_cursor(network_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
     let test_player = menus1_fixture!(player_selection: "Test Player".to_string(), 0xff);
-    app.startup_player_files.push(menus1_fixture!(
+    app.startup.player_files.push(menus1_fixture!(
         startup_player:
             user_data.path().join("Test Player.c4p"),
             "Test Player.c4p".to_string(),
             PlayerFile::default(),
             test_player.clone(),
     ));
-    app.startup_player_models.push(test_player);
+    app.startup.player_models.push(test_player);
     click_main_button(&mut app, 2);
-    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
+    main_assert_eq!(app.startup.view => StartupView::PlayerSelection);
     settle_startup_fade(&mut app);
     let player_layout = clonk_frontend::startup_plrsel::plrsel_layout(1280, 720);
     let player_row = PhysicalPosition::new(
@@ -3819,7 +3819,7 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert!(matches!(
-        app.startup_player_properties_dialog
+        app.startup.player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
@@ -3835,30 +3835,30 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     app.test_cursor(player_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
     click_main_button(&mut app, 3);
-    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.startup.view => StartupView::Options);
     settle_startup_fade(&mut app);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("options state").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Graphics);
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("options state").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Graphics);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("options state").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Sound);
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("options state").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Sound);
 
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("options state").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Keyboard);
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("options state").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Keyboard);
     app.test_key(VirtualKeyCode::KeyR, ElementState::Pressed);
     main_assert!(app.status_text.is_empty());
     app.test_key(VirtualKeyCode::Backspace, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
     click_main_button(&mut app, 4);
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.view => StartupView::About);
     settle_startup_fade(&mut app);
     let about_layout = clonk_frontend::startup_about_dlg::about_layout(1280, 720);
     let licenses = about_layout.buttons[2];
@@ -3869,7 +3869,7 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     app.test_cursor(licenses_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_about_dialog.as_ref().expect("about state").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
+    main_assert_eq!(app.startup.about_dialog.as_ref().expect("about state").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
     let mut licenses_frame = vec![0_u8; 1280 * 720 * 4];
     app.test_render(&mut licenses_frame);
     main_assert!(licenses_frame.iter().any(|byte| *byte != 0));
@@ -3882,7 +3882,7 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     app.test_cursor(about_back_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.view => StartupView::About);
 
     let mut credits = vec![0_u8; 1280 * 720 * 4];
     app.test_render(&mut credits);
@@ -3894,7 +3894,7 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     app.test_cursor(update_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.view => StartupView::About);
     let wait = app.message_dialogs.last().test_value();
     main_assert_eq!(wait.state.caption() => "Check for Updates");
     main_assert_eq!(wait.state.message() => "Checking for updates...");
@@ -3903,12 +3903,12 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     main_assert!(app.message_dialogs.is_empty());
     main_assert!(app.update_check.is_none());
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.view => StartupView::About);
 
     app.test_cursor(about_back_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
     click_main_button(&mut app, 5);
@@ -4188,7 +4188,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     )
     .test_value();
     wait_for_menu(&mut app);
-    main_assert_eq!(app.startup_player_models.len() => 2);
+    main_assert_eq!(app.startup.player_models.len() => 2);
     app.open_player_selection_dialog();
 
     let layout = clonk_frontend::startup_plrsel::plrsel_layout(1280, 720);
@@ -4205,15 +4205,15 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         app.test_right_button(ElementState::Pressed);
     };
 
-    let focus_before = app.startup_player_dialog.test_ref().focused_control();
+    let focus_before = app.startup.player_dialog.test_ref().focused_control();
     open_on_row(&mut app, 1);
     let popup = app.context_menu.test_ref();
     main_assert_eq!(popup.layout().panels.len() => 1);
     main_assert_eq!(popup.layout().panels[0].rows.len() => 2);
     main_assert_eq!(popup.layout().panels[0].selected => None);
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player controller").selected_index() => Some(1));
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player controller").selected_index() => Some(1));
     main_assert_eq!(
-        app.startup_player_dialog
+        app.startup.player_dialog
             .as_ref()
             .expect("player controller")
             .focused_control() =>
@@ -4229,7 +4229,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     app.test_left_button(ElementState::Pressed);
     main_assert!(app.context_menu.is_none());
     main_assert!(matches!(
-        app.startup_player_properties_dialog
+        app.startup.player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 1 })
@@ -4281,7 +4281,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     open_on_row(&mut app, 1);
     app.test_cursor(row_point(0));
     app.test_right_button(ElementState::Pressed);
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player controller").selected_index() => Some(0));
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player controller").selected_index() => Some(0));
     main_assert!(app.context_menu.is_some(), "same down opens the first row popup");
 
     let mut with_context = vec![0_u8; 1280 * 720 * 4];

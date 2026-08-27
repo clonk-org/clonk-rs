@@ -171,7 +171,7 @@ impl GameApp {
     /// same enhanced-search presentation `render_startup_frame` draws, so the
     /// count a reader announces cannot drift from the one on screen.
     pub(crate) fn scen_sel_accessibility(&self) -> clonk_frontend::accessibility::ScenSelSemantics {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+        if self.mode != AppMode::Menu || self.startup.view != StartupView::ScenarioBrowser {
             return clonk_frontend::accessibility::ScenSelSemantics::default();
         }
         clonk_frontend::accessibility::scen_sel_semantics(
@@ -206,7 +206,7 @@ impl GameApp {
 
     pub(crate) fn restore_scensel_rename_pointer_focus(&mut self) {
         let focus = self.scensel.rename_pointer_focus;
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+        if self.mode == AppMode::Menu && self.startup.view == StartupView::ScenarioBrowser {
             if let Some(focus) = focus {
                 self.restore_scensel_focus(focus);
             }
@@ -301,7 +301,7 @@ impl GameApp {
         require_inside: bool,
     ) -> Option<usize> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::ScenarioBrowser
+            || self.startup.view != StartupView::ScenarioBrowser
             || self.menu_state.current_map().is_some()
         {
             return None;
@@ -352,7 +352,7 @@ impl GameApp {
     ) -> Result<bool, EngineError> {
         if self.menu_state.search_text().is_empty()
             || self.mode != AppMode::Menu
-            || self.startup_view != StartupView::ScenarioBrowser
+            || self.startup.view != StartupView::ScenarioBrowser
             || self.menu_state.current_map().is_some()
         {
             return Ok(false);
@@ -451,7 +451,7 @@ impl GameApp {
     }
 
     fn scensel_rename_char_pos(&self, point: GuiPoint, require_inside: bool) -> Option<usize> {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+        if self.mode != AppMode::Menu || self.startup.view != StartupView::ScenarioBrowser {
             return None;
         }
         let fonts = self.assets.clonk_fonts.as_deref()?;
@@ -564,7 +564,7 @@ impl GameApp {
         target: ScenselScrollbarTarget,
     ) -> Option<ScenselScrollbarSpec> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::ScenarioBrowser
+            || self.startup.view != StartupView::ScenarioBrowser
             || self.menu_state.current_map().is_some()
         {
             return None;
@@ -789,7 +789,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::ScenarioBrowser
+            || self.startup.view != StartupView::ScenarioBrowser
             || !matches!(
                 key,
                 VirtualKeyCode::ArrowUp
@@ -995,7 +995,7 @@ impl GameApp {
                 .take()
                 .expect("finished scenario discovery retains its state");
             state.cancel.store(true, AtomicOrdering::Relaxed);
-            if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            if self.mode != AppMode::Menu || self.startup.view != StartupView::ScenarioBrowser {
                 return Ok(());
             }
             let selected_identifier = state.selected_identifier.take();
@@ -1022,7 +1022,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::ScenarioBrowser
+            || self.startup.view != StartupView::ScenarioBrowser
             || self.context_menu.is_some()
             || state != ElementState::Pressed
         {
@@ -1287,26 +1287,27 @@ impl GameApp {
 
     pub(crate) fn open_startup_player_portrait_selector(&mut self) {
         let Some(paths) = self.app_paths.as_ref() else {
-            if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+            if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
                 pending
                     .controller
                     .set_validation_error(Some("Application paths are unavailable".to_string()));
             }
             return;
         };
-        if !self.startup_user_portraits_written {
-            self.startup_user_portraits_written = true;
+        if !self.startup.user_portraits_written {
+            self.startup.user_portraits_written = true;
             extract_default_startup_portraits_once(paths);
         }
         let location_labels =
             PortraitLocationLabels::from_resources(&self.startup_tooltip_resources);
         let locations = startup_player_portrait_locations(paths, &location_labels);
         let current_location = self
-            .startup_last_portrait_folder_index
+            .startup
+            .last_portrait_folder_index
             .or_else(|| load_startup_last_portrait_folder_index(Some(paths)))
             .filter(|index| *index < locations.len())
             .unwrap_or(0);
-        self.startup_last_portrait_folder_index = Some(current_location);
+        self.startup.last_portrait_folder_index = Some(current_location);
         let current_path = locations[current_location].path.clone();
         let entries =
             match clonk_frontend::startup_portraitsel::portrait_files_in_location(&current_path) {
@@ -1321,7 +1322,7 @@ impl GameApp {
                 }
             };
         let labels = self.portrait_sel_labels();
-        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+        if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
             pending.controller.open_portrait_selector_with_labels(
                 locations,
                 current_location,
@@ -1832,7 +1833,7 @@ impl GameApp {
         &mut self,
         scenario: FrontendScenario,
     ) -> Result<(), EngineError> {
-        if self.startup_view == StartupView::ScenarioBrowser
+        if self.startup.view == StartupView::ScenarioBrowser
             && self.menu_state.definition_checkbox_checked
         {
             self.open_definition_selector(scenario)
