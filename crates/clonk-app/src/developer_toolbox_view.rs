@@ -694,6 +694,8 @@ pub(crate) enum PropertyPageAction {
 pub(crate) struct PropertyPageLayout {
     /// `IDC_EDITOUTPUT`, the read-only text box.
     pub(crate) output: IntRect,
+    /// `IDC_COMBOINPUT`, the script entry, on the button's row.
+    pub(crate) script: IntRect,
     /// The scrolled window's vertical bar, beside the box.
     pub(crate) scroll_track: IntRect,
     /// `IDC_BUTTONRELOADDEF`.
@@ -742,6 +744,14 @@ pub(crate) fn property_page_layout(width: u32, height: u32) -> PropertyPageLayou
             content.y,
             bar_width,
             output_height,
+        ),
+        // The entry shares the button's row, as the combo box shares the
+        // dialog's bottom row with `IDC_BUTTONRELOADDEF`.
+        script: IntRect::new(
+            content.x,
+            reload.y,
+            (reload.x - content.x - NARROW_GAP).max(1),
+            button_height,
         ),
         reload,
     }
@@ -797,6 +807,7 @@ pub(crate) fn render_property_page(
     font: &dyn TextFont,
     text: &str,
     scroll: LineScroll,
+    script: &str,
     reload_enabled: bool,
     reload_label: &str,
 ) {
@@ -828,6 +839,29 @@ pub(crate) fn render_property_page(
     ) {
         draw_pane_scroll_bar(surface, &bar);
     }
+    // `IDC_COMBOINPUT`: a sunken edit field carrying whatever is typed, with
+    // a caret while it is enabled so an empty enabled entry still reads as
+    // one. Disabled, it shows its text greyed and no caret.
+    draw_sunken(surface, layout.script, CONTROL_BACKGROUND);
+    let caret = if reload_enabled { "_" } else { "" };
+    draw_fitted_text(
+        surface,
+        font,
+        IntRect::new(
+            layout.script.x + 2,
+            layout.script.y,
+            (layout.script.w - 4).max(1),
+            layout.script.h,
+        ),
+        &format!("{script}{caret}"),
+        if reload_enabled {
+            CONTROL_TEXT
+        } else {
+            DISABLED_TEXT
+        },
+        SMALL_FONT_SIZE,
+        3,
+    );
     draw_raised(surface, layout.reload, WINDOW_BACKGROUND);
     draw_fitted_text(
         surface,
@@ -1273,6 +1307,7 @@ mod tests {
                 &font,
                 "Type: Rock (ROCK)\nOwner: Ada",
                 LineScroll::default(),
+                "Mark(",
                 true,
                 "Reload def",
             );

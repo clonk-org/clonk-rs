@@ -807,6 +807,48 @@ pub(crate) fn handle_developer_toolbox_event(
                 windows.request_redraw(key);
             }
         }
+        // `IDC_COMBOINPUT` has the keyboard while the property page is up, and
+        // it is enabled on `Console.Editing` alone
+        // (`C4PropertyDlg.cpp:117`). A key it takes is the entry's, not the
+        // window's.
+        Event::WindowEvent {
+            event:
+                WindowEvent::KeyboardInput {
+                    event: input @ winit::event::KeyEvent { state, .. },
+                    ..
+                },
+            ..
+        } => {
+            if *state != winit::event::ElementState::Pressed
+                || app.developer_toolbox.current_page() != Some(ToolboxPage::Property)
+            {
+                return;
+            }
+            let claimed = match crate::legacy_virtual_key_from_event(input, app.keyboard_modifiers)
+            {
+                Some(crate::VirtualKeyCode::Enter) | Some(crate::VirtualKeyCode::NumpadEnter) => {
+                    match app.submit_developer_property_script() {
+                        Ok(submitted) => submitted,
+                        Err(error) => {
+                            tracing::error!(%error, "property script submission failed");
+                            true
+                        }
+                    }
+                }
+                Some(crate::VirtualKeyCode::Backspace) => app.backspace_developer_property_script(),
+                // Everything else is text if it produced any: winit resolves
+                // the layout, so this needs no keycode table of its own.
+                _ => input
+                    .text
+                    .as_ref()
+                    .map(|text| text.as_str())
+                    .filter(|text| !text.chars().any(char::is_control))
+                    .is_some_and(|text| app.type_developer_property_script(text)),
+            };
+            if claimed {
+                windows.request_redraw(key);
+            }
+        }
         // The property output is a scrolled text view
         // (`C4PropertyDlg.cpp:128-140`); the tools page has nothing to scroll.
         Event::WindowEvent {

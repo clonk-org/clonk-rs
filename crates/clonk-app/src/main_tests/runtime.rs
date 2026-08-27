@@ -5517,6 +5517,180 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
     );
 }
 
+/// The entry takes text only while editing, and a refresh never eats it.
+///
+/// `EnableWindow(GetDlgItem(hDialog, IDC_COMBOINPUT), Console.Editing)`
+/// (`C4PropertyDlg.cpp:117`) is the whole gate. `UpdateInputCtrl` then reads
+/// the entry's text before clearing the list and writes it back afterwards
+/// (`:296-306,372-374`) — and `Update` runs on Tick35 and on every selection
+/// change, so anything less would eat a half-typed call several times a
+/// second.
+#[test]
+fn the_property_script_entry_is_gated_on_editing_and_survives_a_refresh() {
+    use clonk_engine::developer_selection::SelectionWriter;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    runtime_assert!(app.developer_console_editing());
+
+    runtime_assert!(app.developer_property_script_input().is_empty());
+    runtime_assert!(app.type_developer_property_script("Mark("));
+    runtime_assert!(app.type_developer_property_script("1)"));
+    runtime_assert_eq!(app.developer_property_script_input() => "Mark(1)");
+
+    // A selection change rebuilds the pane; the half-typed call stays.
+    let subject = app.snapshot.objects.first().test_value().id;
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, subject);
+    let _ = app.render_developer_toolbox_page(
+        crate::developer_windows::ToolboxPage::Property,
+        240,
+        200,
+    );
+    runtime_assert_eq!(
+        app.developer_property_script_input() => "Mark(1)",
+        "a refresh restores the text it read",
+    );
+
+    // Backspace and clearing are the entry's own.
+    runtime_assert!(app.backspace_developer_property_script());
+    runtime_assert_eq!(app.developer_property_script_input() => "Mark(1");
+
+    // Editing off: the control is disabled and takes nothing.
+    app.developer_console_editing_enabled = false;
+    runtime_assert!(!app.developer_console_editing());
+    runtime_assert!(
+        !app.type_developer_property_script("X"),
+        "a disabled combo box accepts no input"
+    );
+    runtime_assert_eq!(app.developer_property_script_input() => "Mark(1");
+    runtime_assert!(!app.backspace_developer_property_script());
+}
+
+/// Enter submits what was typed, through the editor's own control path.
+///
+/// `OnScriptActivate` calls `Console.EditCursor.In(text)` for nonempty text
+/// only (`C4PropertyDlg.cpp:394-399`), and `In` is what wraps the live
+/// selection into the queued `EMMO_Script` control the port already had.
+#[test]
+fn the_property_script_entry_submits_the_live_selection_on_enter() {
+    use clonk_engine::developer_selection::SelectionWriter;
+
+    let mut app = new_state_only_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+    let subject = app.snapshot.objects.first().test_value().id;
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, subject);
+
+    // Empty input is not a submission.
+    runtime_assert!(!app.submit_developer_property_script().test_value());
+    runtime_assert!(commands.take_submitted_decided_controls().is_empty());
+
+    runtime_assert!(app.type_developer_property_script("Mark()"));
+    runtime_assert!(app.submit_developer_property_script().test_value());
+
+    let decided = commands.take_submitted_decided_controls();
+    let [(_, clonk_engine::ControlPacket::EmMoveObject(control), false)] = decided.as_slice()
+    else {
+        panic!("expected one queued editor script, got {decided:?}");
+    };
+    runtime_assert_eq!(control.action => clonk_engine::EMMO_SCRIPT);
+    runtime_assert_eq!(control.script.as_bytes() => b"Mark()");
+    runtime_assert_eq!(
+        control.objects => vec![subject.as_u64() as i32],
+        "the live selection is what the script runs on",
+    );
+    runtime_assert!(
+        app.developer_property_script_input().is_empty(),
+        "a submitted line leaves the entry ready for the next"
+    );
+
+    // Editing off, Enter does nothing at all.
+    app.developer_console_editing_enabled = false;
+    runtime_assert!(!app.submit_developer_property_script().test_value());
+    runtime_assert!(commands.take_submitted_decided_controls().is_empty());
+}
+
+/// The script entry completes what C++ puts in its combo box.
+///
+/// `C4PropertyDlg::UpdateInputCtrl` fills it from two sources
+/// (`C4PropertyDlg.cpp:336-370`): every **public** function the script engine
+/// holds, and — only when exactly one object is selected — every
+/// `AA_PUBLIC` function of that object's definition script, in `GetSFunc`
+/// order. Nothing else gets in: a private or protected definition function is
+/// not offered, and a multiple selection contributes none at all, because
+/// `Update` passes the single object or nothing.
+#[test]
+fn the_property_script_completion_is_the_public_engine_and_selected_definition() {
+    use clonk_engine::developer_selection::SelectionWriter;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.engine
+        .register_script_definition(
+            "CMPL",
+            "Completion",
+            "public func OfferedOne() { return 1; }\n\
+             func OfferedTwo() { return 2; }\n\
+             private func Hidden() { return 3; }\n\
+             protected func AlsoHidden() { return 4; }\n",
+        )
+        .test_value();
+    let subject = app
+        .engine
+        .spawn_test_object(clonk_engine::SpawnConfig::new("CMPL"));
+    app.snapshot = app.engine.snapshot();
+
+    let global = app.developer_property_script_completions();
+    runtime_assert!(
+        !global.is_empty(),
+        "the engine's own public functions are always offered"
+    );
+    for hidden in ["OfferedOne", "OfferedTwo", "Hidden", "AlsoHidden"] {
+        runtime_assert!(
+            !global.contains(&hidden.to_owned()),
+            "with nothing selected, no definition contributes {hidden}"
+        );
+    }
+
+    // One object selected: its public functions join the list.
+    app.developer_selection
+        .replace(SelectionWriter::ObjectTree, subject);
+    let selected = app.developer_property_script_completions();
+    for offered in ["OfferedOne", "OfferedTwo"] {
+        runtime_assert!(
+            selected.contains(&offered.to_owned()),
+            "{offered} is public and belongs in the list"
+        );
+    }
+    for hidden in ["Hidden", "AlsoHidden"] {
+        runtime_assert!(
+            !selected.contains(&hidden.to_owned()),
+            "{hidden} is not AA_PUBLIC and must not be offered"
+        );
+    }
+    runtime_assert!(
+        global.iter().all(|name| selected.contains(name)),
+        "the engine's functions stay offered alongside the definition's"
+    );
+
+    // Several selected: `Update` passes no object, so no definition does.
+    let second = app
+        .engine
+        .spawn_test_object(clonk_engine::SpawnConfig::new("CMPL"));
+    app.snapshot = app.engine.snapshot();
+    app.developer_selection
+        .toggle(SelectionWriter::ObjectTree, second);
+    runtime_assert_eq!(app.developer_selection.objects().len() => 2);
+    runtime_assert_eq!(
+        app.developer_property_script_completions() => global,
+        "a multiple selection offers only the engine's own",
+    );
+}
+
 /// Both developer panes drive their retained position from one bar.
 ///
 /// The panes sit in `GTK_POLICY_AUTOMATIC` scrolled windows

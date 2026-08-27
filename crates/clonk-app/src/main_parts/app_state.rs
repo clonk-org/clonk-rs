@@ -464,6 +464,14 @@ pub(crate) struct GameApp {
     pub(crate) developer_object_tree_expansion:
         crate::developer_object_list_view::ObjectTreeExpansion,
     pub(crate) developer_object_list_revealed: Option<clonk_engine::ObjectId>,
+    /// What is typed into the property page's script entry.
+    ///
+    /// `IDC_COMBOINPUT`'s own text: `UpdateInputCtrl` reads it before
+    /// rebuilding the completion list and writes it back afterwards
+    /// (`C4PropertyDlg.cpp:296-306,372-374`), so the rebuild `Update` performs
+    /// on Tick35 and on every selection change cannot eat a half-typed call.
+    /// Holding it here is that preservation: nothing else writes it.
+    pub(crate) developer_property_script_input: String,
     /// The property pane's retained first visible line
     /// (`C4PropertyDlg.cpp:257-262`).
     pub(crate) developer_property_scroll: crate::developer_toolbox_view::LineScroll,
