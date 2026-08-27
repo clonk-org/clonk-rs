@@ -249,6 +249,59 @@ pub(crate) struct StartupDialogState {
     pub(crate) view_flags: StartupViewFlags,
 }
 
+/// The dialogs a running game can put on screen, and the stack that orders
+/// them.
+///
+/// `C4GUI::Screen` keeps one absolute z-order across every shown dialog, so
+/// the scoreboard, the client list, the statistics chart and the message
+/// dialogs are not independent toggles: which one is topmost decides which
+/// one a key or a click reaches, and each keeps its own consumed-key and
+/// pointer-capture latches for exactly that reason. Held flat, the stack sat
+/// several hundred lines from the dialogs it orders.
+#[derive(Default)]
+pub(crate) struct RuntimeDialogState {
+    /// Singleton runtime `C4Network2ClientListDlg`, toggled by bare F4.
+    pub(crate) client_list: Option<clonk_frontend::runtime_client_list::RuntimeClientListDialog>,
+    /// Keys owned by the modal lobby `C4Network2ClientDlg` until release,
+    /// including the Escape press that closes it.
+    pub(crate) client_list_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Both this dialog and game-over use C4GUI's default z=0. Preserve which
+    /// one was shown most recently so equal-z rendering and input stay in the
+    /// native insertion order.
+    pub(crate) client_list_above_game_over: bool,
+    /// Bottom-to-top order of the running Screen's default-z dialogs.
+    pub(crate) default_order: Vec<RuntimeDefaultDialog>,
+    /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
+    /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
+    /// the explicit game-over/Clear close sites.
+    pub(crate) scoreboard: Option<ScoreboardPresentationRequest>,
+    pub(crate) scoreboard_initial_reconcile_pending: bool,
+    pub(crate) scoreboard_close_pointer_capture: bool,
+    pub(crate) scoreboard_runtime: ScoreboardDialogRuntime,
+    /// Bottom-to-top native Screen child order for the running shared-dialog
+    /// layers whose z/activation interactions cross controller boundaries.
+    pub(crate) stack: Vec<RunningDialogStackEntry>,
+    /// App-owned classic dialogs, in C4GUI z-order. Pointer hit-testing starts
+    /// at the top; every entry is rendered bottom-to-top without a scrim.
+    pub(crate) messages: Vec<PendingMessageDialog>,
+    /// Process-global C4ChartDialog singleton and its stronger Escape latch.
+    pub(crate) chart: Option<clonk_frontend::network_chart::NetworkChartDialog>,
+    pub(crate) chart_consumed_keys: HashSet<VirtualKeyCode>,
+    pub(crate) chart_pointer_capture: bool,
+    /// `ActivateDialog`/new-dialog insertion can move the z=0 chart after
+    /// already shown z=+1/+2 dialogs in the Screen's absolute list.
+    pub(crate) chart_elevated: bool,
+    /// `C4GraphicsSystem::ShowHelp`; reset by GraphicsSystem::Default for a
+    /// new game and toggled by each in-scope F1 down edge.
+    pub(crate) help_visible: bool,
+    /// C4's process-global resource string table is fixed at application
+    /// startup. Cache the resolved help columns likewise; errors are retained
+    /// so no later frame can silently switch languages.
+    pub(crate) help_text_cache: OnceLock<std::result::Result<RuntimeHelpColumns, String>>,
+    /// Wooden menu title currently moving its owning dialog.
+    pub(crate) menu_title_drag: Option<MenuTitleDrag>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -1033,8 +1086,6 @@ pub(crate) struct GameApp {
     pub(crate) ingame_menu_close_pointer_capture: Option<i32>,
     /// Script menu close button retaining the current left-down.
     pub(crate) script_menu_close_pointer_capture: Option<(i32, ObjectId)>,
-    /// Wooden menu title currently moving its owning dialog.
-    pub(crate) menu_title_drag: Option<MenuTitleDrag>,
     /// Tooltip-style caption installed by a Help-mode object click or region
     /// hover, including C4MouseControl's move-count lifetime.
     pub(crate) ingame_mouse_help_caption: Option<IngameMouseHelpCaption>,
@@ -1073,13 +1124,6 @@ pub(crate) struct GameApp {
     pub(crate) game_over_dialog: Option<GameOverState>,
     pub(crate) game_over_handled: bool,
     pub(crate) pending_league_end: Option<PendingLeagueEnd>,
-    /// `C4GraphicsSystem::ShowHelp`; reset by GraphicsSystem::Default for a
-    /// new game and toggled by each in-scope F1 down edge.
-    pub(crate) runtime_help_visible: bool,
-    /// C4's process-global resource string table is fixed at application
-    /// startup. Cache the resolved help columns likewise; errors are retained
-    /// so no later frame can silently switch languages.
-    pub(crate) runtime_help_text_cache: OnceLock<std::result::Result<RuntimeHelpColumns, String>>,
     /// `C4Game::InitKeyboard` reloads Extra.c4g/KeyConfig.txt once per game.
     /// Keep that ownership check separate from the process-global language
     /// table so a new round cannot reuse a stale accept/refusal.
@@ -1105,33 +1149,10 @@ pub(crate) struct GameApp {
     /// local-control registry. Once a film retarget makes physical lifetime
     /// observable, never reconstruct the concrete list until the game resets.
     pub(crate) physical_viewports_authoritative: bool,
-    /// Singleton runtime `C4Network2ClientListDlg`, toggled by bare F4.
-    pub(crate) runtime_client_list:
-        Option<clonk_frontend::runtime_client_list::RuntimeClientListDialog>,
-    /// Keys owned by the modal lobby `C4Network2ClientDlg` until release,
-    /// including the Escape press that closes it.
-    pub(crate) runtime_client_list_consumed_keys: HashSet<VirtualKeyCode>,
-    /// Both this dialog and game-over use C4GUI's default z=0. Preserve which
-    /// one was shown most recently so equal-z rendering and input stay in the
-    /// native insertion order.
-    pub(crate) runtime_client_list_above_game_over: bool,
-    /// Bottom-to-top order of the running Screen's default-z dialogs.
-    pub(crate) runtime_default_dialog_order: Vec<RuntimeDefaultDialog>,
-    /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
-    /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
-    /// the explicit game-over/Clear close sites.
-    pub(crate) scoreboard_dialog: Option<ScoreboardPresentationRequest>,
-    pub(crate) scoreboard_initial_reconcile_pending: bool,
-    pub(crate) scoreboard_close_pointer_capture: bool,
-    pub(crate) scoreboard_runtime: ScoreboardDialogRuntime,
-    /// Bottom-to-top native Screen child order for the running shared-dialog
-    /// layers whose z/activation interactions cross controller boundaries.
-    pub(crate) running_dialog_stack: Vec<RunningDialogStackEntry>,
+    /// The runtime dialogs and the stack that orders them.
+    pub(crate) dialogs: RuntimeDialogState,
     pub(crate) running_active_dialog: Option<RunningDialogStackEntry>,
     pub(crate) next_running_message_stack_id: u64,
-    /// App-owned classic dialogs, in C4GUI z-order. Pointer hit-testing starts
-    /// at the top; every entry is rendered bottom-to-top without a scrim.
-    pub(crate) message_dialogs: Vec<PendingMessageDialog>,
     /// Native C4LeagueSignupDialog kept below its validation/cancellation
     /// MessageDialog while the current local player auth is suspended.
     pub(crate) league_signup_dialog: Option<PendingLeagueSignupDialog>,
@@ -1220,13 +1241,6 @@ pub(crate) struct GameApp {
     /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
     /// Fader/ScreenFader state.
     pub(crate) message_board: ClassicMessageBoardState,
-    /// Process-global C4ChartDialog singleton and its stronger Escape latch.
-    pub(crate) network_chart_dialog: Option<clonk_frontend::network_chart::NetworkChartDialog>,
-    pub(crate) network_chart_consumed_keys: HashSet<VirtualKeyCode>,
-    pub(crate) network_chart_pointer_capture: bool,
-    /// `ActivateDialog`/new-dialog insertion can move the z=0 chart after
-    /// already shown z=+1/+2 dialogs in the Screen's absolute list.
-    pub(crate) network_chart_elevated: bool,
     pub(crate) message_input_history: VecDeque<String>,
     /// `C4Player::ShowStartup` for the local player: device hint + name
     /// until the first control com (src/C4Player.cpp:1376,1735).

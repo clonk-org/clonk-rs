@@ -3925,7 +3925,7 @@ fn portrait_selector_semantics_cover_locales_sizes_and_high_dpi() {
             }
             app.test_modifiers(ModifiersState::empty());
             main_assert!(app.startup.player_properties_dialog.is_some(), "{case}: closing selector retains parent properties dialog");
-            main_assert!(app.message_dialogs.is_empty(), "{case}: semantic flow opens no error modal");
+            main_assert!(app.dialogs.messages.is_empty(), "{case}: semantic flow opens no error modal");
             main_assert!(app.sound.ui_log.is_empty(), "{case}: access keys synthesize no pointer sounds");
         }
     }
@@ -4333,7 +4333,7 @@ fn portrait_selector_honors_exact_keyboard_modifiers() {
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
@@ -4362,7 +4362,7 @@ fn portrait_selector_alt_o_activates_the_native_ok_hotkey() {
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyO, ElementState::Pressed);
 
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
 }
 
@@ -4392,7 +4392,7 @@ fn portrait_selector_cancel_hotkey_follows_the_active_language() {
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .is_none());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -4408,7 +4408,7 @@ fn portrait_selector_does_not_bind_keypad_enter_as_return() {
     app.test_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed);
 
     main_assert!(app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -4500,8 +4500,8 @@ fn portrait_selector_errors_use_screen_owned_modals() {
 
     missing.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(missing.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
-    main_assert_eq!(missing.message_dialogs.len() => 1);
-    main_assert_eq!(missing.message_dialogs[0].state.message() => "Please select a file first!");
+    main_assert_eq!(missing.dialogs.messages.len() => 1);
+    main_assert_eq!(missing.dialogs.messages[0].state.message() => "Please select a file first!");
 
     let temp = tempdir();
     let corrupt = temp.path().join("Broken.png");
@@ -4518,8 +4518,8 @@ fn portrait_selector_errors_use_screen_owned_modals() {
 
     broken.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(broken.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none());
-    main_assert_eq!(broken.message_dialogs.len() => 1);
-    let message = broken.message_dialogs[0].state.message();
+    main_assert_eq!(broken.dialogs.messages.len() => 1);
+    let message = broken.dialogs.messages[0].state.message();
     let prefix = format!("Error at graphics file {}: ", corrupt.display());
     main_assert!(
         message.starts_with(&prefix),
@@ -5066,10 +5066,10 @@ fn control_capture_accepts_every_key_including_ones_the_codec_cannot_encode() {
     ] {
         app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
             .test_value();
-        main_assert!(app.message_dialogs.last().is_some(), "capture modal is up for {key:?}");
+        main_assert!(app.dialogs.messages.last().is_some(), "capture modal is up for {key:?}");
         app.test_key(key, ElementState::Pressed);
         main_assert!(
-            !app.message_dialogs.last().is_some_and(|dialog| matches!(
+            !app.dialogs.messages.last().is_some_and(|dialog| matches!(
                 dialog.continuation,
                 MessageDialogContinuation::OptionsControlCapture(open) if open == target
             )),
@@ -5100,7 +5100,7 @@ fn control_capture_prompt_quotes_the_sheet_label_for_every_control() {
         let target = input_fixture!(capture_target: ControlDevice::Gamepad, 0, control);
         app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
             .test_value();
-        let modal = app.message_dialogs.pop().test_value();
+        let modal = app.dialogs.messages.pop().test_value();
         main_assert_eq!(modal.state.message() => format!("Press the button for \"{label}\" on gamepad 1."), "control {control} quotes its own sheet label",);
     }
     // The three that used to coincide are not the interesting ones; these are
@@ -5125,7 +5125,7 @@ fn options_voice_key_capture_reuses_the_classic_modal_and_rejects_chords() {
     app.process_options_dialog_actions(vec![OptionsDlgAction::BeginVoicePushToTalkCapture])
         .test_value();
 
-    let modal = app.message_dialogs.last().test_value();
+    let modal = app.dialogs.messages.last().test_value();
     main_assert_eq!(modal.state.caption() => "Assign key");
     main_assert_eq!(modal.state.message() => "Press the key to hold down while speaking.");
     main_assert_eq!(modal.state.icon() => MessageDialogIcon::Standard(24));
@@ -5134,14 +5134,14 @@ fn options_voice_key_capture_reuses_the_classic_modal_and_rejects_chords() {
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
     main_assert_eq!(app.test_audio_ref().options.voice_push_to_talk => VirtualKeyCode::Backquote);
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::OptionsVoicePushToTalkCapture)));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::OptionsVoicePushToTalkCapture)));
     app.test_key(VirtualKeyCode::KeyV, ElementState::Released);
 
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
     main_assert_eq!(app.test_audio_ref().options.voice_push_to_talk => VirtualKeyCode::KeyV);
     main_assert_eq!(app.startup.options_dialog.as_ref().expect("options dialog").sound().push_to_talk_key => "V");
-    main_assert!(app.message_dialogs.is_empty(), "the modal closes on capture");
+    main_assert!(app.dialogs.messages.is_empty(), "the modal closes on capture");
     app.test_key(VirtualKeyCode::KeyV, ElementState::Released);
 }
 
@@ -5159,7 +5159,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         keyboard_target,
     )])
     .test_value();
-    let keyboard_modal = app.message_dialogs.last().test_value();
+    let keyboard_modal = app.dialogs.messages.last().test_value();
     main_assert_eq!(keyboard_modal.state.caption() => "Assign key");
     main_assert_eq!(keyboard_modal.state.message() => "Press the key for \"Dig\" on keyboard block 3.");
     main_assert_eq!(keyboard_modal.state.icon() => MessageDialogIcon::Standard(24));
@@ -5171,7 +5171,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert_eq!(app.bindings.key_for_set(2, ControlBindingId::Dig) => Some(previous_key));
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::OptionsControlCapture(target) if target == keyboard_target
     )));
@@ -5189,7 +5189,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         input_fixture!(capture_target: ControlDevice::Gamepad, 2, ControlBindingId::Dig as usize);
     app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(gamepad_target)])
         .test_value();
-    let gamepad_modal = app.message_dialogs.last().test_value();
+    let gamepad_modal = app.dialogs.messages.last().test_value();
     main_assert_eq!(gamepad_modal.state.caption() => "Assign key");
     main_assert_eq!(gamepad_modal.state.message() => "Press the button for \"Dig\" on gamepad 3.");
     main_assert_eq!(gamepad_modal.state.icon() => MessageDialogIcon::Standard(25));
@@ -5213,7 +5213,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         true,
     )
     .test_value();
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::OptionsControlCapture(target) if target == gamepad_target
     )));
@@ -5241,7 +5241,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         false,
     )
     .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.gamepad_bindings.raw_key_for_set(2, ControlBindingId::Dig) => input::legacy_gamepad_button_key(2, 5));
 }
 
@@ -5380,7 +5380,7 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
 
     let mut actual = vec![0_u8; scratch.len()];
     actual_app.test_render(&mut actual);
-    let pending = expected_app.message_dialogs.pop().test_value();
+    let pending = expected_app.dialogs.messages.pop().test_value();
     let mut faded_base = vec![0_u8; scratch.len()];
     expected_app.test_render(&mut faded_base);
     expected_app
@@ -5388,7 +5388,7 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
         .surface_mut()
         .pixels_mut()
         .copy_from_slice(&faded_base);
-    expected_app.message_dialogs.push(pending);
+    expected_app.dialogs.messages.push(pending);
     expected_app
         .render_message_dialogs(Some(startup_gamma()))
         .test_value();
@@ -5396,7 +5396,7 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     main_assert_eq!(actual => expected, "modal pixels must be composed after the fade");
 
     actual_app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(actual_app.message_dialogs.is_empty());
+    main_assert!(actual_app.dialogs.messages.is_empty());
     main_assert_eq!(actual_app.startup.view => StartupView::About);
     main_assert_eq!(actual_app.startup.dialog_fade.as_ref().unwrap().step => 1);
 
@@ -5454,8 +5454,8 @@ fn chart_gamepad_high_close_respects_player_control_priority() {
         pressed_gui_button(slot, GuiButtonClass::High),
         pressed_gamepad_action(slot, GamepadActionType::Cancel),
     ]);
-    main_assert!(chart.network_chart_dialog.is_none());
-    main_assert!(chart.message_dialogs.is_empty());
+    main_assert!(chart.dialogs.chart.is_none());
+    main_assert!(chart.dialogs.messages.is_empty());
 
     let mut player = new_running_sandbox_app();
     player.local_controls = LocalControlRegistry::default();
@@ -5473,7 +5473,7 @@ fn chart_gamepad_high_close_respects_player_control_priority() {
         pressed_gamepad_button(slot, physical),
         pressed_gamepad_action(slot, GamepadActionType::Cancel),
     ]);
-    main_assert!(player.network_chart_dialog.is_some());
+    main_assert!(player.dialogs.chart.is_some());
     main_assert_ne!(player.engine.player(player.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 }
 
@@ -6393,7 +6393,7 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
     main_assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
     app.test_key(VirtualKeyCode::F1, ElementState::Released);
     main_assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
-    main_assert!(!app.runtime_help_visible);
+    main_assert!(!app.dialogs.help_visible);
 
     let mut release_only = new_running_sandbox_app();
     release_only
@@ -6407,7 +6407,7 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
     main_assert!(release_only.show_startup_hint);
     release_only.test_key(VirtualKeyCode::F1, ElementState::Released);
     main_assert!(release_only.show_startup_hint);
-    main_assert!(!release_only.runtime_help_visible);
+    main_assert!(!release_only.dialogs.help_visible);
 }
 
 #[test]
@@ -6420,11 +6420,11 @@ fn running_f4_only_stronger_escape_owns_keyboard_input() {
 
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(app.runtime_client_list.is_some());
+    main_assert!(app.dialogs.client_list.is_some());
     main_assert!(app.running_chat_text().is_some(), "the lower-priority fullscreen Return binding remains reachable");
     app.close_running_chat().test_value();
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.runtime_client_list.is_none());
+    main_assert!(app.dialogs.client_list.is_none());
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 }
 
@@ -6459,9 +6459,9 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
         )
         .expect("parse an F11 scoreboard binding")))
         .test_value();
-    main_assert!(!app.runtime_help_visible);
+    main_assert!(!app.dialogs.help_visible);
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
-    main_assert!(app.runtime_help_visible, "a KeyConfig action bound to F11 must reach classic dispatch");
+    main_assert!(app.dialogs.help_visible, "a KeyConfig action bound to F11 must reach classic dispatch");
     main_assert!(!app.display_flags.is_fullscreen, "dispatching the bound action must not change the display mode");
 }
 
@@ -6557,9 +6557,9 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
         )
         .expect("parse the Mute help binding")))
         .test_value();
-    main_assert!(!app.runtime_help_visible);
+    main_assert!(!app.dialogs.help_visible);
     app.test_key(VirtualKeyCode::AudioVolumeMute, ElementState::Pressed);
-    main_assert!(app.runtime_help_visible, "a KeyConfig action bound to an extended SDL scancode must execute");
+    main_assert!(app.dialogs.help_visible, "a KeyConfig action bound to an extended SDL scancode must execute");
 }
 
 fn platform_ime_test_app() -> GameApp {
@@ -6673,7 +6673,7 @@ fn platform_ime_tracks_external_irc_z_order_and_menu_mode() {
     let mut app = platform_ime_test_app();
     app.mode = AppMode::Running;
     app.chat.external_dialog_visible = true;
-    app.scoreboard_dialog = Some(ScoreboardPresentationRequest {
+    app.dialogs.scoreboard = Some(ScoreboardPresentationRequest {
         rows: 0,
         columns: 0,
         show_count: 0,
@@ -6681,7 +6681,7 @@ fn platform_ime_tracks_external_irc_z_order_and_menu_mode() {
         title_widget_present: false,
         scoreboard: clonk_engine::ScoreboardState::default(),
     });
-    app.runtime_default_dialog_order = vec![
+    app.dialogs.default_order = vec![
         RuntimeDefaultDialog::ExternalIrc,
         RuntimeDefaultDialog::Scoreboard,
     ];

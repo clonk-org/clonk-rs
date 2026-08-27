@@ -199,10 +199,10 @@ fn client_resource_timeout_closes_progress_and_shows_fatal_error_log() {
     .test_value();
 
     main_assert!(app.blocking_resource_wait.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Error Log");
-    main_assert_eq!(app.message_dialogs[0].state.message() => "Waiting for Scenario: Timeout!");
-    main_assert_eq!(app.message_dialogs[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Error Log");
+    main_assert_eq!(app.dialogs.messages[0].state.message() => "Waiting for Scenario: Timeout!");
+    main_assert_eq!(app.dialogs.messages[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn runtime_join_data_tracks_slow_resource_then_cancel_aborts_without_status_pack
     main_assert_eq!(app.pending_client_start_status => Some(reference_status));
 
     let progress = app
-        .message_dialogs
+        .dialogs.messages
         .iter()
         .find(|dialog| {
             matches!(
@@ -281,7 +281,7 @@ fn runtime_join_data_tracks_slow_resource_then_cancel_aborts_without_status_pack
             .test_value();
         app.test_update();
         main_assert_eq!(
-            app.message_dialogs
+            app.dialogs.messages
                 .iter()
                 .find(|dialog| matches!(
                     dialog.continuation,
@@ -303,8 +303,8 @@ fn runtime_join_data_tracks_slow_resource_then_cancel_aborts_without_status_pack
     main_assert!(app.admission_resources.resources.is_empty());
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.message_dialogs.iter().all(|dialog| !matches!(dialog.continuation, MessageDialogContinuation::BlockingResourceWait { .. })));
-    let [failure] = app.message_dialogs.as_slice() else {
+    main_assert!(app.dialogs.messages.iter().all(|dialog| !matches!(dialog.continuation, MessageDialogContinuation::BlockingResourceWait { .. })));
+    let [failure] = app.dialogs.messages.as_slice() else {
         panic!("Cancel should report one startup-network failure");
     };
     main_assert_eq!(failure.state.caption() => "Error Log");
@@ -353,7 +353,7 @@ fn ordinary_client_go_tracks_slow_resource_then_cancel_aborts() {
     app.test_network_events();
 
     let progress = app
-        .message_dialogs
+        .dialogs.messages
         .iter()
         .find(|dialog| {
             matches!(
@@ -378,7 +378,7 @@ fn ordinary_client_go_tracks_slow_resource_then_cancel_aborts() {
             .test_value();
         app.test_update();
         main_assert_eq!(
-            app.message_dialogs
+            app.dialogs.messages
                 .iter()
                 .find(|dialog| matches!(
                     dialog.continuation,
@@ -399,7 +399,7 @@ fn ordinary_client_go_tracks_slow_resource_then_cancel_aborts() {
     main_assert!(app.blocking_resource_wait.is_none());
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    let [failure] = app.message_dialogs.as_slice() else {
+    let [failure] = app.dialogs.messages.as_slice() else {
         panic!("Cancel should report one startup-network failure");
     };
     main_assert_eq!(failure.state.caption() => "Error Log");
@@ -555,7 +555,7 @@ fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         app.poll_loading().test_value();
-        let waiting_for_start = app.message_dialogs.iter().any(|dialog| {
+        let waiting_for_start = app.dialogs.messages.iter().any(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::NetworkClientStartWait
@@ -637,7 +637,7 @@ fn player_resource_abort_releases_only_the_waiting_join() {
         Some(100),
         "a later caller still waits on the active backend transfer"
     );
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     let player_path = PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -696,9 +696,9 @@ fn failed_client_start_resource_aborts_instead_of_stalling_silently() {
 
     main_assert!(app.network.is_none());
     main_assert!(app.blocking_resource_wait.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Error Log");
-    main_assert_eq!(app.message_dialogs[0].state.message() => "Unable to retrieve Scenario.");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Error Log");
+    main_assert_eq!(app.dialogs.messages[0].state.message() => "Unable to retrieve Scenario.");
 }
 
 #[test]
@@ -792,7 +792,7 @@ fn message_dialog_buttons_use_active_language_resources() {
     .test_value();
 
     let fonts = app.assets.clonk_fonts.clone().test_value();
-    let dialog = &mut app.message_dialogs[0].state;
+    let dialog = &mut app.dialogs.messages[0].state;
     main_assert_eq!(dialog.button_label(clonk_frontend::message_dialog::MessageDialogButton::Ok) => "&OK");
     main_assert_eq!(dialog.button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel) => "&Abbrechen");
     main_assert_eq!(dialog.handle_hotkey('A') => Some(clonk_frontend::message_dialog::MessageDialogResult::Cancel));
@@ -940,7 +940,7 @@ fn generic_client_resource_save_hit_target_emits_the_resource_id() {
         b"payload",
         "the routed SaveResourceRequested reaches request_lobby_resource_save"
     );
-    main_assert_eq!(app.message_dialogs.last().expect("save feedback dialog").state.caption() => "Resource saved");
+    main_assert_eq!(app.dialogs.messages.last().expect("save feedback dialog").state.caption() => "Resource saved");
 }
 
 #[test]
@@ -1445,7 +1445,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     );
     main_assert!(runtime.handle_pointer_move(runtime_title, preferred, line_height));
     app.mode = AppMode::Running;
-    app.runtime_client_list = Some(runtime);
+    app.dialogs.client_list = Some(runtime);
     assert_delayed_target(
         &mut app,
         runtime_title,
@@ -1455,7 +1455,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         (runtime_layout.close_button.expect("an ordinary dialog owns its title widgets").x + 1) as f32,
         (runtime_layout.close_button.expect("an ordinary dialog owns its title widgets").y + 1) as f32,
     );
-    main_assert!(app.runtime_client_list.as_mut().expect("runtime list").handle_pointer_move(runtime_close, preferred, line_height));
+    main_assert!(app.dialogs.client_list.as_mut().expect("runtime list").handle_pointer_move(runtime_close, preferred, line_height));
     assert_delayed_target(
         &mut app,
         runtime_close,
@@ -1463,9 +1463,9 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     );
 
     let dragged_point = GuiPoint::new(runtime_title.x + 15.0, runtime_title.y - 4.0);
-    main_assert!(app.runtime_client_list.as_mut().expect("runtime list").handle_pointer_down(runtime_title, preferred, line_height));
+    main_assert!(app.dialogs.client_list.as_mut().expect("runtime list").handle_pointer_down(runtime_title, preferred, line_height));
     let before_layered_move = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height)
         .bounds;
@@ -1475,7 +1475,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         f64::from(dragged_point.y),
     ));
     main_assert_ne!(
-        app.runtime_client_list
+        app.dialogs.client_list
             .as_ref()
             .expect("runtime list")
             .layout(preferred, line_height)
@@ -1483,22 +1483,22 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         before_layered_move,
         "CMouse updates its retained drag element before z-order routing"
     );
-    main_assert!(app.runtime_client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
+    main_assert!(app.dialogs.client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
     app.test_left_button(ElementState::Released);
-    main_assert!(!app.runtime_client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
+    main_assert!(!app.dialogs.client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
     app.chat.external_dialog_visible = false;
 
     let dragged_layout = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height);
     let resize_drag_start = GuiPoint::new(
         (dragged_layout.caption.expect("an ordinary dialog owns its title widgets").x + 8) as f32,
         (dragged_layout.caption.expect("an ordinary dialog owns its title widgets").y + dragged_layout.caption.expect("an ordinary dialog owns its title widgets").h / 2) as f32,
     );
-    main_assert!(app.runtime_client_list.as_mut().expect("runtime list").handle_pointer_down(resize_drag_start, preferred, line_height));
+    main_assert!(app.dialogs.client_list.as_mut().expect("runtime list").handle_pointer_down(resize_drag_start, preferred, line_height));
     main_assert!(app
-        .runtime_client_list
+        .dialogs.client_list
         .as_mut()
         .expect("runtime list")
         .handle_pointer_move(
@@ -1507,23 +1507,23 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
             line_height,
         ));
     app.resize(641, 481).test_value();
-    main_assert!(!app.runtime_client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
+    main_assert!(!app.dialogs.client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
     preferred = scoreboard_preferred_rect(
         app.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
     );
     let retained_after_resize = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height)
         .bounds;
-    let _ = app.runtime_client_list.test_mut().handle_pointer_move(
+    let _ = app.dialogs.client_list.test_mut().handle_pointer_move(
         GuiPoint::new(3.0, 3.0),
         preferred,
         line_height,
     );
     main_assert_eq!(
-        app.runtime_client_list
+        app.dialogs.client_list
             .as_ref()
             .expect("runtime list")
             .layout(preferred, line_height)
@@ -1541,7 +1541,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     );
     main_assert!(info.handle_pointer_move(info_title, preferred, line_height));
     app.mode = AppMode::Menu;
-    app.runtime_client_list = Some(info);
+    app.dialogs.client_list = Some(info);
     assert_delayed_target(
         &mut app,
         info_title,
@@ -1551,14 +1551,14 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         (info_layout.close_button.expect("an ordinary dialog owns its title widgets").x + 1) as f32,
         (info_layout.close_button.expect("an ordinary dialog owns its title widgets").y + 1) as f32,
     );
-    main_assert!(app.runtime_client_list.as_mut().expect("client info").handle_pointer_move(info_close, preferred, line_height));
+    main_assert!(app.dialogs.client_list.as_mut().expect("client info").handle_pointer_move(info_close, preferred, line_height));
     assert_delayed_target(
         &mut app,
         info_close,
         StartupTooltip::resource("IDS_MNU_CLOSE"),
     );
 
-    app.runtime_client_list = None;
+    app.dialogs.client_list = None;
     app.startup.options_advanced_dialog = None;
     let mut definition =
         clonk_frontend::definition_sel::DefinitionSelController::new("", Vec::new(), Vec::new());
@@ -1894,7 +1894,7 @@ fn visible_ingame_menu_without_exact_resources_fails_before_rendering() {
         app.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
-    app.scoreboard_initial_reconcile_pending = true;
+    app.dialogs.scoreboard_initial_reconcile_pending = true;
     let before = runtime_global_ui_snapshot(&app);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     let error = app
@@ -3064,7 +3064,7 @@ fn unknown_loadable_resource_join_stalls_until_resource_completion() {
     main_assert_eq!(wait.resource_id => resource_id);
     main_assert_eq!(wait.display_name => "player file for Delayed resource");
     let progress = app
-        .message_dialogs
+        .dialogs.messages
         .iter()
         .find(|dialog| {
             matches!(
@@ -3089,7 +3089,7 @@ fn unknown_loadable_resource_join_stalls_until_resource_completion() {
     main_assert_eq!(app.engine.frame() => initial_frame);
     main_assert_eq!(app.blocking_resource_wait.as_ref().expect("wait remains active").present_percent() => 47);
     main_assert_eq!(
-        app.message_dialogs
+        app.dialogs.messages
             .iter()
             .find(|dialog| matches!(
                 dialog.continuation,
@@ -3114,7 +3114,7 @@ fn unknown_loadable_resource_join_stalls_until_resource_completion() {
     main_assert_eq!(app.admission_resources.complete_path(resource_id) => Some(path.as_path()));
     main_assert!(app.snapshot.players.iter().any(|player| player.player_info_id == info_id));
     main_assert!(app.blocking_resource_wait.is_none());
-    main_assert!(!app.message_dialogs.iter().any(|dialog| matches!(dialog.continuation, MessageDialogContinuation::BlockingResourceWait { .. })));
+    main_assert!(!app.dialogs.messages.iter().any(|dialog| matches!(dialog.continuation, MessageDialogContinuation::BlockingResourceWait { .. })));
 }
 
 #[test]

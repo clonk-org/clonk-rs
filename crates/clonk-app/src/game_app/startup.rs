@@ -102,7 +102,7 @@ impl GameApp {
         self.mode == AppMode::Menu
             && self.startup.view == StartupView::MainMenu
             && !self.startup_dialog_fade_active()
-            && self.message_dialogs.is_empty()
+            && self.dialogs.messages.is_empty()
             && self.context_menu.is_none()
             && !self.startup_element_tooltip_pending()
             && self
@@ -113,7 +113,7 @@ impl GameApp {
 
     pub(crate) fn can_defer_native_loader_text(&self, scale: f32) -> bool {
         self.loader_presentation_active()
-            && self.message_dialogs.is_empty()
+            && self.dialogs.messages.is_empty()
             && !self
                 .network_start_wait
                 .as_ref()
@@ -163,7 +163,7 @@ impl GameApp {
         self.startup_network_connection
             .as_ref()
             .is_some_and(|connection| connection.purpose == StartupNetworkPurpose::Join)
-            && self.message_dialogs.iter().any(|dialog| {
+            && self.dialogs.messages.iter().any(|dialog| {
                 matches!(
                     dialog.continuation,
                     MessageDialogContinuation::StartupNetworkConnectProgress
@@ -757,7 +757,7 @@ impl GameApp {
             && self.startup.view == StartupView::Options
             && self.startup.options_dialog.is_some()
             && self.startup.options_advanced_dialog.is_none()
-            && self.message_dialogs.is_empty()
+            && self.dialogs.messages.is_empty()
             && self.context_menu.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
@@ -1371,7 +1371,7 @@ impl GameApp {
         if self.startup_network_dialog.is_none()
             || self.startup_network_ignore_redirect
             || reply.league_server_redirect.trim().is_empty()
-            || self.message_dialogs.iter().any(|dialog| {
+            || self.dialogs.messages.iter().any(|dialog| {
                 matches!(
                     &dialog.continuation,
                     MessageDialogContinuation::NetworkServerRedirect { .. }
@@ -2277,7 +2277,7 @@ impl GameApp {
     }
 
     pub(crate) fn dismiss_startup_network_connect_progress(&mut self) {
-        let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+        let Some(index) = self.dialogs.messages.iter().rposition(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::StartupNetworkConnectProgress
@@ -2302,9 +2302,9 @@ impl GameApp {
     pub(crate) fn present_startup_restart_diagnostics(&mut self) -> Result<(), EngineError> {
         self.status_text.clear();
         let caption = self.runtime_resource_text("IDS_DLG_LOG", "Error Log");
-        self.runtime_client_list = None;
-        self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list_above_game_over = false;
+        self.dialogs.client_list = None;
+        self.dialogs.client_list_consumed_keys.clear();
+        self.dialogs.client_list_above_game_over = false;
         let presentation = self
             .startup_restart_diagnostics
             .take_presentation()
@@ -2343,7 +2343,7 @@ impl GameApp {
         let text = entries.join("|");
         let close_label = self.runtime_resource_text("IDS_DLG_CLOSE", "&Close");
         self.cancel_underlying_interaction();
-        self.runtime_client_list = Some(
+        self.dialogs.client_list = Some(
             clonk_frontend::runtime_client_list::RuntimeClientListDialog::new_static_info(
                 caption,
                 10,
@@ -2962,7 +2962,7 @@ impl GameApp {
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::PlayerSelection
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
             || self.startup.player_properties_dialog.is_some()
             || self.game_option_input_dialog.is_some()
@@ -3067,7 +3067,7 @@ impl GameApp {
     pub(crate) fn open_startup_participants_context_menu(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::MainMenu
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
         {
             return Ok(false);
@@ -3256,7 +3256,7 @@ impl GameApp {
     fn startup_network_dialog_is_covered_by_message(&self) -> bool {
         self.startup.view == StartupView::NetworkGame
             && self.startup_network_dialog.is_some()
-            && !self.message_dialogs.is_empty()
+            && !self.dialogs.messages.is_empty()
     }
 
     fn next_startup_game_search_event(&mut self) -> Option<clonk_network::StartupGameSearchEvent> {
@@ -5084,10 +5084,10 @@ impl GameApp {
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
         self.chat.running = None;
-        self.runtime_client_list = None;
-        self.running_dialog_stack.clear();
+        self.dialogs.client_list = None;
+        self.dialogs.stack.clear();
         self.running_active_dialog = None;
-        self.runtime_client_list_consumed_keys.clear();
+        self.dialogs.client_list_consumed_keys.clear();
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         self.message_input_history.clear();
         self.close_context_menu_silently();
@@ -5476,7 +5476,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup_network_transition_active()
             || self.context_menu.is_some()
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self
                 .network_start_wait
                 .as_ref()
@@ -5486,7 +5486,7 @@ impl GameApp {
             || self.league_signup_dialog.is_some()
             || self.startup.options_advanced_dialog.is_some()
             || self.chat.external_dialog_visible
-            || self.runtime_client_list.is_some()
+            || self.dialogs.client_list.is_some()
         {
             return None;
         }
@@ -5549,12 +5549,12 @@ impl GameApp {
         match self.startup.view {
             StartupView::NetworkLobby
                 if self.classic_host_lobby.is_none()
-                    && self.runtime_client_list.is_none()
+                    && self.dialogs.client_list.is_none()
                     && self.context_menu.is_none()
                     && self.definition_selector.is_none()
                     && self.game_option_input_dialog.is_none()
                     && self.league_signup_dialog.is_none()
-                    && self.message_dialogs.is_empty()
+                    && self.dialogs.messages.is_empty()
                     && self.startup.player_properties_dialog.is_none()
                     && !self.chat.external_dialog_visible
                     && self

@@ -1018,7 +1018,7 @@ impl GameApp {
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.set_open_option_combo(option);
         }
-        if let Some(dialog) = self.runtime_client_list.as_mut() {
+        if let Some(dialog) = self.dialogs.client_list.as_mut() {
             dialog.set_open_option(option);
         }
     }
@@ -1060,7 +1060,8 @@ impl GameApp {
                     && lobby.controller.open_option_combo() == Some(option)
             });
             let runtime_owns = self
-                .runtime_client_list
+                .dialogs
+                .client_list
                 .as_ref()
                 .is_some_and(|dialog| dialog.open_option() == Some(option));
             !lobby_owns && !runtime_owns
@@ -2168,8 +2169,8 @@ impl GameApp {
         let (_, rows, _) = self.runtime_client_list_snapshot();
         let row = rows.into_iter().find(|row| row.client_id == client_id);
         self.cancel_underlying_interaction();
-        self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list = Some(
+        self.dialogs.client_list_consumed_keys.clear();
+        self.dialogs.client_list = Some(
             clonk_frontend::runtime_client_list::RuntimeClientListDialog::new_info(
                 self.runtime_resource_string("IDS_NET_CLIENT_INFO"),
                 client_id,
@@ -2387,7 +2388,7 @@ impl GameApp {
         }
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::NetworkLobby
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
         {
@@ -2497,7 +2498,7 @@ impl GameApp {
         }
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::NetworkLobby
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
             || option == LobbyOptionKind::ControlMode
@@ -3264,7 +3265,7 @@ impl GameApp {
         &mut self,
         packet: clonk_network::ReadyCheckPacket,
     ) -> Result<(), EngineError> {
-        if self.message_dialogs.iter().any(|dialog| {
+        if self.dialogs.messages.iter().any(|dialog| {
             matches!(
                 &dialog.continuation,
                 MessageDialogContinuation::LobbyReadyCheck { .. }
@@ -3395,14 +3396,14 @@ impl GameApp {
             // `Screen::ShowDialog` puts a shown dialog on top of the stack;
             // the port's equivalent is the end of `message_dialogs`, so a
             // raise is a move to the back rather than a re-show.
-            if let Some(index) = self.message_dialogs.iter().position(|dialog| {
+            if let Some(index) = self.dialogs.messages.iter().position(|dialog| {
                 matches!(
                     &dialog.continuation,
                     MessageDialogContinuation::LobbyReadyCheck { .. }
                 )
             }) {
-                let dialog = self.message_dialogs.remove(index);
-                self.message_dialogs.push(dialog);
+                let dialog = self.dialogs.messages.remove(index);
+                self.dialogs.messages.push(dialog);
             }
         }
         let Some(outcome) = self
@@ -3416,7 +3417,7 @@ impl GameApp {
         self.dismiss_ready_check_notification();
         // The prompt is still open: the claim happened outside it. Drop it
         // without running its continuation, which is already resolved.
-        if let Some(index) = self.message_dialogs.iter().position(|dialog| {
+        if let Some(index) = self.dialogs.messages.iter().position(|dialog| {
             matches!(
                 &dialog.continuation,
                 MessageDialogContinuation::LobbyReadyCheck { .. }
@@ -7273,7 +7274,7 @@ impl GameApp {
     }
 
     pub(crate) fn tick_lobby_ready_check_prompt(&mut self) -> bool {
-        let Some(prompt_index) = self.message_dialogs.iter().position(|dialog| {
+        let Some(prompt_index) = self.dialogs.messages.iter().position(|dialog| {
             matches!(
                 &dialog.continuation,
                 MessageDialogContinuation::LobbyReadyCheck { .. }
@@ -7282,7 +7283,8 @@ impl GameApp {
             return false;
         };
         let expires = self
-            .message_dialogs
+            .dialogs
+            .messages
             .get_mut(prompt_index)
             .is_some_and(|dialog| {
                 let MessageDialogContinuation::LobbyReadyCheck { remaining_seconds } =
@@ -7300,7 +7302,7 @@ impl GameApp {
                 false
             });
         if expires {
-            if prompt_index + 1 == self.message_dialogs.len() {
+            if prompt_index + 1 == self.dialogs.messages.len() {
                 if let Err(error) = self.finish_message_dialog(
                     clonk_frontend::message_dialog::MessageDialogResult::Dismissed,
                 ) {
@@ -7328,7 +7330,7 @@ impl GameApp {
         // press would answer a check that no longer exists.
         self.close_lobby_ready_check_continuation();
         self.release_message_dialog_pointer_elements();
-        self.message_dialogs.clear();
+        self.dialogs.messages.clear();
         self.message_dialog_active_index = None;
         self.message_dialog_pointer_capture_index = None;
         self.message_dialog_consumed_keys.clear();
@@ -7725,8 +7727,8 @@ impl GameApp {
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.league_signup_dialog.is_none()
-            && self.message_dialogs.is_empty()
-            && self.runtime_client_list.is_none()
+            && self.dialogs.messages.is_empty()
+            && self.dialogs.client_list.is_none()
             && !self.chat.external_dialog_visible;
         let surface = self.graphics.surface_mut();
         loader.render_background(surface, config, Some(&gamma));
@@ -7762,8 +7764,8 @@ impl GameApp {
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.league_signup_dialog.is_none()
-            && self.message_dialogs.is_empty()
-            && self.runtime_client_list.is_none()
+            && self.dialogs.messages.is_empty()
+            && self.dialogs.client_list.is_none()
             && !self.chat.external_dialog_visible;
         lobby.controller.render_tooltips(
             self.graphics.surface_mut(),

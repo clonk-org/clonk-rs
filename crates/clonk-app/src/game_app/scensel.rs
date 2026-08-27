@@ -1788,7 +1788,7 @@ impl GameApp {
         controller.render(
             self.graphics.surface_mut(),
             resources,
-            self.message_dialogs.is_empty(),
+            self.dialogs.messages.is_empty(),
             gamma,
         )
     }

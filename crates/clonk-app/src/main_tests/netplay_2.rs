@@ -1535,7 +1535,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
         .test_value();
     main_assert_eq!(app.startup.view => StartupView::Options);
-    let tcp_error = app.message_dialogs.last().test_value();
+    let tcp_error = app.dialogs.messages.last().test_value();
     main_assert_eq!(tcp_error.state.caption() => "Configuration error");
     main_assert_eq!(tcp_error.state.message() => "TCP port and reference port must be set to different values between 1 and 65535!");
     main_assert_eq!(tcp_error.state.icon() => MessageDialogIcon::ERROR);
@@ -1555,7 +1555,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
         .test_value();
     main_assert_eq!(app.startup.view => StartupView::Options);
-    let udp_error = app.message_dialogs.last().test_value();
+    let udp_error = app.dialogs.messages.last().test_value();
     main_assert_eq!(udp_error.state.caption() => "Configuration error");
     main_assert_eq!(udp_error.state.message() => "UDP port and discovery port must be set to different values between 1 and 65535!");
     main_assert_eq!(udp_error.state.icon() => MessageDialogIcon::ERROR);
@@ -1567,8 +1567,8 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
         checked: true,
     }])
     .test_value();
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::OptionsAlternateServerNotice)));
-    app.message_dialogs
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::OptionsAlternateServerNotice)));
+    app.dialogs.messages
         .last_mut()
         .test_value()
         .state
@@ -1581,7 +1581,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
         checked: true,
     }])
     .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -2707,10 +2707,10 @@ fn post_go_client_preparation_failure_clears_session_and_presents_startup_error(
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_lobby.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Error Log");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Error Log");
     main_assert!(
-        app.message_dialogs[0]
+        app.dialogs.messages[0]
             .state
             .message()
             .starts_with("Unable to prepare network scenario:"),
@@ -2957,8 +2957,8 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
     })
     .test_value();
 
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let modal = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let modal = &app.dialogs.messages[0].state;
     main_assert_eq!(modal.caption() => "Search Error");
     main_assert_eq!(modal.message() => format!("Search failed: {detail}"));
     main_assert_eq!(modal.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::CANCEL);
@@ -2970,7 +2970,7 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
 
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::SearchError {
@@ -2978,7 +2978,7 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
         message: "masterserver unavailable".to_string(),
     })
     .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     let masterserver = app.startup_network_dialog.test_ref().masterserver_entry();
     main_assert_eq!(masterserver.details => "masterserver unavailable");
@@ -3054,8 +3054,8 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
     .test_value();
 
     main_assert!(app.startup_network_transition_active());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let progress = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let progress = &app.dialogs.messages[0].state;
     main_assert_eq!(progress.message() => format!("Connecting to host on {target}..."));
     main_assert_eq!(progress.caption() => "Joining network game");
     main_assert_eq!(progress.buttons() => MessageDialogButtons::CANCEL);
@@ -3101,7 +3101,7 @@ fn a_reference_join_names_the_game_rather_than_its_transport_addresses() {
     }))
     .test_value();
 
-    let progress = &app.message_dialogs.last().test_value().state;
+    let progress = &app.dialogs.messages.last().test_value().state;
     main_assert_eq!(progress.message() => "Connecting to Clonk Party on archlinux...");
     main_assert_eq!(progress.caption() => "Joining network game");
 }
@@ -3128,7 +3128,7 @@ fn a_password_prompt_does_not_cost_the_join_the_name_of_its_game() {
     )])
     .test_value();
 
-    let progress = &app.message_dialogs.last().test_value().state;
+    let progress = &app.dialogs.messages.last().test_value().state;
     main_assert_eq!(progress.message() => "Connecting to Clonk Party on archlinux...");
 }
 
@@ -3151,7 +3151,7 @@ fn escape_aborts_inflight_join_and_keeps_network_dialog() {
 
     main_assert!(app.startup_network_connection.is_none());
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
@@ -3197,7 +3197,7 @@ fn cancel_button_aborts_inflight_join() {
     app.test_left_button(ElementState::Released);
 
     main_assert!(app.startup_network_connection.is_none());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(sender.send(Err(NetworkStartError::Other("stale result".to_string()))).is_err());
 }
@@ -3327,10 +3327,10 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
     first_server_worker.join().test_value();
     main_assert!(app.startup_network_connection.is_none());
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     app.poll_startup_network_connection().test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     let (second_server, second_accepted, second_closed, second_server_worker) =
         stalled_handshake_server();
@@ -3355,7 +3355,7 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
     let rebound_udp = UdpSocket::bind(second_mesh_udp).test_value();
     drop((rebound_tcp, rebound_udp));
     app.poll_startup_network_connection().test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
 }
 
@@ -3447,7 +3447,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         },
     )
     .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     let row = &app.startup_network_dialog.as_ref().test_value().games()[0];
     main_assert_eq!(row.details => "reference connection refused");
     main_assert_eq!(row.row_icon => NetDlgRowIcon::Error);
@@ -3686,7 +3686,7 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
         join_allowed: false,
     }))
     .test_value();
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
 
     app.poll_startup_game_search().test_value();
     main_assert_eq!(app.startup_game_search_test_events.len() => 1);
@@ -3720,7 +3720,7 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
         clonk_network::StartupGameSearchEvent::ReferencesUpdated(Vec::new()),
     ]);
     app.poll_startup_game_search().test_value();
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.startup_game_search_test_events.len() => 1);
     main_assert_eq!(app.startup_game_references => [nearly_expired_reference]);
 
@@ -3985,8 +3985,8 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
 
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_connection.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let dialog = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let dialog = &app.dialogs.messages[0].state;
     main_assert_eq!(dialog.caption() => "Cannot join game");
     main_assert_eq!(dialog.message() => "No reference selected. Select a game from the list or enter a direct join address below!");
     main_assert_eq!(dialog.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK);
@@ -4004,15 +4004,15 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
 
     let mut frame = vec![0_u8; 1280 * 720 * 4];
     app.test_render(&mut frame);
 
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert_eq!(app.message_dialogs.len() => 1, "Return must show the button-down frame before activation");
+    main_assert_eq!(app.dialogs.messages.len() => 1, "Return must show the button-down frame before activation");
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_connection.is_none());
     reset_cached_app_paths();
@@ -4266,8 +4266,8 @@ fn network_version_mismatch_defers_to_runtime_join_policy() {
 
     app.process_network_dialog_actions(actions).test_value();
 
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let modal = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let modal = &app.dialogs.messages[0].state;
     main_assert_eq!(modal.caption() => "Cannot join game");
     main_assert_eq!(modal.message() => "The game has started already and runtime join is not allowed! Try joining anyway?");
     main_assert_eq!(modal.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO);
@@ -4311,7 +4311,7 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
 
     app.process_network_dialog_actions(actions.clone())
         .test_value();
-    let modal = &app.message_dialogs[0].state;
+    let modal = &app.dialogs.messages[0].state;
     main_assert_eq!(modal.caption() => "Cannot join game");
     main_assert_eq!(modal.message() => "The game has started already and runtime join is not allowed! Try joining anyway?");
     main_assert_eq!(modal.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO);
@@ -4365,11 +4365,11 @@ fn network_row_double_click_joins_another_cpp_build() {
 
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.netdlg_last_click.is_none());
     main_assert_eq!(
         app.pending_network_join
@@ -4430,7 +4430,7 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
 
     app.process_network_dialog_actions(actions).test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.active_scenario.is_none());
     match app.active_definition_load.as_ref() {
         Some(ScenarioDefinitionLoad::Seed { modules, .. }) => {
@@ -4494,7 +4494,7 @@ fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
     main_assert!(app.pending_network_join.is_none());
     main_assert!(app.startup_game_search.is_some(), "a cancelled password prompt must leave the dialog's search running");
     app.request_startup_network_refresh().test_value();
-    main_assert!(app.message_dialogs.is_empty(), "refresh must not report a search that was never stopped");
+    main_assert!(app.dialogs.messages.is_empty(), "refresh must not report a search that was never stopped");
 
     // An empty password aborts the join exactly like Cancel does.
     app.activate_network_reference_join(reference).test_value();
@@ -4537,7 +4537,7 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
     }))
     .test_value();
     main_assert!(app.startup_game_search.is_none(), "a join that actually launches stops the search");
-    main_assert!(matches!(app.message_dialogs.last().map(|dialog| &dialog.continuation), Some(MessageDialogContinuation::StartupNetworkConnectProgress)));
+    main_assert!(matches!(app.dialogs.messages.last().map(|dialog| &dialog.continuation), Some(MessageDialogContinuation::StartupNetworkConnectProgress)));
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
@@ -4546,7 +4546,7 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
     main_assert!(app.pending_network_join.is_none());
     main_assert!(app.startup_game_search.is_some(), "the netdlg must never be left on screen without its search");
     app.request_startup_network_refresh().test_value();
-    main_assert!(app.message_dialogs.is_empty(), "refresh must not report a search that was restored");
+    main_assert!(app.dialogs.messages.is_empty(), "refresh must not report a search that was restored");
     main_assert_eq!(app.startup_network_dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Query);
 }
 
@@ -5623,9 +5623,9 @@ fn running_dispatches_controls_modes_and_custom_commands() {
     app.process_running_chat_text("/msgboard 0");
     main_assert_eq!(app.message_board.mode => MessageBoardMode::Hidden);
     app.process_running_chat_text("/chart");
-    main_assert!(app.network_chart_dialog.is_some());
+    main_assert!(app.dialogs.chart.is_some());
     app.process_running_chat_text("/chart");
-    main_assert!(app.network_chart_dialog.is_none());
+    main_assert!(app.dialogs.chart.is_none());
 
     app.runtime_network_control_mode = Some(0);
     app.process_running_chat_text("/decentralctrl");
@@ -5706,7 +5706,7 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
     app.mode = AppMode::Running;
 
     app.process_running_chat_text("/chart");
-    let dialog = app.network_chart_dialog.test_ref();
+    let dialog = app.dialogs.chart.test_ref();
     main_assert_eq!(dialog.tab_names() => ["oc", "FPS", "NetIO", "Pings", "Control", "APM"]);
     main_assert!(dialog.tabs().iter().all(|tab| !tab.graph.is_empty()), "every live graph receives at least one frame/second/control sample");
     let object_graph = dialog.active_graph().test_value();
@@ -5719,7 +5719,7 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
                 .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
         );
         let layout = app
-            .network_chart_dialog
+            .dialogs.chart
             .test_ref()
             .layout(preferred, resources);
         let caption = layout
@@ -5732,24 +5732,24 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
     };
     app.running_pointer_position = Some(chart_point);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
-    main_assert!(app.network_chart_pointer_capture);
+    main_assert!(app.dialogs.chart_pointer_capture);
     app.ingame_pointer = None;
     app.ingame_edge_scroll = None;
     app.test_cursor(PhysicalPosition::new(10_000.0, 10_000.0));
-    main_assert!(app.network_chart_pointer_capture);
+    main_assert!(app.dialogs.chart_pointer_capture);
     main_assert!(app.ingame_pointer.is_none());
     main_assert!(app.ingame_edge_scroll.is_none());
     app.handle_mouse_button_classified(ElementState::Released, false)
         .test_value();
-    main_assert!(!app.network_chart_pointer_capture);
+    main_assert!(!app.dialogs.chart_pointer_capture);
 
     app.process_running_chat_text("/chart");
-    main_assert!(app.network_chart_dialog.is_none(), "a second activation closes the singleton");
+    main_assert!(app.dialogs.chart.is_none(), "a second activation closes the singleton");
     main_assert!(app.network_stats.is_some(), "closing presentation retains sampling");
 
     app.return_to_menu_for_relaunch();
     main_assert!(app.network_stats.is_none(), "game teardown drops live stats");
-    main_assert!(app.network_chart_dialog.is_none());
+    main_assert!(app.dialogs.chart.is_none());
 }
 
 #[test]
@@ -5771,7 +5771,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     ] {
         let mut app = configured(name);
         app.test_key(key, ElementState::Pressed);
-        main_assert!(app.network_chart_dialog.is_some(), "{name}");
+        main_assert!(app.dialogs.chart.is_some(), "{name}");
     }
 
     for (binding, key, modifiers) in [
@@ -5796,7 +5796,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         chat.start_running_chat(RunningChatMode::All);
         chat.keyboard_modifiers = modifiers;
         main_assert!(!chat.handle_runtime_chart_toggle_key(key, ElementState::Pressed), "focused chat Edit owns {binding}");
-        main_assert!(chat.network_chart_dialog.is_none());
+        main_assert!(chat.dialogs.chart.is_none());
     }
 
     let mut observer_menu = configured("Left");
@@ -5822,14 +5822,14 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     irc.show_external_irc_dialog().test_value();
     irc.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     main_assert!(irc.chat.external_dialog_visible);
-    main_assert!(irc.network_chart_dialog.is_some());
+    main_assert!(irc.dialogs.chart.is_some());
     main_assert!(irc.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart));
 
     let mut irc_unclaimed = configured("Alt+Z");
     irc_unclaimed.show_external_irc_dialog().test_value();
     irc_unclaimed.keyboard_modifiers = ModifiersState::ALT;
     irc_unclaimed.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
-    main_assert!(irc_unclaimed.network_chart_dialog.is_some());
+    main_assert!(irc_unclaimed.dialogs.chart.is_some());
 
     let mut irc_edit = configured("Ctrl+Shift+Left");
     irc_edit.show_external_irc_dialog().test_value();
@@ -5843,7 +5843,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     let mut irc_connect = configured("Up");
     irc_connect.show_external_irc_dialog().test_value();
     irc_connect.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
-    main_assert!(irc_connect.network_chart_dialog.is_some());
+    main_assert!(irc_connect.dialogs.chart.is_some());
 
     let mut game_over = new_game_over_keyboard_app();
     game_over.runtime_key_config_cache = OnceLock::new();
@@ -5904,7 +5904,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     player_escape.test_key(VirtualKeyCode::F8, ElementState::Released);
     main_assert!(!player_escape.network_chart_owns_stronger_escape());
     player_escape.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(player_escape.network_chart_dialog.is_some());
+    main_assert!(player_escape.dialogs.chart.is_some());
     player_escape.test_key(VirtualKeyCode::Escape, ElementState::Released);
 }
 
@@ -5920,7 +5920,7 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
             .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
     );
     let layout = app
-        .network_chart_dialog
+        .dialogs.chart
         .test_ref()
         .layout(preferred, resources);
     main_assert_eq!((layout.bounds.x, layout.bounds.y) => (preferred.x + 30, preferred.y + 30));
@@ -5934,14 +5934,14 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
     );
     app.running_pointer_position = Some(caption);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
-    main_assert!(app.network_chart_pointer_capture);
+    main_assert!(app.dialogs.chart_pointer_capture);
     let moved = GuiPoint::new(caption.x + 37.0, caption.y + 19.0);
     app.running_pointer_position = Some(moved);
     main_assert!(app.handle_network_chart_pointer_move(moved));
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Released));
-    main_assert!(!app.network_chart_pointer_capture);
+    main_assert!(!app.dialogs.chart_pointer_capture);
     let moved_layout = app
-        .network_chart_dialog
+        .dialogs.chart
         .test_ref()
         .layout(preferred, resources);
     main_assert_eq!((moved_layout.bounds.x, moved_layout.bounds.y) => (layout.bounds.x + 37, layout.bounds.y + 19));
@@ -5952,7 +5952,7 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
     );
     app.running_pointer_position = Some(body);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
-    main_assert!(!app.network_chart_pointer_capture, "chart body clicks are consumed without becoming a drag element");
+    main_assert!(!app.dialogs.chart_pointer_capture, "chart body clicks are consumed without becoming a drag element");
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Released));
 
     let close_button = moved_layout
@@ -5964,9 +5964,9 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
     );
     app.running_pointer_position = Some(close);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
-    main_assert!(app.network_chart_pointer_capture);
+    main_assert!(app.dialogs.chart_pointer_capture);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Released));
-    main_assert!(app.network_chart_dialog.is_none());
+    main_assert!(app.dialogs.chart.is_none());
 }
 
 #[test]
@@ -6044,12 +6044,12 @@ fn menu_touch_title_drag_uses_touch_coordinates_through_release() {
     app.running_pointer_position = Some(GuiPoint::new(1.0, 1.0));
 
     app.test_touch(TouchPhase::Started, start);
-    main_assert!(app.message_dialogs[0].state.has_positional_pointer_drag());
+    main_assert!(app.dialogs.messages[0].state.has_positional_pointer_drag());
     app.test_touch(TouchPhase::Ended, end);
 
-    main_assert_eq!(app.message_dialogs[0].state.dialog_offset() => (41, 27));
-    main_assert!(!app.message_dialogs[0].state.has_pointer_capture());
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.dialog_offset() => (41, 27));
+    main_assert!(!app.dialogs.messages[0].state.has_pointer_capture());
+    main_assert_eq!(app.dialogs.messages.len() => 1);
 }
 
 #[test]
@@ -7502,7 +7502,7 @@ fn startup_host_auth_players_stay_with_their_connection_and_cancel_cleanly() {
     app.show_main_menu();
     main_assert!(app.pending_league_player_auth.is_none());
     main_assert!(app.startup_network_connection.is_none());
-    main_assert!(!app.message_dialogs.iter().any(|dialog| matches!(
+    main_assert!(!app.dialogs.messages.iter().any(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::LeaguePlayerAuthWait
             | MessageDialogContinuation::LeaguePlayerAuthWelcome
@@ -10203,11 +10203,11 @@ fn a_window_that_closes_mid_attempt_reports_one_failure() {
     ));
 
     app.poll_startup_network_connection().test_value();
-    let after_failure = app.message_dialogs.len();
+    let after_failure = app.dialogs.messages.len();
     app.poll_startup_network_connection().test_value();
 
     main_assert!(app.pending_host_rejoin.is_none());
-    main_assert_eq!(app.message_dialogs.len() => after_failure, "the expired window must not raise a second failure behind the first");
+    main_assert_eq!(app.dialogs.messages.len() => after_failure, "the expired window must not raise a second failure behind the first");
 }
 
 #[test]
@@ -12324,7 +12324,7 @@ fn runtime_join_chase_retarget_reopens_a_reached_loading_barrier() {
         prepared,
     ));
     app.show_reached_network_start_wait().test_value();
-    main_assert!(app.message_dialogs.iter().any(|dialog| matches!(
+    main_assert!(app.dialogs.messages.iter().any(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::NetworkClientStartWait
     )));
@@ -12341,7 +12341,7 @@ fn runtime_join_chase_retarget_reopens_a_reached_loading_barrier() {
     main_assert_eq!(prepared.status => chase);
     main_assert!(!prepared.local_reached);
     main_assert_eq!(app.pending_client_start_status => Some(chase));
-    main_assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+    main_assert!(app.dialogs.messages.iter().all(|dialog| !matches!(
         dialog.continuation,
         MessageDialogContinuation::NetworkClientStartWait
     )));
@@ -12590,13 +12590,13 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     let mut commands = removal_observer.test_join();
     main_assert!(combined_path.exists());
     main_assert!(app.blocking_resource_wait.is_none());
-    main_assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+    main_assert!(app.dialogs.messages.iter().all(|dialog| !matches!(
         dialog.continuation,
         MessageDialogContinuation::BlockingResourceWait { .. }
     )));
 
     let loading_deadline = Instant::now() + Duration::from_secs(5);
-    while app.message_dialogs.iter().all(|dialog| !matches!(
+    while app.dialogs.messages.iter().all(|dialog| !matches!(
         dialog.continuation,
         MessageDialogContinuation::NetworkClientStartWait
     )) {
@@ -13028,9 +13028,9 @@ fn debug_key_gates_remaps_and_native_priority_body() {
     vote_priority.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(!vote_priority.engine.debug_mode());
     main_assert!(vote_priority.runtime_flash_message.is_none());
-    main_assert_eq!(vote_priority.message_dialogs.len() => 1);
+    main_assert_eq!(vote_priority.dialogs.messages.len() => 1);
     vote_priority.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(vote_priority.message_dialogs.is_empty());
+    main_assert!(vote_priority.dialogs.messages.is_empty());
     main_assert_eq!(vote_priority.mode => AppMode::Running);
 
     let mut game_over_priority = n2_app_with_key_config(
@@ -13537,7 +13537,7 @@ fn runtime_f4_toggles_only_live_network_dialog_and_consumes_edges() {
         let mut app = new_running_sandbox_app();
         configure_runtime_network_role(&mut app, role);
         app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
-        main_assert_eq!(app.runtime_client_list.is_some() => opens, "role {role:?}");
+        main_assert_eq!(app.dialogs.client_list.is_some() => opens, "role {role:?}");
         main_assert_eq!(app.mode => AppMode::Running);
         main_assert!(!app.exit_requested);
 
@@ -13555,7 +13555,7 @@ fn runtime_f4_toggles_only_live_network_dialog_and_consumes_edges() {
         main_assert_eq!(after_release => before_release);
 
         app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
-        main_assert!(app.runtime_client_list.is_none());
+        main_assert!(app.dialogs.client_list.is_none());
     }
 }
 
@@ -13600,7 +13600,7 @@ fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let rate = {
-        let dialog = app.runtime_client_list.test_ref();
+        let dialog = app.dialogs.client_list.test_ref();
         let layout = dialog.layout(preferred, line_height);
         let index = dialog
             .option_rows()
@@ -13632,7 +13632,7 @@ fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
     main_assert_eq!(app.engine.control_rate() => 4);
     main_assert_eq!(app.network_control_clock.map(NetworkControlClock::control_rate) => Some(4));
     main_assert_eq!(
-        app.runtime_client_list
+        app.dialogs.client_list
             .as_ref()
             .expect("F4 dialog remains open")
             .option_rows()
@@ -13652,7 +13652,7 @@ fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
     main_assert_eq!(app.network_control_clock.map(NetworkControlClock::control_rate) => Some(7));
     main_assert!(app.sec1_timer().expect("refresh runtime options"));
     main_assert_eq!(
-        app.runtime_client_list
+        app.dialogs.client_list
             .as_ref()
             .expect("F4 dialog remains open")
             .option_rows()
@@ -13683,7 +13683,7 @@ fn f4_runtime_join_waits_for_network_ack_and_flashes_state() {
 
     main_assert_eq!(app.runtime_network_join_allowed => Some(true));
     main_assert_eq!(
-        app.runtime_client_list
+        app.dialogs.client_list
             .as_ref()
             .expect("F4 dialog remains open")
             .option_rows()
@@ -13704,9 +13704,9 @@ fn running_f4_nonexclusive_scope_does_not_receive_tab() {
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
 
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    main_assert_eq!(app.runtime_client_list.as_ref().and_then(|dialog| dialog.focused()) => None);
+    main_assert_eq!(app.dialogs.client_list.as_ref().and_then(|dialog| dialog.focused()) => None);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert!(app.runtime_client_list.is_some());
+    main_assert!(app.dialogs.client_list.is_some());
 }
 
 #[test]
@@ -13721,7 +13721,7 @@ fn runtime_client_list_wheel_precedes_running_player_control() {
 
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let layout = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height);
     app.running_pointer_position = Some(GuiPoint::new(
@@ -13771,14 +13771,14 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
         can_moderate: false,
         unacknowledged: false,
     };
-    app.runtime_client_list = Some(RuntimeClientListDialog::new_info(
+    app.dialogs.client_list = Some(RuntimeClientListDialog::new_info(
         "Client information",
         row.client_id,
         Some(row),
     ));
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let info = app
-        .runtime_client_list
+        .dialogs.client_list
         .as_ref()
         .and_then(|dialog| dialog.info_layout(preferred, line_height))
         .test_value();
@@ -13787,7 +13787,7 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
         (info.text.y + info.text.h / 2) as f32,
     ));
     let initial = app
-        .runtime_client_list
+        .dialogs.client_list
         .as_ref()
         .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
         .test_value();
@@ -13795,7 +13795,7 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
 
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     let wheeled = app
-        .runtime_client_list
+        .dialogs.client_list
         .as_ref()
         .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
         .test_value();
@@ -13803,7 +13803,7 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
 
     app.test_key(VirtualKeyCode::End, ElementState::Pressed);
     let ended = app
-        .runtime_client_list
+        .dialogs.client_list
         .as_ref()
         .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
         .test_value();
@@ -13811,7 +13811,7 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
     app.test_key(VirtualKeyCode::End, ElementState::Released);
     app.test_key(VirtualKeyCode::Home, ElementState::Pressed);
     main_assert_eq!(
-        app.runtime_client_list
+        app.dialogs.client_list
             .as_ref()
             .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
             .expect("Home scroll metrics")
@@ -13827,7 +13827,7 @@ fn runtime_client_list_consumption_cancels_world_mouse_gestures() {
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let bounds = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height)
         .bounds;
@@ -13907,7 +13907,7 @@ fn runtime_client_list_prevents_tick5_from_reviving_edge_scroll() {
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let bounds = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height)
         .bounds;
@@ -13950,7 +13950,7 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     app.network_control_clock = Some(clock);
 
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
-    let initial = app.runtime_client_list.test_ref().status();
+    let initial = app.dialogs.client_list.test_ref().status();
     main_assert_eq!(
         (
             initial.tick,
@@ -13962,9 +13962,9 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
         // beside it is still C++'s exact 1/150 EWMA of the same sample.
         (41, 4, 15, 40_000)
     );
-    main_assert_eq!(app.runtime_client_list.as_ref().expect("dialog open").status_text() => initial.to_string());
+    main_assert_eq!(app.dialogs.client_list.as_ref().expect("dialog open").status_text() => initial.to_string());
     let initial_remote = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .rows()
         .iter()
@@ -13978,9 +13978,9 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
         .set_test_runtime_client_states([n2_fixture!(runtime_client:
             7, clonk_network::RemoteBarrierState::Ready, false, 9
         )]);
-    main_assert_eq!(app.runtime_client_list.as_ref().expect("dialog remains open").status() => initial, "the visible status is a one-second snapshot");
+    main_assert_eq!(app.dialogs.client_list.as_ref().expect("dialog remains open").status() => initial, "the visible status is a one-second snapshot");
     let stale_remote = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .rows()
         .iter()
@@ -13995,11 +13995,11 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
         "client rows are also one-second snapshots"
     );
     main_assert!(app.sec1_timer().expect("pulse one-second network dialog timer"));
-    let refreshed = app.runtime_client_list.test_ref().status();
+    let refreshed = app.dialogs.client_list.test_ref().status();
     main_assert_eq!((refreshed.tick, refreshed.rate, refreshed.presend, refreshed.average_control_time) => (50, 2, 1, 0));
     main_assert!(refreshed.to_string().contains("Behind "));
     let waiting_remote = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .rows()
         .iter()
@@ -14014,7 +14014,7 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
         )]);
     main_assert!(app.sec1_timer().expect("refresh removing client row"));
     let removing_remote = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .rows()
         .iter()
@@ -15314,7 +15314,7 @@ fn console_network_chart_owns_a_child_window_only_while_its_dialog_is_open() {
     // for a child one however the dialog was opened.
     let mut fullscreen = new_running_sandbox_app();
     fullscreen.toggle_network_chart();
-    main_assert!(fullscreen.network_chart_dialog.is_some());
+    main_assert!(fullscreen.dialogs.chart.is_some());
     main_assert!(!fullscreen.console_network_chart_window_open());
 
     let mut console = new_running_sandbox_app();
@@ -15322,7 +15322,7 @@ fn console_network_chart_owns_a_child_window_only_while_its_dialog_is_open() {
     main_assert!(!console.console_network_chart_window_open());
 
     console.toggle_network_chart();
-    main_assert!(console.network_chart_dialog.is_some());
+    main_assert!(console.dialogs.chart.is_some());
     main_assert!(console.console_network_chart_window_open());
 
     // The chrome is the dialog's own fixed extent: `Dialog::UpdateSize` sizes
@@ -15336,7 +15336,7 @@ fn console_network_chart_owns_a_child_window_only_while_its_dialog_is_open() {
 
     // The same toggle closes it, and the window request goes with the dialog.
     console.toggle_network_chart();
-    main_assert!(console.network_chart_dialog.is_none());
+    main_assert!(console.dialogs.chart.is_none());
     main_assert!(!console.console_network_chart_window_open());
     main_assert!(console.console_network_chart_window_chrome().is_none());
 }
@@ -15366,19 +15366,19 @@ fn the_console_network_chart_paints_its_own_window_framebuffer() {
 
     // Tab selection is the one input the window chrome does not own, and it
     // reaches the dialog through the window's own pointer route.
-    main_assert_eq!(console.network_chart_dialog.test_ref().active_tab_index() => 0);
+    main_assert_eq!(console.dialogs.chart.test_ref().active_tab_index() => 0);
     main_assert!(console.console_network_chart_pointer_down(GuiPoint::new(
         console_network_chart_tab_center(&console, 2).0,
         console_network_chart_tab_center(&console, 2).1,
     )));
-    main_assert_eq!(console.network_chart_dialog.test_ref().active_tab_index() => 2);
+    main_assert_eq!(console.dialogs.chart.test_ref().active_tab_index() => 2);
 }
 
 /// The middle of one console sheet tab, in the window's own coordinates.
 fn console_network_chart_tab_center(app: &GameApp, index: usize) -> (f32, f32) {
     let resources = app.assets.network_chart_resources().test_value();
     let (width, height) = clonk_frontend::network_chart::NetworkChartDialog::console_window_extent();
-    let layout = app.network_chart_dialog.test_ref().console_layout(
+    let layout = app.dialogs.chart.test_ref().console_layout(
         clonk_frontend::classic_gui::IntRect::new(0, 0, width as i32, height as i32),
         resources,
     );

@@ -145,7 +145,7 @@ impl GameApp {
     /// FilmView/FreeView scope. Nonexclusive overlays (scoreboard, client
     /// list, and player-owned menus) deliberately do not participate.
     pub(crate) fn viewport_cycle_scope_available(&self) -> bool {
-        (!self.runtime_gui_has_keyboard_focus() || self.network_chart_elevated)
+        (!self.runtime_gui_has_keyboard_focus() || self.dialogs.chart_elevated)
             && !self.runtime_top_default_dialog_is_exclusive()
             && !(self.primary_physical_viewport_is_no_owner() && self.ingame_menu.is_some())
     }
@@ -358,14 +358,14 @@ impl GameApp {
                 reset_script_menu_presentation_location(state);
             }
         }
-        if self.menu_title_drag.is_some_and(|drag| {
+        if self.dialogs.menu_title_drag.is_some_and(|drag| {
             let owner = match drag {
                 MenuTitleDrag::Script { owner, .. } => owner,
                 MenuTitleDrag::Ingame { player, .. } => player,
             };
             changed.contains(&owner)
         }) {
-            self.menu_title_drag = None;
+            self.dialogs.menu_title_drag = None;
         }
         if self
             .ingame_menu_close_pointer_capture
@@ -780,20 +780,20 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
-        if self.message_dialogs.is_empty() {
+        if self.dialogs.messages.is_empty() {
             return Ok(());
         }
         let assets = Arc::clone(&self.assets);
         let Some(resources) = assets.message_dialog_resources() else {
             tracing::error!(
-                count = self.message_dialogs.len(),
+                count = self.dialogs.messages.len(),
                 "refusing to render classic message dialog without exact resources"
             );
             anyhow::bail!(
                 "classic message-dialog resources are unavailable; refusing generic fallback"
             );
         };
-        let last = self.message_dialogs.len() - 1;
+        let last = self.dialogs.messages.len() - 1;
         let active_index = (!self.running_chat_active())
             .then(|| self.active_message_dialog_index())
             .flatten();
@@ -802,7 +802,7 @@ impl GameApp {
         for index in 0..=last {
             let keyboard_active = Some(index) == active_index && self.context_menu.is_none();
             let mouse_active = self.mode == AppMode::Running || Some(index) == active_index;
-            self.message_dialogs[index].state.render_at(
+            self.dialogs.messages[index].state.render_at(
                 self.graphics.surface_mut(),
                 resources,
                 keyboard_active,
@@ -825,7 +825,8 @@ impl GameApp {
         ordered_native: bool,
     ) -> Result<()> {
         let Some(index) = self
-            .message_dialogs
+            .dialogs
+            .messages
             .iter()
             .position(|dialog| dialog.running_stack_id == stack_id)
         else {
@@ -838,7 +839,7 @@ impl GameApp {
         let keyboard_active = Some(index) == self.active_message_dialog_index()
             && !self.running_chat_active()
             && self.context_menu.is_none();
-        self.message_dialogs[index].state.render_at(
+        self.dialogs.messages[index].state.render_at(
             self.graphics.surface_mut(),
             resources,
             keyboard_active,
@@ -866,7 +867,7 @@ impl GameApp {
         dialog.controller.render(
             self.graphics.surface_mut(),
             resources,
-            self.message_dialogs.is_empty() && self.context_menu.is_none(),
+            self.dialogs.messages.is_empty() && self.context_menu.is_none(),
             gamma,
         )
     }
@@ -952,7 +953,7 @@ impl GameApp {
             .render(
                 surface,
                 resources,
-                self.message_dialogs.is_empty() && self.context_menu.is_none(),
+                self.dialogs.messages.is_empty() && self.context_menu.is_none(),
                 Some(gamma),
             )
             .map_err(|error| self.loader_boundary(error.to_string()))
@@ -1043,8 +1044,8 @@ impl GameApp {
                 _ => None,
             }
         } else {
-            (0..self.message_dialogs.len()).rev().find(|index| {
-                let dialog = &self.message_dialogs[*index].state;
+            (0..self.dialogs.messages.len()).rev().find(|index| {
+                let dialog = &self.dialogs.messages[*index].state;
                 let layout = dialog.layout(surface_width, surface_height, &resources.fonts.text);
                 dialog
                     .tooltip_state(Some(tooltip_pointer), &layout)
@@ -1057,7 +1058,7 @@ impl GameApp {
         if self.graphics.surface().is_clonk_text_capture_active() {
             self.next_pending_native_overlay();
         }
-        self.message_dialogs[index].state.render_tooltip(
+        self.dialogs.messages[index].state.render_tooltip(
             self.graphics.surface_mut(),
             resources,
             Some(tooltip_pointer),
@@ -1106,7 +1107,7 @@ impl GameApp {
         ordered_native: bool,
     ) -> Result<()> {
         self.refresh_network_chart_dialog();
-        let Some(dialog) = self.network_chart_dialog.as_ref() else {
+        let Some(dialog) = self.dialogs.chart.as_ref() else {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
@@ -1134,7 +1135,7 @@ impl GameApp {
         frame_gamma: &clonk_graphics::GammaRamp,
         ordered_native: bool,
     ) -> Result<()> {
-        let Some(dialog) = self.runtime_client_list.as_ref() else {
+        let Some(dialog) = self.dialogs.client_list.as_ref() else {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
@@ -1179,7 +1180,7 @@ impl GameApp {
         frame_gamma: &clonk_graphics::GammaRamp,
     ) -> Result<bool> {
         let mouse_active = self.runtime_client_list_mouse_active();
-        let Some(dialog) = self.runtime_client_list.as_ref() else {
+        let Some(dialog) = self.dialogs.client_list.as_ref() else {
             return Ok(false);
         };
         if dialog.is_static_info_only() {
@@ -1206,11 +1207,11 @@ impl GameApp {
         if self.mode == AppMode::Running {
             self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
                 && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
-                && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
+                && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
                 && self.context_menu.is_none()
         } else {
-            (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
-                && self.message_dialogs.is_empty()
+            (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
+                && self.dialogs.messages.is_empty()
                 && self.context_menu.is_none()
         }
     }
@@ -1230,10 +1231,11 @@ impl GameApp {
         // Shared C4GUI dialogs remain mouse-active even when another dialog
         // owns keyboard focus. Reverse stack routing clears this flag only
         // when a higher hit actually occludes the scoreboard close button.
-        let close_hovered = self.scoreboard_runtime.close_hovered;
-        let close_pressed = self.scoreboard_close_pointer_capture && close_hovered;
+        let close_hovered = self.dialogs.scoreboard_runtime.close_hovered;
+        let close_pressed = self.dialogs.scoreboard_close_pointer_capture && close_hovered;
         let (layout, render_state) = {
             let presentation = self
+                .dialogs
                 .scoreboard_runtime
                 .presentation
                 .as_mut()
@@ -1288,7 +1290,8 @@ impl GameApp {
         ordered_native: bool,
     ) -> Result<()> {
         let stack = self
-            .running_dialog_stack
+            .dialogs
+            .stack
             .iter()
             .copied()
             .skip(start_index)
@@ -1496,7 +1499,8 @@ impl GameApp {
                         }
                     }
                     if self
-                        .runtime_client_list
+                        .dialogs
+                        .client_list
                         .as_ref()
                         .is_some_and(|dialog| dialog.is_info_only())
                     {
@@ -1505,7 +1509,7 @@ impl GameApp {
                             ordered_native,
                         )?;
                     }
-                    if !self.message_dialogs.is_empty() {
+                    if !self.dialogs.messages.is_empty() {
                         self.render_message_dialogs(gamma.as_ref())?;
                     }
                     if ordered_native
@@ -1616,7 +1620,7 @@ impl GameApp {
                     || self.startup.player_properties_dialog.is_some()
                     || league_signup_open
                     || self.chat.external_dialog_visible
-                    || self.runtime_client_list.is_some()
+                    || self.dialogs.client_list.is_some()
                     || fade_draw_inactive;
                 let options_draw_focus =
                     self.startup_options_dialog_has_focus_owner() && !fade_draw_inactive;
@@ -1646,7 +1650,7 @@ impl GameApp {
                     context_menu_open,
                     definition_selector_open,
                     game_option_input_open,
-                    !self.message_dialogs.is_empty() || league_signup_open,
+                    !self.dialogs.messages.is_empty() || league_signup_open,
                     &self.scenario_game_options,
                     self.scensel.mode,
                     self.startup.options_dialog.as_ref(),
@@ -1858,13 +1862,14 @@ impl GameApp {
                     }
                 }
                 if self
-                    .runtime_client_list
+                    .dialogs
+                    .client_list
                     .as_ref()
                     .is_some_and(|dialog| dialog.is_info_only())
                 {
                     self.render_runtime_client_list_layer(menu_gamma, ordered_native)?;
                 }
-                if !self.message_dialogs.is_empty() {
+                if !self.dialogs.messages.is_empty() {
                     self.render_message_dialogs(Some(menu_gamma))?;
                 }
                 if portrait_location_popup_open {
@@ -1933,8 +1938,8 @@ impl GameApp {
                         || game_option_input_open
                         || league_signup_open
                         || self.chat.external_dialog_visible
-                        || self.runtime_client_list.is_some()
-                        || !self.message_dialogs.is_empty()
+                        || self.dialogs.client_list.is_some()
+                        || !self.dialogs.messages.is_empty()
                         || gui_cursor_drawn
                         || startup_tooltips_drawn)
                 {
@@ -1973,7 +1978,7 @@ impl GameApp {
             || !matches!(self.mode, AppMode::Running)
             || self.game_over_dialog.is_some()
             || self.game_option_input_dialog.is_some()
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
         {
             return None;
         }
@@ -2027,7 +2032,7 @@ impl GameApp {
         if config.uses_scaling_correction()
             && !defer_native_text
             && !ordered_native
-            && self.message_dialogs.is_empty()
+            && self.dialogs.messages.is_empty()
             && self.league_signup_dialog.is_none()
             && !self
                 .network_start_wait
@@ -2090,7 +2095,7 @@ impl GameApp {
             }
             self.render_message_dialogs(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
-            if !self.message_dialogs.is_empty() {
+            if !self.dialogs.messages.is_empty() {
                 self.next_pending_native_overlay();
             }
             if self.draw_classic_gui_cursor(Some(gamma)) {
@@ -2190,7 +2195,7 @@ impl GameApp {
         surface: &mut Surface,
         gamma: &clonk_graphics::GammaRamp,
     ) -> Result<()> {
-        if self.message_dialogs.is_empty() {
+        if self.dialogs.messages.is_empty() {
             return Ok(());
         }
         let assets = Arc::clone(&self.assets);
@@ -2199,14 +2204,14 @@ impl GameApp {
                 "classic message-dialog resources are unavailable during network start wait",
             )
         })?;
-        let last = self.message_dialogs.len() - 1;
+        let last = self.dialogs.messages.len() - 1;
         let active_index = self.active_message_dialog_index();
         let context_menu_closed = self.context_menu.is_none();
         let now = Instant::now();
         for index in 0..=last {
             let keyboard_active = Some(index) == active_index && context_menu_closed;
             let mouse_active = Some(index) == active_index;
-            let result = self.message_dialogs[index].state.render_at(
+            let result = self.dialogs.messages[index].state.render_at(
                 surface,
                 resources,
                 keyboard_active,
@@ -2227,7 +2232,7 @@ impl GameApp {
         surface: &mut Surface,
         gamma: &clonk_graphics::GammaRamp,
     ) -> Result<()> {
-        if self.message_dialogs.is_empty() {
+        if self.dialogs.messages.is_empty() {
             return Ok(());
         }
         let assets = Arc::clone(&self.assets);
@@ -2241,8 +2246,8 @@ impl GameApp {
             return Ok(());
         };
         let (surface_width, surface_height) = (surface.width() as i32, surface.height() as i32);
-        let Some(index) = (0..self.message_dialogs.len()).rev().find(|index| {
-            let dialog = &self.message_dialogs[*index].state;
+        let Some(index) = (0..self.dialogs.messages.len()).rev().find(|index| {
+            let dialog = &self.dialogs.messages[*index].state;
             let layout = dialog.layout(surface_width, surface_height, &resources.fonts.text);
             dialog
                 .tooltip_state(Some(tooltip_pointer), &layout)
@@ -2250,7 +2255,7 @@ impl GameApp {
         }) else {
             return Ok(());
         };
-        let result = self.message_dialogs[index].state.render_tooltip(
+        let result = self.dialogs.messages[index].state.render_tooltip(
             surface,
             resources,
             Some(tooltip_pointer),
@@ -3404,7 +3409,7 @@ impl GameApp {
         if !self.console_network_chart_window_open() {
             return None;
         }
-        let dialog = self.network_chart_dialog.as_ref()?;
+        let dialog = self.dialogs.chart.as_ref()?;
         let (width, height) =
             clonk_frontend::network_chart::NetworkChartDialog::console_window_extent();
         Some((dialog.caption().to_owned(), width, height))
@@ -3479,7 +3484,7 @@ impl GameApp {
             return None;
         }
         self.refresh_network_chart_dialog();
-        let dialog = self.network_chart_dialog.as_ref()?;
+        let dialog = self.dialogs.chart.as_ref()?;
         let assets = Arc::clone(&self.assets);
         let resources = assets.network_chart_resources()?;
         let mut surface = clonk_graphics::Surface::new(
@@ -3517,7 +3522,7 @@ impl GameApp {
         let (width, height) =
             clonk_frontend::network_chart::NetworkChartDialog::console_window_extent();
         let extent = clonk_frontend::classic_gui::IntRect::new(0, 0, width as i32, height as i32);
-        let Some(dialog) = self.network_chart_dialog.as_mut() else {
+        let Some(dialog) = self.dialogs.chart.as_mut() else {
             return false;
         };
         !matches!(
@@ -5775,10 +5780,10 @@ impl GameApp {
                         self.script_menu_close_pointer_capture = None;
                     }
                     if matches!(
-                        self.menu_title_drag,
+                        self.dialogs.menu_title_drag,
                         Some(MenuTitleDrag::Script { owner, .. }) if owner == script_menu_owner
                     ) {
-                        self.menu_title_drag = None;
+                        self.dialogs.menu_title_drag = None;
                     }
                     0
                 });
@@ -6540,15 +6545,16 @@ impl GameApp {
         let use_running_dialog_stack = self.mode == AppMode::Running;
         let render_network_chart_elevated = self.network_chart_renders_elevated();
         let running_stack_split = if use_running_dialog_stack {
-            self.running_dialog_stack
+            self.dialogs
+                .stack
                 .iter()
                 .position(|entry| entry.z_order() > 0)
-                .unwrap_or(self.running_dialog_stack.len())
+                .unwrap_or(self.dialogs.stack.len())
         } else {
             0
         };
         let running_stack_tail = if use_running_dialog_stack {
-            self.running_dialog_stack[running_stack_split..].to_vec()
+            self.dialogs.stack[running_stack_split..].to_vec()
         } else {
             Vec::new()
         };
@@ -6626,7 +6632,7 @@ impl GameApp {
             )?;
         } else {
             self.render_message_dialogs(Some(&frame_gamma))?;
-            if ordered_native && !self.message_dialogs.is_empty() {
+            if ordered_native && !self.dialogs.messages.is_empty() {
                 self.next_pending_native_overlay();
             }
         }
@@ -6641,7 +6647,7 @@ impl GameApp {
             self.render_network_chart_layer(&frame_gamma, ordered_native)?;
         }
         if self.context_menu.is_some()
-            && (!running_chat_input_open || use_running_dialog_stack || self.network_chart_elevated)
+            && (!running_chat_input_open || use_running_dialog_stack || self.dialogs.chart_elevated)
         {
             // C4GUI::Screen draws its recursively owned context chain after
             // every dialog, so it stays above viewport menus, F1 help,

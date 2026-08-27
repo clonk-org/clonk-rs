@@ -4270,7 +4270,7 @@ fn runtime_music_flash_reaches_every_nonexclusive_running_layer() {
         )
         .test_value();
     assert_f3_renders(&mut message, "message dialog");
-    main_assert_eq!(message.message_dialogs.len() => 1);
+    main_assert_eq!(message.dialogs.messages.len() => 1);
 
     let mut context = new_running_sandbox_app();
     context
@@ -4292,7 +4292,7 @@ fn runtime_music_flash_reaches_every_nonexclusive_running_layer() {
     );
     toggle_scoreboard(&mut scoreboard, ModifiersState::empty());
     assert_f3_renders(&mut scoreboard, "scoreboard");
-    main_assert!(scoreboard.scoreboard_dialog.is_some());
+    main_assert!(scoreboard.dialogs.scoreboard.is_some());
 
     for mode in [
         AppObjectMenuMode::Inventory,

@@ -3478,7 +3478,7 @@ fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::ResetConfiguration])
         .test_value();
-    let modal = app.message_dialogs.last().test_value();
+    let modal = app.dialogs.messages.last().test_value();
     runtime_assert_eq!(
         modal.state.caption() => "Reset configuration";
         modal.state.message() => "Are you sure you want to reset all configuration values?|For changes to take effect the program has to be restarted.";
@@ -3620,7 +3620,7 @@ fn options_close_reports_disk_write_failure() {
     .test_value();
 
     assert_eq!(app.startup.view, StartupView::MainMenu);
-    let error = app.message_dialogs.last().test_value();
+    let error = app.dialogs.messages.last().test_value();
     runtime_assert_eq!(
         error.state.caption() => "Configuration error";
         error.state.message() => "Could not save configuration: simulated config write failure";
@@ -3988,7 +3988,7 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
     ])
     .test_value();
 
-    let confirm = &app.message_dialogs[0].state;
+    let confirm = &app.dialogs.messages[0].state;
     runtime_assert_eq!(
         confirm.caption() => "Delete";
         confirm.message() => "Do you really want to delete player Ada? - this player has a total playing time of 10:00:01!";
@@ -4009,7 +4009,7 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
     assert!(!ada.exists());
-    assert!(app.message_dialogs.is_empty());
+    assert!(app.dialogs.messages.is_empty());
     assert!(app.startup.player_files.is_empty());
     assert!(app.startup.player_models.is_empty());
     runtime_assert_eq!(
@@ -4032,8 +4032,8 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
     fs::remove_dir_all(&broken).test_value();
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
-    assert_eq!(app.message_dialogs.len(), 1);
-    let failure = &app.message_dialogs[0].state;
+    assert_eq!(app.dialogs.messages.len(), 1);
+    let failure = &app.dialogs.messages[0].state;
     runtime_assert_eq!(
         failure.caption() => "Clear";
         failure.message() => "Delete failure.";
@@ -4149,13 +4149,13 @@ fn chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
     let mut app = new_running_sandbox_app();
     install_runtime_key_config(&mut app, Ok(parsed));
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    assert!(app.network_chart_dialog.is_some());
+    assert!(app.dialogs.chart.is_some());
     app.test_key(VirtualKeyCode::F8, ElementState::Released);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(app.network_chart_dialog.is_none());
+    assert!(app.dialogs.chart.is_none());
     runtime_assert!(
-        app.message_dialogs.is_empty(),
+        app.dialogs.messages.is_empty(),
         "chart Escape must not also open the abort dialog"
     );
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
@@ -4166,23 +4166,23 @@ fn chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
         !app.handle_network_chart_key(VirtualKeyCode::ArrowUp, ElementState::Pressed),
         "the non-exclusive chart must not invent GUI-scope arrow navigation"
     );
-    runtime_assert_eq!(app.network_chart_dialog.as_ref().expect("chart remains open").active_tab_index() => 0);
+    runtime_assert_eq!(app.dialogs.chart.as_ref().expect("chart remains open").active_tab_index() => 0);
 
     app.start_running_chat(RunningChatMode::All);
     assert!(app.running_chat_active());
     tap_runtime_key(&mut app, VirtualKeyCode::Escape);
     assert!(app.running_chat_controller().is_none());
     runtime_assert!(
-        app.network_chart_dialog.is_some(),
+        app.dialogs.chart.is_some(),
         "closing foreground chat must retain the background chart"
     );
     tap_runtime_key(&mut app, VirtualKeyCode::Escape);
-    assert!(app.network_chart_dialog.is_none());
-    assert!(app.message_dialogs.is_empty());
+    assert!(app.dialogs.chart.is_none());
+    assert!(app.dialogs.messages.is_empty());
 
     tap_runtime_key(&mut app, VirtualKeyCode::F8);
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    assert!(app.network_chart_dialog.is_none());
+    assert!(app.dialogs.chart.is_none());
 
     let mut priority = new_running_sandbox_app();
     install_runtime_key_config(
@@ -4191,7 +4191,7 @@ fn chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
     );
     priority.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     assert!(priority.running_chat_active());
-    assert!(priority.network_chart_dialog.is_none());
+    assert!(priority.dialogs.chart.is_none());
 
     let mut remapped_priority = new_running_sandbox_app();
     install_runtime_key_config(
@@ -4200,7 +4200,7 @@ fn chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
     );
     remapped_priority.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(remapped_priority.running_chat_active());
-    assert!(remapped_priority.network_chart_dialog.is_none());
+    assert!(remapped_priority.dialogs.chart.is_none());
 }
 
 #[test]
@@ -7836,12 +7836,12 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
         confirm_unassociated_savegame_players: false,
     }])
     .test_value();
-    let league = app.message_dialogs.last().test_value();
+    let league = app.dialogs.messages.last().test_value();
     runtime_assert_eq!(
         league.state.message() => "Loaded players Chooser and Companion";
         league.state.caption() => "Loaded league error";
     );
-    app.message_dialogs.clear();
+    app.dialogs.messages.clear();
     app.network_is_league = false;
 
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
@@ -7850,7 +7850,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
         confirm_unassociated_savegame_players: true,
     }])
     .test_value();
-    let confirmation = app.message_dialogs.last().test_value();
+    let confirmation = app.dialogs.messages.last().test_value();
     assert_eq!(confirmation.state.message(), "Loaded unassociated players");
     assert_eq!(confirmation.state.caption(), "Loaded player assignment");
 
@@ -7983,7 +7983,7 @@ fn runtime_f1_help_displays_live_remapped_key_names() {
         Ok(parse_runtime_key_config(b"[Keys]\nToggleShowHelp=Shift+H\nScoreboardToggle=Escape,Return\n                  MusicToggle=Joy1A\nDbgModeToggle=Ctrl+Alt+D\n",).expect("parse remapped help chords")),
     );
     // The columns are rebuilt lazily, so drop the memoized text.
-    app.runtime_help_text_cache = OnceLock::new();
+    app.dialogs.help_text_cache = OnceLock::new();
     let columns = app.runtime_help_columns().test_value().clone();
 
     // Each remapped action shows its live ordered binding name.
@@ -8213,13 +8213,13 @@ fn runtime_f1_key_config_ownership_is_snapshotted_once_per_game() {
     fs::create_dir_all(&extra).test_value();
     fs::write(extra.join("KeyConfig.txt"), "[Keys]\nToggleShowHelp=F2\n").test_value();
     app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(app.runtime_help_visible);
+    assert!(app.dialogs.help_visible);
 
     app.configure_running_state("Second game".to_string(), DEFAULT_GROUND_HEIGHT);
     app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(!app.runtime_help_visible);
+    assert!(!app.dialogs.help_visible);
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    assert!(app.runtime_help_visible);
+    assert!(app.dialogs.help_visible);
 }
 
 #[test]
@@ -8242,7 +8242,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         let mut app = new_classic_running_sandbox_app();
         app.display_flags.upper_board = mode;
         app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        assert!(app.runtime_help_visible, "mode {mode:?}");
+        assert!(app.dialogs.help_visible, "mode {mode:?}");
         let mut frame = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut frame);
         runtime_assert_eq!(app.graphics.preferred_dialog_rect(None).y => expected_top, "mode {mode:?}");
@@ -8266,7 +8266,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
         .expect_err("missing UpperBoard cannot shift the anchor to y=0");
     assert!(error.to_string().contains("UpperBoard resource"));
-    assert!(!missing_board.runtime_help_visible);
+    assert!(!missing_board.dialogs.help_visible);
 
     let mut tiny = new_classic_running_sandbox_app();
     tiny.graphics = GraphicsSystem::new(
@@ -8285,7 +8285,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
         .expect_err("tiny Full-mode fallback cannot move help to y=0");
     assert!(error.to_string().contains("50px viewport origin"));
-    assert!(!tiny.runtime_help_visible);
+    assert!(!tiny.dialogs.help_visible);
 
     let mut tiny_hide = new_classic_running_sandbox_app();
     tiny_hide.display_flags.upper_board = UpperBoardMode::Hide;
@@ -8306,28 +8306,28 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
         .expect_err("tiny Hide-mode fallback cannot masquerade as valid geometry");
     assert!(error.to_string().contains("message-board bounds"));
-    assert!(!tiny_hide.runtime_help_visible);
+    assert!(!tiny_hide.dialogs.help_visible);
 
     let mut visible = new_classic_running_sandbox_app();
-    visible.runtime_help_visible = true;
+    visible.dialogs.help_visible = true;
     visible.display_flags.upper_board = UpperBoardMode::Small;
     let mut frame = vec![0x6d; 320 * 200 * 4];
     let sentinel = frame.clone();
     visible.test_render(&mut frame);
     assert_ne!(frame, sentinel);
-    assert!(visible.runtime_help_visible);
+    assert!(visible.dialogs.help_visible);
     assert_eq!(visible.graphics.preferred_dialog_rect(None).y, 25);
 
     let mut recover = new_classic_running_sandbox_app();
     recover.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(recover.runtime_help_visible);
+    assert!(recover.dialogs.help_visible);
     recover.display_flags.upper_board = UpperBoardMode::Small;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     recover.test_render(&mut frame);
-    assert!(recover.runtime_help_visible);
+    assert!(recover.dialogs.help_visible);
     assert_eq!(recover.graphics.preferred_dialog_rect(None).y, 25);
     recover.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(!recover.runtime_help_visible);
+    assert!(!recover.dialogs.help_visible);
 }
 
 #[test]
@@ -8362,7 +8362,7 @@ fn upper_board_display_toggle_reinitializes_geometry_synchronously() {
 fn runtime_f1_help_toggles_beneath_nonmatching_running_layers() {
     let mut game_over = new_game_over_keyboard_app();
     game_over.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(game_over.runtime_help_visible);
+    assert!(game_over.dialogs.help_visible);
     assert!(game_over.game_over_dialog.is_some());
 
     let mut message = new_classic_running_sandbox_app();
@@ -8377,8 +8377,8 @@ fn runtime_f1_help_toggles_beneath_nonmatching_running_layers() {
         )
         .test_value();
     message.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(message.runtime_help_visible);
-    assert_eq!(message.message_dialogs.len(), 1);
+    assert!(message.dialogs.help_visible);
+    assert_eq!(message.dialogs.messages.len(), 1);
 
     let mut context = new_classic_running_sandbox_app();
     context
@@ -8391,19 +8391,19 @@ fn runtime_f1_help_toggles_beneath_nonmatching_running_layers() {
         .test_value();
     assert!(context.context_menu.is_some());
     context.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(context.runtime_help_visible);
+    assert!(context.dialogs.help_visible);
     assert!(context.context_menu.is_some());
 
     let mut object = new_classic_running_sandbox_app();
     assert!(object.open_object_menu().expect("open object menu"));
     object.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(object.runtime_help_visible);
+    assert!(object.dialogs.help_visible);
     assert!(object.object_menu.is_some());
 
     let mut ingame = new_classic_running_sandbox_app();
     ingame.open_ingame_menu().test_value();
     ingame.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(ingame.runtime_help_visible);
+    assert!(ingame.dialogs.help_visible);
     assert!(ingame.ingame_menu.is_some());
 }
 
@@ -8417,17 +8417,17 @@ fn custom_player_f1_binding_outranks_help_when_control_scope_is_active() {
         .control
         .control_style = true;
     app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(!app.runtime_help_visible);
+    assert!(!app.dialogs.help_visible);
     runtime_assert_ne!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     app.test_key(VirtualKeyCode::F1, ElementState::Released);
-    assert!(!app.runtime_help_visible);
+    assert!(!app.dialogs.help_visible);
 
     let mut menu = new_running_sandbox_app();
     menu.bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     menu.open_ingame_menu().test_value();
     menu.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(!menu.runtime_help_visible);
+    assert!(!menu.dialogs.help_visible);
     assert!(menu.ingame_menu.is_some());
 }
 
@@ -8455,7 +8455,7 @@ fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
         runtime_assert_eq!(app.engine.player(primary).expect("primary local player").control.pressed_coms & left_mask => 0);
         runtime_assert_ne!(app.engine.player(secondary).expect("secondary local player").control.pressed_coms & left_mask => 0);
         assert!(app.pressed_engine_keys.contains(&key));
-        assert!(!app.runtime_help_visible);
+        assert!(!app.dialogs.help_visible);
         assert!(app.runtime_flash_message.is_none());
 
         app.test_key(key, ElementState::Released);
@@ -8465,7 +8465,7 @@ fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
         );
         runtime_assert_eq!(app.engine.player(primary).expect("primary local player").control.pressed_coms & left_mask => 0);
         assert!(!app.pressed_engine_keys.contains(&key));
-        assert!(!app.runtime_help_visible);
+        assert!(!app.dialogs.help_visible);
         assert!(app.runtime_flash_message.is_none());
     }
 }
@@ -8496,7 +8496,7 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
 
         for state in [ElementState::Pressed, ElementState::Released] {
             app.test_key(VirtualKeyCode::F1, state);
-            assert!(!app.runtime_help_visible, "modifiers {modifiers:?}");
+            assert!(!app.dialogs.help_visible, "modifiers {modifiers:?}");
             runtime_assert_eq!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms => pressed_coms, "modifiers {modifiers:?}, state {state:?}");
             let mut expected_raw_keys = pressed_engine_keys.clone();
             match state {
@@ -8531,7 +8531,7 @@ fn modified_f1_refuses_an_unrepresented_key_config_on_both_edges() {
             .expect_err("custom global-key ownership must precede modifier fallthrough");
         runtime_assert!(
             matches!(error, EngineError::ClassicMenuParityBoundary {..});
-            !app.runtime_help_visible;
+            !app.dialogs.help_visible;
         );
     }
 }
@@ -8548,13 +8548,13 @@ fn unresolved_runtime_help_language_fails_typed_before_pixels() {
         .expect_err("unrepresented key config must fail before toggling");
     runtime_assert!(
         matches!(error, EngineError::ClassicMenuParityBoundary {..});
-        !input_app.runtime_help_visible;
+        !input_app.dialogs.help_visible;
     );
 
     let mut app = new_classic_running_sandbox_app();
-    app.runtime_help_visible = true;
-    app.runtime_help_text_cache = OnceLock::new();
-    app.runtime_help_text_cache
+    app.dialogs.help_visible = true;
+    app.dialogs.help_text_cache = OnceLock::new();
+    app.dialogs.help_text_cache
         .set(Err("LanguageZZ.txt cannot be resolved".to_string()))
         .test_value();
     let before_surface = app.graphics.surface().pixels().to_vec();
@@ -8665,7 +8665,7 @@ fn f4_control_mode_waits_for_status_commit() {
     runtime_assert_eq!(
         app.runtime_network_control_mode => Some(1);
         app.runtime_network_committed_control_mode => Some(0);
-        app.runtime_client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
+        app.dialogs.client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
             Some(labels.control_mode_decentral.as_str());
     );
 
@@ -8678,7 +8678,7 @@ fn f4_control_mode_waits_for_status_commit() {
     app.refresh_runtime_client_list();
     runtime_assert_eq!(
         app.runtime_network_committed_control_mode => Some(1);
-        app.runtime_client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
+        app.dialogs.client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
             Some(labels.control_mode_central.as_str());
     );
 
@@ -8694,7 +8694,7 @@ fn f4_control_mode_waits_for_status_commit() {
     app.refresh_runtime_client_list();
     runtime_assert_eq!(
         app.runtime_network_committed_control_mode => Some(1);
-        app.runtime_client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
+        app.dialogs.client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
             Some(labels.control_mode_central.as_str());
     );
 
@@ -8706,7 +8706,7 @@ fn f4_control_mode_waits_for_status_commit() {
     app.refresh_runtime_client_list();
     runtime_assert_eq!(
         app.runtime_network_committed_control_mode => Some(0);
-        app.runtime_client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
+        app.dialogs.client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
             Some(labels.control_mode_decentral.as_str());
     );
 }
@@ -9658,15 +9658,15 @@ fn network_global_gamepad_overrides_reach_their_callbacks() {
     clients
         .control_clients
         .replace_snapshot([message_client(0, b"Host")]);
-    runtime_assert!(clients.runtime_client_list.is_none());
+    runtime_assert!(clients.dialogs.client_list.is_none());
     press(&mut clients);
     runtime_assert!(
-        clients.runtime_client_list.is_some(),
+        clients.dialogs.client_list.is_some(),
         "the rebound button opens the client list"
     );
     press(&mut clients);
     runtime_assert!(
-        clients.runtime_client_list.is_none(),
+        clients.dialogs.client_list.is_none(),
         "and the same button closes it, as a toggle"
     );
 
@@ -9885,18 +9885,18 @@ fn runtime_gamepad_overrides_reach_every_fullscreen_global_action() {
 
     // ToggleShowHelp is a toggle, and the release must not toggle it back:
     // the callback has no Up handler.
-    runtime_assert!(!app.runtime_help_visible);
+    runtime_assert!(!app.dialogs.help_visible);
     press(&mut app, 0x0f);
-    runtime_assert!(app.runtime_help_visible);
+    runtime_assert!(app.dialogs.help_visible);
     app.handle_gamepad_button(
         GamepadSlot::new(0),
         LegacyGamepadButton::new(0x0f - 0x0a),
         ElementState::Released,
     )
     .test_value();
-    runtime_assert!(app.runtime_help_visible, "the release has no callback");
+    runtime_assert!(app.dialogs.help_visible, "the release has no callback");
     press(&mut app, 0x0f);
-    runtime_assert!(!app.runtime_help_visible);
+    runtime_assert!(!app.dialogs.help_visible);
 
     // The port-only stats overlay is off by default and toggles like the rest.
     runtime_assert!(!app.display_flags.show_stats);
@@ -9926,7 +9926,7 @@ fn runtime_gamepad_fullscreen_globals_have_no_default_binding() {
     let mut app = new_running_sandbox_app();
     let before = (
         app.pending_screenshots.len(),
-        app.runtime_help_visible,
+        app.dialogs.help_visible,
         app.display_flags.show_stats,
         app.chat.external_dialog_visible,
     );
@@ -9952,7 +9952,7 @@ fn runtime_gamepad_fullscreen_globals_have_no_default_binding() {
     runtime_assert_eq!(
         (
             app.pending_screenshots.len(),
-            app.runtime_help_visible,
+            app.dialogs.help_visible,
             app.display_flags.show_stats,
             app.chat.external_dialog_visible,
         ) => before

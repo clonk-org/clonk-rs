@@ -125,7 +125,7 @@ fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
     app.test_left_button(ElementState::Released);
     main_assert!(app.mouse_state.is_none());
     main_assert!(app.chat.running.is_some());
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.running_chat_text() => Some(""));
 }
 
@@ -1173,10 +1173,10 @@ fn hidden_startup_irc_warning_connects_immediately() {
     main_assert_eq!(login.real_name => "Hidden Name");
     main_assert_eq!(login.channel => "#hidden");
     login.password = "not-persisted".into();
-    let dialog_count = app.message_dialogs.len();
+    let dialog_count = app.dialogs.messages.len();
 
     app.request_startup_irc_connection(login).test_value();
-    main_assert_eq!(app.message_dialogs.len() => dialog_count);
+    main_assert_eq!(app.dialogs.messages.len() => dialog_count);
     let client = app.chat.client.test_ref();
     main_assert!(matches!(client.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
     let persisted = Config::load(paths.config_file()).test_value();
@@ -1247,7 +1247,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         NetDlgChatValidationError::InvalidPassword,
     )])
     .test_value();
-    let validation = app.message_dialogs.last().test_value();
+    let validation = app.dialogs.messages.last().test_value();
     main_assert_eq!(validation.state.icon() => MessageDialogIcon::ERROR);
     main_assert!(validation.state.message().contains("31"));
     app.finish_message_dialog(MessageDialogResult::Ok)
@@ -1264,7 +1264,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Chats);
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDisconnectConfirmationRequested])
         .test_value();
-    let confirmation = app.message_dialogs.last().test_value();
+    let confirmation = app.dialogs.messages.last().test_value();
     main_assert!(matches!(confirmation.continuation, MessageDialogContinuation::StartupIrcDisconnectConfirm));
     main_assert_eq!(confirmation.state.caption() => "Chat");
     main_assert_eq!(confirmation.state.button_label(MessageDialogButton::Cancel) => "Abort");
@@ -1486,7 +1486,7 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
     app.start_running_chat(RunningChatMode::All);
     app.toggle_network_chart();
     app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
-    main_assert!(app.network_chart_elevated);
+    main_assert!(app.dialogs.chart_elevated);
     main_assert!(app.network_chart_is_active_dialog());
     main_assert!(!app.running_chat_active());
 
@@ -1501,7 +1501,7 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
             .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
     );
     let chart = app
-        .network_chart_dialog
+        .dialogs.chart
         .test_ref()
         .layout(preferred, resources)
         .chart;
@@ -1519,7 +1519,7 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
 
     app.set_running_chat_active(true);
     app.toggle_network_chart();
-    main_assert!(app.network_chart_dialog.is_none());
+    main_assert!(app.dialogs.chart.is_none());
     main_assert!(app.running_chat_active(), "closing an inactive elevated chart must not overwrite reactivated chat ownership");
 }
 
@@ -1540,8 +1540,8 @@ fn chart_restores_projected_successor_after_active_underlay_is_removed() {
         )
         .test_value();
     }
-    let successor = app.message_dialogs[0].running_stack_id;
-    let removed = app.message_dialogs[1].running_stack_id;
+    let successor = app.dialogs.messages[0].running_stack_id;
+    let removed = app.dialogs.messages[1].running_stack_id;
 
     app.toggle_network_chart();
     app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
@@ -1560,7 +1560,7 @@ fn chart_restores_projected_successor_after_active_underlay_is_removed() {
     main_assert_eq!(app.active_message_dialog_index() => None);
 
     app.toggle_network_chart();
-    main_assert!(app.network_chart_dialog.is_none());
+    main_assert!(app.dialogs.chart.is_none());
     main_assert_eq!(app.message_dialog_active_index => Some(0));
     main_assert_eq!(app.active_message_dialog_index() => Some(0));
 }
@@ -1577,7 +1577,7 @@ fn chart_hide_restores_projected_message_instead_of_inactive_chat() {
         MessageDialogContinuation::None,
     )
     .test_value();
-    let message = app.message_dialogs[0].running_stack_id;
+    let message = app.dialogs.messages[0].running_stack_id;
     app.start_running_chat(RunningChatMode::All);
     app.set_running_chat_active(false);
     app.message_dialog_active_index = Some(0);
@@ -1589,7 +1589,7 @@ fn chart_hide_restores_projected_message_instead_of_inactive_chat() {
     main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Message(message)));
 
     app.toggle_network_chart();
-    main_assert!(app.network_chart_dialog.is_none());
+    main_assert!(app.dialogs.chart.is_none());
     main_assert_eq!(app.message_dialog_active_index => Some(0));
     main_assert!(!app.running_chat_active());
 }
@@ -1768,7 +1768,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(message_button.y + message_button.h / 2),
     );
     app.test_cursor(message_point);
-    main_assert!(app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(app.dialogs.messages[0].state.has_pointer_hover());
 
     let chat_layout = app.game_option_input_layout().test_value();
     let chat_point = PhysicalPosition::new(
@@ -1786,7 +1786,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(context_row.x + 1),
         f64::from(context_row.y + 1),
     ));
-    main_assert!(!app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(!app.dialogs.messages[0].state.has_pointer_hover());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 
@@ -1844,12 +1844,12 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(checkbox.y + checkbox.h / 2),
     );
     cursor_exit.test_cursor(checkbox_point);
-    main_assert!(cursor_exit.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(cursor_exit.dialogs.messages[0].state.has_pointer_hover());
     cursor_exit.pointer_left().test_value();
     main_assert!(cursor_exit.running_pointer_position.is_none());
-    main_assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(!cursor_exit.dialogs.messages[0].state.has_pointer_hover());
     cursor_exit.test_left_button(ElementState::Released);
-    main_assert_eq!(cursor_exit.message_dialogs[0].state.checkbox_checked() => Some(false));
+    main_assert_eq!(cursor_exit.dialogs.messages[0].state.checkbox_checked() => Some(false));
 
     let button = checkbox_layout.buttons[0].rect;
     cursor_exit.test_cursor(PhysicalPosition::new(
@@ -1860,8 +1860,8 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     main_assert_eq!(cursor_exit.message_dialog_pointer_capture_index => Some(0));
     cursor_exit.resize(360, 240).test_value();
     main_assert_eq!(cursor_exit.message_dialog_pointer_capture_index => None);
-    main_assert!(!cursor_exit.message_dialogs[0].state.has_pointer_capture());
-    main_assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(!cursor_exit.dialogs.messages[0].state.has_pointer_capture());
+    main_assert!(!cursor_exit.dialogs.messages[0].state.has_pointer_hover());
 
     let mut menu = new_menu_app(320, 200);
     let stationary_dialog = notice();
@@ -1877,7 +1877,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         .test_value();
     menu.test_left_button(ElementState::Pressed);
     menu.test_left_button(ElementState::Released);
-    main_assert!(menu.message_dialogs.is_empty());
+    main_assert!(menu.dialogs.messages.is_empty());
 
     menu.open_game_option_input_dialog(GameOptionInputDialogRequest {
         kind: GameOptionInputKind::Password,

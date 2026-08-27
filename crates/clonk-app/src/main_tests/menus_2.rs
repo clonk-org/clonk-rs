@@ -77,12 +77,12 @@ fn default_z_dialog_order_tracks_show_raise_and_close() {
             RuntimeDefaultDialog::ExternalIrc,
         ]
     );
-    main_assert!(app.runtime_client_list_above_game_over);
+    main_assert!(app.dialogs.client_list_above_game_over);
     main_assert!(app.runtime_top_default_dialog_is_exclusive());
 
     app.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
     main_assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver));
-    main_assert!(!app.runtime_client_list_above_game_over);
+    main_assert!(!app.dialogs.client_list_above_game_over);
     app.dismiss_game_over_dialog();
     main_assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc));
     app.chat.external_dialog_visible = false;
@@ -166,14 +166,14 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         f64::from(button.y + button.h / 2),
     ));
     f2.test_left_button(ElementState::Pressed);
-    main_assert!(f2.message_dialogs[0].state.has_pointer_capture());
+    main_assert!(f2.dialogs.messages[0].state.has_pointer_capture());
     main_assert_eq!(f2.message_dialog_pointer_capture_index => Some(0));
     f2.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     main_assert_eq!(f2.running_chat_text() => Some(""));
-    main_assert_eq!(f2.message_dialogs.len() => 1);
-    main_assert!(f2.message_dialogs[0].state.has_pointer_capture());
+    main_assert_eq!(f2.dialogs.messages.len() => 1);
+    main_assert!(f2.dialogs.messages[0].state.has_pointer_capture());
     f2.test_left_button(ElementState::Released);
-    main_assert!(f2.message_dialogs.is_empty());
+    main_assert!(f2.dialogs.messages.is_empty());
     main_assert!(f2.running_chat_active());
 
     let mut focus_loss = boxed_running_sandbox_app();
@@ -189,11 +189,11 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     focus_loss.test_left_button(ElementState::Pressed);
     focus_loss.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     focus_loss.handle_focus_lost().test_value();
-    main_assert!(!focus_loss.message_dialogs[0].state.has_pointer_capture());
+    main_assert!(!focus_loss.dialogs.messages[0].state.has_pointer_capture());
     main_assert_eq!(focus_loss.message_dialog_pointer_capture_index => None);
     main_assert!(!focus_loss.primary_pointer_left_down);
     focus_loss.test_left_button(ElementState::Released);
-    main_assert_eq!(focus_loss.message_dialogs.len() => 1);
+    main_assert_eq!(focus_loss.dialogs.messages.len() => 1);
 
     for (modifiers, expected) in [
         (ModifiersState::SHIFT, "/team "),
@@ -205,7 +205,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
         main_assert_eq!(app.running_chat_text() => Some(expected));
-        main_assert_eq!(app.message_dialogs.len() => 1);
+        main_assert_eq!(app.dialogs.messages.len() => 1);
     }
 
     let mut bare_return = boxed_running_sandbox_app();
@@ -214,7 +214,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .test_value();
     bare_return.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert_eq!(bare_return.running_chat_text() => Some(""));
-    main_assert_eq!(bare_return.message_dialogs.len() => 1);
+    main_assert_eq!(bare_return.dialogs.messages.len() => 1);
 
     let lower_layout = bare_return.top_message_dialog_layout().test_value();
     let lower_point = PhysicalPosition::new(
@@ -253,10 +253,10 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     inactive_return.test_left_button(ElementState::Pressed);
     inactive_return.test_left_button(ElementState::Released);
     inactive_return.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert_eq!(inactive_return.message_dialogs.len() => 1);
+    main_assert_eq!(inactive_return.dialogs.messages.len() => 1);
     main_assert!(!inactive_return.running_chat_active());
     inactive_return.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(inactive_return.message_dialogs.is_empty());
+    main_assert!(inactive_return.dialogs.messages.is_empty());
     main_assert!(inactive_return.running_chat_active());
 
     let mut held_drag = boxed_running_sandbox_app();
@@ -283,7 +283,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         f64::from(lower_button.y + lower_button.h / 2),
     ));
     held_drag.test_left_button(ElementState::Released);
-    main_assert_eq!(held_drag.message_dialogs.len() => 1);
+    main_assert_eq!(held_drag.dialogs.messages.len() => 1);
 
     let mut label_drag = boxed_running_sandbox_app();
     label_drag.start_running_chat(RunningChatMode::All);
@@ -350,7 +350,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     release_hit.test_cursor(checkbox_point);
     release_hit.test_left_button(ElementState::Released);
     main_assert_eq!(release_hit.game_option_input_pointer_capture => None);
-    main_assert_eq!(release_hit.message_dialogs[0].state.checkbox_checked() => Some(true),);
+    main_assert_eq!(release_hit.dialogs.messages[0].state.checkbox_checked() => Some(true),);
 
     let mut close_active_chat = boxed_running_sandbox_app();
     close_active_chat.start_running_chat(RunningChatMode::All);
@@ -374,7 +374,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     close_active_chat.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(close_active_chat.chat.running.is_none());
     main_assert_eq!(close_active_chat.message_dialog_pointer_capture_index => None);
-    main_assert!(!close_active_chat.message_dialogs[0].state.has_pointer_capture());
+    main_assert!(!close_active_chat.dialogs.messages[0].state.has_pointer_capture());
 
     let mut stacked_active = boxed_running_sandbox_app();
     stacked_active.start_running_chat(RunningChatMode::All);
@@ -426,8 +426,8 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(stacked_active.active_message_dialog_index() => Some(0));
     stacked_active.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     stacked_active.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(stacked_active.message_dialogs.len() => 1);
-    main_assert!(matches!(stacked_active.message_dialogs[0].continuation, MessageDialogContinuation::LeagueSurrender));
+    main_assert_eq!(stacked_active.dialogs.messages.len() => 1);
+    main_assert!(matches!(stacked_active.dialogs.messages[0].continuation, MessageDialogContinuation::LeagueSurrender));
     main_assert!(stacked_active.running_chat_active());
 
     let mut stacked_capture = boxed_running_sandbox_app();
@@ -458,10 +458,10 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert!(!GameApp::point_in_message_dialog_bounds(GuiPoint::new(a_only_point.x as f32, a_only_point.y as f32), &small_layout,));
 
     stacked_capture.test_left_button(ElementState::Released);
-    main_assert_eq!(stacked_capture.message_dialogs.len() => 2);
+    main_assert_eq!(stacked_capture.dialogs.messages.len() => 2);
     main_assert_eq!(stacked_capture.active_message_dialog_index() => Some(0));
     main_assert_eq!(stacked_capture.message_dialog_pointer_capture_index => None);
-    main_assert!(stacked_capture.message_dialogs.iter().all(|dialog| !dialog.state.has_pointer_capture()));
+    main_assert!(stacked_capture.dialogs.messages.iter().all(|dialog| !dialog.state.has_pointer_capture()));
 
     let mut exposed_lower = boxed_running_sandbox_app();
     exposed_lower
@@ -493,7 +493,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(exposed_lower.active_message_dialog_index() => Some(1));
     main_assert_eq!(exposed_lower.message_dialog_pointer_capture_index => Some(0));
     exposed_lower.test_left_button(ElementState::Released);
-    main_assert_eq!(exposed_lower.message_dialogs.len() => 2);
+    main_assert_eq!(exposed_lower.dialogs.messages.len() => 2);
     main_assert_eq!(exposed_lower.message_dialog_pointer_capture_index => None);
 
     let mut inserted_capture = boxed_running_sandbox_app();
@@ -513,7 +513,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .test_value();
     main_assert_eq!(inserted_capture.active_message_dialog_index() => Some(1));
     main_assert_eq!(inserted_capture.message_dialog_pointer_capture_index => Some(0));
-    main_assert!(inserted_capture.message_dialogs[0].state.has_pointer_capture());
+    main_assert!(inserted_capture.dialogs.messages[0].state.has_pointer_capture());
     let small_layout = inserted_capture.top_message_dialog_layout().test_value();
     let top_point = PhysicalPosition::new(
         f64::from(small_layout.bounds.x + small_layout.bounds.w / 2),
@@ -521,7 +521,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     );
     inserted_capture.test_cursor(top_point);
     inserted_capture.test_left_button(ElementState::Released);
-    main_assert_eq!(inserted_capture.message_dialogs.len() => 2);
+    main_assert_eq!(inserted_capture.dialogs.messages.len() => 2);
     main_assert_eq!(inserted_capture.message_dialog_pointer_capture_index => None);
 
     let exposed_point = PhysicalPosition::new(
@@ -547,10 +547,10 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(stacked_capture.message_dialog_pointer_capture_index => Some(0));
     main_assert_eq!(stacked_capture.active_message_dialog_index() => Some(1));
     stacked_capture.test_left_button(ElementState::Released);
-    main_assert_eq!(stacked_capture.message_dialogs.len() => 2);
+    main_assert_eq!(stacked_capture.dialogs.messages.len() => 2);
     main_assert_eq!(stacked_capture.active_message_dialog_index() => Some(1));
     main_assert_eq!(stacked_capture.message_dialog_pointer_capture_index => None);
-    main_assert!(stacked_capture.message_dialogs.iter().all(|dialog| !dialog.state.has_pointer_capture()));
+    main_assert!(stacked_capture.dialogs.messages.iter().all(|dialog| !dialog.state.has_pointer_capture()));
 
     let mut vote_pointer = boxed_running_sandbox_app();
     vote_pointer
@@ -567,9 +567,9 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .test_value();
     vote_return.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(vote_return.chat.running.is_none());
-    main_assert_eq!(vote_return.message_dialogs.len() => 1);
+    main_assert_eq!(vote_return.dialogs.messages.len() => 1);
     vote_return.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(vote_return.message_dialogs.is_empty());
+    main_assert!(vote_return.dialogs.messages.is_empty());
     main_assert_eq!(vote_return.mode => AppMode::Running);
 
     for (key, modifiers) in [
@@ -588,7 +588,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         app.test_modifiers(modifiers);
         app.test_key(key, ElementState::Pressed);
         app.test_key(key, ElementState::Released);
-        main_assert_eq!(app.message_dialogs.len() => 1);
+        main_assert_eq!(app.dialogs.messages.len() => 1);
         main_assert!(app.chat.running.is_none());
     }
 
@@ -600,7 +600,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     unmatched_vote_hotkey.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     main_assert!(unmatched_vote_hotkey.chat.external_dialog_visible);
     unmatched_vote_hotkey.test_key(VirtualKeyCode::KeyC, ElementState::Released);
-    main_assert_eq!(unmatched_vote_hotkey.message_dialogs.len() => 1);
+    main_assert_eq!(unmatched_vote_hotkey.dialogs.messages.len() => 1);
 
     let mut handled_message_hotkey = boxed_running_sandbox_app();
     handled_message_hotkey
@@ -611,7 +611,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .test_value();
     handled_message_hotkey.test_modifiers(ModifiersState::ALT);
     main_assert!(handled_message_hotkey.handle_message_dialog_key(VirtualKeyCode::KeyD, ElementState::Pressed).expect("checkbox mnemonic down is handled"));
-    main_assert_eq!(handled_message_hotkey.message_dialogs[0].state.checkbox_checked() => Some(true));
+    main_assert_eq!(handled_message_hotkey.dialogs.messages[0].state.checkbox_checked() => Some(true));
     main_assert!(!handled_message_hotkey.message_dialog_consumed_keys.contains(&VirtualKeyCode::KeyD));
     main_assert!(!handled_message_hotkey
         .handle_message_dialog_key(VirtualKeyCode::KeyD, ElementState::Released)
@@ -624,7 +624,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     changed_release.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     changed_release.test_modifiers(ModifiersState::CONTROL);
     changed_release.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(changed_release.message_dialogs.len() => 1);
+    main_assert_eq!(changed_release.dialogs.messages.len() => 1);
     main_assert!(changed_release.chat.running.is_none());
 
     let mut exclusive_top_scope = boxed_running_sandbox_app();
@@ -645,8 +645,8 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(exclusive_top_scope.active_message_dialog_index() => Some(0));
     exclusive_top_scope.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     exclusive_top_scope.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(exclusive_top_scope.message_dialogs.len() => 1);
-    main_assert!(matches!(exclusive_top_scope.message_dialogs[0].continuation, MessageDialogContinuation::LeagueSurrender));
+    main_assert_eq!(exclusive_top_scope.dialogs.messages.len() => 1);
+    main_assert!(matches!(exclusive_top_scope.dialogs.messages[0].continuation, MessageDialogContinuation::LeagueSurrender));
     main_assert!(exclusive_top_scope.chat.running.is_none());
 
     let mut nonexclusive_top_scope = boxed_running_sandbox_app();
@@ -669,7 +669,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(nonexclusive_top_scope.active_message_dialog_index() => Some(0));
     nonexclusive_top_scope.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert_eq!(nonexclusive_top_scope.running_chat_text() => Some(""));
-    main_assert_eq!(nonexclusive_top_scope.message_dialogs.len() => 2);
+    main_assert_eq!(nonexclusive_top_scope.dialogs.messages.len() => 2);
 
     for (key, modifiers, expected) in [
         (VirtualKeyCode::F2, ModifiersState::empty(), ""),
@@ -682,7 +682,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         app.test_modifiers(modifiers);
         app.test_key(key, ElementState::Pressed);
         main_assert_eq!(app.running_chat_text() => Some(expected));
-        main_assert_eq!(app.message_dialogs.len() => 1);
+        main_assert_eq!(app.dialogs.messages.len() => 1);
     }
 
     for (key, modifiers, expected) in [
@@ -865,7 +865,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     app.test_text_input('!');
     main_assert_eq!(app.running_chat_text() => Some("alpha beta!"));
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     let mut frame = vec![0_u8; (surface_width * surface_height * 4) as usize];
     app.test_render(&mut frame);
     main_assert!(frame.iter().any(|byte| *byte != 0));
@@ -894,7 +894,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     main_assert!(app.running_chat_controller().and_then(InputDialogController::selected_text).is_some_and(|text| !text.is_empty()));
     app.test_right_button(ElementState::Pressed);
     main_assert!(app.context_menu.is_some());
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     app.test_right_button(ElementState::Released);
 
     let text_before_context_key = app.running_chat_text().map(str::to_string);
@@ -923,7 +923,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_modifiers(ModifiersState::empty());
     main_assert!(app.game_option_input_dialog.is_none());
     main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.message_board_line() => board_before);
 }
 
@@ -2858,18 +2858,18 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
             .ingame_menu
             .replace(default_app.local_owner, Some(default_menu));
         default_app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        main_assert!(default_app.runtime_help_visible, "page {page:?}");
+        main_assert!(default_app.dialogs.help_visible, "page {page:?}");
         main_assert_eq!(default_app.ingame_menu.as_ref().map(IngameMenuState::page) => Some(page));
         default_app.test_key(VirtualKeyCode::F1, ElementState::Released);
         default_app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
         default_app.test_key(VirtualKeyCode::F1, ElementState::Released);
-        main_assert!(!default_app.runtime_help_visible, "page {page:?}");
+        main_assert!(!default_app.dialogs.help_visible, "page {page:?}");
 
         rebound_app
             .ingame_menu
             .replace(rebound_app.local_owner, Some(rebound_menu));
         rebound_app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        main_assert!(!rebound_app.runtime_help_visible, "page {page:?}");
+        main_assert!(!rebound_app.dialogs.help_visible, "page {page:?}");
         main_assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
         rebound_app.test_key(VirtualKeyCode::F1, ElementState::Released);
         main_assert!(!rebound_app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
@@ -2898,7 +2898,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     observer.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    main_assert!(observer.runtime_help_visible);
+    main_assert!(observer.dialogs.help_visible);
     main_assert!(observer.ingame_menu.is_some());
 
     let mut object = new_running_sandbox_app();
@@ -2912,7 +2912,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .control
         .control_style = true;
     object.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    main_assert!(!object.runtime_help_visible);
+    main_assert!(!object.dialogs.help_visible);
     main_assert!(object.object_menu.is_some());
 
     let mut message = new_running_sandbox_app();
@@ -2930,8 +2930,8 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     message.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    main_assert!(!message.runtime_help_visible);
-    main_assert_eq!(message.message_dialogs.len() => 1);
+    main_assert!(!message.dialogs.help_visible);
+    main_assert_eq!(message.dialogs.messages.len() => 1);
 
     let mut context = new_running_sandbox_app();
     context
@@ -2946,7 +2946,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     context.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    main_assert!(!context.runtime_help_visible);
+    main_assert!(!context.dialogs.help_visible);
     main_assert!(context.context_menu.is_some());
 
     let board_script = r#"global func Initialize()
@@ -2960,8 +2960,8 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
     default_scoreboard.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     let mut scoreboard_and_help = vec![0_u8; 320 * 200 * 4];
     default_scoreboard.test_render(&mut scoreboard_and_help);
-    main_assert!(default_scoreboard.runtime_help_visible);
-    main_assert!(default_scoreboard.scoreboard_dialog.is_some());
+    main_assert!(default_scoreboard.dialogs.help_visible);
+    main_assert!(default_scoreboard.dialogs.scoreboard.is_some());
     main_assert_ne!(scoreboard_and_help => scoreboard_only);
 
     let mut scoreboard = new_scoreboard_test_app(
@@ -2971,20 +2971,20 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
             }"#,
     );
     toggle_scoreboard(&mut scoreboard, ModifiersState::empty());
-    main_assert!(scoreboard.scoreboard_dialog.is_some());
+    main_assert!(scoreboard.dialogs.scoreboard.is_some());
     scoreboard
         .bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     scoreboard.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    main_assert!(!scoreboard.runtime_help_visible);
-    main_assert!(scoreboard.scoreboard_dialog.is_some());
+    main_assert!(!scoreboard.dialogs.help_visible);
+    main_assert!(scoreboard.dialogs.scoreboard.is_some());
 
     let mut game_over = new_game_over_keyboard_app();
     game_over
         .bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     game_over.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    main_assert!(game_over.runtime_help_visible);
+    main_assert!(game_over.dialogs.help_visible);
 }
 
 #[test]
@@ -3051,13 +3051,13 @@ fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
             app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
             menu_and_help.fill(0);
             app.test_render(&mut menu_and_help);
-            main_assert!(app.runtime_help_visible, "style {style}, progress {text_progressing}");
+            main_assert!(app.dialogs.help_visible, "style {style}, progress {text_progressing}");
             main_assert_ne!(menu_and_help => menu_only);
             main_assert!(app.engine.cursor_object_menu(app.local_owner).is_some());
             app.test_key(VirtualKeyCode::F1, ElementState::Released);
             app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
             app.test_key(VirtualKeyCode::F1, ElementState::Released);
-            main_assert!(!app.runtime_help_visible);
+            main_assert!(!app.dialogs.help_visible);
 
             let rebound_cursor = rebound.engine.test_crew_cursor(rebound.local_owner);
             let mut rebound_menu = two_item_script_menu(rebound_cursor);
@@ -3072,7 +3072,7 @@ fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
                 .test_value();
             rebound.snapshot = rebound.engine.snapshot();
             rebound.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-            main_assert!(!rebound.runtime_help_visible);
+            main_assert!(!rebound.dialogs.help_visible);
             main_assert!(rebound.engine.cursor_object_menu(rebound.local_owner).is_some());
             rebound.test_key(VirtualKeyCode::F1, ElementState::Released);
             main_assert!(!rebound.pressed_engine_keys.contains(&VirtualKeyCode::F1));
@@ -3118,7 +3118,7 @@ fn runtime_f4_gamepad_high_requires_active_dialog_and_other_input_reaches_gamepl
             ElementState::Pressed,
         ),
     ]);
-    main_assert!(active.runtime_client_list.is_none());
+    main_assert!(active.dialogs.client_list.is_none());
     main_assert!(active.ingame_menu.is_none());
     main_assert!(commands.take_submitted_local().is_empty());
 
@@ -3142,8 +3142,8 @@ fn runtime_f4_gamepad_high_requires_active_dialog_and_other_input_reaches_gamepl
         GuiButtonClass::High,
         ElementState::Pressed,
     )]);
-    main_assert!(inactive.runtime_client_list.is_some());
-    main_assert_eq!(inactive.message_dialogs.len() => 1);
+    main_assert!(inactive.dialogs.client_list.is_some());
+    main_assert_eq!(inactive.dialogs.messages.len() => 1);
 }
 
 #[test]
@@ -3184,7 +3184,7 @@ fn window_close_confirms_running_round_and_nonrunning_close_exits() {
     let running_scenario = app.active_scenario.test_ref().identifier.clone();
 
     app.handle_window_close_requested();
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
     main_assert!(!app.take_exit_request());
     finish_abort_dialog(
         &mut app,
@@ -3211,7 +3211,7 @@ fn window_close_confirms_running_round_and_nonrunning_close_exits() {
     loading.handle_window_close_requested();
     main_assert!(loading.take_exit_request());
     main_assert!(loading.ingame_menu.is_none());
-    main_assert!(loading.message_dialogs.is_empty());
+    main_assert!(loading.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -3228,15 +3228,15 @@ fn window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
     observer.handle_window_close_requested();
     observer.handle_window_close_requested();
     main_assert!(observer.ingame_menu.is_none());
-    main_assert_eq!(observer.message_dialogs.len() => 1);
-    main_assert!(matches!(observer.message_dialogs[0].continuation, MessageDialogContinuation::AbortGame { .. }));
+    main_assert_eq!(observer.dialogs.messages.len() => 1);
+    main_assert!(matches!(observer.dialogs.messages[0].continuation, MessageDialogContinuation::AbortGame { .. }));
     main_assert!(!observer.take_exit_request());
 
     let mut game_over = new_game_over_keyboard_app();
     game_over.handle_window_close_requested();
     main_assert!(game_over.game_over_dialog.is_some());
     main_assert!(game_over.ingame_menu.is_none());
-    main_assert!(game_over.message_dialogs.is_empty());
+    main_assert!(game_over.dialogs.messages.is_empty());
     main_assert!(!game_over.take_exit_request());
 }
 
@@ -3247,13 +3247,13 @@ fn bare_escape_opens_abort_confirmation_without_exiting() {
     app.status_text.clear();
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
     main_assert!(app.object_menu.is_none());
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(!app.take_exit_request());
     main_assert!(app.status_text.is_empty());
     main_assert!(!app.show_abort_dialog(app.local_owner));
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
 }
 
 #[test]
@@ -3295,7 +3295,7 @@ fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
 
     main_assert!(app.show_abort_dialog(app.local_owner));
     main_assert_eq!(app.offline_halt_count => 2);
-    let index = app.message_dialogs.len() - 1;
+    let index = app.dialogs.messages.len() - 1;
     app.remove_message_dialog_at(index).test_value();
     main_assert_eq!(app.offline_halt_count => 1);
     app.set_runtime_pause(false);

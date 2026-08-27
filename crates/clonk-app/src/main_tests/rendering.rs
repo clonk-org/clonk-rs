@@ -2424,7 +2424,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
         game_over.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
-    game_over.scoreboard_initial_reconcile_pending = true;
+    game_over.dialogs.scoreboard_initial_reconcile_pending = true;
     game_over.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     remove_global_gui_sheet(&mut game_over, "GUISpinBoxArrow.png");
     let before = runtime_global_ui_snapshot(&game_over);
@@ -3275,7 +3275,7 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
     let before_failure = fs::read(paths.config_file()).test_value();
     app.apply_options_font_selection(Some("Definitely Missing Font".to_string()), None)
         .test_value();
-    let error = app.message_dialogs.last().test_value();
+    let error = app.dialogs.messages.last().test_value();
     main_assert_eq!(error.state.message() => "Error initializing fonts");
     main_assert_eq!(error.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().program().font_size => "16");
@@ -3312,7 +3312,7 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
         .test_value();
     main_assert_eq!(restarted.startup.options_dialog.as_ref().unwrap().program().font_size => "16");
     main_assert_eq!(restarted.assets.clonk_fonts.as_ref().unwrap().text.line_height => 25);
-    main_assert_eq!(restarted.message_dialogs.last().expect("font persistence error").state.message() => "Error initializing fonts");
+    main_assert_eq!(restarted.dialogs.messages.last().expect("font persistence error").state.message() => "Error initializing fonts");
 }
 
 #[test]
@@ -3340,7 +3340,7 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
         .test_value()
         .into();
     let provider = FakeSystemFontProvider::new("Mock System Face", font_bytes.clone());
-    let dialog_count = app.message_dialogs.len();
+    let dialog_count = app.dialogs.messages.len();
 
     app.apply_options_font_selection_with_system_fonts(
         Some("Mock System Face".to_string()),
@@ -3349,7 +3349,7 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
     )
     .test_value();
 
-    main_assert_eq!(app.message_dialogs.len() => dialog_count);
+    main_assert_eq!(app.dialogs.messages.len() => dialog_count);
     main_assert_eq!(app.startup.options_dialog.as_ref().expect("reopened Options").program().font_face => "Mock System Face");
     let config = Config::load(paths.config_file()).test_value();
     main_assert_eq!(config.get_in(Some("General"), "FontName") => Some("Mock System Face"));
@@ -3370,7 +3370,7 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
         &provider,
     )
     .test_value();
-    main_assert_eq!(app.message_dialogs.len() => dialog_count + 1);
+    main_assert_eq!(app.dialogs.messages.len() => dialog_count + 1);
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().program().font_face => "Mock System Face");
     main_assert!(Arc::ptr_eq(app.assets.clonk_fonts.as_ref().unwrap(), &selected_gui));
     main_assert_eq!(fs::read(paths.config_file()).unwrap() => before_failure);
@@ -3394,9 +3394,9 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     main_assert!(app.game_option_input_dialog.is_none());
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 225);
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 225, false)));
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
     main_assert!(matches!(
-        app.message_dialogs
+        app.dialogs.messages
             .last()
             .map(|dialog| &dialog.continuation),
         Some(MessageDialogContinuation::OptionsScaleTest {
@@ -3406,11 +3406,11 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
         })
     ));
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     for _ in 0..12 {
         app.sec1_timer().test_value();
     }
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 100, false)));
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 100);
 
@@ -4236,7 +4236,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
     ));
     main_assert_eq!(app.script_menu_pointer_target(start).expect("title hit-test resources") => Some(EngineScriptMenuPointerTarget::Title));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(matches!(app.menu_title_drag, Some(MenuTitleDrag::Script { .. })));
+    main_assert!(matches!(app.dialogs.menu_title_drag, Some(MenuTitleDrag::Script { .. })));
     let destination = GuiPoint::new(start.x - 400.0, start.y + 17.0);
     app.test_cursor(PhysicalPosition::new(
         f64::from(destination.x),
@@ -4254,7 +4254,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
         "native title drag applies the exact pointer delta without a threshold or clamp"
     );
     app.test_left_button(ElementState::Released);
-    main_assert!(app.menu_title_drag.is_none());
+    main_assert!(app.dialogs.menu_title_drag.is_none());
     let retained = app
         .script_menu_presentations
         .get(&owner)
@@ -4262,7 +4262,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
     app.test_cursor(PhysicalPosition::new(10.0, 10.0));
     main_assert_eq!(app.script_menu_presentations.get(&owner).and_then(|state| state.location) => retained);
     app.resize(360, 220).test_value();
-    main_assert!(app.menu_title_drag.is_none());
+    main_assert!(app.dialogs.menu_title_drag.is_none());
     main_assert_eq!(app.script_menu_presentations.get(&owner).and_then(|state| state.location) => None, "viewport ResetLocation restores anchored placement");
 
     let mut player_app = new_classic_running_sandbox_app();
@@ -4331,7 +4331,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
     main_assert_eq!(moved_x => bounds.x + 11);
     player_app.test_left_button(ElementState::Released);
     player_app.resize(360, 220).test_value();
-    main_assert!(player_app.menu_title_drag.is_none());
+    main_assert!(player_app.dialogs.menu_title_drag.is_none());
 }
 
 #[test]
@@ -4401,18 +4401,18 @@ fn runtime_help_and_flash_resolve_fontregular_images() {
     app.status_text.clear();
     app.snapshot.hud.messages.clear();
     hold_message_board_for_frame_comparison(&mut app);
-    app.runtime_help_text_cache = OnceLock::new();
-    app.runtime_help_text_cache
+    app.dialogs.help_text_cache = OnceLock::new();
+    app.dialogs.help_text_cache
         .set(Ok(RuntimeHelpColumns {
             left: "<i>{{CLNK}}</i>".to_string(),
             right: String::new(),
         }))
         .test_value();
-    app.runtime_help_visible = true;
+    app.dialogs.help_visible = true;
 
     let mut help = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut help);
-    app.runtime_help_visible = false;
+    app.dialogs.help_visible = false;
     let mut baseline = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut baseline);
     main_assert_ne!(help => baseline, "resolved help image contributes pixels");
@@ -4603,9 +4603,9 @@ fn runtime_f1_help_toggles_on_each_down_renders_and_release_falls_through() {
         let mut before_pixels = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut before_pixels);
         app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        main_assert!(app.runtime_help_visible);
+        main_assert!(app.dialogs.help_visible);
         app.test_key(VirtualKeyCode::F1, ElementState::Released);
-        main_assert!(app.runtime_help_visible);
+        main_assert!(app.dialogs.help_visible);
 
         let mut after_pixels = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut after_pixels);
@@ -4613,15 +4613,15 @@ fn runtime_f1_help_toggles_on_each_down_renders_and_release_falls_through() {
 
         // Repeated key-down events execute ToggleShowHelp each time.
         app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        main_assert!(!app.runtime_help_visible);
+        main_assert!(!app.dialogs.help_visible);
         let mut hidden_again = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut hidden_again);
         main_assert_eq!(hidden_again => before_pixels);
 
         app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        main_assert!(app.runtime_help_visible);
+        main_assert!(app.dialogs.help_visible);
         app.configure_running_state("Next game".to_string(), DEFAULT_GROUND_HEIGHT);
-        main_assert!(!app.runtime_help_visible);
+        main_assert!(!app.dialogs.help_visible);
     }
 }
 
@@ -4637,7 +4637,7 @@ fn ownerless_escape_opens_fullscreen_abort_confirmation() {
     main_assert!(app.primary_physical_viewport_is_no_owner());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
     main_assert!(app.ingame_menu.is_none());
     main_assert!(!app.ingame_menu_belongs_to(app.local_owner));
     main_assert!(matches!(app.mode, AppMode::Running));

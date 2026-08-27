@@ -617,7 +617,7 @@ impl GameApp {
     }
 
     fn dismiss_league_player_auth_wait(&mut self) {
-        let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+        let Some(index) = self.dialogs.messages.iter().rposition(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::LeaguePlayerAuthWait
@@ -630,7 +630,7 @@ impl GameApp {
 
     pub(crate) fn clear_pending_league_player_auth(&mut self) {
         self.pending_league_player_auth = None;
-        while let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+        while let Some(index) = self.dialogs.messages.iter().rposition(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::LeaguePlayerAuthWait
@@ -1139,13 +1139,13 @@ impl GameApp {
 
     pub(crate) fn toggle_network_chart(&mut self) {
         self.cancel_network_chart_pointer_capture();
-        if self.network_chart_dialog.take().is_some() {
+        if self.dialogs.chart.take().is_some() {
             self.hide_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
             return;
         }
         self.reconcile_network_stats_series();
         let caption = self.runtime_resource_text("IDS_NET_STATISTICS", "Statistics");
-        self.network_chart_dialog = Some(
+        self.dialogs.chart = Some(
             clonk_frontend::network_chart::NetworkChartDialog::new_with_caption(
                 self.network.is_some(),
                 caption,
@@ -1171,8 +1171,8 @@ impl GameApp {
 
     pub(crate) fn network_chart_renders_elevated(&self) -> bool {
         matches!(self.mode, AppMode::Running)
-            && self.network_chart_elevated
-            && self.network_chart_dialog.is_some()
+            && self.dialogs.chart_elevated
+            && self.dialogs.chart.is_some()
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart)
             && !self.runtime_modal_above_network_chart()
     }
@@ -1184,7 +1184,7 @@ impl GameApp {
 
     pub(crate) fn network_chart_contains_point(&self, point: GuiPoint) -> bool {
         let (Some(dialog), Some(resources)) = (
-            self.network_chart_dialog.as_ref(),
+            self.dialogs.chart.as_ref(),
             self.assets.network_chart_resources(),
         ) else {
             return false;
@@ -1848,20 +1848,22 @@ impl GameApp {
     }
 
     fn refresh_runtime_client_list_inner(&mut self, sec1_timer: bool) -> bool {
-        if self.runtime_client_list.is_none()
+        if self.dialogs.client_list.is_none()
             || self
-                .runtime_client_list
+                .dialogs
+                .client_list
                 .as_ref()
                 .is_some_and(|dialog| dialog.is_static_info_only())
         {
             return false;
         }
         let info_was_open = self
-            .runtime_client_list
+            .dialogs
+            .client_list
             .as_ref()
             .is_some_and(|dialog| dialog.info_is_open());
         let (options, rows, status) = self.runtime_client_list_snapshot();
-        let close_info_only = self.runtime_client_list.as_mut().is_some_and(|dialog| {
+        let close_info_only = self.dialogs.client_list.as_mut().is_some_and(|dialog| {
             if sec1_timer {
                 dialog.replace_snapshot_on_sec1(options, rows, status);
             } else {
@@ -1871,29 +1873,30 @@ impl GameApp {
         });
         if info_was_open
             && self
-                .runtime_client_list
+                .dialogs
+                .client_list
                 .as_ref()
                 .is_some_and(|dialog| !dialog.info_is_open())
         {
             self.startup_tooltip.pointer_left();
         }
         if close_info_only {
-            self.runtime_client_list = None;
+            self.dialogs.client_list = None;
             self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
-            self.runtime_client_list_above_game_over = false;
+            self.dialogs.client_list_above_game_over = false;
             self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         }
         true
     }
 
     pub(crate) fn toggle_runtime_client_list(&mut self) -> Result<(), EngineError> {
-        if self.runtime_client_list.take().is_some() {
+        if self.dialogs.client_list.take().is_some() {
             self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
             self.startup_tooltip.pointer_left();
             if self.context_menu_lobby_option.is_some() {
                 self.close_context_menu_silently();
             }
-            self.runtime_client_list_consumed_keys.clear();
+            self.dialogs.client_list_consumed_keys.clear();
             self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
             return Ok(());
         }
@@ -1912,8 +1915,8 @@ impl GameApp {
         )?;
         let (options, rows, status) = self.runtime_client_list_snapshot();
         let option_caption_reference = self.classic_lobby_option_labels().runtime_join;
-        self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list = Some(
+        self.dialogs.client_list_consumed_keys.clear();
+        self.dialogs.client_list = Some(
             clonk_frontend::runtime_client_list::RuntimeClientListDialog::new(
                 self.runtime_resource_string("IDS_NET_CAPTION"),
                 options,
@@ -1943,9 +1946,9 @@ impl GameApp {
         match action {
             RuntimeClientListAction::Close => {
                 self.startup_tooltip.pointer_left();
-                self.runtime_client_list = None;
+                self.dialogs.client_list = None;
                 self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
-                self.runtime_client_list_above_game_over = false;
+                self.dialogs.client_list_above_game_over = false;
                 self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
                 return Ok(());
             }
@@ -1956,13 +1959,14 @@ impl GameApp {
             RuntimeClientListAction::CloseInfo => {
                 self.startup_tooltip.pointer_left();
                 if self
-                    .runtime_client_list
+                    .dialogs
+                    .client_list
                     .as_ref()
                     .is_some_and(|dialog| dialog.is_info_only())
                 {
-                    self.runtime_client_list = None;
+                    self.dialogs.client_list = None;
                     self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
-                    self.runtime_client_list_above_game_over = false;
+                    self.dialogs.client_list_above_game_over = false;
                     self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
                 }
                 return Ok(());
@@ -2079,7 +2083,7 @@ impl GameApp {
 
     pub(crate) fn runtime_client_list_contains_point(&self, point: GuiPoint) -> bool {
         let (Some(dialog), Some((preferred, line_height))) = (
-            self.runtime_client_list.as_ref(),
+            self.dialogs.client_list.as_ref(),
             self.runtime_client_list_input_geometry(),
         ) else {
             return false;
@@ -2092,7 +2096,7 @@ impl GameApp {
     }
 
     pub(crate) fn runtime_client_list_owns_game_over(&self) -> bool {
-        self.runtime_client_list.is_some()
+        self.dialogs.client_list.is_some()
             && self.game_over_dialog.is_some()
             && self.runtime_default_dialog_is_above(
                 RuntimeDefaultDialog::ClientList,
@@ -2101,32 +2105,33 @@ impl GameApp {
     }
 
     pub(crate) fn runtime_client_list_is_active(&self) -> bool {
-        self.runtime_client_list.is_some()
+        self.dialogs.client_list.is_some()
             && (!matches!(self.mode, AppMode::Running)
                 || self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList))
     }
 
     pub(crate) fn stop_runtime_client_list_title_drag_at_current_position(&mut self) {
         if !self
-            .runtime_client_list
+            .dialogs
+            .client_list
             .as_ref()
             .is_some_and(|dialog| dialog.has_positional_pointer_drag())
         {
             return;
         }
         let Some(point) = self.running_pointer_position else {
-            if let Some(dialog) = self.runtime_client_list.as_mut() {
+            if let Some(dialog) = self.dialogs.client_list.as_mut() {
                 dialog.pointer_left();
             }
             return;
         };
         let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
-            if let Some(dialog) = self.runtime_client_list.as_mut() {
+            if let Some(dialog) = self.dialogs.client_list.as_mut() {
                 dialog.pointer_left();
             }
             return;
         };
-        if let Some(dialog) = self.runtime_client_list.as_mut() {
+        if let Some(dialog) = self.dialogs.client_list.as_mut() {
             let action = dialog.handle_pointer_up(point, preferred, line_height);
             debug_assert!(action.is_none(), "a title drag cannot activate a control");
         }
@@ -4787,7 +4792,7 @@ impl GameApp {
                                     .as_ref()
                                     .and_then(|loading| loading.prepared_go.as_ref())
                                     .is_some_and(|prepared| prepared.local_reached)
-                                    || self.message_dialogs.iter().any(|dialog| {
+                                    || self.dialogs.messages.iter().any(|dialog| {
                                         matches!(
                                             dialog.continuation,
                                             MessageDialogContinuation::NetworkClientStartWait
@@ -6112,7 +6117,7 @@ impl GameApp {
     }
 
     fn dismiss_network_client_start_wait(&mut self) {
-        let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+        let Some(index) = self.dialogs.messages.iter().rposition(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::NetworkClientStartWait
@@ -7060,9 +7065,9 @@ impl GameApp {
         self.abandon_live_masterserver_signup();
         self.network = None;
         self.network_mode = None;
-        self.runtime_client_list = None;
+        self.dialogs.client_list = None;
         self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
-        self.runtime_client_list_consumed_keys.clear();
+        self.dialogs.client_list_consumed_keys.clear();
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         self.control_messages.clear_clients();
         self.network_game_advertiser = None;
@@ -7655,7 +7660,7 @@ impl GameApp {
         let origin = self
             .league_votes
             .end(subject, result.approve, local_client_id);
-        if let Some(index) = self.message_dialogs.iter().position(|dialog| {
+        if let Some(index) = self.dialogs.messages.iter().position(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::LeagueVote {
@@ -9297,7 +9302,7 @@ impl GameApp {
         width: i32,
         height: i32,
     ) -> Option<(GuiPoint, String)> {
-        if !self.message_dialogs.is_empty() || self.context_menu.is_some() {
+        if !self.dialogs.messages.is_empty() || self.context_menu.is_some() {
             return None;
         }
         let pointer = self.startup_tooltip.eligible_pointer()?;

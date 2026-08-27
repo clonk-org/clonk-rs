@@ -315,7 +315,7 @@ fn classic_host_start_honors_the_league_split_screen_gate() {
 
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
     main_assert!(app.host_lobby_countdown.is_none());
-    let warning = app.message_dialogs.last().test_value();
+    let warning = app.dialogs.messages.last().test_value();
     main_assert_eq!(warning.state.caption() => "League error");
     main_assert_eq!(warning.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Standard(46));
     main_assert!(warning.state.message().contains("Chooser"));
@@ -369,7 +369,7 @@ fn classic_league_start_removes_a_known_remote_split_screen_client() {
                 }]
             );
     main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown::new()));
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -883,7 +883,7 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
     main_assert_eq!(master.details => "1 game(s) found.");
     main_assert_eq!(master.row_icon => NetDlgRowIcon::QueryStatic);
     main_assert!(app.status_text.is_empty());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     app.set_startup_masterserver_error("masterserver timed out".to_string());
 
@@ -1072,8 +1072,8 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
         redirect.clone(),
     ))
     .test_value();
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let modal = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let modal = &app.dialogs.messages[0].state;
     main_assert_eq!(modal.caption() => "Server Redirection");
     main_assert!(modal.message().contains("https://new.example"));
     main_assert_eq!(modal.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO);
@@ -1085,7 +1085,7 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
         redirect.clone(),
     ))
     .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(
         Config::load(paths.config_file())
             .unwrap()
@@ -1116,8 +1116,8 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
     main_assert_eq!(redirected.get_in(Some("General"), "FPS") => Some("true"));
     main_assert_eq!(redirected.get_in(Some("Graphics"), "UpperBoard") => Some("Small"));
     main_assert_eq!(app.config.deferred.len() => 0);
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let applied = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let applied = &app.dialogs.messages[0].state;
     main_assert_eq!(applied.caption() => "Server Redirection");
     main_assert_eq!(applied.message() => "Server redirection has been applied.");
     main_assert_eq!(applied.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK);
@@ -1141,7 +1141,7 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
         },
     ))
     .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 fn serve_one_record_stream_upload() -> (String, thread::JoinHandle<Vec<u8>>) {
@@ -1822,14 +1822,14 @@ fn exclusive_vote_outside_hit_still_reaches_exposed_chart() {
     )
     .test_value();
     app.toggle_network_chart();
-    main_assert!(!app.network_chart_elevated);
+    main_assert!(!app.dialogs.chart_elevated);
     let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
         app.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
     );
     let chart_layout = app
-        .network_chart_dialog
+        .dialogs.chart
         .test_ref()
         .layout(preferred, resources);
     let exposed = (chart_layout.chart.y..chart_layout.chart.y.saturating_add(chart_layout.chart.h))
@@ -1847,15 +1847,15 @@ fn exclusive_vote_outside_hit_still_reaches_exposed_chart() {
     ));
     app.handle_mouse_button_classified(ElementState::Pressed, false)
         .test_value();
-    main_assert!(!app.network_chart_pointer_capture);
-    main_assert!(app.network_chart_elevated);
+    main_assert!(!app.dialogs.chart_pointer_capture);
+    main_assert!(app.dialogs.chart_elevated);
     main_assert_eq!(app.message_dialog_active_index => None);
     app.handle_mouse_button_classified(ElementState::Released, false)
         .test_value();
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert!(app.network_chart_owns_stronger_escape());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.network_chart_dialog.is_none());
+    main_assert!(app.dialogs.chart.is_none());
     main_assert_eq!(app.message_dialog_active_index => Some(0));
 }
 
@@ -2342,7 +2342,7 @@ fn league_client_authenticates_each_published_player_and_submits_only_auid_survi
     main_assert_eq!(app.submit_initial_client_player_info(7, "league.example".to_string()) => LeaguePlayerAuthStatus::Pending);
     poll_league_auth_until(&mut app, "Auth error", |app| {
         matches!(
-            app.message_dialogs
+            app.dialogs.messages
                 .last()
                 .map(|dialog| &dialog.continuation),
             Some(MessageDialogContinuation::LeaguePlayerAuthError)
@@ -2395,7 +2395,7 @@ fn league_client_authenticates_each_published_player_and_submits_only_auid_survi
     main_assert_eq!(app.submit_initial_client_player_info(7, "league.example".to_string()) => LeaguePlayerAuthStatus::Pending);
     poll_league_auth_until(&mut app, "Auth error", |app| {
         matches!(
-            app.message_dialogs
+            app.dialogs.messages
                 .last()
                 .map(|dialog| &dialog.continuation),
             Some(MessageDialogContinuation::LeaguePlayerAuthError)
@@ -2475,7 +2475,7 @@ fn league_auth_wait_is_abortable_and_success_uses_exact_welcome_confirmation() {
             .map(|pending| GameApp::league_auth_continuation_player_name(&pending.continuation)) =>
         Some("Exact Player".to_string())
     );
-    let wait = app.message_dialogs.last().test_value();
+    let wait = app.dialogs.messages.last().test_value();
     main_assert_eq!(wait.state.message() => "League login for player Exact Player on league.example...");
     main_assert_eq!(wait.state.caption() => "League Login");
     main_assert_eq!(wait.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Standard(3));
@@ -2489,7 +2489,7 @@ fn league_auth_wait_is_abortable_and_success_uses_exact_welcome_confirmation() {
     );
     app.poll_league_player_auth().test_value();
 
-    let welcome = app.message_dialogs.last().test_value();
+    let welcome = app.dialogs.messages.last().test_value();
     main_assert_eq!(welcome.state.message() => "Server welcome");
     main_assert_eq!(welcome.state.caption() => "Confirm League Login");
     main_assert_eq!(welcome.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Extended(8));
@@ -2572,7 +2572,7 @@ fn league_auth_error_dialog_retries_with_cleared_password() {
     main_assert_eq!(rejected.auth.password.as_bytes() => b"password");
     main_assert!(rejected.complete(Ok(clonk_network::decode_league_auth_response(b"[Response]\r\nStatus=Failure\r\nMessage=Wrong password\r\n",))));
     app.poll_league_player_auth().test_value();
-    let error = app.message_dialogs.last().test_value();
+    let error = app.dialogs.messages.last().test_value();
     main_assert_eq!(error.state.message() => "League server reply: Wrong password");
     main_assert_eq!(error.state.caption() => "League Login Failed");
     main_assert_eq!(error.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
@@ -2592,7 +2592,7 @@ fn league_auth_error_dialog_retries_with_cleared_password() {
     main_assert_eq!(retry.auth.password.as_bytes() => b"replacement");
     main_assert!(retry.complete(Ok(clonk_network::decode_league_auth_response(b"[Response]\r\nStatus=Success\r\nAUID=retry-token\r\nAccount=Master\r\n",))));
     app.poll_league_player_auth().test_value();
-    let welcome = app.message_dialogs.last().test_value();
+    let welcome = app.dialogs.messages.last().test_value();
     main_assert_eq!(welcome.state.message() => "Player: Exact Player|League user name: Master|Server: league.example");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
@@ -2632,7 +2632,7 @@ fn league_auth_error_dialog_retries_with_cleared_password() {
     app.poll_league_player_auth().test_value();
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
-    main_assert!(matches!(app.message_dialogs.last().map(|dialog| &dialog.continuation), Some(MessageDialogContinuation::LeaguePlayerAuthCancelled)));
+    main_assert!(matches!(app.dialogs.messages.last().map(|dialog| &dialog.continuation), Some(MessageDialogContinuation::LeaguePlayerAuthCancelled)));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     let registration_retry = app.league_signup_dialog.test_ref();
@@ -3012,12 +3012,12 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     let invalid = app.league_signup_dialog.test_mut().controller.submit();
     app.process_league_signup_actions(vec![invalid])
         .test_value();
-    let validation = app.message_dialogs.last().test_value();
+    let validation = app.dialogs.messages.last().test_value();
     main_assert_eq!(validation.state.caption() => "Invalid Entry");
     main_assert_eq!(validation.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
     main_assert_eq!(app.league_signup_dialog.as_ref().expect("login remains open").controller.focused_control() => Some(LeagueSignupControl::Account));
     app.finish_message_dialog_at(
-        app.message_dialogs.len() - 1,
+        app.dialogs.messages.len() - 1,
         clonk_frontend::message_dialog::MessageDialogResult::Ok,
     )
     .test_value();
@@ -3078,19 +3078,19 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     main_assert_eq!(app.continue_league_player_auth(continuation(pending_request())).expect("show failed-auth message") => LeaguePlayerAuthStatus::Pending);
     poll_league_auth_until(&mut app, "failed-auth message", |app| {
         matches!(
-            app.message_dialogs
+            app.dialogs.messages
                 .last()
                 .map(|dialog| &dialog.continuation),
             Some(MessageDialogContinuation::LeaguePlayerAuthError)
         )
     });
     main_assert!(app.league_signup_dialog.is_none());
-    let failure = app.message_dialogs.last().test_value();
+    let failure = app.dialogs.messages.last().test_value();
     main_assert_eq!(failure.state.caption() => "League Login Failed");
     main_assert_eq!(failure.state.message() => "League server reply: Invalid password");
     main_assert_eq!(app.league_auth_session.as_ref().expect("credentials remain while message is modal").password.as_bytes() => b"outdated");
     app.finish_message_dialog_at(
-        app.message_dialogs.len() - 1,
+        app.dialogs.messages.len() - 1,
         clonk_frontend::message_dialog::MessageDialogResult::Ok,
     )
     .test_value();
@@ -3126,11 +3126,11 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     let abort = app.league_signup_dialog.test_mut().controller.abort();
     app.process_league_signup_actions(vec![abort]).test_value();
     main_assert!(app.league_signup_dialog.is_none());
-    main_assert_eq!(app.message_dialogs.last().map(|dialog| dialog.state.icon()) => Some(clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY));
+    main_assert_eq!(app.dialogs.messages.last().map(|dialog| dialog.state.icon()) => Some(clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY));
     let observer =
         thread::spawn(move || commands.complete_initial_league_client_join(Vec::new(), Vec::new()));
     app.finish_message_dialog_at(
-        app.message_dialogs.len() - 1,
+        app.dialogs.messages.len() - 1,
         clonk_frontend::message_dialog::MessageDialogResult::Ok,
     )
     .test_value();
@@ -3188,18 +3188,18 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
         .test_value();
     poll_league_auth_until(&mut app, "registration failure", |app| {
         matches!(
-            app.message_dialogs
+            app.dialogs.messages
                 .last()
                 .map(|dialog| &dialog.continuation),
             Some(MessageDialogContinuation::LeaguePlayerAuthError)
         )
     });
     main_assert!(app.league_signup_dialog.is_none());
-    let failure = app.message_dialogs.last().test_value();
+    let failure = app.dialogs.messages.last().test_value();
     main_assert_eq!(failure.state.caption() => "League Login Failed");
     main_assert_eq!(failure.state.message() => "League server reply: League server reply without authentication-id!");
     app.finish_message_dialog_at(
-        app.message_dialogs.len() - 1,
+        app.dialogs.messages.len() - 1,
         clonk_frontend::message_dialog::MessageDialogResult::Ok,
     )
     .test_value();
@@ -3284,7 +3284,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     let abort = app.league_signup_dialog.test_mut().controller.abort();
     app.process_league_signup_actions(vec![abort]).test_value();
     app.finish_message_dialog_at(
-        app.message_dialogs.len() - 1,
+        app.dialogs.messages.len() - 1,
         clonk_frontend::message_dialog::MessageDialogResult::Ok,
     )
     .test_value();
@@ -3417,7 +3417,7 @@ fn league_lobby_checks_only_new_ids_removes_failures_and_consumes_successful_aui
     app.test_network_events();
     let (checked, broadcasts) = observer.test_join();
 
-    let refusal = app.message_dialogs.last().test_value();
+    let refusal = app.dialogs.messages.last().test_value();
     main_assert_eq!(refusal.state.message() => "League server has refused the join of player Rejected: Rejected");
     main_assert_eq!(refusal.state.caption() => "Error");
     main_assert_eq!(refusal.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
@@ -3803,7 +3803,7 @@ fn league_end_transport_retry_reissues_and_broadcasts_the_successful_result() {
     });
 
     app.run_pending_league_end_attempt().test_value();
-    let retry = app.message_dialogs.last().test_value();
+    let retry = app.dialogs.messages.last().test_value();
     main_assert_eq!(retry.state.caption() => "League error");
     main_assert_eq!(retry.state.message() => "Could not send game result: temporary outage");
     main_assert_eq!(retry.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::RETRY_CANCEL);
@@ -3889,7 +3889,7 @@ fn league_end_server_rejection_is_abort_only_and_preserves_legacy_text() {
     });
 
     app.run_pending_league_end_attempt().test_value();
-    let rejected = app.message_dialogs.last().test_value();
+    let rejected = app.dialogs.messages.last().test_value();
     main_assert_eq!(rejected.state.message() => "Could not send game result: Server says André");
     main_assert_eq!(rejected.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::CANCEL);
     main_assert_eq!(rejected.state.button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel) => "Abort");
@@ -4212,7 +4212,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     });
     main_assert!(matches!(restart_host.mode, AppMode::Running));
     main_assert!(restart_host.abort_restart_pending, "a rejected vote leaves Application.NextMission scheduled");
-    main_assert!(restart_host.message_dialogs.iter().any(|dialog| matches!(dialog.continuation, MessageDialogContinuation::LeagueSurrender)));
+    main_assert!(restart_host.dialogs.messages.iter().any(|dialog| matches!(dialog.continuation, MessageDialogContinuation::LeagueSurrender)));
     restart_host.loader_render_error = Some("test restart blocker".to_string());
     restart_host.hard_abort_running_game().test_value();
     main_assert!(!restart_host.abort_restart_pending);
@@ -4486,8 +4486,8 @@ fn rate_limited_own_vote_opens_surrender_but_active_duplicate_does_not() {
         main_assert!(!app.submit_own_league_vote_at(subject, true, 219));
         main_assert!(commands.take_submitted_votes().is_empty());
         main_assert_eq!(latest_message_board_logical_entry(&app).as_deref() => Some("Voting-Timeout: you have to wait two minutes until you can request a new vote."));
-        main_assert_eq!(app.message_dialogs.len() => 1);
-        let prompt = &app.message_dialogs[0];
+        main_assert_eq!(app.dialogs.messages.len() => 1);
+        let prompt = &app.dialogs.messages[0];
         main_assert!(matches!(prompt.continuation, MessageDialogContinuation::LeagueSurrender));
         main_assert_eq!(prompt.state.caption() => "Voting");
         main_assert_eq!(
@@ -4515,7 +4515,7 @@ fn rate_limited_own_vote_opens_surrender_but_active_duplicate_does_not() {
 
     main_assert!(!app.submit_own_league_vote_at(subject, true, 101));
     main_assert!(commands.take_submitted_votes().is_empty());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(message_board_logical_entries(&app) => log_before);
 
     let mut app = new_running_sandbox_app();
@@ -4534,13 +4534,13 @@ fn rate_limited_own_vote_opens_surrender_but_active_duplicate_does_not() {
     app.apply_ingame_menu_action(MenuAction::Part).test_value();
     app.apply_ingame_menu_action(MenuAction::Part).test_value();
     main_assert_eq!(commands.take_submitted_votes() => vec![league_fixture!(vote: clonk_engine::VOTE_TYPE_KICK, true, local_client as i32, local_client as i32)]);
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert!(matches!(app.message_dialogs[0].continuation, MessageDialogContinuation::LeagueSurrender));
-    main_assert_eq!(app.message_dialogs[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::No));
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert!(matches!(app.dialogs.messages[0].continuation, MessageDialogContinuation::LeagueSurrender));
+    main_assert_eq!(app.dialogs.messages[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::No));
 
     app.apply_ingame_menu_action(MenuAction::Part).test_value();
     main_assert!(commands.take_submitted_votes().is_empty());
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
 }
 
 #[test]
@@ -4829,8 +4829,8 @@ fn eligible_client_vote_prompt_defaults_no_and_yes_submits_ballot() {
 
     app.test_network_events();
 
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let prompt = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let prompt = &app.dialogs.messages[0].state;
     main_assert_eq!(prompt.caption() => "Voting");
     main_assert_eq!(
                 prompt.message() =>
@@ -4878,8 +4878,8 @@ fn rejected_own_self_kick_opens_default_no_surrender_prompt() {
     )
     .test_value();
 
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let prompt = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let prompt = &app.dialogs.messages[0].state;
     main_assert_eq!(prompt.caption() => "Voting");
     main_assert_eq!(prompt.message() => "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?");
     main_assert_eq!(prompt.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::No));
@@ -4887,7 +4887,7 @@ fn rejected_own_self_kick_opens_default_no_surrender_prompt() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.network.is_some());
     main_assert!(matches!(app.mode, AppMode::Running));
 }
@@ -5143,8 +5143,8 @@ fn a_refused_host_registration_offers_the_native_ok_or_abort_choice() {
     let mut app = staged_host();
     app.present_refused_league_registration(refusal.to_string())
         .test_value();
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let dialog = &app.message_dialogs[0];
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let dialog = &app.dialogs.messages[0];
     main_assert_eq!(dialog.state.caption() => "League error");
     main_assert_eq!(dialog.state.message() => format!("Could not register game: {refusal}"));
     main_assert_eq!(dialog.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL);
@@ -5253,7 +5253,7 @@ fn a_headless_host_logs_a_refused_league_registration_instead_of_drawing_it() {
     server
         .present_refused_league_registration(refusal.to_string())
         .test_value();
-    main_assert!(server.message_dialogs.is_empty(), "a dedicated server draws no notice it could never dismiss");
+    main_assert!(server.dialogs.messages.is_empty(), "a dedicated server draws no notice it could never dismiss");
     main_assert!(!server.take_exit_request(), "and keeps hosting unregistered rather than quitting");
 }
 

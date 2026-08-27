@@ -437,7 +437,7 @@ impl GameApp {
     }
 
     pub(crate) fn update_update_download_progress(&mut self, percent: Option<u8>) {
-        if let Some(dialog) = self.message_dialogs.iter_mut().find(|dialog| {
+        if let Some(dialog) = self.dialogs.messages.iter_mut().find(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::UpdateDownloadWait
@@ -451,7 +451,7 @@ impl GameApp {
     }
 
     fn close_update_download_dialog(&mut self) {
-        let Some(index) = self.message_dialogs.iter().position(|dialog| {
+        let Some(index) = self.dialogs.messages.iter().position(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::UpdateDownloadWait
@@ -506,7 +506,7 @@ impl GameApp {
     }
 
     fn close_update_check_wait_dialog(&mut self) -> Result<(), EngineError> {
-        let Some(index) = self.message_dialogs.iter().position(|dialog| {
+        let Some(index) = self.dialogs.messages.iter().position(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::UpdateCheckWait

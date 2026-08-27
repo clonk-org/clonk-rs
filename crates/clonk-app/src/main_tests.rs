@@ -1590,8 +1590,8 @@ fn assert_startup_error_log(app: &GameApp, expected_message: &str) {
         MessageDialogButton, MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
     };
 
-    assert_eq!(app.message_dialogs.len(), 1);
-    let dialog = &app.message_dialogs[0];
+    assert_eq!(app.dialogs.messages.len(), 1);
+    let dialog = &app.dialogs.messages[0];
     assert_eq!(dialog.state.caption(), "Error Log");
     assert_eq!(dialog.state.message(), expected_message);
     assert_eq!(dialog.state.buttons(), MessageDialogButtons::OK);
@@ -2651,7 +2651,7 @@ fn finish_abort_dialog(
     app: &mut GameApp,
     result: clonk_frontend::message_dialog::MessageDialogResult,
 ) {
-    assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+    assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::AbortGame { .. }
     )));
@@ -3626,7 +3626,8 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
         Some((BlockingResourceScope::ClientStart, 70))
     );
     assert_eq!(
-        app.message_dialogs
+        app.dialogs
+            .messages
             .iter()
             .find(|dialog| matches!(
                 dialog.continuation,
@@ -3723,7 +3724,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
         .test_value();
     app.process_network_events().test_value();
     assert!(app.blocking_resource_wait.is_none());
-    assert!(!app.message_dialogs.iter().any(|dialog| matches!(
+    assert!(!app.dialogs.messages.iter().any(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::BlockingResourceWait { .. }
     )));
@@ -3762,7 +3763,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
     let loading_deadline = Instant::now() + Duration::from_secs(5);
     loop {
         app.poll_loading().test_value();
-        let waiting_for_start = app.message_dialogs.iter().any(|dialog| {
+        let waiting_for_start = app.dialogs.messages.iter().any(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::NetworkClientStartWait
@@ -3790,7 +3791,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
         100
     );
     assert!(app.network_start_wait.is_none());
-    assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+    assert!(app.dialogs.messages.iter().all(|dialog| !matches!(
         dialog.continuation,
         MessageDialogContinuation::NetworkClientStartWait
     )));
@@ -3917,7 +3918,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
     assert!(app.network_control_running);
     assert_eq!(app.expected_network_control_tick(), 25);
     assert!(app.network_ticks.ready.contains_key(&25));
-    assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+    assert!(app.dialogs.messages.iter().all(|dialog| !matches!(
         dialog.continuation,
         MessageDialogContinuation::NetworkClientStartWait
     )));
@@ -4560,7 +4561,8 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
         exit_requested: app.exit_requested,
         status_text: app.status_text.clone(),
         message_dialogs: app
-            .message_dialogs
+            .dialogs
+            .messages
             .iter()
             .map(|dialog| {
                 (
@@ -4588,13 +4590,13 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
         definition_selector_open: app.definition_selector.is_some(),
         game_option_input_open: app.game_option_input_dialog.is_some(),
         game_over_handled: app.game_over_handled,
-        runtime_help_visible: app.runtime_help_visible,
+        runtime_help_visible: app.dialogs.help_visible,
         runtime_flash_message: app.runtime_flash_message.clone(),
-        runtime_client_list_open: app.runtime_client_list.is_some(),
-        scoreboard_dialog: app.scoreboard_dialog.clone(),
+        runtime_client_list_open: app.dialogs.client_list.is_some(),
+        scoreboard_dialog: app.dialogs.scoreboard.clone(),
         scoreboard: app.snapshot.hud.scoreboard.clone(),
-        scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
-        scoreboard_close_pointer_capture: app.scoreboard_close_pointer_capture,
+        scoreboard_initial_reconcile_pending: app.dialogs.scoreboard_initial_reconcile_pending,
+        scoreboard_close_pointer_capture: app.dialogs.scoreboard_close_pointer_capture,
         pressed_engine_keys: app.pressed_engine_keys.clone(),
         message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
     }

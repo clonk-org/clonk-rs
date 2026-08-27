@@ -2152,7 +2152,7 @@ fn handle_developer_console_window_event(
     event: WindowEvent,
     event_loop: &winit::event_loop::ActiveEventLoop,
 ) -> Result<()> {
-    let message_dialog_active = !app.message_dialogs.is_empty();
+    let message_dialog_active = !app.dialogs.messages.is_empty();
     match event {
         WindowEvent::CloseRequested => {
             // A native modal C4Console::Message disables its parent window.

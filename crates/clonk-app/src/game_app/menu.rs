@@ -158,7 +158,7 @@ impl GameApp {
     }
 
     pub(crate) fn refresh_network_chart_dialog(&mut self) {
-        let Some(aliases) = self.network_chart_dialog.as_ref().map(|dialog| {
+        let Some(aliases) = self.dialogs.chart.as_ref().map(|dialog| {
             dialog
                 .tab_names()
                 .into_iter()
@@ -188,7 +188,7 @@ impl GameApp {
                 })
             })
             .collect::<Vec<_>>();
-        if let Some(dialog) = self.network_chart_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.chart.as_mut() {
             for (alias, graph) in snapshots {
                 dialog.set_graph_snapshot(&alias, graph);
             }
@@ -197,9 +197,9 @@ impl GameApp {
 
     pub(crate) fn runtime_default_dialog_visible(&self, dialog: RuntimeDefaultDialog) -> bool {
         match dialog {
-            RuntimeDefaultDialog::Scoreboard => self.scoreboard_dialog.is_some(),
-            RuntimeDefaultDialog::NetworkChart => self.network_chart_dialog.is_some(),
-            RuntimeDefaultDialog::ClientList => self.runtime_client_list.is_some(),
+            RuntimeDefaultDialog::Scoreboard => self.dialogs.scoreboard.is_some(),
+            RuntimeDefaultDialog::NetworkChart => self.dialogs.chart.is_some(),
+            RuntimeDefaultDialog::ClientList => self.dialogs.client_list.is_some(),
             RuntimeDefaultDialog::GameOver => self.game_over_dialog.is_some(),
             RuntimeDefaultDialog::ExternalIrc => self.chat.external_dialog_visible,
         }
@@ -210,12 +210,13 @@ impl GameApp {
     /// populate the retained order explicitly.
     pub(crate) fn runtime_default_dialog_order_snapshot(&self) -> Vec<RuntimeDefaultDialog> {
         let mut order = self
-            .runtime_default_dialog_order
+            .dialogs
+            .default_order
             .iter()
             .copied()
             .filter(|dialog| self.runtime_default_dialog_visible(*dialog))
             .collect::<Vec<_>>();
-        let fallback = if self.runtime_client_list_above_game_over {
+        let fallback = if self.dialogs.client_list_above_game_over {
             [
                 RuntimeDefaultDialog::Scoreboard,
                 RuntimeDefaultDialog::NetworkChart,
@@ -248,7 +249,7 @@ impl GameApp {
         let game_over = order
             .iter()
             .position(|dialog| *dialog == RuntimeDefaultDialog::GameOver);
-        self.runtime_client_list_above_game_over = client
+        self.dialogs.client_list_above_game_over = client
             .zip(game_over)
             .is_some_and(|(client, game_over)| client > game_over);
     }
@@ -257,14 +258,14 @@ impl GameApp {
         let mut order = self.runtime_default_dialog_order_snapshot();
         order.retain(|candidate| *candidate != dialog);
         order.push(dialog);
-        if self.network_chart_elevated
+        if self.dialogs.chart_elevated
             && dialog != RuntimeDefaultDialog::NetworkChart
-            && self.network_chart_dialog.is_some()
+            && self.dialogs.chart.is_some()
         {
             order.retain(|candidate| *candidate != RuntimeDefaultDialog::NetworkChart);
             order.push(RuntimeDefaultDialog::NetworkChart);
         }
-        self.runtime_default_dialog_order = order;
+        self.dialogs.default_order = order;
         self.sync_runtime_default_dialog_compatibility();
     }
 
@@ -282,33 +283,33 @@ impl GameApp {
         }
         self.show_or_raise_runtime_default_dialog(dialog);
         if dialog == RuntimeDefaultDialog::NetworkChart {
-            self.network_chart_elevated =
-                !self.message_dialogs.is_empty() || self.running_chat_controller().is_some();
-            if self.network_chart_elevated {
+            self.dialogs.chart_elevated =
+                !self.dialogs.messages.is_empty() || self.running_chat_controller().is_some();
+            if self.dialogs.chart_elevated {
                 self.message_dialog_active_index = None;
                 self.set_running_chat_active(false);
             }
         } else {
-            if self.network_chart_elevated {
+            if self.dialogs.chart_elevated {
                 let mut order = self.runtime_default_dialog_order_snapshot();
                 order.retain(|candidate| *candidate != dialog);
                 order.push(dialog);
-                self.runtime_default_dialog_order = order;
+                self.dialogs.default_order = order;
             }
-            self.network_chart_elevated = false;
+            self.dialogs.chart_elevated = false;
             self.sync_runtime_default_dialog_compatibility();
         }
     }
 
     pub(crate) fn hide_runtime_default_dialog(&mut self, dialog: RuntimeDefaultDialog) {
         let chart_was_elevated =
-            dialog == RuntimeDefaultDialog::NetworkChart && self.network_chart_elevated;
+            dialog == RuntimeDefaultDialog::NetworkChart && self.dialogs.chart_elevated;
         let chart_owned_input = chart_was_elevated && self.network_chart_elevated_owns_input();
         let mut order = self.runtime_default_dialog_order_snapshot();
         order.retain(|candidate| *candidate != dialog);
-        self.runtime_default_dialog_order = order;
+        self.dialogs.default_order = order;
         if dialog == RuntimeDefaultDialog::NetworkChart {
-            self.network_chart_elevated = false;
+            self.dialogs.chart_elevated = false;
             if chart_owned_input {
                 match self.running_active_dialog {
                     Some(RunningDialogStackEntry::Chat) if self.chat.running.is_some() => {
@@ -327,13 +328,14 @@ impl GameApp {
     }
 
     pub(crate) fn reset_runtime_default_dialog_order(&mut self) {
-        self.runtime_default_dialog_order.clear();
-        self.network_chart_elevated = false;
+        self.dialogs.default_order.clear();
+        self.dialogs.chart_elevated = false;
         if self.chat.external_dialog_visible {
-            self.runtime_default_dialog_order
+            self.dialogs
+                .default_order
                 .push(RuntimeDefaultDialog::ExternalIrc);
         }
-        self.runtime_client_list_above_game_over = false;
+        self.dialogs.client_list_above_game_over = false;
     }
 
     pub(crate) fn runtime_default_dialog_is_top(&self, dialog: RuntimeDefaultDialog) -> bool {
@@ -362,12 +364,12 @@ impl GameApp {
 
     pub(crate) fn network_chart_is_active_dialog(&self) -> bool {
         matches!(self.mode, AppMode::Running)
-            && self.network_chart_dialog.is_some()
+            && self.dialogs.chart.is_some()
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart)
             && self.context_menu.is_none()
             && !self.runtime_modal_above_network_chart()
             && (self.network_chart_elevated_owns_input()
-                || (self.message_dialogs.is_empty() && self.game_option_input_dialog.is_none()))
+                || (self.dialogs.messages.is_empty() && self.game_option_input_dialog.is_none()))
     }
 
     fn set_running_active_dialog(&mut self, entry: Option<RunningDialogStackEntry>) {
@@ -381,16 +383,16 @@ impl GameApp {
         if self.mode != AppMode::Running {
             return;
         }
-        self.running_dialog_stack
-            .retain(|current| *current != entry);
+        self.dialogs.stack.retain(|current| *current != entry);
         let z_order = entry.z_order();
-        let previous_len = self.running_dialog_stack.len();
+        let previous_len = self.dialogs.stack.len();
         let index = self
-            .running_dialog_stack
+            .dialogs
+            .stack
             .iter()
             .position(|current| current.z_order() > z_order)
-            .unwrap_or(self.running_dialog_stack.len());
-        self.running_dialog_stack.insert(index, entry);
+            .unwrap_or(self.dialogs.stack.len());
+        self.dialogs.stack.insert(index, entry);
         if index == previous_len {
             self.set_running_active_dialog(Some(entry));
         }
@@ -407,11 +409,10 @@ impl GameApp {
             // drag before this one was shown asynchronously.
             self.release_all_running_pointer_elements();
         }
-        self.running_dialog_stack
-            .retain(|current| *current != entry);
+        self.dialogs.stack.retain(|current| *current != entry);
         if was_named_active {
-            let next = self.running_dialog_stack.last().copied();
-            if self.network_chart_elevated {
+            let next = self.dialogs.stack.last().copied();
+            if self.dialogs.chart_elevated {
                 // Keep the shared Screen projection current without granting
                 // its successor input through the visually higher chart.
                 self.running_active_dialog = next;
@@ -422,7 +423,7 @@ impl GameApp {
     }
 
     fn activate_running_dialog_stack_only(&mut self, entry: RunningDialogStackEntry) {
-        if !self.running_dialog_stack.contains(&entry) {
+        if !self.dialogs.stack.contains(&entry) {
             return;
         }
         if entry.z_order() != 0 {
@@ -432,9 +433,8 @@ impl GameApp {
         // Screen::ActivateDialog uses MakeLastElement for default-z dialogs,
         // even when this carries them past specially ordered input/chat
         // dialogs. Subsequent ShowDialog insertion observes that exact order.
-        self.running_dialog_stack
-            .retain(|current| *current != entry);
-        self.running_dialog_stack.push(entry);
+        self.dialogs.stack.retain(|current| *current != entry);
+        self.dialogs.stack.push(entry);
         self.set_running_active_dialog(Some(entry));
     }
 
@@ -458,13 +458,11 @@ impl GameApp {
         other: RunningDialogStackEntry,
     ) -> bool {
         let candidate = self
-            .running_dialog_stack
+            .dialogs
+            .stack
             .iter()
             .rposition(|entry| *entry == candidate);
-        let other = self
-            .running_dialog_stack
-            .iter()
-            .rposition(|entry| *entry == other);
+        let other = self.dialogs.stack.iter().rposition(|entry| *entry == other);
         matches!((candidate, other), (Some(candidate), Some(other)) if candidate > other)
     }
 
@@ -490,9 +488,9 @@ impl GameApp {
                 .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
         );
         let layout_revision = request.layout_revision;
-        self.scoreboard_dialog = Some(request);
-        self.scoreboard_close_pointer_capture = false;
-        self.scoreboard_runtime = ScoreboardDialogRuntime {
+        self.dialogs.scoreboard = Some(request);
+        self.dialogs.scoreboard_close_pointer_capture = false;
+        self.dialogs.scoreboard_runtime = ScoreboardDialogRuntime {
             layout_revision,
             preferred: Some(preferred),
             ..ScoreboardDialogRuntime::default()
@@ -511,7 +509,7 @@ impl GameApp {
     /// dialog's — which is why the console runner reconciles against this
     /// rather than being commanded.
     pub(crate) fn console_scoreboard_window_open(&self) -> bool {
-        self.console_mode && self.scoreboard_dialog.is_some()
+        self.console_mode && self.dialogs.scoreboard.is_some()
     }
 
     /// Whether the chart wants a console child window.
@@ -521,15 +519,15 @@ impl GameApp {
     /// above (`C4GuiDialogs.cpp:659-661`) and its window lives exactly as long
     /// as the dialog does.
     pub(crate) fn console_network_chart_window_open(&self) -> bool {
-        self.console_mode && self.network_chart_dialog.is_some()
+        self.console_mode && self.dialogs.chart.is_some()
     }
 
     pub(crate) fn close_scoreboard_dialog(&mut self) -> bool {
-        let closed = self.scoreboard_dialog.take().is_some();
+        let closed = self.dialogs.scoreboard.take().is_some();
         self.scoreboard_pointer_left();
         self.remove_running_dialog(RunningDialogStackEntry::Scoreboard);
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::Scoreboard);
-        self.scoreboard_runtime = ScoreboardDialogRuntime::default();
+        self.dialogs.scoreboard_runtime = ScoreboardDialogRuntime::default();
         closed
     }
 
@@ -800,7 +798,7 @@ impl GameApp {
     pub(crate) fn show_abort_dialog(&mut self, _player: i32) -> bool {
         if !matches!(self.mode, AppMode::Running)
             || self.game_over_dialog.is_some()
-            || self.message_dialogs.iter().any(|dialog| {
+            || self.dialogs.messages.iter().any(|dialog| {
                 matches!(
                     dialog.continuation,
                     MessageDialogContinuation::AbortGame { .. }
@@ -846,8 +844,11 @@ impl GameApp {
     pub(crate) fn close_ingame_menu(&mut self) {
         self.ingame_menu.clear();
         self.ingame_menu_close_pointer_capture = None;
-        if matches!(self.menu_title_drag, Some(MenuTitleDrag::Ingame { .. })) {
-            self.menu_title_drag = None;
+        if matches!(
+            self.dialogs.menu_title_drag,
+            Some(MenuTitleDrag::Ingame { .. })
+        ) {
+            self.dialogs.menu_title_drag = None;
         }
     }
 
@@ -857,13 +858,13 @@ impl GameApp {
             self.ingame_menu_close_pointer_capture = None;
         }
         if matches!(
-            self.menu_title_drag,
+            self.dialogs.menu_title_drag,
             Some(MenuTitleDrag::Ingame {
                 player: dragged,
                 ..
             }) if dragged == player
         ) {
-            self.menu_title_drag = None;
+            self.dialogs.menu_title_drag = None;
         }
     }
 
@@ -877,13 +878,13 @@ impl GameApp {
                 self.ingame_menu_close_pointer_capture = None;
             }
             if matches!(
-                self.menu_title_drag,
+                self.dialogs.menu_title_drag,
                 Some(MenuTitleDrag::Ingame {
                     player: dragged,
                     ..
                 }) if dragged == player
             ) {
-                self.menu_title_drag = None;
+                self.dialogs.menu_title_drag = None;
             }
             if player != OWNER_NONE {
                 // Player-owned C4MainMenu::OnClosed queues exactly one
@@ -1782,7 +1783,7 @@ impl GameApp {
         resource_id: i32,
         present_percent: u8,
     ) {
-        if let Some(dialog) = self.message_dialogs.iter_mut().rfind(|dialog| {
+        if let Some(dialog) = self.dialogs.messages.iter_mut().rfind(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::BlockingResourceWait {
@@ -1800,7 +1801,7 @@ impl GameApp {
         scope: BlockingResourceScope,
         resource_id: i32,
     ) {
-        let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+        let Some(index) = self.dialogs.messages.iter().rposition(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::BlockingResourceWait {
@@ -1873,7 +1874,7 @@ impl GameApp {
     /// `Element::DoDragging`: retain the original title-local pointer and
     /// apply its screen-space delta one-for-one, even outside the dialog.
     pub(crate) fn update_menu_title_drag(&mut self, point: GuiPoint) -> bool {
-        let Some(drag) = self.menu_title_drag else {
+        let Some(drag) = self.dialogs.menu_title_drag else {
             return false;
         };
         let moved = |start_pointer: GuiPoint, start_location: (i32, i32)| {
@@ -1893,7 +1894,7 @@ impl GameApp {
                 start_location,
             } => {
                 let Some(menu) = self.ingame_menu.get_mut(player) else {
-                    self.menu_title_drag = None;
+                    self.dialogs.menu_title_drag = None;
                     return false;
                 };
                 menu.set_location(moved(start_pointer, start_location));
@@ -1917,7 +1918,7 @@ impl GameApp {
                                 })
                     });
                 if !valid {
-                    self.menu_title_drag = None;
+                    self.dialogs.menu_title_drag = None;
                     return false;
                 }
                 if let Some(state) = self.script_menu_presentations.get_mut(&owner) {
@@ -1930,13 +1931,13 @@ impl GameApp {
     }
 
     pub(crate) fn finish_menu_title_drag(&mut self, point: Option<GuiPoint>) -> bool {
-        if self.menu_title_drag.is_none() {
+        if self.dialogs.menu_title_drag.is_none() {
             return false;
         }
         if let Some(point) = point {
             self.update_menu_title_drag(point);
         }
-        self.menu_title_drag = None;
+        self.dialogs.menu_title_drag = None;
         self.cancel_ingame_mouse_gestures();
         true
     }
@@ -2164,7 +2165,7 @@ impl GameApp {
         if let Some(menu) = self.ingame_menu.get_mut(player) {
             menu.set_location(start_location);
         }
-        self.menu_title_drag = Some(MenuTitleDrag::Ingame {
+        self.dialogs.menu_title_drag = Some(MenuTitleDrag::Ingame {
             player,
             start_pointer: point,
             start_location,
@@ -2472,7 +2473,7 @@ impl GameApp {
         };
         state.location = Some(start_location);
         state.location_needs_initialization = false;
-        self.menu_title_drag = Some(MenuTitleDrag::Script {
+        self.dialogs.menu_title_drag = Some(MenuTitleDrag::Script {
             owner,
             target,
             start_pointer: point,
@@ -3034,7 +3035,7 @@ impl GameApp {
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::ScenarioBrowser
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
         {
@@ -3784,7 +3785,7 @@ impl GameApp {
     }
 
     pub(crate) fn open_next_league_vote_dialog(&mut self) -> Result<(), EngineError> {
-        let already_open = self.message_dialogs.iter().any(|dialog| {
+        let already_open = self.dialogs.messages.iter().any(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::LeagueVote { .. }
@@ -3840,7 +3841,7 @@ impl GameApp {
     }
 
     pub(crate) fn open_league_surrender_dialog(&mut self) -> Result<(), EngineError> {
-        if self.message_dialogs.iter().any(|dialog| {
+        if self.dialogs.messages.iter().any(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::LeagueVote { .. }
@@ -3940,7 +3941,7 @@ impl GameApp {
             MessageDialogContinuation::LiveMasterserverSignup,
         )?;
         let abort = self.runtime_resource_text("IDS_DLG_ABORT", "Abort");
-        if let Some(dialog) = self.message_dialogs.last_mut() {
+        if let Some(dialog) = self.dialogs.messages.last_mut() {
             dialog.state.set_button_label(
                 clonk_frontend::message_dialog::MessageDialogButton::Cancel,
                 abort,
@@ -3950,7 +3951,7 @@ impl GameApp {
     }
 
     pub(crate) fn close_live_masterserver_signup_dialog(&mut self) -> Result<(), EngineError> {
-        let Some(index) = self.message_dialogs.iter().position(|dialog| {
+        let Some(index) = self.dialogs.messages.iter().position(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::LiveMasterserverSignup
@@ -4010,15 +4011,15 @@ impl GameApp {
                 .and_then(|resources| resources.validate()),
         )?;
         let chat_above = self.running_chat_controller().is_some();
-        let chart_above = self.network_chart_elevated;
+        let chart_above = self.dialogs.chart_elevated;
         let chart_stays_above = chart_above && chat_above;
         if chart_above && !chart_stays_above {
-            self.network_chart_elevated = false;
+            self.dialogs.chart_elevated = false;
         }
         if !chat_above && !chart_stays_above && self.mode != AppMode::Running {
             self.close_context_menu_silently();
         }
-        if self.message_dialogs.is_empty()
+        if self.dialogs.messages.is_empty()
             && !chat_above
             && !chart_stays_above
             && self.mode != AppMode::Running
@@ -4033,20 +4034,20 @@ impl GameApp {
         }
         let running_stack_id = self.next_running_message_stack_id;
         self.next_running_message_stack_id = self.next_running_message_stack_id.wrapping_add(1);
-        self.message_dialogs.push(PendingMessageDialog {
+        self.dialogs.messages.push(PendingMessageDialog {
             running_stack_id,
             state,
             continuation,
         });
         self.show_running_dialog(RunningDialogStackEntry::Message(running_stack_id));
         if !chat_above && !chart_stays_above {
-            self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
+            self.message_dialog_active_index = self.dialogs.messages.len().checked_sub(1);
         }
         Ok(())
     }
 
     pub(crate) fn persist_top_message_dialog_checkbox_changes(&mut self) {
-        let Some(index) = self.message_dialogs.len().checked_sub(1) else {
+        let Some(index) = self.dialogs.messages.len().checked_sub(1) else {
             return;
         };
         self.persist_message_dialog_checkbox_changes(index);
@@ -4054,7 +4055,7 @@ impl GameApp {
 
     pub(crate) fn persist_message_dialog_checkbox_changes(&mut self, index: usize) {
         let Some((key, description, native_irc_preference, changes)) =
-            self.message_dialogs.get_mut(index).and_then(|dialog| {
+            self.dialogs.messages.get_mut(index).and_then(|dialog| {
                 let (key, description, native_irc_preference) = match &dialog.continuation {
                     MessageDialogContinuation::ClassicLobbyStart { .. } => (
                         "HideMsgPlrNoTakeOver",
@@ -4111,7 +4112,7 @@ impl GameApp {
         &mut self,
         result: clonk_frontend::message_dialog::MessageDialogResult,
     ) -> Result<(), EngineError> {
-        let Some(index) = self.message_dialogs.len().checked_sub(1) else {
+        let Some(index) = self.dialogs.messages.len().checked_sub(1) else {
             return Ok(());
         };
         self.finish_message_dialog_at(index, result)
@@ -4121,11 +4122,11 @@ impl GameApp {
         &mut self,
         index: usize,
     ) -> Option<(PendingMessageDialog, bool)> {
-        if index >= self.message_dialogs.len() {
+        if index >= self.dialogs.messages.len() {
             return None;
         }
         let removed_entry =
-            RunningDialogStackEntry::Message(self.message_dialogs[index].running_stack_id);
+            RunningDialogStackEntry::Message(self.dialogs.messages[index].running_stack_id);
         let was_active = if self.mode == AppMode::Running {
             !self.network_chart_elevated_owns_input()
                 && self.running_active_dialog == Some(removed_entry)
@@ -4137,7 +4138,7 @@ impl GameApp {
             self.release_game_option_input_pointer_elements();
         }
         let releases_abort_halt = matches!(
-            &self.message_dialogs[index].continuation,
+            &self.dialogs.messages[index].continuation,
             MessageDialogContinuation::AbortGame {
                 halted_offline: true
             }
@@ -4146,7 +4147,7 @@ impl GameApp {
             debug_assert!(self.offline_halt_count > 0);
             self.offline_halt_count -= 1;
         }
-        let pending = self.message_dialogs.remove(index);
+        let pending = self.dialogs.messages.remove(index);
         self.remove_running_dialog(removed_entry);
         self.message_dialog_active_index = match self.message_dialog_active_index {
             Some(active) if active > index => Some(active - 1),
@@ -4161,7 +4162,7 @@ impl GameApp {
         };
         if was_active {
             if self.mode == AppMode::Running {
-                if self.network_chart_elevated {
+                if self.dialogs.chart_elevated {
                     self.message_dialog_active_index = None;
                     if let Some(chat) = self.chat.running.as_mut() {
                         chat.active = false;
@@ -4182,11 +4183,11 @@ impl GameApp {
             } else if self.chat.running.is_some() {
                 self.set_running_chat_active(true);
             } else {
-                self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
+                self.message_dialog_active_index = self.dialogs.messages.len().checked_sub(1);
             }
         }
-        if self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
-            self.network_chart_elevated = false;
+        if self.dialogs.messages.is_empty() && self.running_chat_controller().is_none() {
+            self.dialogs.chart_elevated = false;
         }
         Some((pending, was_active))
     }
@@ -4559,7 +4560,7 @@ impl GameApp {
         &self,
         index: usize,
     ) -> Option<clonk_frontend::message_dialog::MessageDialogLayout> {
-        let dialog = self.message_dialogs.get(index)?;
+        let dialog = self.dialogs.messages.get(index)?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.graphics.surface();
         Some(
@@ -4572,21 +4573,22 @@ impl GameApp {
     pub(crate) fn top_message_dialog_layout(
         &self,
     ) -> Option<clonk_frontend::message_dialog::MessageDialogLayout> {
-        self.message_dialogs
+        self.dialogs
+            .messages
             .len()
             .checked_sub(1)
             .and_then(|index| self.message_dialog_layout_at(index))
     }
 
     pub(crate) fn top_message_dialog_hit_index(&self, point: GuiPoint) -> Option<usize> {
-        (0..self.message_dialogs.len()).rev().find(|index| {
+        (0..self.dialogs.messages.len()).rev().find(|index| {
             self.message_dialog_layout_at(*index)
                 .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout))
         })
     }
 
     pub(crate) fn top_message_dialog_is_exclusive(&self) -> bool {
-        self.message_dialogs.last().is_some_and(|dialog| {
+        self.dialogs.messages.last().is_some_and(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::AbortGame { .. }
@@ -4607,12 +4609,13 @@ impl GameApp {
             return self.running_message_index(stack_id);
         }
         self.message_dialog_active_index
-            .filter(|index| *index < self.message_dialogs.len())
+            .filter(|index| *index < self.dialogs.messages.len())
     }
 
     pub(crate) fn captured_message_dialog_index(&self) -> Option<usize> {
         self.message_dialog_pointer_capture_index.filter(|index| {
-            self.message_dialogs
+            self.dialogs
+                .messages
                 .get(*index)
                 .is_some_and(|dialog| dialog.state.has_pointer_capture())
         })
@@ -4666,14 +4669,14 @@ impl GameApp {
         }
         if self.mode == AppMode::Running
             && self.game_over_dialog.is_none()
-            && !self.running_dialog_stack.is_empty()
+            && !self.dialogs.stack.is_empty()
         {
             return match self.top_scoreboard_message_pointer_target_cached(point) {
                 Some(RunningDialogStackEntry::Scoreboard) => {
                     self.scoreboard_tooltip_target_cached(point)
                 }
                 Some(RunningDialogStackEntry::RuntimeClientList) => {
-                    let dialog = self.runtime_client_list.as_ref()?;
+                    let dialog = self.dialogs.client_list.as_ref()?;
                     let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
                     let preferred = scoreboard_preferred_rect(
                         self.graphics
@@ -4691,7 +4694,8 @@ impl GameApp {
         // standalone IRC window, while the running F4 list is below it.
         if self.mode != AppMode::Running {
             if let Some(dialog) = self
-                .runtime_client_list
+                .dialogs
+                .client_list
                 .as_ref()
                 .filter(|dialog| dialog.is_info_only())
             {
@@ -4723,7 +4727,7 @@ impl GameApp {
             if !self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList) {
                 return None;
             }
-            let scoreboard_above_client = self.runtime_client_list.is_none()
+            let scoreboard_above_client = self.dialogs.client_list.is_none()
                 || self.scoreboard_is_above_runtime_client_list();
             if scoreboard_above_client {
                 if let Some(target) = scoreboard_owns_point(self) {
@@ -4733,7 +4737,7 @@ impl GameApp {
                     };
                 }
             }
-            if let Some(dialog) = self.runtime_client_list.as_ref() {
+            if let Some(dialog) = self.dialogs.client_list.as_ref() {
                 let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
                 let preferred = scoreboard_preferred_rect(
                     self.graphics
@@ -4883,7 +4887,7 @@ impl GameApp {
         self.control_playback = None;
         self.saves.deferred_network_recreation.clear();
         self.saves.network_recreation_progress = None;
-        self.message_dialogs.clear();
+        self.dialogs.messages.clear();
         self.message_dialog_active_index = None;
         self.message_dialog_pointer_capture_index = None;
         self.league_signup_dialog = None;
@@ -4905,28 +4909,28 @@ impl GameApp {
         self.game_over_dialog = None;
         self.pending_league_end = None;
         self.pending_league_player_auth = None;
-        self.runtime_help_visible = false;
+        self.dialogs.help_visible = false;
         self.ingame_mouse_help = false;
         self.ingame_mouse_help_caption = None;
         self.runtime_flash_message = None;
         self.film_view_player = None;
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
-        self.runtime_client_list = None;
-        self.running_dialog_stack.clear();
+        self.dialogs.client_list = None;
+        self.dialogs.stack.clear();
         self.running_active_dialog = None;
-        self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list_above_game_over = false;
-        self.scoreboard_dialog = None;
-        self.scoreboard_initial_reconcile_pending = false;
-        self.scoreboard_close_pointer_capture = false;
-        self.scoreboard_runtime = ScoreboardDialogRuntime::default();
+        self.dialogs.client_list_consumed_keys.clear();
+        self.dialogs.client_list_above_game_over = false;
+        self.dialogs.scoreboard = None;
+        self.dialogs.scoreboard_initial_reconcile_pending = false;
+        self.dialogs.scoreboard_close_pointer_capture = false;
+        self.dialogs.scoreboard_runtime = ScoreboardDialogRuntime::default();
         self.network_stats = None;
         self.network_stats_clients.clear();
         self.network_stats_players.clear();
-        self.network_chart_dialog = None;
-        self.network_chart_consumed_keys.clear();
-        self.network_chart_pointer_capture = false;
+        self.dialogs.chart = None;
+        self.dialogs.chart_consumed_keys.clear();
+        self.dialogs.chart_pointer_capture = false;
         self.reset_runtime_default_dialog_order();
         // C4Application::QuitGame runs Game.Default and enters PreInit before
         // showing startup again. This is when a language selected in the

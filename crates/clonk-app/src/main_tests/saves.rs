@@ -1323,27 +1323,27 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     main_assert!(app.loading_state.is_none());
     main_assert!(app.definition_selector.is_none());
     main_assert!(app.status_text.is_empty());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Cannot start scenario.");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Cannot start scenario.");
     main_assert_eq!(
-            app.message_dialogs[0].state.message() =>
+            app.dialogs.messages[0].state.message() =>
             "This scenario is designed for a minimum of 1 players. Please go to the Player Selection dialog and activate the participants for this round."
         );
-    main_assert_eq!(app.message_dialogs[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
-    main_assert_eq!(app.message_dialogs[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Ok));
+    main_assert_eq!(app.dialogs.messages[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
+    main_assert_eq!(app.dialogs.messages[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Ok));
     let mut frame = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut frame);
     let ok = app.top_message_dialog_layout().test_value().buttons[0].rect;
     let ok_point = PhysicalPosition::new(f64::from(ok.x + ok.w / 2), f64::from(ok.y + ok.h / 2));
     app.test_cursor(ok_point);
-    main_assert!(app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(app.dialogs.messages[0].state.has_pointer_hover());
     main_assert_eq!(app.menu_state.pointer_position() => None, "the exclusive startup popup owns pointer movement");
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(ok_point.x + 1.0, ok_point.y));
-    main_assert!(app.message_dialogs[0].state.has_pointer_capture());
-    main_assert!(app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(app.dialogs.messages[0].state.has_pointer_capture());
+    main_assert!(app.dialogs.messages[0].state.has_pointer_hover());
     app.test_left_button(ElementState::Released);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.status_text.is_empty());
 
@@ -1368,10 +1368,10 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     app.test_cursor(close_point);
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(close_point.x + 1.0, close_point.y));
-    main_assert!(app.message_dialogs[0].state.has_pointer_capture());
-    main_assert!(app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(app.dialogs.messages[0].state.has_pointer_capture());
+    main_assert!(app.dialogs.messages[0].state.has_pointer_hover());
     app.test_left_button(ElementState::Released);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.loading_state.is_none());
     main_assert!(app.definition_selector.is_none());
@@ -1670,7 +1670,7 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
-    main_assert_eq!(app.message_dialogs.last().expect("empty-name modal").state.message() => "You must specify a player name!");
+    main_assert_eq!(app.dialogs.messages.last().expect("empty-name modal").state.message() => "You must specify a player name!");
     main_assert!(app.startup.player_properties_dialog.as_ref().is_some_and(|pending| pending.controller.validation_error().is_none()));
     main_assert!(app.startup.player_files.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
@@ -1765,7 +1765,7 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(Config::load(paths.config_file()).expect("reload reconciled config").get_in(Some("General"), "Participants") => Some(""));
 
-    let modal = app.message_dialogs.last().test_value();
+    let modal = app.dialogs.messages.last().test_value();
     main_assert_eq!(modal.state.caption() => "Error");
     main_assert!(modal.state.message().starts_with("Error opening file \""));
     main_assert!(modal.state.message().contains(&renamed.display().to_string()));
@@ -1776,7 +1776,7 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
 
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.startup.player_properties_dialog.is_none());
     main_assert!(app.startup.player_files.is_empty());
     main_assert_eq!(app.startup.player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => None);
@@ -1811,7 +1811,7 @@ fn startup_player_properties_save_failure_modal_names_step_and_path() {
     ]);
 
     let renamed = player_root.join("Renamed.c4p");
-    let modal = app.message_dialogs.last().test_value();
+    let modal = app.dialogs.messages.last().test_value();
     main_assert_eq!(modal.state.caption() => "Error");
     let message = modal.state.message().to_string();
     let expected_body = format!(
@@ -2389,7 +2389,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
 
-    let warning = app.message_dialogs.last().test_value();
+    let warning = app.dialogs.messages.last().test_value();
     main_assert_eq!(warning.state.buttons() => MessageDialogButtons::OK_CANCEL);
     main_assert_eq!(warning.state.focused_button() => Some(MessageDialogButton::Cancel), "the dangerous action defaults to Cancel");
     main_assert!(app.startup.options_advanced_dialog.is_none());
@@ -2683,7 +2683,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
         .test_value();
     main_assert!(app.startup.options_advanced_dialog.is_some(), "a failed Save keeps the draft editor open");
-    main_assert_eq!(app.message_dialogs.last().expect("advanced save error dialog").state.caption() => "Fehler");
+    main_assert_eq!(app.dialogs.messages.last().expect("advanced save error dialog").state.caption() => "Fehler");
     main_assert!(app.status_text.is_empty());
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
@@ -2726,7 +2726,7 @@ fn options_gamepad_capture_records_the_exact_axis_key() {
     )
     .test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.gamepad_bindings.raw_key_for_set(0, ControlBindingId::Dig) => input::legacy_gamepad_axis_key(0, 1, false));
 }
 
@@ -2797,7 +2797,7 @@ fn options_gamepad_capture_accepts_full_classic_raw_event_space() {
         app.process_sourced_gamepad_event_batch(events, true)
             .test_value();
 
-        main_assert!(app.message_dialogs.is_empty(), "capture closed its modal");
+        main_assert!(app.dialogs.messages.is_empty(), "capture closed its modal");
         main_assert_eq!(
             app.gamepad_bindings.raw_key_for_set(0, control) =>
             input::legacy_gamepad_axis_key(0, expected_axis, expected_high),
@@ -3887,7 +3887,7 @@ fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     main_assert_eq!(app.film_view_player => Some(second));
     app.keyboard_modifiers = ModifiersState::empty();
 
-    app.scoreboard_dialog = Some(app.scoreboard_request());
+    app.dialogs.scoreboard = Some(app.scoreboard_request());
     main_assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
     main_assert_eq!(app.film_view_player => Some(first), "the nonexclusive scoreboard does not acquire GUI key focus");
 
@@ -5131,16 +5131,16 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
         .map(|table| table.entries)
         .unwrap_or_default();
     app.report_offline_wild_takeovers(&takeovers).test_value();
-    main_assert_eq!(app.message_dialogs.len() => 2);
-    main_assert_eq!(app.message_dialogs[0].state.message() => "Participant Carol will continue for player Ghost from the savegame.");
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Player assignment");
-    main_assert_eq!(app.message_dialogs[1].state.message() => "Participant Dave will continue for player Stranger from the savegame.");
+    main_assert_eq!(app.dialogs.messages.len() => 2);
+    main_assert_eq!(app.dialogs.messages[0].state.message() => "Participant Carol will continue for player Ghost from the savegame.");
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Player assignment");
+    main_assert_eq!(app.dialogs.messages[1].state.message() => "Participant Dave will continue for player Stranger from the savegame.");
 
     // The checkbox persists Startup.HideMsgPlrTakeOver.
     // The `&Don't display...` mnemonic is how the native checkbox is toggled.
-    main_assert_eq!(app.message_dialogs[0].state.checkbox_checked() => Some(false));
-    app.message_dialogs[0].state.handle_hotkey('D');
-    main_assert_eq!(app.message_dialogs[0].state.checkbox_checked() => Some(true));
+    main_assert_eq!(app.dialogs.messages[0].state.checkbox_checked() => Some(false));
+    app.dialogs.messages[0].state.handle_hotkey('D');
+    main_assert_eq!(app.dialogs.messages[0].state.checkbox_checked() => Some(true));
     app.persist_message_dialog_checkbox_changes(0);
     // `ShowMessageModal` writes the `HideMsg*` flag through its by-pointer
     // argument and no call site saves (C4ChatDlg.cpp:624; no `Config.Save()` in
@@ -5156,13 +5156,13 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     hidden
         .report_offline_wild_takeovers(&takeovers)
         .test_value();
-    main_assert!(hidden.message_dialogs.is_empty());
+    main_assert!(hidden.dialogs.messages.is_empty());
 
     // An empty set never opens a dialog at all.
     let mut none = new_menu_app(320, 200);
     none.app_paths = Some(paths.clone());
     none.report_offline_wild_takeovers(&[]).test_value();
-    main_assert!(none.message_dialogs.is_empty());
+    main_assert!(none.dialogs.messages.is_empty());
 }
 
 /// `RestoreSavegameInfos` logs an unassociated current participant only for a
