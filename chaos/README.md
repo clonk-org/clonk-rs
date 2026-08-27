@@ -54,13 +54,21 @@ network-quality number.
   so the *shape* of contention is modelled but its absolute bitrate is not. A
   profile's capacity numbers are therefore comparable against each other and
   against the baseline, not against a wire capture.
-- **Resource transfer is not modelled on the shared sequence space.** The link
-  model has competing bulk traffic (`cross_traffic_*_bps`), but the session
-  harness does not yet put resource fragments into the same strictly-ordered
-  reliable-UDP stream as control. That is the mechanism behind the multi-second
-  control freezes seen when a peer is still downloading resources, so the
-  numbers here currently understate such a session. Tracked by
-  clonk-org/clonk-rs#1230.
+- **Resource transfer shares the ordered stream, and is reported apart from
+  bandwidth.** `joining-download` gives every peer an outstanding transfer whose
+  fragments are sequenced *ahead* of each tick's aggregate, so a fragment that
+  has to be repaired withholds the control behind it. That head-of-line stall is
+  the mechanism behind the multi-second freezes seen while a peer downloads, and
+  it is not something competing bandwidth can produce: cross traffic *delays* a
+  packet, an unrepaired fragment *withholds* it. The `resource stalled ms`
+  column and the `resource_*` baseline fields count only the second, so the two
+  causes never merge into one number. The sweep fails if no fragment ever
+  reaches the stream or none ever withholds an aggregate.
+
+  The fragment size is chosen to leave the host uplink headroom rather than to
+  saturate it. Oversubscribing the pipe makes the queue grow without bound, and
+  the profile then measures an uplink that cannot carry the transfer at all —
+  true, but it drowns the stall this profile exists to isolate.
 - The transport-level view (`clonk_network::sim`) and the session view
   (`clonk_network::sim_session`) are separate models. The session harness does not
   drive real `ReliableUdpEndpointCore` endpoints; it drives the real

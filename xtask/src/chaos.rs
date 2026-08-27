@@ -82,7 +82,24 @@ struct Profile {
     /// peers then cost the host nothing, because nothing carried the extra
     /// copies.
     host_uplink_bps: u32,
+    /// Resource bytes the host still owes every peer at session start. Zero
+    /// models peers that already hold every resource, which is what every
+    /// profile assumed before.
+    resource_bytes: u64,
 }
+
+/// Fragment size the transfer is cut into. Nominal, like every other payload
+/// here: what is being modelled is that fragments share the ordered stream
+/// with control, not a wire-accurate resource packet.
+///
+/// Sized to leave the host uplink headroom rather than to saturate it. At
+/// `HOST_UPLINK_BPS` one control period carries about 3.5 KB for the whole
+/// session, so a fragment per peer per tick at this size competes with control
+/// while still fitting. A larger fragment oversubscribes the pipe, and the
+/// queue then grows without bound: the profile measures an uplink that cannot
+/// carry the transfer at all, which drowns the head-of-line stall this exists
+/// to isolate.
+const RESOURCE_FRAGMENT_BYTES: u32 = 512;
 
 fn dialup() -> LinkConditions {
     LinkConditions {
@@ -121,6 +138,7 @@ fn profiles() -> Vec<Profile> {
             cpu: None,
             clients: 4,
             host_uplink_bps: 0,
+            resource_bytes: 0,
         },
         Profile {
             name: "slow-cpu-only",
@@ -129,6 +147,7 @@ fn profiles() -> Vec<Profile> {
             cpu: Some(CpuProfile::potato()),
             clients: 4,
             host_uplink_bps: 0,
+            resource_bytes: 0,
         },
         Profile {
             name: "bad-link-only",
@@ -137,6 +156,7 @@ fn profiles() -> Vec<Profile> {
             cpu: None,
             clients: 4,
             host_uplink_bps: 0,
+            resource_bytes: 0,
         },
         Profile {
             name: "potato-dialup",
@@ -145,6 +165,7 @@ fn profiles() -> Vec<Profile> {
             cpu: Some(CpuProfile::potato()),
             clients: 4,
             host_uplink_bps: HOST_UPLINK_BPS,
+            resource_bytes: 0,
         },
         Profile {
             name: "pi4-hotel-wifi",
@@ -153,6 +174,7 @@ fn profiles() -> Vec<Profile> {
             cpu: Some(CpuProfile::pi4()),
             clients: 4,
             host_uplink_bps: 0,
+            resource_bytes: 0,
         },
         Profile {
             name: "potato-dialup-8p",
@@ -162,6 +184,17 @@ fn profiles() -> Vec<Profile> {
             cpu: Some(CpuProfile::potato()),
             clients: 8,
             host_uplink_bps: HOST_UPLINK_BPS,
+            resource_bytes: 0,
+        },
+        Profile {
+            name: "joining-download",
+            description: "four peers still downloading resources while play continues; \
+                          fragments share the ordered stream with control",
+            link: Some(hotel_wifi()),
+            cpu: None,
+            clients: 4,
+            host_uplink_bps: HOST_UPLINK_BPS,
+            resource_bytes: 128 * 1024,
         },
     ]
 }
@@ -190,6 +223,12 @@ impl Profile {
             seed,
             presend_source,
             host_uplink_bps: self.host_uplink_bps,
+            resource_bytes: self.resource_bytes,
+            resource_fragment_bytes: if self.resource_bytes > 0 {
+                RESOURCE_FRAGMENT_BYTES
+            } else {
+                0
+            },
             ..SessionConfig::default()
         }
     }
@@ -227,6 +266,16 @@ struct ProfileMetrics {
     host_uplink_delayed_total: u64,
     /// Total delay it imposed, in microseconds.
     host_uplink_delay_us_total: u64,
+    /// Fragments the resource transfer put on the ordered stream, and how many
+    /// of them the link lost. Zero for a profile that models no transfer.
+    resource_fragments_total: u64,
+    resource_fragments_lost_total: u64,
+    /// Control aggregates withheld behind an unrepaired fragment, and the time
+    /// they spent withheld. Reported apart from the blocking numbers because
+    /// competing bandwidth *delays* a packet while an unrepaired fragment
+    /// ahead of it *withholds* it, and the two have different fixes.
+    resource_stalls_total: u64,
+    resource_stall_us_total: u64,
 }
 
 fn percentile_u64(sorted: &[u64], fraction: f64) -> u64 {
@@ -256,6 +305,8 @@ struct Coverage {
     datagram_drops: u64,
     queue_drops: u64,
     host_uplink_delays: u64,
+    resource_fragments: u64,
+    resource_stalls: u64,
 }
 
 impl Coverage {
@@ -279,6 +330,12 @@ impl Coverage {
         if self.host_uplink_delays == 0 {
             missing.push("the shared host uplink never delayed a payload");
         }
+        if self.resource_fragments == 0 {
+            missing.push("no resource fragment was ever put on the ordered stream");
+        }
+        if self.resource_stalls == 0 {
+            missing.push("no control aggregate was ever withheld behind a fragment");
+        }
         missing
     }
 }
@@ -298,6 +355,10 @@ fn measure(
     let mut unpublished_total = 0u64;
     let mut host_uplink_delayed_total = 0u64;
     let mut host_uplink_delay_us_total = 0u64;
+    let mut resource_fragments_total = 0u64;
+    let mut resource_fragments_lost_total = 0u64;
+    let mut resource_stalls_total = 0u64;
+    let mut resource_stall_us_total = 0u64;
 
     for seed in SEEDS {
         let report: SessionReport = run_session(&profile.session_with(seed, ticks, presend_source));
@@ -322,6 +383,12 @@ fn measure(
         host_uplink_delayed_total += report.host_uplink.delayed_payloads as u64;
         host_uplink_delay_us_total += report.host_uplink.delay.as_micros() as u64;
         coverage.host_uplink_delays += report.host_uplink.delayed_payloads as u64;
+        resource_fragments_total += report.resource_stream.fragments_sent as u64;
+        resource_fragments_lost_total += report.resource_stream.fragments_lost as u64;
+        resource_stalls_total += report.resource_stream.stalls as u64;
+        resource_stall_us_total += report.resource_stream.stall_total.as_micros() as u64;
+        coverage.resource_fragments += report.resource_stream.fragments_sent as u64;
+        coverage.resource_stalls += report.resource_stream.stalls as u64;
     }
 
     // The transport view of the same link, which is where datagram-level loss
@@ -363,6 +430,10 @@ fn measure(
         unpublished_total,
         host_uplink_delayed_total,
         host_uplink_delay_us_total,
+        resource_fragments_total,
+        resource_fragments_lost_total,
+        resource_stalls_total,
+        resource_stall_us_total,
     }
 }
 
@@ -398,7 +469,7 @@ fn render_table(metrics: &[ProfileMetrics]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<20} {:>10} {:>10} {:>11} {:>11} {:>9} {:>8} {:>10} {:>10}",
+        "{:<20} {:>10} {:>10} {:>11} {:>11} {:>9} {:>8} {:>10} {:>10} {:>11}",
         "profile",
         "blocked",
         "blocked",
@@ -407,17 +478,27 @@ fn render_table(metrics: &[ProfileMetrics]) -> String {
         "dropped",
         "forced",
         "horizon",
-        "host up"
+        "host up",
+        "resource"
     );
     let _ = writeln!(
         out,
-        "{:<20} {:>10} {:>10} {:>11} {:>11} {:>9} {:>8} {:>10} {:>10}",
-        "", "p50 ‰", "max ‰", "drift p50", "drift p50", "inputs", "ticks", "p50", "held ms"
+        "{:<20} {:>10} {:>10} {:>11} {:>11} {:>9} {:>8} {:>10} {:>10} {:>11}",
+        "",
+        "p50 ‰",
+        "max ‰",
+        "drift p50",
+        "drift p50",
+        "inputs",
+        "ticks",
+        "p50",
+        "held ms",
+        "stalled ms"
     );
     for metric in metrics {
         let _ = writeln!(
             out,
-            "{:<20} {:>10} {:>10} {:>10}ms {:>10}ms {:>9} {:>8} {:>8}us {:>10}",
+            "{:<20} {:>10} {:>10} {:>10}ms {:>10}ms {:>9} {:>8} {:>8}us {:>10} {:>11}",
             metric.name,
             metric.healthy_blocked_permille_median,
             metric.healthy_blocked_permille_worst,
@@ -427,6 +508,7 @@ fn render_table(metrics: &[ProfileMetrics]) -> String {
             metric.forced_ticks_total,
             metric.healthy_horizon_us_median,
             metric.host_uplink_delay_us_total / 1_000,
+            metric.resource_stall_us_total / 1_000,
         );
     }
     out
@@ -453,7 +535,11 @@ fn to_json(metrics: &[ProfileMetrics]) -> String {
                 "      \"healthy_horizon_us_median\": {},\n",
                 "      \"unpublished_total\": {},\n",
                 "      \"host_uplink_delayed_total\": {},\n",
-                "      \"host_uplink_delay_us_total\": {}\n",
+                "      \"host_uplink_delay_us_total\": {},\n",
+                "      \"resource_fragments_total\": {},\n",
+                "      \"resource_fragments_lost_total\": {},\n",
+                "      \"resource_stalls_total\": {},\n",
+                "      \"resource_stall_us_total\": {}\n",
                 "    }}"
             ),
             metric.name,
@@ -471,6 +557,10 @@ fn to_json(metrics: &[ProfileMetrics]) -> String {
             metric.unpublished_total,
             metric.host_uplink_delayed_total,
             metric.host_uplink_delay_us_total,
+            metric.resource_fragments_total,
+            metric.resource_fragments_lost_total,
+            metric.resource_stalls_total,
+            metric.resource_stall_us_total,
         );
         out.push_str(if index + 1 == metrics.len() {
             "\n"
@@ -597,13 +687,16 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
         }
         println!(
             "\ncoverage ok: {} stalls, {} forced ticks, {} dropped inputs, {} datagram drops \
-             ({} from full queues), {} payloads held back by the shared host uplink",
+             ({} from full queues), {} payloads held back by the shared host uplink, \
+             {} resource fragments on the ordered stream ({} aggregates withheld behind one)",
             coverage.stalls,
             coverage.forced,
             coverage.dropped_inputs,
             coverage.datagram_drops,
             coverage.queue_drops,
-            coverage.host_uplink_delays
+            coverage.host_uplink_delays,
+            coverage.resource_fragments,
+            coverage.resource_stalls
         );
     }
 
@@ -743,6 +836,10 @@ mod tests {
             unpublished_total: 99,
             host_uplink_delayed_total: 111,
             host_uplink_delay_us_total: 222,
+            resource_fragments_total: 333,
+            resource_fragments_lost_total: 44,
+            resource_stalls_total: 55,
+            resource_stall_us_total: 666,
         }];
         let json = to_json(&metrics);
 
@@ -753,6 +850,16 @@ mod tests {
         assert_eq!(
             baseline_lookup(&json, "sample", "healthy_horizon_us_median"),
             Some(88)
+        );
+        // The ordered-stream columns have to survive the round trip too, or a
+        // recorded baseline cannot be compared on them.
+        assert_eq!(
+            baseline_lookup(&json, "sample", "resource_fragments_total"),
+            Some(333)
+        );
+        assert_eq!(
+            baseline_lookup(&json, "sample", "resource_stall_us_total"),
+            Some(666)
         );
         assert_eq!(
             baseline_lookup(&json, "sample", "unpublished_total"),
