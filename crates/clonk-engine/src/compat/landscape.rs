@@ -1187,9 +1187,7 @@ pub(crate) fn path_free2(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
     let x1 = x_arg.read()?.as_c4_int().unwrap_or(0);
     let y1 = y_arg.read()?.as_c4_int().unwrap_or(0);
 
-    let hit = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let hit = with_host_context(None, |context| {
         let landscape = context.landscape_ref()?;
         Some(match context.world.materials() {
             Some(materials) => {
@@ -2076,9 +2074,7 @@ pub(crate) fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     };
 
-    let preflight = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let preflight = with_host_context_mut(None, |context| {
         let Some((landscape_width, landscape_height, map_zoom, retained_creator)) =
             context.world.landscape_ref().and_then(|landscape| {
                 let (landscape_width, landscape_height) = landscape.grid_dimensions()?;
@@ -2222,9 +2218,7 @@ pub(crate) fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     };
 
-    let preflight = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let preflight = with_host_context_mut(None, |context| {
         let Some((landscape_width, landscape_height, map_zoom, map_creator)) =
             context.world.landscape_ref().and_then(|landscape| {
                 let (landscape_width, landscape_height) = landscape.grid_dimensions()?;

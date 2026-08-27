@@ -1012,9 +1012,7 @@ pub(crate) fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
 /// C4GuiDialogs.cpp:113-114). SetByDef snapshots five definition callbacks
 /// and eight ActMap facets immediately.
 fn build_frame_decoration_snapshot(deco_id: &str) -> Option<crate::ObjectMenuFrameDecoration> {
-    let (metadata, script) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let (metadata, script) = with_host_context(None, |context| {
         Some((
             context.definition_metadata(deco_id).cloned()?,
             context.world.definition_script(deco_id).cloned()?,
@@ -1654,9 +1652,7 @@ pub(crate) fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
 /// scope, including SetRefillObject's immediate full refill. No HOST_CONTEXT
 /// borrow is held while the Activate builder calls GetValue/CalcValue.
 pub(crate) fn preview_prepare_put_take_menu(request: MenuRequest) -> bool {
-    let prepared = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let prepared = with_host_context(None, |context| {
         let target = match &request.kind {
             MenuRequestKind::Activate => context
                 .get_world_object(request.crew_id)

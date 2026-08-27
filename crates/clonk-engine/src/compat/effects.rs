@@ -1673,9 +1673,7 @@ fn dispatch_effect_fx_callback_with_parameter_conversion_policy(
 pub(crate) fn object_effect_info_lines(target: ObjectId) -> Vec<String> {
     let target_value = object_reference_value(target);
     let mut lines = Vec::new();
-    let mut current_number = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let mut current_number = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(target) {
             return None;
         }
@@ -1777,9 +1775,7 @@ pub(crate) fn dispatch_effects_do_damage(
     cause: i32,
     caused_by: i32,
 ) -> Option<i32> {
-    let mut current_number = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let mut current_number = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(target) {
             return None;
         }
@@ -1896,9 +1892,7 @@ pub(crate) fn explode(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
 
-    let pre_removal = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let pre_removal = with_host_context(None, |context| {
         let object = context.get_world_object(target)?;
         let scope = context.object_scope(target);
         Some((
@@ -1915,9 +1909,7 @@ pub(crate) fn explode(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let _ = assign_removal_live(target, false)?;
-    let position = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let position = with_host_context(None, |context| {
         context
             .object_scope(target)
             .map(ObjectScopeContext::effective_position)
@@ -1964,9 +1956,7 @@ fn native_explosion(
 
     // Resolve containment once, before any visual-effect callbacks, and keep
     // that pointer for the later second BlastObjects pass.
-    let contain_blast = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let contain_blast = with_host_context(None, |context| {
         let mut container = in_object;
         while let Some(candidate) = container {
             let definition = effective_definition_id(context, candidate);
@@ -2040,9 +2030,7 @@ fn native_explosion_visual(
     effect_id: Option<String>,
     effect_name: &str,
 ) -> Result<(), RuntimeError> {
-    let selected_particle = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let selected_particle = with_host_context(None, |context| {
         let default =
             (context.particle_def_known("Blast") != Some(false)).then(|| "Blast".to_string());
         if !effect_name.is_empty() && context.particle_def_known(effect_name) != Some(false) {
@@ -2084,9 +2072,7 @@ fn native_explosion_visual(
     }
 
     let definition = effect_id.unwrap_or_else(|| "FXB1".to_string());
-    let controller = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let controller = with_host_context(None, |context| {
         context
             .object_scope(by_object)
             .map(ObjectScopeContext::controller)
@@ -2176,9 +2162,7 @@ fn native_blast_objects(
     caused_by: i32,
     by_object: Option<ObjectId>,
 ) -> Result<(), RuntimeError> {
-    let blast_layer = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let blast_layer = with_host_context(None, |context| {
         by_object.and_then(|object| context.object_layer(object))
     });
 
@@ -2221,9 +2205,7 @@ fn native_blast_objects(
     for id in ids {
         // Status/containment/layer are the outer C++ if-chain and are tested
         // once. A direct Blast callback may mutate later shockwave inputs.
-        let direct_hit = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let direct_hit = with_host_context(None, |context| {
             let object = context.get_world_object(id)?;
             let container = context
                 .object_scope(id)
@@ -2258,9 +2240,7 @@ fn native_blast_objects(
 
         // C++ stays inside the already-passed outer block but reads these
         // fields after the direct Blast callback.
-        let living_shockwave = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let living_shockwave = with_host_context(None, |context| {
             let object = context.get_world_object(id)?;
             let scope = context.object_scope(id);
             let category = scope
@@ -2325,9 +2305,7 @@ fn native_blast_objects(
 
         // Living damage callbacks precede both force calculations. p2 is
         // evaluated before p1, and p1 alone consumes one Rnd3 value.
-        let force_state = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let force_state = with_host_context(None, |context| {
             let object = context.get_world_object(id)?;
             let scope = context.object_scope(id);
             Some((
@@ -2726,9 +2704,7 @@ fn fire_effect_start_core(
                 .unwrap_or_default()
         });
         for content in contents {
-            let parent = HOST_CONTEXT.with(|cell| {
-                let mut borrow = cell.borrow_mut();
-                let context = borrow.as_mut()?;
+            let parent = with_host_context_mut(None, |context| {
                 let target_object = context.get_world_object(target)?;
                 let content_object = context.get_world_object(content)?;
                 if !target_object.is_present()
@@ -2767,9 +2743,7 @@ fn fire_effect_start_core(
         // pFindNext from Game.Objects makes the next search stop.
         let mut previous = None;
         loop {
-            let candidate = HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let context = borrow.as_ref()?;
+            let candidate = with_host_context(None, |context| {
                 let master_ids = context
                     .master_object_ids()
                     .into_iter()

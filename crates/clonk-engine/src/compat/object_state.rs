@@ -154,9 +154,7 @@ pub(crate) fn assign_death_live(target: ObjectId, forced: bool) -> Result<bool, 
     // C++ snapshots pPlr from the current Owner before ClearPointers. The
     // callbackful cursor adjustment may subsequently change Owner, Category
     // or FoW membership, but the retention test still uses that same player.
-    let owner_player = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let owner_player = with_host_context(None, |context| {
         let owner = context.object_scope(target)?.owner();
         context.player_state(owner).map(|_| owner)
     });
@@ -704,9 +702,7 @@ pub(crate) fn death_announce(args: &[Value]) -> Result<Value, RuntimeError> {
     // `script_object_context` is cthr->Obj. The mutable carrier scope can
     // still exist for a definition-owned callback whose script object is
     // null, and must not make DeathAnnounce succeed.
-    let state = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let state = with_host_context(None, |context| {
         let target = context.script_object_context?;
         let film = matches!(
             context.world.scenario_value("Film", Some("Head"), 0),
@@ -1364,9 +1360,7 @@ pub(crate) fn get_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    let resolution = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let resolution = with_host_context(None, |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let target = target?;
         if let Some(object) = context.object_scope(target) {
@@ -1986,9 +1980,7 @@ pub(crate) fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
 /// low-level construction primitive is also used by NewObject's initial
 /// pass, so all non-initial side arms live here instead of in that primitive.
 pub(crate) fn do_con_live(target: ObjectId, delta: i32) -> Result<bool, RuntimeError> {
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let staged = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(target) {
             return None;
         }
@@ -2047,9 +2039,7 @@ pub(crate) fn do_con_live(target: ObjectId, delta: i32) -> Result<bool, RuntimeE
     if refresh && after < FULL_CON {
         if !metadata.fire.incomplete_activity {
             loop {
-                let next = HOST_CONTEXT.with(|cell| {
-                    let borrow = cell.borrow();
-                    let context = borrow.as_ref()?;
+                let next = with_host_context(None, |context| {
                     let object = context.get_world_object(target)?;
                     Some((first_retained_content(context, target)?, object.container()))
                 });
@@ -3506,9 +3496,7 @@ pub(crate) fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_ref()
             .map(|context| fixed100(context.gravity()) / 5)
     });
-    let launch = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let launch = with_host_context(None, |context| {
         let object = context.object_scope(object_id)?;
         let walk = physical.walk;
         let jump_physical = physical.jump;
@@ -4366,9 +4354,7 @@ pub(crate) fn shake_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
 
     for id in ids {
-        let candidate = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let candidate = with_host_context(None, |context| {
             let object = context.get_world_object(id)?;
             let category = context
                 .object_scope(id)
@@ -4391,9 +4377,7 @@ pub(crate) fn shake_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         if !inside || draw_context_random(3)? != 0 {
             continue;
         }
-        let attached_to_world = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let attached_to_world = with_host_context(None, |context| {
             let t_attach = context
                 .object_scope(id)
                 .map(ObjectScopeContext::t_attach)
@@ -6613,9 +6597,7 @@ pub(crate) fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
 /// Live host-side `C4Object::SetOwner`. The callback must run before the
 /// outer VM resumes, so this cannot be deferred to ObjectUpdate folding.
 fn set_owner_live(target: ObjectId, new_owner: i32) -> bool {
-    let staged: Option<Option<i32>> = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let staged: Option<Option<i32>> = with_host_context_mut(None, |context| {
         if new_owner != OWNER_NONE && context.player_state(new_owner).is_none() {
             return None;
         }

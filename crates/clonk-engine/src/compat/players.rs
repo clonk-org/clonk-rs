@@ -748,9 +748,7 @@ pub(crate) fn set_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     }
 
-    let switched = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let switched = with_host_context_mut(None, |context| {
         // RejectTeamSwitch may itself have changed the player. C++ searches
         // the old roster only after that callback, so capture the live value
         // here rather than the preflight snapshot.
@@ -4013,9 +4011,7 @@ fn call_crew_selection_callback(target: ObjectId, unselect: bool, cursor: bool) 
 /// C4Object::DoSelect (C4Object.cpp:5815-5824). Returns false only for an
 /// unknown target; CrewDisabled is a successful callback-less no-op.
 fn do_select_host_object(target: ObjectId, cursor: bool) -> bool {
-    let disposition = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let disposition = with_host_context_mut(None, |context| {
         context.get_world_object(target)?;
         if context.object_crew_disabled(target).unwrap_or(false) {
             return Some(false);
@@ -4166,9 +4162,7 @@ pub(crate) fn clear_owner_death_pointers_host(target: ObjectId, owner: i32) {
 
 /// C4Player::AdjustCursorCommand (C4Player.cpp:1235-1258).
 fn adjust_cursor_host(player_id: i32) -> bool {
-    let Some((previous, next)) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let Some((previous, next)) = with_host_context_mut(None, |context| {
         context.player_state_mut(player_id)?.reset_cursor_view();
         context.record_player_command(PlayerCommand::ResetCursorView { player_id });
         let player = context.player_state(player_id)?.clone();
@@ -4461,9 +4455,7 @@ pub(crate) fn unselect_crew_host(args: &[Value]) -> Result<Value, RuntimeError> 
         "UnselectCrew",
         "player",
     )?;
-    let Some((crew, cursor)) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let Some((crew, cursor)) = with_host_context(None, |context| {
         let player = context.player_state(player_id)?;
         Some((player.crew.clone(), player.cursor))
     }) else {
@@ -4509,9 +4501,7 @@ pub(crate) fn set_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
         "SetCursor",
         "no select crew",
     )?;
-    let Some((previous, disabled)) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let Some((previous, disabled)) = with_host_context_mut(None, |context| {
         if context.world.player(player_id).is_none() {
             return None;
         }
@@ -4621,9 +4611,7 @@ pub(crate) fn set_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
 /// CrewSelection callbacks and copied-player preview; the final record after
 /// clearing the two latches makes the authoritative fold retain that state.
 pub(crate) fn update_player_selection_toggle_status_host(player_id: i32) {
-    let Some((cursor_selection, cursor_toggled)) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let Some((cursor_selection, cursor_toggled)) = with_host_context(None, |context| {
         let player = context.player_state(player_id)?;
         Some((
             player.control.cursor_selection,

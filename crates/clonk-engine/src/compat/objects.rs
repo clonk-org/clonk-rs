@@ -103,9 +103,7 @@ pub(crate) fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
         // C4Def::GetComponentCount/GetIndexedComponent run the definition's
         // GetCustomComponents with cthr->Obj as the builder. Capture that
         // object before the nested callback changes or removes it.
-        let builder = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let builder = with_host_context(None, |context| {
             context.definition_metadata(&definition)?;
             Some(context.script_object_context)
         });
@@ -206,9 +204,7 @@ pub(crate) fn get_needed_mat_str(args: &[Value]) -> Result<Value, RuntimeError> 
     // Capture Def before GetCustomComponents runs. The callback may mutate
     // the live object, but C++ has already selected `pObj->Def` for the
     // component query at that point.
-    let target_and_recipe = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let target_and_recipe = with_host_context(None, |context| {
         let target = explicit_target.or(context.script_object_context)?;
         let definition = context.object_effective_definition_id(target)?;
         Some((target, context.script_object_context, definition))
@@ -321,9 +317,7 @@ pub(crate) fn component_all(args: &[Value]) -> Result<Value, RuntimeError> {
     // Capture Def and cthr->Obj before the callback. The overload may mutate
     // either object, but C++ has already selected the recipe definition and
     // builder passed to C4Def::GetComponents at that point.
-    let definition_and_builder = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let definition_and_builder = with_host_context(None, |context| {
         Some((
             context.object_effective_definition_id(target)?,
             context.script_object_context,
@@ -920,9 +914,7 @@ pub(crate) fn bounds_check_live_object(target: ObjectId, position: &mut Vector2)
         apply_live_target_bounds(target, &mut position.x, low, high, CNAT_LEFT, CNAT_RIGHT);
     }
 
-    let landscape_side = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let landscape_side = with_host_context(None, |context| {
         let definition_id = context.object_effective_definition_id(target)?;
         let metadata = context.definition_metadata(&definition_id)?;
         if metadata.border_bound & C4D_BORDER_SIDES == 0 {
@@ -944,9 +936,7 @@ pub(crate) fn bounds_check_live_object(target: ObjectId, position: &mut Vector2)
         apply_live_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
     }
 
-    let top = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let top = with_host_context(None, |context| {
         let definition_id = context.object_effective_definition_id(target)?;
         let metadata = context.definition_metadata(&definition_id)?;
         if metadata.border_bound & C4D_BORDER_TOP == 0 {
@@ -961,9 +951,7 @@ pub(crate) fn bounds_check_live_object(target: ObjectId, position: &mut Vector2)
         apply_live_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
     }
 
-    let bottom = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let bottom = with_host_context(None, |context| {
         let definition_id = context.object_effective_definition_id(target)?;
         let metadata = context.definition_metadata(&definition_id)?;
         if metadata.border_bound & C4D_BORDER_BOTTOM == 0 {
@@ -1146,9 +1134,7 @@ fn clear_contents_and_contained_live(target: ObjectId, f_calls: bool) -> Result<
     });
     let mut iterator = crate::direct_com::RemovalSafeContentsIterator::new(target, &initial_links);
     loop {
-        let links_and_position = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let links_and_position = with_host_context(None, |context| {
             let object = context.get_world_object(target)?;
             let links = object
                 .contents()
@@ -1169,9 +1155,7 @@ fn clear_contents_and_contained_live(target: ObjectId, f_calls: bool) -> Result<
 
     // C++ re-reads x/y after all content callbacks, so an Ejection or
     // Departure callback that moves the object affects its own later Exit.
-    let contained_position = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let contained_position = with_host_context(None, |context| {
         let object = context.get_world_object(target)?;
         object.container().map(|_| object.position)
     });
@@ -1412,9 +1396,7 @@ fn enter_object_live_internal(
 
     if f_calls {
         call_object_own_fail_safe(container, "Collection2", &[object_reference_value(target)]);
-        let entrance_container = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let entrance_container = with_host_context(None, |context| {
             let current = context.get_world_object(target)?.container()?;
             let current_live = context
                 .get_world_object(current)
@@ -1951,9 +1933,7 @@ fn auto_sell_after_enter(
     entering: ObjectId,
     original_target: ObjectId,
 ) -> Result<(), RuntimeError> {
-    let sale = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let sale = with_host_context(None, |context| {
         if !context.world.base_auto_sell_enabled
             || !context
                 .get_world_object(original_target)
@@ -2405,9 +2385,7 @@ pub(crate) fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     // The SUBJECT's live Shape.y (C4Script.cpp:385): a same-call SetShape
     // override wins over the def shape. Read it only after the attach
     // AbortCall, which may change the shape or definition.
-    let shape_y = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let shape_y = with_host_context(None, |context| {
         Some(
             live_object_shape(context, target)
                 .map(|shape| shape.y)
@@ -2601,9 +2579,7 @@ pub(crate) fn get_value(args: &[Value]) -> Result<Value, RuntimeError> {
             .unwrap_or(Value::Nil));
     }
 
-    let target = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let target = with_host_context(None, |context| {
         target.or_else(|| context.object_context().map(ObjectScopeContext::id))
     });
     let Some(target) = target else {
@@ -2623,9 +2599,7 @@ pub(crate) fn get_value(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(result) => result?.as_c4_int().unwrap_or(0),
         None => calculated_definition_value(&definition, None, player)?.unwrap_or(0),
     };
-    let construction = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let construction = with_host_context(None, |context| {
         context
             .object_scope(target)
             .map(ObjectScopeContext::construction)
@@ -3224,9 +3198,7 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     // The cyclic relink (C4ObjectList::ShiftContents, C4ObjectList.cpp:
     // 815-833) via ObjectUpdate.contents_front.
-    let shifted = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let shifted = with_host_context_mut(None, |context| {
         let shifted = context.rotate_contents_link_to_front(container, new_front);
         if shifted {
             if let Some(object) = context.object_context_mut() {
@@ -7358,9 +7330,7 @@ pub(crate) fn create_native_object(
         })
         .unwrap_or(metadata);
 
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let staged = with_host_context_mut(None, |context| {
         let before = context.object_scope(target)?.construction();
         let entry_position = context.object_scope(target)?.effective_position();
         let entry_shape = live_object_shape(context, target);
@@ -7414,9 +7384,7 @@ pub(crate) fn create_native_object(
     if refresh && staged_construction < FULL_CON {
         if !metadata.fire.incomplete_activity {
             loop {
-                let next = HOST_CONTEXT.with(|cell| {
-                    let borrow = cell.borrow();
-                    let context = borrow.as_ref()?;
+                let next = with_host_context(None, |context| {
                     let object = context.get_world_object(target)?;
                     Some((first_retained_content(context, target)?, object.container()))
                 });
@@ -7474,9 +7442,7 @@ pub(crate) fn create_native_object(
         }
     }
 
-    let final_construction = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let final_construction = with_host_context_mut(None, |context| {
         let current_shape = live_object_shape(context, target);
         let scope = context.object_scope_mut(target)?;
         let current_position = scope.effective_position();
@@ -7574,9 +7540,7 @@ pub(crate) fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let mut last = Value::Nil;
     for _ in 0..count {
-        let owner = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let owner = with_host_context(None, |context| {
             context
                 .object_scope(container)
                 .map(ObjectScopeContext::owner)
@@ -7888,9 +7852,7 @@ pub(crate) fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError>
             let ydir = draw_context_rnd3()?;
             let xdir = draw_context_rnd3()?;
             let rotation = draw_context_random(360)?;
-            let creation = HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let context = borrow.as_ref()?;
+            let creation = with_host_context(None, |context| {
                 let source_state = context.get_world_object(source)?;
                 let owner = context
                     .object_scope(source)

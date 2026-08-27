@@ -57,9 +57,7 @@ pub(crate) fn with_fair_crew_definition_context<T>(
     // cthr->Obj=null and cthr->Def set to the physical's definition. Move
     // the suspended object scope, rather than cloning it, so explicit-object
     // natives in the hook still reach and mutate that one live scope.
-    let host = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let host = with_host_context_mut(None, |context| {
         let active = context.object.take();
         context.dormant_scopes.push(active);
         Some(FairCrewHostContextState {
@@ -2605,9 +2603,7 @@ pub(crate) fn with_effects_from_context<R>(
     scope: EffectScope,
     func: impl FnOnce(&[EffectState]) -> R,
 ) -> Option<R> {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    with_host_context(None, |context| {
         context
             .scope(scope)
             .map(|scope| func(scope.effects.as_slice()))
