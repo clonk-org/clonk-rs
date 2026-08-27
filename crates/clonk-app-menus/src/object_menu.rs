@@ -3938,10 +3938,6 @@ mod tests {
         }
     }
 
-    fn repository_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-    }
-
     // C++ GL capture oracle (2026-07-21, Drachenfels choice-menu
     // tooltip at (942,580) 182x26 in Screenshot001.png): every frame pixel
     // over the opaque #F1EA78 fill — corners included — reads (121,117,60):
@@ -3997,6 +3993,8 @@ mod tests {
         assert_eq!(surface.get_pixel(7, 9), divider);
         assert_eq!(surface.get_pixel(13, 5), divider);
     }
+
+    use clonk_app_core::test_support::repository_root;
 
     fn solid_image(width: u32, height: u32, color: Color) -> ImageData {
         ImageData::new(

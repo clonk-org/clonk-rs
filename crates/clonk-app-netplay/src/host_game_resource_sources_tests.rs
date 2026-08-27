@@ -1,3 +1,4 @@
+use clonk_app_core::test_support::repository_root;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -812,11 +813,4 @@ fn path_bytes(path: &Path) -> Vec<u8> {
 #[cfg(not(unix))]
 fn path_bytes(path: &Path) -> Vec<u8> {
     clonk_script::c4_string_bytes(path.to_string_lossy().as_ref())
-}
-
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
 }

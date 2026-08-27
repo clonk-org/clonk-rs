@@ -5,6 +5,8 @@
 pub mod menu_images;
 pub mod native_config;
 pub mod pictures;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 use std::fmt;
 

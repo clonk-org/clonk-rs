@@ -34,6 +34,7 @@ tracing = "0.1"
 [dev-dependencies]
 # Keep clonk-engine's property-test dependencies in this test graph so focused
 # netplay-crate runs share one clonk-engine fingerprint with the workspace gate.
+clonk-app-core = { path = "../clonk-app-core", features = ["test-support"] }
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
 flate2 = "1"
 # Match clonk-app's image feature request so both test graphs resolve one

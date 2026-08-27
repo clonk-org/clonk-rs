@@ -29,6 +29,7 @@ tracing = "0.1"
 [dev-dependencies]
 # Keep clonk-engine's property-test dependencies in this test graph so focused
 # menu-crate runs share one clonk-engine fingerprint with the workspace gate.
+clonk-app-core = { path = "../clonk-app-core", features = ["test-support"] }
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
 # Match clonk-app's plain serde_json request so both test graphs resolve one
 # serde_json fingerprint.

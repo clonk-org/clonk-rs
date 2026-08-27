@@ -9,6 +9,12 @@ repository.workspace = true
 readme.workspace = true
 publish.workspace = true
 
+[features]
+# Fixture utilities for the extracted app crates' tests. Only dev-dependencies
+# enable it, so nothing here reaches a production build
+# (clonk-org/clonk-rs#1260).
+test-support = []
+
 [dependencies]
 clonk-core = { path = "../clonk-core" }
 clonk-engine = { path = "../clonk-engine" }

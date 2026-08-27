@@ -1,3 +1,4 @@
+use clonk_app_core::test_support::repository_root;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -2614,13 +2615,6 @@ fn minimal_install(game: Option<&[u8]>) -> MinimalInstall {
         scenario_text,
         definition_modules: vec!["Defs.c4d".to_owned()],
     }
-}
-
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
 }
 
 #[derive(Default)]
