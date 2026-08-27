@@ -1151,6 +1151,20 @@ fn install_contact_oracle_landscape(
 }
 
 /// The material library the `shape_contact` grid's bytes map onto.
+/// The bytes a packed parent stores for its `RawChild.c4g` entry.
+///
+/// Read back through a fresh open, so the comparison is against what the
+/// container actually holds rather than against the standalone file it was
+/// built from — a parent may pack a child differently from how it sat on disk,
+/// and the claim under test is only that a *rewrite* leaves those stored bytes
+/// alone.
+fn raw_child_bytes(packed: &[u8]) -> Vec<u8> {
+    clonk_resources::Group::from_top_level_memory("RawParent.c4g".into(), packed.to_vec())
+        .ok()
+        .and_then(|group| group.read_file("RawChild.c4g").ok())
+        .unwrap_or_default()
+}
+
 fn contact_oracle_materials() -> clonk_resources::MaterialLibrary {
     clonk_resources::MaterialLibrary::parse(
         r#"
@@ -14028,6 +14042,138 @@ protected func ContactBottom()
             assert_eq!(
                 actual, expected,
                 "PARITY DIVERGENCE in `{label}` field `order`: C++ golden = {expected:?}, Rust = {actual:?}"
+            );
+        }
+    }
+
+    // 16h1b. c4group_raw_child_rewrite: `C4Group::Save`/`Close` stream every
+    //        entry back out through `AppendEntry2StdFile`
+    //        (C4Group.cpp:907-1050,1090+). A stored child group the caller
+    //        never opened has to survive that byte-for-byte; only a child the
+    //        caller actually replaced may be materialized anew. The port
+    //        reaches the same decision through `Group::requires_rewrite`,
+    //        which keeps `raw_image()` verbatim when nothing forced a repack.
+    for case in golden["c4group_raw_child_rewrite"]
+        .as_array()
+        .expect("c4group_raw_child_rewrite is an array")
+    {
+        use clonk_resources::{Group, MutableGroup};
+
+        let name = case["name"].as_str().unwrap_or("?");
+        let label = format!("c4group_raw_child_rewrite[{name}]");
+        let modify_sibling = i(case, "modify_sibling") != 0;
+        let modify_child = i(case, "modify_child") != 0;
+
+        // The child, packed on its own exactly as the oracle builds it first.
+        let mut child = MutableGroup::new("RawChild.c4g");
+        child
+            .add_file_bytes_with_metadata("Inside.txt", b"child-payload".to_vec(), 1000, false)
+            .expect("child entry adds");
+        let child_image = child.pack().expect("child packs");
+        let child_crc = child.contents_crc();
+
+        let mut parent = MutableGroup::new("RawParent.c4g");
+        parent
+            .add_file_bytes_with_metadata("Sibling.txt", b"sibling-v1".to_vec(), 2000, false)
+            .expect("sibling adds");
+        parent
+            .add_packed_child_bytes_with_metadata(
+                "RawChild.c4g",
+                child_image.clone(),
+                child_crc,
+                3000,
+                false,
+            )
+            .expect("packed child adds");
+        let packed = parent.pack().expect("parent packs");
+
+        let stored_before = raw_child_bytes(&packed);
+
+        // The rewrite: reopen, apply the case's modification, pack again.
+        let opened = Group::from_top_level_memory("RawParent.c4g".into(), packed.clone())
+            .expect("parent opens");
+        let mut rewritten = MutableGroup::from_group(&opened).expect("parent copies");
+        if modify_sibling {
+            rewritten
+                .add_file_bytes_with_metadata(
+                    "Sibling.txt",
+                    b"sibling-v2-longer".to_vec(),
+                    3000,
+                    false,
+                )
+                .expect("sibling replaces");
+        }
+        if modify_child {
+            rewritten
+                .add_packed_child_bytes_with_metadata(
+                    "RawChild.c4g",
+                    b"replaced-child".to_vec(),
+                    0,
+                    4000,
+                    false,
+                )
+                .expect("child replaces");
+        }
+        let repacked = rewritten.pack().expect("parent repacks");
+        let stored_after = raw_child_bytes(&repacked);
+
+        let preserved = !stored_after.is_empty() && stored_after == stored_before;
+        expect_eq(
+            &label,
+            0,
+            "child_bytes_preserved",
+            i(case, "child_bytes_preserved"),
+            i64::from(preserved),
+        );
+
+        let reopened = Group::from_top_level_memory("RawParent.c4g".into(), repacked)
+            .expect("rewritten parent opens");
+        let entries = reopened.entries().expect("rewritten parent lists entries");
+        let expected = case["entries"]
+            .as_array()
+            .expect("c4group_raw_child_rewrite entries");
+        expect_eq(
+            &label,
+            0,
+            "entry_count",
+            expected.len() as i64,
+            entries.len() as i64,
+        );
+        for (expected, actual) in expected.iter().zip(&entries) {
+            let entry_label = format!(
+                "{label}.entry[{}]",
+                expected["name"].as_str().unwrap_or("?")
+            );
+            expect_json_eq(
+                &entry_label,
+                0,
+                "name",
+                expected["name"].clone(),
+                serde_json::json!(String::from_utf8_lossy(&actual.name_bytes)),
+            );
+            // Absolute packed sizes are deliberately not compared. They depend
+            // on how each engine *constructs* a group, which is a wider claim
+            // than this section owns and which the two do not currently agree
+            // on to the byte (clonk-org/clonk-rs#1191 records the measurement).
+            // What matters here is that a rewrite does not disturb a child it
+            // was not asked to touch, which `child_bytes_preserved` states
+            // directly.
+            expect_eq(
+                &entry_label,
+                0,
+                "child",
+                i(expected, "child"),
+                i64::from(actual.is_directory),
+            );
+            // C++'s public surface reports the time it stored and the CRC it
+            // computes on demand; `Packed`, `HasCRC` and `Executable` sit
+            // behind `C4GroupEntry`'s access specifier and are not compared.
+            expect_eq(
+                &entry_label,
+                0,
+                "time",
+                i(expected, "time"),
+                i64::from(actual.time),
             );
         }
     }
