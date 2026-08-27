@@ -1690,7 +1690,9 @@ fn global_gui_bootstrap_issues_are_aggregated_in_cpp_init_order() {
 fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
     let mut app = new_classic_menu_app(320, 200);
     app.mode = AppMode::Loading;
-    app.loader_error = Some("lower-priority loader failure".to_string());
+    app.loader_error = Some(LoaderScreenFailure::NativeInit(
+        "lower-priority loader failure".to_string(),
+    ));
     remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
     let expected = vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")];
     let mut frame = vec![0x91; 320 * 200 * 4];

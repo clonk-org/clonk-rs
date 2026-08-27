@@ -2354,6 +2354,10 @@ impl GameApp {
         let host_local_player_info_ids = initial_host_local_player_info_ids(network_mode.as_ref());
         let control_player_infos = ControlPlayerInfoRegistry::default();
         let runtime_language_table = load_runtime_language_table(paths);
+        let loader_failure_resources = runtime_language_table
+            .as_ref()
+            .map(|table| table.entries.clone())
+            .unwrap_or_else(|_| embedded_runtime_language_table().entries.clone());
         // Scenario discovery only walks directories and reads scenario
         // groups; start it only after the process-global resource gate.
         let scenario_discovery = frontend_scenarios.is_none().then(|| {
@@ -2367,13 +2371,29 @@ impl GameApp {
             Some(paths) => match build_startup_loader(paths, assets.as_ref()) {
                 Ok(setup) => (Some(setup.screen), None),
                 Err(error) => {
+                    // C++ prints two lines here: the reason C4LoaderScreen::Init
+                    // logged for itself, then IDS_PRC_ERRLOADER from the caller
+                    // (src/C4Application.cpp:241-247).
                     tracing::error!(%error, "classic startup loader initialization failed");
-                    (None, Some(error.to_string()))
+                    tracing::error!(
+                        "{}",
+                        runtime_resource_text_from_table(
+                            &loader_failure_resources,
+                            "IDS_PRC_ERRLOADER",
+                            LOADER_INIT_FAILURE_TEXT,
+                        )
+                    );
+                    (
+                        None,
+                        Some(LoaderScreenFailure::NativeInit(error.to_string())),
+                    )
                 }
             },
             None => (
                 None,
-                Some("application paths are unavailable for classic loader discovery".to_string()),
+                Some(LoaderScreenFailure::NoInstallPath(
+                    "application paths are unavailable for classic loader discovery".to_string(),
+                )),
             ),
         };
         let (system_scripts, standard_names) = paths

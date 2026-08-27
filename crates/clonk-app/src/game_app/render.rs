@@ -2009,8 +2009,17 @@ impl GameApp {
         defer_monitor_gamma: bool,
     ) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
-        if let Some(detail) = self.loader_error.as_deref() {
-            return Err(self.loader_boundary(detail));
+        if let Some(failure) = self.loader_error.as_ref() {
+            // A native init failure stops the game exactly as C++ stops, so it
+            // is reported as the ordinary fatal C++ reports and not as an
+            // unimplemented path; only the port-only state keeps the boundary.
+            return Err(match failure {
+                LoaderScreenFailure::NativeInit(detail) => anyhow::anyhow!(
+                    "{}: {detail}",
+                    self.runtime_resource_text("IDS_PRC_ERRLOADER", LOADER_INIT_FAILURE_TEXT)
+                ),
+                LoaderScreenFailure::NoInstallPath(detail) => self.loader_boundary(detail.clone()),
+            });
         }
         // A scale the renderer cannot use is not a reason to fail the frame.
         // `C4LoaderScreen::Draw` validates nothing and lets the draw layer clip
