@@ -1117,11 +1117,9 @@ pub(crate) fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             .is_some_and(|effect| effect.name == crate::C4FX_FIRE)
         && !script_shadows_engine_fx("FxFireStop")
     {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                if let Some(object) = context.object_context_mut() {
-                    object.pending_update.stage_fire_flag(false);
-                }
+        with_host_context_mut((), |context| {
+            if let Some(object) = context.object_context_mut() {
+                object.pending_update.stage_fire_flag(false);
             }
         });
     }
@@ -1673,9 +1671,7 @@ fn dispatch_effect_fx_callback_with_parameter_conversion_policy(
 pub(crate) fn object_effect_info_lines(target: ObjectId) -> Vec<String> {
     let target_value = object_reference_value(target);
     let mut lines = Vec::new();
-    let mut current_number = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let mut current_number = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(target) {
             return None;
         }
@@ -1777,9 +1773,7 @@ pub(crate) fn dispatch_effects_do_damage(
     cause: i32,
     caused_by: i32,
 ) -> Option<i32> {
-    let mut current_number = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let mut current_number = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(target) {
             return None;
         }
@@ -1896,9 +1890,7 @@ pub(crate) fn explode(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
 
-    let pre_removal = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let pre_removal = with_host_context(None, |context| {
         let object = context.get_world_object(target)?;
         let scope = context.object_scope(target);
         Some((
@@ -1915,9 +1907,7 @@ pub(crate) fn explode(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let _ = assign_removal_live(target, false)?;
-    let position = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let position = with_host_context(None, |context| {
         context
             .object_scope(target)
             .map(ObjectScopeContext::effective_position)
@@ -1954,19 +1944,15 @@ fn native_explosion(
     effect_name: &str,
 ) -> Result<(), RuntimeError> {
     let grade = (level / 10 - 1).clamp(1, 3);
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            // The current C++ oracle's std::format receives the promoted int
-            // value of '0' + grade, hence Blast49..Blast51.
-            let _ = context.play_sound_at(&format!("Blast{}", i32::from(b'0') + grade), position);
-        }
+    with_host_context_mut((), |context| {
+        // The current C++ oracle's std::format receives the promoted int
+        // value of '0' + grade, hence Blast49..Blast51.
+        let _ = context.play_sound_at(&format!("Blast{}", i32::from(b'0') + grade), position);
     });
 
     // Resolve containment once, before any visual-effect callbacks, and keep
     // that pointer for the later second BlastObjects pass.
-    let contain_blast = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let contain_blast = with_host_context(None, |context| {
         let mut container = in_object;
         while let Some(candidate) = container {
             let definition = effective_definition_id(context, candidate);
@@ -2040,9 +2026,7 @@ fn native_explosion_visual(
     effect_id: Option<String>,
     effect_name: &str,
 ) -> Result<(), RuntimeError> {
-    let selected_particle = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let selected_particle = with_host_context(None, |context| {
         let default =
             (context.particle_def_known("Blast") != Some(false)).then(|| "Blast".to_string());
         if !effect_name.is_empty() && context.particle_def_known(effect_name) != Some(false) {
@@ -2084,9 +2068,7 @@ fn native_explosion_visual(
     }
 
     let definition = effect_id.unwrap_or_else(|| "FXB1".to_string());
-    let controller = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let controller = with_host_context(None, |context| {
         context
             .object_scope(by_object)
             .map(ObjectScopeContext::controller)
@@ -2176,9 +2158,7 @@ fn native_blast_objects(
     caused_by: i32,
     by_object: Option<ObjectId>,
 ) -> Result<(), RuntimeError> {
-    let blast_layer = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let blast_layer = with_host_context(None, |context| {
         by_object.and_then(|object| context.object_layer(object))
     });
 
@@ -2221,9 +2201,7 @@ fn native_blast_objects(
     for id in ids {
         // Status/containment/layer are the outer C++ if-chain and are tested
         // once. A direct Blast callback may mutate later shockwave inputs.
-        let direct_hit = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let direct_hit = with_host_context(None, |context| {
             let object = context.get_world_object(id)?;
             let container = context
                 .object_scope(id)
@@ -2258,9 +2236,7 @@ fn native_blast_objects(
 
         // C++ stays inside the already-passed outer block but reads these
         // fields after the direct Blast callback.
-        let living_shockwave = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let living_shockwave = with_host_context(None, |context| {
             let object = context.get_world_object(id)?;
             let scope = context.object_scope(id);
             let category = scope
@@ -2325,9 +2301,7 @@ fn native_blast_objects(
 
         // Living damage callbacks precede both force calculations. p2 is
         // evaluated before p1, and p1 alone consumes one Rnd3 value.
-        let force_state = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let force_state = with_host_context(None, |context| {
             let object = context.get_world_object(id)?;
             let scope = context.object_scope(id);
             Some((
@@ -2726,9 +2700,7 @@ fn fire_effect_start_core(
                 .unwrap_or_default()
         });
         for content in contents {
-            let parent = HOST_CONTEXT.with(|cell| {
-                let mut borrow = cell.borrow_mut();
-                let context = borrow.as_mut()?;
+            let parent = with_host_context_mut(None, |context| {
                 let target_object = context.get_world_object(target)?;
                 let content_object = context.get_world_object(content)?;
                 if !target_object.is_present()
@@ -2767,9 +2739,7 @@ fn fire_effect_start_core(
         // pFindNext from Game.Objects makes the next search stop.
         let mut previous = None;
         loop {
-            let candidate = HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let context = borrow.as_ref()?;
+            let candidate = with_host_context(None, |context| {
                 let master_ids = context
                     .master_object_ids()
                     .into_iter()
@@ -2985,12 +2955,10 @@ pub(crate) fn fx_fire_start(args: &[Value]) -> Result<Value, RuntimeError> {
     let temp = args.get(2).is_some_and(|value| value_as_i32(value) != 0);
     if temp {
         // temp readd: SetOnFire(true), return 1 (C4Effect.cpp:565)
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                if context.ensure_object_scope(target) {
-                    if let Some(scope) = context.object_scope_mut(target) {
-                        scope.pending_update.stage_fire_flag(true);
-                    }
+        with_host_context_mut((), |context| {
+            if context.ensure_object_scope(target) {
+                if let Some(scope) = context.object_scope_mut(target) {
+                    scope.pending_update.stage_fire_flag(true);
                 }
             }
         });
@@ -3108,13 +3076,11 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     // Fire Phase (C4Object.cpp:770)
     let next_phase = (state.phase + 1) % crate::MAX_FIRE_PHASE;
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            if let Some(scope) = context.object_scope_mut(target) {
-                scope
-                    .pending_update
-                    .stage_ignite(state.caused_by, next_phase);
-            }
+    with_host_context_mut((), |context| {
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope
+                .pending_update
+                .stage_ignite(state.caused_by, next_phase);
         }
     });
     // C4Object::ExecFire's Tick5 base arm runs immediately after the phase
@@ -3373,12 +3339,10 @@ pub(crate) fn fx_fire_stop(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target else {
         return Ok(Value::Bool(false));
     };
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            if context.ensure_object_scope(target) {
-                if let Some(scope) = context.object_scope_mut(target) {
-                    scope.pending_update.stage_fire_flag(false);
-                }
+    with_host_context_mut((), |context| {
+        if context.ensure_object_scope(target) {
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.pending_update.stage_fire_flag(false);
             }
         }
     });
@@ -3664,54 +3628,52 @@ fn cast_a_particles(args: &[Value], back: bool, fn_name: &str) -> Result<Value, 
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new(format!("{fn_name} requires an active engine context"))
-        })?;
-
-        // safety: pObj && !pObj->Status → false (C4Script.cpp:4884)
-        let layer = if let Some(target) = target_object {
-            if !context.object_status_present(target) {
-                return Ok(Value::Bool(false));
-            }
-            if context.get_world_object(target).is_none() {
-                return Ok(Value::Bool(false));
-            }
-            if back {
-                ParticleLayer::ObjectBack(target)
+    try_with_host_context_mut(
+        &format!("{fn_name} requires an active engine context"),
+        |context| {
+            // safety: pObj && !pObj->Status → false (C4Script.cpp:4884)
+            let layer = if let Some(target) = target_object {
+                if !context.object_status_present(target) {
+                    return Ok(Value::Bool(false));
+                }
+                if context.get_world_object(target).is_none() {
+                    return Ok(Value::Bool(false));
+                }
+                if back {
+                    ParticleLayer::ObjectBack(target)
+                } else {
+                    ParticleLayer::ObjectFront(target)
+                }
             } else {
-                ParticleLayer::ObjectFront(target)
+                ParticleLayer::Global
+            };
+
+            // GetDef failure → false (C4Script.cpp:4893)
+            if context.particle_def_known(&definition) == Some(false) {
+                return Ok(Value::Bool(false));
             }
-        } else {
-            ParticleLayer::Global
-        };
 
-        // GetDef failure → false (C4Script.cpp:4893)
-        if context.particle_def_known(&definition) == Some(false) {
-            return Ok(Value::Bool(false));
-        }
+            // local offset (C4Script.cpp:4886-4890)
+            let base_position = context
+                .object_context()
+                .map(|object| object.effective_position())
+                .unwrap_or(Vector2::ZERO);
 
-        // local offset (C4Script.cpp:4886-4890)
-        let base_position = context
-            .object_context()
-            .map(|object| object.effective_position())
-            .unwrap_or(Vector2::ZERO);
-
-        context.register_particle(ParticleCommand::Cast {
-            definition_id: definition,
-            amount,
-            x: base_position.x.saturating_add(x) as f32,
-            y: base_position.y.saturating_add(y) as f32,
-            level,
-            a0: a0 as f32 / 10.0,
-            b0,
-            a1: a1 as f32 / 10.0,
-            b1,
-            layer,
-        });
-        Ok(Value::Bool(true))
-    })
+            context.register_particle(ParticleCommand::Cast {
+                definition_id: definition,
+                amount,
+                x: base_position.x.saturating_add(x) as f32,
+                y: base_position.y.saturating_add(y) as f32,
+                level,
+                a0: a0 as f32 / 10.0,
+                b0,
+                a1: a1 as f32 / 10.0,
+                b1,
+                layer,
+            });
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn cast_particles(args: &[Value]) -> Result<Value, RuntimeError> {

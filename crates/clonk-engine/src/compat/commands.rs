@@ -894,61 +894,59 @@ pub(crate) fn set_transfer_zone(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|value| parse_object_reference_argument(value, "SetTransferZone", "object"))
         .transpose()?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetTransferZone requires an active engine context")
-        })?;
+    try_with_host_context_mut(
+        "SetTransferZone requires an active engine context",
+        |context| {
+            let owner = match explicit_object.flatten() {
+                Some(id) => id,
+                None => context
+                    .object_context()
+                    .map(|ctx| ctx.id())
+                    .ok_or_else(|| {
+                        RuntimeError::new(
+                            "SetTransferZone requires an object argument or active object context",
+                        )
+                    })?,
+            };
 
-        let owner = match explicit_object.flatten() {
-            Some(id) => id,
-            None => context
+            // pObj->x/y off the LIVE object (C4Script.cpp:3154): the executing
+            // scope resolves the object even while its own Initialize runs
+            // before the world snapshot knows it (C4Object::Init fires the
+            // callbacks on the constructed object, C4Object.cpp:215+ — the
+            // WZKP homebase placed at player join).
+            let position = context
                 .object_context()
-                .map(|ctx| ctx.id())
+                .filter(|object| object.id() == owner)
+                .map(|object| object.effective_position())
+                .or_else(|| {
+                    context
+                        .get_world_object(owner)
+                        .map(|object| object.position())
+                })
                 .ok_or_else(|| {
-                    RuntimeError::new(
-                        "SetTransferZone requires an object argument or active object context",
-                    )
-                })?,
-        };
+                    RuntimeError::new(format!(
+                        "SetTransferZone: object {} not found in current engine context",
+                        owner
+                    ))
+                })?;
 
-        // pObj->x/y off the LIVE object (C4Script.cpp:3154): the executing
-        // scope resolves the object even while its own Initialize runs
-        // before the world snapshot knows it (C4Object::Init fires the
-        // callbacks on the constructed object, C4Object.cpp:215+ — the
-        // WZKP homebase placed at player join).
-        let position = context
-            .object_context()
-            .filter(|object| object.id() == owner)
-            .map(|object| object.effective_position())
-            .or_else(|| {
-                context
-                    .get_world_object(owner)
-                    .map(|object| object.position())
-            })
-            .ok_or_else(|| {
-                RuntimeError::new(format!(
-                    "SetTransferZone: object {} not found in current engine context",
-                    owner
-                ))
-            })?;
+            if width == 0 || height == 0 {
+                context.register_transfer_zone_command(TransferZoneCommand::clear(owner));
+                return Ok(Value::Bool(true));
+            }
 
-        if width == 0 || height == 0 {
-            context.register_transfer_zone_command(TransferZoneCommand::clear(owner));
-            return Ok(Value::Bool(true));
-        }
-
-        let abs_x = position.x.saturating_add(x);
-        let abs_y = position.y.saturating_add(y);
-        let rect = TransferZoneRect {
-            x: abs_x,
-            y: abs_y,
-            width,
-            height,
-        };
-        context.register_transfer_zone_command(TransferZoneCommand::set(owner, rect));
-        Ok(Value::Bool(true))
-    })
+            let abs_x = position.x.saturating_add(x);
+            let abs_y = position.y.saturating_add(y);
+            let rect = TransferZoneRect {
+                x: abs_x,
+                y: abs_y,
+                width,
+                height,
+            };
+            context.register_transfer_zone_command(TransferZoneCommand::set(owner, rect));
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 /// The post-pixel evaluate loop of C4Landscape::BlastFree. Object creation
@@ -1026,18 +1024,17 @@ pub(crate) fn process_preview_blast_reactions(
                             .collect::<Vec<_>>(),
                     )
                 })?;
-                HOST_CONTEXT.with(|cell| {
-                    let mut borrow = cell.borrow_mut();
-                    let context = borrow.as_mut().ok_or_else(|| {
-                        RuntimeError::new("BlastFree requires an active engine context")
-                    })?;
-                    context.register_landscape_operation(LandscapeOperation::CastPxs {
-                        material,
-                        position: center,
-                        velocities,
-                    });
-                    Ok::<_, RuntimeError>(())
-                })?;
+                try_with_host_context_mut(
+                    "BlastFree requires an active engine context",
+                    |context| {
+                        context.register_landscape_operation(LandscapeOperation::CastPxs {
+                            material,
+                            position: center,
+                            velocities,
+                        });
+                        Ok::<_, RuntimeError>(())
+                    },
+                )?;
             }
         }
     }
@@ -1090,9 +1087,7 @@ pub(crate) fn process_preview_dig_reactions(
         if ratio == 0 || (on_request_only && !requested) {
             continue;
         }
-        let position = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let context = borrow.as_mut()?;
+        let position = with_host_context_mut(None, |context| {
             let content = context.dig_material_content(target, material);
             if content == 0 || content < ratio {
                 return None;
@@ -1125,10 +1120,8 @@ pub(crate) fn process_preview_dig_reactions(
             velocity: FixedVec2::ZERO,
             rotation_velocity: C4Fixed::ZERO,
         })?;
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.reset_dig_material_content(target, material);
-            }
+        with_host_context_mut((), |context| {
+            context.reset_dig_material_content(target, material);
         });
     }
     Ok(())
@@ -1204,9 +1197,7 @@ fn preview_command_failure_feedback(
     let failure_reason = feedback.reason;
     let mut fail_message = (failure_reason == Some(CommandFailureReason::CannotBuild))
         .then(|| {
-            HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let context = borrow.as_ref()?;
+            with_host_context(None, |context| {
                 let name = context
                     .object_custom_name(actor)
                     .filter(|name| !name.is_empty())
@@ -1380,9 +1371,7 @@ fn preview_object_com_ungrab(
     actor: ObjectId,
     restore_fight_ready: bool,
 ) -> Result<bool, RuntimeError> {
-    let target = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let target = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(actor) {
             return None;
         }
@@ -1459,9 +1448,7 @@ fn preview_object_com_ungrab(
 /// facing are frozen before SetAction callbacks; position/shape and the Exit
 /// callbacks are observed afterward (C4ObjectCom.cpp:120-137).
 fn preview_object_action_throw(actor: ObjectId, object: ObjectId) -> Result<bool, RuntimeError> {
-    let physical = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let physical = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(actor) || !context.ensure_object_scope(object) {
             return None;
         }
@@ -1475,9 +1462,7 @@ fn preview_object_action_throw(actor: ObjectId, object: ObjectId) -> Result<bool
         return Ok(false);
     };
     let throw_force = crate::math::val_by_physical(400, physical.resolve().throw);
-    let prepared = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let prepared = with_host_context(None, |context| {
         let actor_scope = context.object_scope(actor)?;
         let direction = if actor_scope.current_direction == Direction::Left {
             -1
@@ -1496,9 +1481,7 @@ fn preview_object_action_throw(actor: ObjectId, object: ObjectId) -> Result<bool
     // ObjectActionThrow consumes the synced rotation only after SetAction
     // succeeds, even if callbacks removed the carried object before Exit.
     let rotation = draw_context_random(360)?;
-    let exit = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let exit = with_host_context(None, |context| {
         let actor_position = context.object_scope(actor)?.effective_position();
         let shape_top = live_object_bounds_shape(context, actor)
             .map(|shape| shape.y)
@@ -1525,9 +1508,7 @@ fn preview_object_action_throw(actor: ObjectId, object: ObjectId) -> Result<bool
 /// Item/actor state, callbacks, delay and cached OCF are staged here in C++
 /// order before the outer script call folds back into the engine.
 fn preview_object_com_drop(actor: ObjectId, object: ObjectId) -> Result<bool, RuntimeError> {
-    let physical = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let physical = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(actor) || !context.ensure_object_scope(object) {
             return None;
         }
@@ -1537,9 +1518,7 @@ fn preview_object_com_drop(actor: ObjectId, object: ObjectId) -> Result<bool, Ru
         return Ok(false);
     };
     let throw_force = crate::math::val_by_physical(400, physical.resolve().throw);
-    let prepared = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let prepared = with_host_context(None, |context| {
         let actor_scope = context.object_scope(actor)?;
         let procedure = actor_scope.effective_action_procedure();
         let command_direction = actor_scope.command_direction();
@@ -1731,9 +1710,7 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
     }
 
     fn object(&self, object: ObjectId) -> Option<crate::direct_com::InternalObjectMenuObject> {
-        HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        with_host_context(None, |context| {
             let object_state = context.get_world_object(object)?;
             let definition_id = object_state.definition_id().to_string();
             let name = context
@@ -1783,9 +1760,7 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
         &self,
         definition: &str,
     ) -> Option<crate::direct_com::InternalObjectMenuDefinition> {
-        HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        with_host_context(None, |context| {
             let metadata = context.definition_metadata(definition)?;
             Some(crate::direct_com::InternalObjectMenuDefinition {
                 description: context
@@ -1823,10 +1798,8 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
         container: ObjectId,
         menu_before_value: &crate::ObjectMenuState,
     ) -> Result<i32, Self::Error> {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.set_object_menu(command_object, Some(menu_before_value.clone()));
-            }
+        with_host_context_mut((), |context| {
+            context.set_object_menu(command_object, Some(menu_before_value.clone()));
         });
         let value = get_value(&[
             object_reference_value(object),
@@ -1849,10 +1822,8 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
         object: ObjectId,
         menu_before_call: &crate::ObjectMenuState,
     ) -> Result<bool, Self::Error> {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.set_object_menu(command_object, Some(menu_before_call.clone()));
-            }
+        with_host_context_mut((), |context| {
+            context.set_object_menu(command_object, Some(menu_before_call.clone()));
         });
         let definition_id = HOST_CONTEXT.with(|cell| {
             cell.borrow()
@@ -1886,9 +1857,7 @@ fn preview_object_com_put_take(
     target: ObjectId,
     requested_item: Option<ObjectId>,
 ) -> Result<PreviewObjectComPutTakeOutcome, RuntimeError> {
-    let prepared = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let prepared = with_host_context(None, |context| {
         let actor_state = context.get_world_object(actor)?;
         let _target_state = context.get_world_object(target)?;
         let is_resolved = |item| context.get_world_object(item).is_some();
@@ -1980,9 +1949,7 @@ fn preview_object_com_stop(actor: ObjectId) -> Result<(), RuntimeError> {
 /// physical gate, callbackful SetAction, localized GameMsgObject failure and
 /// Action.Data reset all complete before the caller's next script instruction.
 fn preview_object_com_dig(actor: ObjectId) -> Result<bool, RuntimeError> {
-    let physical = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let physical = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(actor) {
             return None;
         }
@@ -2111,9 +2078,7 @@ impl CommandPreviewOutcome {
 fn prepare_command_runtime_data(
     physical_actor: Option<ObjectId>,
 ) -> Option<PreparedCommandRuntimeData> {
-    let resolution = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let resolution = with_host_context(None, |context| {
         Some(physical_actor.and_then(|id| {
             context
                 .prepare_object_physical(id, false)
@@ -2355,9 +2320,7 @@ fn preview_resolve_put_attempt(
             })
     });
     let succeeded = preview_object_com_put(actor_id, target_id, object_id)?;
-    let feedback = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let feedback = with_host_context_mut(None, |context| {
         let scope = context.object_scope_mut(actor_id)?;
         if succeeded && ungrab_on_success {
             let _ = scope
@@ -2931,12 +2894,10 @@ fn preview_dispatch_command_continuation_events(
                 level,
                 transfer_zones_enabled,
             } => {
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        context
-                            .world
-                            .set_pathfinder_settings(level, transfer_zones_enabled);
-                    }
+                with_host_context_mut((), |context| {
+                    context
+                        .world
+                        .set_pathfinder_settings(level, transfer_zones_enabled);
                 });
                 preview_defer_command_event(
                     actor,
@@ -2948,26 +2909,20 @@ fn preview_dispatch_command_continuation_events(
                 Vec::new()
             }
             CommandEvent::SetPathFinderDebug { snapshot } => {
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        *context.world.pathfinder_debug.borrow_mut() = snapshot;
-                    }
+                with_host_context_mut((), |context| {
+                    *context.world.pathfinder_debug.borrow_mut() = snapshot;
                 });
                 Vec::new()
             }
             CommandEvent::NativeCommandSuccess { object_id, command } => {
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        apply_preview_native_command_success(context, object_id, command);
-                    }
+                with_host_context_mut((), |context| {
+                    apply_preview_native_command_success(context, object_id, command);
                 });
                 Vec::new()
             }
             CommandEvent::OpenMenu(request) => {
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        context.pending_menu_requests.push(request);
-                    }
+                with_host_context_mut((), |context| {
+                    context.pending_menu_requests.push(request);
                 });
                 Vec::new()
             }
@@ -3279,9 +3234,7 @@ fn resolve_preview_buy(
     definition_id: &str,
     succeeded: bool,
 ) -> Result<(), RuntimeError> {
-    let feedback = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let feedback = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(actor) {
             return None;
         }
@@ -3305,9 +3258,7 @@ fn resolve_preview_sell(
     definition_id: &str,
     succeeded: bool,
 ) -> Result<(), RuntimeError> {
-    let feedback = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let feedback = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(actor) {
             return None;
         }
@@ -3401,9 +3352,7 @@ fn preview_evaluate_buy(
     });
 
     for _ in 0..purchase_count {
-        let parties = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let parties = with_host_context(None, |context| {
             if !context.world.base_buy_enabled {
                 return None;
             }
@@ -3479,9 +3428,7 @@ fn preview_evaluate_sell(
     let mut preferred = preferred;
 
     for _ in 0..sale_count {
-        let attempt = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
+        let attempt = with_host_context(None, |context| {
             if !context.world.base_sell_enabled {
                 return None;
             }
@@ -3770,9 +3717,7 @@ fn preview_control_transfer(
     ty: i32,
     command_instance_id: u64,
 ) {
-    let callback = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let callback = with_host_context(None, |context| {
         let definition_id = context.object_effective_definition_id(object_id)?;
         context
             .definition_metadata(&definition_id)
@@ -3893,9 +3838,7 @@ fn preview_resolve_activate_entrance(
         })
         .flatten();
     let activated = preview_activate_entrance(object_id, caller);
-    let feedback = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let feedback = with_host_context_mut(None, |context| {
         let scope = context.object_scope_mut(caller)?;
         let feedback = match on_result {
             Some(CallResultAction::ResolveExitActivation) => match scope
@@ -4035,9 +3978,7 @@ pub(crate) fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     for (actor_id, dig_out_material, direction, command_instance_id) in dig_attempts {
         let succeeded = preview_object_com_dig(actor_id)?;
-        let feedback = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let context = borrow.as_mut()?;
+        let feedback = with_host_context_mut(None, |context| {
             let scope = context.object_scope_mut(actor_id)?;
             if succeeded {
                 if dig_out_material {
@@ -4176,10 +4117,8 @@ pub(crate) fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 log_runtime_call_frames("", error.call_frames());
             }
         }
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.clear_finished_command_fronts(target);
-            }
+        with_host_context_mut((), |context| {
+            context.clear_finished_command_fronts(target);
         });
     }
 
@@ -4326,9 +4265,7 @@ fn set_command_live(
 
     // The contained vehicle receives a seventh argument naming the command
     // object, and inherits that object's live Controller before its call.
-    let inside = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let inside = with_host_context_mut(None, |context| {
         let (container, controller) = {
             let actor = context.object_scope(target)?;
             (actor.container()?, actor.controller())
@@ -4355,9 +4292,7 @@ fn set_command_live(
 
     // Re-read action/procedure/target/controller after the inside callback:
     // it may have redirected the pushed vehicle or changed the actor.
-    let outside = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let outside = with_host_context_mut(None, |context| {
         let (pushed, controller) = {
             let actor = context.object_scope(target)?;
             if actor.effective_action_procedure() != ActionProcedure::Push {

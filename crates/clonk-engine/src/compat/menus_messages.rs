@@ -184,16 +184,14 @@ pub(crate) fn add_msg_board_cmd(args: &[Value]) -> Result<Value, RuntimeError> {
         _ => return Ok(Value::Bool(false)),
     };
 
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.record_player_command(PlayerCommand::AddMessageBoardCommand {
-                command: crate::InitialNetworkMessageBoardCommand {
-                    name: command,
-                    script,
-                    restriction,
-                },
-            });
-        }
+    with_host_context_mut((), |context| {
+        context.record_player_command(PlayerCommand::AddMessageBoardCommand {
+            command: crate::InitialNetworkMessageBoardCommand {
+                name: command,
+                script,
+                restriction,
+            },
+        });
     });
     Ok(Value::Bool(true))
 }
@@ -1012,9 +1010,7 @@ pub(crate) fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
 /// C4GuiDialogs.cpp:113-114). SetByDef snapshots five definition callbacks
 /// and eight ActMap facets immediately.
 fn build_frame_decoration_snapshot(deco_id: &str) -> Option<crate::ObjectMenuFrameDecoration> {
-    let (metadata, script) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let (metadata, script) = with_host_context(None, |context| {
         Some((
             context.definition_metadata(deco_id).cloned()?,
             context.world.definition_script(deco_id).cloned()?,
@@ -1216,13 +1212,10 @@ pub(crate) fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
     if let Some(id) = decoration.as_deref() {
-        let known = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref().ok_or_else(|| {
-                RuntimeError::new("CustomMessage requires an active engine context")
-            })?;
-            Ok(context.world.definition_known(id))
-        })?;
+        let known = try_with_host_context(
+            "CustomMessage requires an active engine context",
+            |context| Ok(context.world.definition_known(id)),
+        )?;
         // `FnCustomMessage` returns false before creating a message when
         // `idDeco && !C4Id2Def(idDeco)` (C4Script.cpp:6002).
         if known == Some(false) {
@@ -1654,9 +1647,7 @@ pub(crate) fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
 /// scope, including SetRefillObject's immediate full refill. No HOST_CONTEXT
 /// borrow is held while the Activate builder calls GetValue/CalcValue.
 pub(crate) fn preview_prepare_put_take_menu(request: MenuRequest) -> bool {
-    let prepared = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let prepared = with_host_context(None, |context| {
         let target = match &request.kind {
             MenuRequestKind::Activate => context
                 .get_world_object(request.crew_id)

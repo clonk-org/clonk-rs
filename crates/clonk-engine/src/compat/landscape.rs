@@ -140,41 +140,40 @@ pub(crate) fn set_material_color(args: &[Value]) -> Result<Value, RuntimeError> 
         return Ok(Value::Bool(false));
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetMaterialColor requires an active engine context")
-        })?;
-        let source = context
-            .world
-            .materials()
-            .and_then(|materials| materials.get_by_id(material_id))
-            .map(|material| {
-                let color = material.color();
-                RgbColor::new(
-                    color.first().copied().unwrap_or(0) as u8,
-                    color.get(1).copied().unwrap_or(0) as u8,
-                    color.get(2).copied().unwrap_or(0) as u8,
-                )
-            });
-        let Some(source) = source else {
-            return Ok(Value::Bool(false));
-        };
-        let target = RgbColor::new(red as u8, green as u8, blue as u8);
-        let modulation =
-            SkyAdjustment::from_color_modulation(source, target).modulation & 0x00ff_ffff;
-        let modulation = match modulation {
-            0 => 1,
-            0x00ff_ffff => 0,
-            modulation => modulation,
-        };
+    try_with_host_context_mut(
+        "SetMaterialColor requires an active engine context",
+        |context| {
+            let source = context
+                .world
+                .materials()
+                .and_then(|materials| materials.get_by_id(material_id))
+                .map(|material| {
+                    let color = material.color();
+                    RgbColor::new(
+                        color.first().copied().unwrap_or(0) as u8,
+                        color.get(1).copied().unwrap_or(0) as u8,
+                        color.get(2).copied().unwrap_or(0) as u8,
+                    )
+                });
+            let Some(source) = source else {
+                return Ok(Value::Bool(false));
+            };
+            let target = RgbColor::new(red as u8, green as u8, blue as u8);
+            let modulation =
+                SkyAdjustment::from_color_modulation(source, target).modulation & 0x00ff_ffff;
+            let modulation = match modulation {
+                0 => 1,
+                0x00ff_ffff => 0,
+                modulation => modulation,
+            };
 
-        if let Some(landscape) = context.world.landscape_mut() {
-            landscape.set_modulation(modulation);
-        }
-        context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
-        Ok(Value::Bool(true))
-    })
+            if let Some(landscape) = context.world.landscape_mut() {
+                landscape.set_modulation(modulation);
+            }
+            context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 /// FnGetMaterialCount (C4Script.cpp:2207-2213): invalid material indices
@@ -1187,9 +1186,7 @@ pub(crate) fn path_free2(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
     let x1 = x_arg.read()?.as_c4_int().unwrap_or(0);
     let y1 = y_arg.read()?.as_c4_int().unwrap_or(0);
 
-    let hit = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
+    let hit = with_host_context(None, |context| {
         let landscape = context.landscape_ref()?;
         Some(match context.world.materials() {
             Some(materials) => {
@@ -1562,10 +1559,8 @@ pub(crate) fn set_gamma(args: &[Value]) -> Result<Value, RuntimeError> {
     if !(0..crate::GAMMA_RAMP_COUNT as i32).contains(&index) {
         return Ok(Value::Nil);
     }
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.register_landscape_operation(LandscapeOperation::GammaRamp { index, points });
-        }
+    with_host_context_mut((), |context| {
+        context.register_landscape_operation(LandscapeOperation::GammaRamp { index, points });
     });
     Ok(Value::Nil)
 }
@@ -1581,13 +1576,11 @@ pub(crate) fn reset_gamma(args: &[Value]) -> Result<Value, RuntimeError> {
     if !(0..crate::GAMMA_RAMP_COUNT as i32).contains(&index) {
         return Ok(Value::Nil);
     }
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.register_landscape_operation(LandscapeOperation::GammaRamp {
-                index,
-                points: crate::GammaControlState::DEFAULT_RAMP,
-            });
-        }
+    with_host_context_mut((), |context| {
+        context.register_landscape_operation(LandscapeOperation::GammaRamp {
+            index,
+            points: crate::GammaControlState::DEFAULT_RAMP,
+        });
     });
     Ok(Value::Nil)
 }
@@ -1623,19 +1616,19 @@ pub(crate) fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn apply_sky_color_modulation(function: &str, target: RgbColor) -> Result<Value, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new(format!("{function} requires an active engine context"))
-        })?;
-        let adjustment = SkyAdjustment::from_color_modulation(context.world.sky_fade[0], target);
-        context.sky_adjustment = adjustment;
-        context.register_landscape_operation(LandscapeOperation::SkyAdjust {
-            modulation: adjustment.modulation,
-            back_color: adjustment.back_color,
-        });
-        Ok(Value::Nil)
-    })
+    try_with_host_context_mut(
+        &format!("{function} requires an active engine context"),
+        |context| {
+            let adjustment =
+                SkyAdjustment::from_color_modulation(context.world.sky_fade[0], target);
+            context.sky_adjustment = adjustment;
+            context.register_landscape_operation(LandscapeOperation::SkyAdjust {
+                modulation: adjustment.modulation,
+                back_color: adjustment.back_color,
+            });
+            Ok(Value::Nil)
+        },
+    )
 }
 
 /// FnSetSkyFade (C4Script.cpp:3039-3044): NewGfx maps only the first RGB
@@ -1776,19 +1769,18 @@ pub(crate) fn set_landscape_pixel(args: &[Value]) -> Result<Value, RuntimeError>
         "SetLandscapePixel",
         "color",
     )? as u32;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetLandscapePixel requires an active engine context")
-        })?;
-        let position = context
-            .caller_scope()
-            .map_or(Vector2::new(x, y), |(_, base)| {
-                Vector2::new(base.x.saturating_add(x), base.y.saturating_add(y))
-            });
-        context.register_set_landscape_pixel(position, color);
-        Ok(Value::Nil)
-    })
+    try_with_host_context_mut(
+        "SetLandscapePixel requires an active engine context",
+        |context| {
+            let position = context
+                .caller_scope()
+                .map_or(Vector2::new(x, y), |(_, base)| {
+                    Vector2::new(base.x.saturating_add(x), base.y.saturating_add(y))
+                });
+            context.register_set_landscape_pixel(position, color);
+            Ok(Value::Nil)
+        },
+    )
 }
 
 /// FnSetSkyParallax (C4Script.cpp:4955-4970): seven plain ints; nil and
@@ -2076,9 +2068,7 @@ pub(crate) fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     };
 
-    let preflight = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let preflight = with_host_context_mut(None, |context| {
         let Some((landscape_width, landscape_height, map_zoom, retained_creator)) =
             context.world.landscape_ref().and_then(|landscape| {
                 let (landscape_width, landscape_height) = landscape.grid_dimensions()?;
@@ -2222,9 +2212,7 @@ pub(crate) fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     };
 
-    let preflight = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
+    let preflight = with_host_context_mut(None, |context| {
         let Some((landscape_width, landscape_height, map_zoom, map_creator)) =
             context.world.landscape_ref().and_then(|landscape| {
                 let (landscape_width, landscape_height) = landscape.grid_dimensions()?;
