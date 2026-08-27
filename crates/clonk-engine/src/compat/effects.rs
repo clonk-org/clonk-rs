@@ -588,11 +588,7 @@ fn check_effect_with_policy(
     };
     // FnCheckEffect returns C4VNull when there is no list head. This is
     // observably distinct from C4Effect::Check's successful integer zero.
-    let had_list_head = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.effect_list_had_head(scope))
-    });
+    let had_list_head = with_host_context(None, |context| context.effect_list_had_head(scope));
     if !had_list_head.unwrap_or(!checker_numbers.is_empty()) {
         return Ok(Value::Nil);
     }
@@ -874,10 +870,8 @@ fn add_effect_constructor(
     // command target and overwrites idCommandTarget with that object's
     // current definition for save/runtime-join safety (C4Effect.cpp:31-57).
     if let Some(target) = command_target {
-        if let Some(definition) = HOST_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().and_then(|context| {
-                context.object_effective_definition_id(ObjectId::new(target as u64))
-            })
+        if let Some(definition) = with_host_context(None, |context| {
+            context.object_effective_definition_id(ObjectId::new(target as u64))
         }) {
             command_target_id = Some(definition);
         }
@@ -1228,10 +1222,8 @@ pub(crate) fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
                     .unwrap_or(Value::Nil),
                 5 => {
                     let live_id = effect.command_target.and_then(|target| {
-                        HOST_CONTEXT.with(|cell| {
-                            cell.borrow().as_ref().and_then(|context| {
-                                context.object_effective_definition_id(ObjectId::new(target as u64))
-                            })
+                        with_host_context(None, |context| {
+                            context.object_effective_definition_id(ObjectId::new(target as u64))
                         })
                     });
                     live_id
@@ -1380,10 +1372,8 @@ pub(crate) fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
     // host functions (the C4Effect list lives on the GIVEN object).
     let target = args.first().unwrap_or(&Value::Nil);
     if let Some(foreign) = object_id_from_value(target) {
-        let active = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.object_context().map(|object| object.id()))
+        let active = with_host_context(None, |context| {
+            context.object_context().map(|object| object.id())
         });
         if Some(foreign) != active {
             // A vanished/dead target is the FnEffectCall status guard
@@ -1582,13 +1572,11 @@ fn dispatch_effect_fx_callback_with_parameter_conversion_policy(
             if let Some(resolution) = resolution
                 .filter(|resolution| resolution.scope == clonk_script::ScriptFunctionScope::Global)
             {
-                let exact_script = HOST_CONTEXT.with(|cell| {
-                    cell.borrow().as_ref().and_then(|context| {
-                        context
-                            .world
-                            .script_for_host_identity(resolution.host_identity)
-                            .map(|(_, _, script)| script)
-                    })
+                let exact_script = with_host_context(None, |context| {
+                    context
+                        .world
+                        .script_for_host_identity(resolution.host_identity)
+                        .map(|(_, _, script)| script)
                 });
                 return exact_script.and_then(|script| {
                     call_world_object_resolved_global_function(
@@ -1610,14 +1598,12 @@ fn dispatch_effect_fx_callback_with_parameter_conversion_policy(
         }
     }
     let definition_script = command_id.and_then(definition_id_for_c4id).and_then(|id| {
-        HOST_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().and_then(|context| {
-                context
-                    .world
-                    .definition_script(&id)
-                    .cloned()
-                    .map(|script| (id, script))
-            })
+        with_host_context(None, |context| {
+            context
+                .world
+                .definition_script(&id)
+                .cloned()
+                .map(|script| (id, script))
         })
     });
     if let Some((definition, script)) = definition_script {
@@ -1628,13 +1614,11 @@ fn dispatch_effect_fx_callback_with_parameter_conversion_policy(
             .as_ref()
             .filter(|resolution| resolution.scope == clonk_script::ScriptFunctionScope::Global)
         {
-            let exact_script = HOST_CONTEXT.with(|cell| {
-                cell.borrow().as_ref().and_then(|context| {
-                    context
-                        .world
-                        .script_for_host_identity(resolution.host_identity)
-                        .map(|(_, _, script)| script)
-                })
+            let exact_script = with_host_context(None, |context| {
+                context
+                    .world
+                    .script_for_host_identity(resolution.host_identity)
+                    .map(|(_, _, script)| script)
             });
             return exact_script.and_then(|script| {
                 call_scoped_global_effect_function(
@@ -1658,14 +1642,12 @@ fn dispatch_effect_fx_callback_with_parameter_conversion_policy(
     }
     // No command target at all: Game.ScriptEngine — resolve the retained
     // GLOBAL function's exact LinkedTo host, then native engine functions.
-    let global_carrier = HOST_CONTEXT.with(|cell| {
-        cell.borrow().as_ref().and_then(|context| {
-            context
-                .world
-                .resolve_engine_global_script(function)
-                .map(|(script, _)| script)
-                .or_else(|| context.world.resolve_engine_host_script(function))
-        })
+    let global_carrier = with_host_context(None, |context| {
+        context
+            .world
+            .resolve_engine_global_script(function)
+            .map(|(script, _)| script)
+            .or_else(|| context.world.resolve_engine_host_script(function))
     });
     global_carrier.and_then(|script| {
         call_scoped_global_effect_function(script, function, call_args, parameter_conversion)
@@ -1907,10 +1889,8 @@ pub(crate) fn explode(args: &[Value]) -> Result<Value, RuntimeError> {
     let effect_name =
         parse_native_c4_string_argument(args.get(3), "Explode", "effect")?.unwrap_or_default();
 
-    let target = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| explicit_target.or(context.script_object_context))
+    let target = with_host_context(None, |context| {
+        explicit_target.or(context.script_object_context)
     });
     let Some(target) = target else {
         return Ok(Value::Bool(false));
@@ -3205,15 +3185,13 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     // in extinguisher material, then the unconditional Random(3) inflame
     // draw (C4Object.cpp:794-809).
     if frame.is_multiple_of(5) {
-        let material_extinguisher = HOST_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().and_then(|context| {
-                context
-                    .landscape_ref()
-                    .and_then(|landscape| landscape.material_at(state.position.x, state.position.y))
-                    .zip(context.world.materials())
-                    .and_then(|(material_id, materials)| materials.get_by_id(material_id))
-                    .map(|material| material.extinguisher() != 0)
-            })
+        let material_extinguisher = with_host_context(None, |context| {
+            context
+                .landscape_ref()
+                .and_then(|landscape| landscape.material_at(state.position.x, state.position.y))
+                .zip(context.world.materials())
+                .and_then(|(material_id, materials)| materials.get_by_id(material_id))
+                .map(|material| material.extinguisher() != 0)
         });
         if let Some(extinguisher) = material_extinguisher {
             if extinguisher {
@@ -3447,10 +3425,8 @@ pub(crate) fn extinguish(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "Extinguish", "target"))
         .transpose()?
         .flatten();
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     let Some(target) = target_id.or(active) else {
         return Ok(Value::Bool(false));

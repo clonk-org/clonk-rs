@@ -352,11 +352,7 @@ pub(crate) fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     let target =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "ChangeDef", "obj")?;
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.script_object_context)
-    });
+    let active = with_host_context(None, |context| context.script_object_context);
     // The optional object argument selects the native receiver; it does not
     // perform a second script lookup on that object's definition. A script
     // function also named ChangeDef therefore cannot shadow FnChangeDef.
@@ -919,11 +915,7 @@ fn apply_live_target_bounds(
 /// enters it. Runs Contact callbacks, so callers must hold no object-scope
 /// borrow across it.
 pub(crate) fn bounds_check_live_object(target: ObjectId, position: &mut Vector2) {
-    let layer_side = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| live_layer_bounds(context, target, true))
-    });
+    let layer_side = with_host_context(None, |context| live_layer_bounds(context, target, true));
     if let Some((low, high)) = layer_side {
         apply_live_target_bounds(target, &mut position.x, low, high, CNAT_LEFT, CNAT_RIGHT);
     }
@@ -946,11 +938,8 @@ pub(crate) fn bounds_check_live_object(target: ObjectId, position: &mut Vector2)
         apply_live_target_bounds(target, &mut position.x, low, high, CNAT_LEFT, CNAT_RIGHT);
     }
 
-    let layer_vertical = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| live_layer_bounds(context, target, false))
-    });
+    let layer_vertical =
+        with_host_context(None, |context| live_layer_bounds(context, target, false));
     if let Some((low, high)) = layer_vertical {
         apply_live_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
     }
@@ -1287,10 +1276,8 @@ fn enter_object_live_internal(
     }
 
     if reject_collect {
-        let definition_id = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.object_effective_definition_id(target))
+        let definition_id = with_host_context(None, |context| {
+            context.object_effective_definition_id(target)
         });
         let Some(definition_id) = definition_id else {
             return Ok(false);
@@ -1533,17 +1520,15 @@ pub(crate) fn assign_removal_live(
 
     // AssignRemoval(true) passes the removed container's x/y to every
     // direct child's Exit (C4Object.cpp:285-288).
-    let exit_position = HOST_CONTEXT.with(|cell| {
-        cell.borrow().as_ref().and_then(|context| {
-            context
-                .object_scope(target)
-                .map(|scope| scope.current_position)
-                .or_else(|| {
-                    context
-                        .get_world_object(target)
-                        .map(|object| object.position)
-                })
-        })
+    let exit_position = with_host_context(None, |context| {
+        context
+            .object_scope(target)
+            .map(|scope| scope.current_position)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.position)
+            })
     });
 
     with_host_context_mut((), |context| {
@@ -1631,11 +1616,7 @@ pub(crate) fn sell_object_to_home_live(
     }
 
     loop {
-        let child = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| first_retained_content(context, target))
-        });
+        let child = with_host_context(None, |context| first_retained_content(context, target));
         let Some(child) = child else { break };
         let container = HOST_CONTEXT.with(|cell| {
             cell.borrow()
@@ -1690,10 +1671,8 @@ pub(crate) fn sell_object_to_home_live(
         });
     });
 
-    let original_definition = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_effective_definition_id(target))
+    let original_definition = with_host_context(None, |context| {
+        context.object_effective_definition_id(target)
     });
     let stock_definition =
         match call_world_object_own_function(target, "SellTo", &[Value::Int(player)]) {
@@ -1782,11 +1761,7 @@ pub(crate) fn buy(args: &[Value]) -> Result<Value, RuntimeError> {
     let to_base =
         parse_object_reference_argument(args.get(3).unwrap_or(&Value::Nil), "Buy", "target")?;
     let show_errors = value_to_bool(args.get(4).unwrap_or(&Value::Nil), "Buy", "show_errors")?;
-    let caller = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.script_object_context)
-    });
+    let caller = with_host_context(None, |context| context.script_object_context);
     let creator = to_base.or(caller);
     let definition_id = DefinitionId::from(definition.as_str());
 
@@ -1965,11 +1940,7 @@ pub(crate) fn sell(args: &[Value]) -> Result<Value, RuntimeError> {
     let player = value_to_i32(args.first().unwrap_or(&Value::Nil), "Sell", "player")?;
     let explicit =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "Sell", "object")?;
-    let target = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| explicit.or(context.script_object_context))
-    });
+    let target = with_host_context(None, |context| explicit.or(context.script_object_context));
     let Some(target) = target else {
         return Ok(Value::Bool(false));
     };
@@ -2050,10 +2021,8 @@ pub(crate) fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     let subject =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "Enter", "obj")?;
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     let Some(subject) = subject.or(active) else {
         return Ok(Value::Bool(false));
@@ -2469,10 +2438,8 @@ pub(crate) fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
     let count = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetComponent", "count")?;
     let target =
         parse_object_reference_argument(args.get(2).unwrap_or(&Value::Nil), "SetComponent", "obj")?;
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     if let Some(target) = target {
         if Some(target) != active {
@@ -2642,11 +2609,9 @@ pub(crate) fn get_value(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target else {
         return Ok(Value::Nil);
     };
-    let Some(definition) = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| effective_definition_id(context, target))
-    }) else {
+    let Some(definition) =
+        with_host_context(None, |context| effective_definition_id(context, target))
+    else {
         return Ok(Value::Nil);
     };
 
@@ -7784,19 +7749,12 @@ pub(crate) fn compose_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         "ComposeContents",
         "container",
     )?;
-    let container = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| explicit.or(context.script_object_context))
-    });
+    let container = with_host_context(None, |context| explicit.or(context.script_object_context));
     let Some(container) = container.filter(|container| object_is_present(*container)) else {
         return Ok(Value::Nil);
     };
-    let definition_known = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.world.definition_known(&definition))
-    });
+    let definition_known =
+        with_host_context(None, |context| context.world.definition_known(&definition));
     if definition_known == Some(false) {
         return Ok(Value::Nil);
     }
@@ -7896,11 +7854,7 @@ pub(crate) fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError>
     });
 
     loop {
-        let child = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| first_retained_content(context, source))
-        });
+        let child = with_host_context(None, |context| first_retained_content(context, source));
         let Some(child) = child else { break };
         let moved = match original_container {
             Some(container) => enter_object_live(child, container)?,
@@ -7911,10 +7865,8 @@ pub(crate) fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError>
         }
     }
 
-    let definition = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_effective_definition_id(source))
+    let definition = with_host_context(None, |context| {
+        context.object_effective_definition_id(source)
     });
     let Some(definition) = definition else {
         return Ok(Value::Bool(false));
@@ -9424,10 +9376,8 @@ pub(crate) fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnRemoveObject (C4Script.cpp:455-460): a nil target means the calling
     // object, and ANY object may be removed. AssignRemoval runs the complete
     // callback/effect/contents lifecycle synchronously.
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     if let Some(target) = target_id {
         if Some(target) != active {
@@ -9529,10 +9479,8 @@ pub(crate) fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     if let Some(target) = target_id {
         if Some(target) != active {

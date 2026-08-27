@@ -144,11 +144,7 @@ pub(crate) fn assign_death_live(target: ObjectId, forced: bool) -> Result<bool, 
     // Re-read the live list head after every callbackful Exit. Ejection or
     // Departure is allowed to mutate the remaining contents.
     loop {
-        let content = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| first_retained_content(context, target))
-        });
+        let content = with_host_context(None, |context| first_retained_content(context, target));
         let Some(content) = content else {
             break;
         };
@@ -226,10 +222,8 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     // Resolve only the physicals the native zero-punch branch actually
     // touches, in native order: target guard, attacker numerator, target
     // denominator (C4ObjectCom.cpp:738-740).
-    let attacker = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(ObjectScopeContext::id))
+    let attacker = with_host_context(None, |context| {
+        context.object_context().map(ObjectScopeContext::id)
     });
     let Some(attacker) = attacker else {
         return Ok(Value::Bool(false));
@@ -891,11 +885,7 @@ pub(crate) fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok()
             .flatten();
         let mass = peek.as_ref().and_then(|d| {
-            HOST_CONTEXT.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .and_then(|c| c.world.definition_metadata(d).map(|m| m.mass))
-            })
+            with_host_context(None, |c| c.world.definition_metadata(d).map(|m| m.mass))
         });
         eprintln!("MASSDBG GetMass args={args:?} -> {mass:?}");
     }
@@ -936,10 +926,8 @@ pub(crate) fn set_mass(args: &[Value]) -> Result<Value, RuntimeError> {
     let value = parse_optional_i32(args.first(), "SetMass", "mass")?.unwrap_or(0);
     let target =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "SetMass", "obj")?;
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     if let Some(target) = target {
         if Some(target) != active {
@@ -1339,10 +1327,8 @@ fn physical_name_argument(
 /// Resolve a live object's physicals without retaining a borrow of the host
 /// TLS across a possible first-fill definition callback.
 pub(crate) fn resolve_object_physical(target: ObjectId, permanent: bool) -> Option<PhysicalInfo> {
-    let resolution = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.prepare_object_physical(target, permanent))
+    let resolution = with_host_context(None, |context| {
+        context.prepare_object_physical(target, permanent)
     });
     resolution.map(PhysicalResolution::resolve)
 }
@@ -3479,10 +3465,8 @@ pub(crate) fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "Jump", "obj"))
         .transpose()?
         .flatten();
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     if let Some(target) = target {
         if Some(target) != active {
@@ -3916,13 +3900,7 @@ pub(crate) fn fight_with(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target else {
         return Ok(Value::Bool(false));
     };
-    let clonk = clonk.or_else(|| {
-        HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.script_object_context)
-        })
-    });
+    let clonk = clonk.or_else(|| with_host_context(None, |context| context.script_object_context));
     let Some(clonk) = clonk else {
         return Ok(Value::Bool(false));
     };
@@ -6785,11 +6763,7 @@ pub(crate) fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let target = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| target_id.or(context.script_object_context))
-    });
+    let target = with_host_context(None, |context| target_id.or(context.script_object_context));
     Ok(Value::Bool(
         target.is_some_and(|target| set_owner_live(target, owner)),
     ))
@@ -6840,10 +6814,8 @@ pub(crate) fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
             Ok(Value::Bool(true))
         })?;
     if updated == Value::Bool(true) {
-        let target = HOST_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().and_then(|context| {
-                target_id.or_else(|| context.object_context().map(ObjectScopeContext::id))
-            })
+        let target = with_host_context(None, |context| {
+            target_id.or_else(|| context.object_context().map(ObjectScopeContext::id))
         });
         if let Some(target) = target {
             HOST_CONTEXT.with(|cell| {

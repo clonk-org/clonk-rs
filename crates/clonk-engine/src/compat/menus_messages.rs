@@ -142,11 +142,8 @@ pub(crate) fn on_message_board_answer(args: &[Value]) -> Result<Value, RuntimeEr
     let callback = match target {
         Some(target) => call_world_object_own_function(target, "InputCallback", &callback_args),
         None => {
-            let script = HOST_CONTEXT.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .and_then(|context| context.world.scenario_script().cloned())
-            });
+            let script =
+                with_host_context(None, |context| context.world.scenario_script().cloned());
             script.and_then(|script| {
                 call_scoped_script_function(script, "InputCallback", &callback_args)
             })
@@ -282,11 +279,7 @@ fn menu_close_denied(menu_object: ObjectId, menu: &crate::ObjectMenuState) -> bo
 /// MenuQueryCancel query (C4Menu::TryClose, C4Menu.cpp:317-320); a denied
 /// soft close keeps the menu and fails.
 pub(crate) fn close_object_menu(target: ObjectId, force: bool) -> bool {
-    let menu = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_menu(target))
-    });
+    let menu = with_host_context(None, |context| context.object_menu(target));
     let Some(menu) = menu else {
         return true; // no menu -> close OK
     };
@@ -403,11 +396,7 @@ pub(crate) fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target.or(active_object_id()) else {
         return Ok(Value::Int(-1));
     };
-    let menu = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_menu(target))
-    });
+    let menu = with_host_context(None, |context| context.object_menu(target));
     Ok(menu
         .map(|menu| menu.identification)
         .unwrap_or(Value::Int(0)))
@@ -452,11 +441,7 @@ pub(crate) fn get_menu_selection(args: &[Value]) -> Result<Value, RuntimeError> 
     let Some(target) = target.or(active_object_id()) else {
         return Ok(Value::Int(-1));
     };
-    let menu = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_menu(target))
-    });
+    let menu = with_host_context(None, |context| context.object_menu(target));
     Ok(Value::Int(menu.map(|menu| menu.selection).unwrap_or(-1)))
 }
 
@@ -812,15 +797,11 @@ pub(crate) fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         _ => crate::ObjectMenuImage::Definition,
     };
     let picture_snapshot = match &image {
-        crate::ObjectMenuImage::ObjectRank { object } => HOST_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().and_then(|context| {
-                context.object_menu_picture_snapshot(*object, true, picture_symbol_size)
-            })
+        crate::ObjectMenuImage::ObjectRank { object } => with_host_context(None, |context| {
+            context.object_menu_picture_snapshot(*object, true, picture_symbol_size)
         }),
-        crate::ObjectMenuImage::Object { object } => HOST_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().and_then(|context| {
-                context.object_menu_picture_snapshot(*object, false, picture_symbol_size)
-            })
+        crate::ObjectMenuImage::Object { object } => with_host_context(None, |context| {
+            context.object_menu_picture_snapshot(*object, false, picture_symbol_size)
         }),
         _ => None,
     };
@@ -925,11 +906,7 @@ pub(crate) fn select_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target.or(active_object_id()) else {
         return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1738)
     };
-    let menu = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_menu(target))
-    });
+    let menu = with_host_context(None, |context| context.object_menu(target));
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
     };
@@ -966,11 +943,7 @@ pub(crate) fn clear_menu_items(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target.or(active_object_id()) else {
         return Ok(Value::Bool(false));
     };
-    let menu = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_menu(target))
-    });
+    let menu = with_host_context(None, |context| context.object_menu(target));
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false));
     };
@@ -1013,11 +986,7 @@ pub(crate) fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target.or(active_object_id()) else {
         return Ok(Value::Bool(false)); // !pObj (C4Script.cpp:4486)
     };
-    let menu = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_menu(target))
-    });
+    let menu = with_host_context(None, |context| context.object_menu(target));
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMnu || !IsActive (C4Script.cpp:4489)
     };
@@ -1130,11 +1099,7 @@ pub(crate) fn set_menu_text_progress(args: &[Value]) -> Result<Value, RuntimeErr
     let Some(target) = target else {
         return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1752)
     };
-    let menu = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_menu(target))
-    });
+    let menu = with_host_context(None, |context| context.object_menu(target));
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu / !IsActive
     };
@@ -1407,10 +1372,8 @@ pub(crate) fn start_script_profiler(args: &[Value]) -> Result<Value, RuntimeErro
     let target = match definition.as_deref() {
         None => None,
         Some(definition) => {
-            let script = HOST_CONTEXT.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .and_then(|context| context.world.definition_script(definition).cloned())
+            let script = with_host_context(None, |context| {
+                context.world.definition_script(definition).cloned()
             });
             let Some(script) = script else {
                 // C4Id2Def failure leaves any active profiler run untouched.

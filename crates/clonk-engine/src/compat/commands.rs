@@ -797,10 +797,8 @@ pub(crate) fn finish_command(args: &[Value]) -> Result<Value, RuntimeError> {
         "success",
     )?;
     let index = parse_optional_i32(args.get(2), "FinishCommand", "command")?.unwrap_or(0);
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     if let Some(target) = target {
         if Some(target) != active {
@@ -1729,11 +1727,7 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
     type Error = RuntimeError;
 
     fn current_menu(&self, object: ObjectId) -> Option<crate::ObjectMenuState> {
-        HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.object_menu(object))
-        })
+        with_host_context(None, |context| context.object_menu(object))
     }
 
     fn object(&self, object: ObjectId) -> Option<crate::direct_com::InternalObjectMenuObject> {
@@ -1809,10 +1803,8 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
         &self,
         object: ObjectId,
     ) -> Option<crate::ObjectMenuPictureSnapshot> {
-        HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.object_menu_picture_snapshot(object, false, 35))
+        with_host_context(None, |context| {
+            context.object_menu_picture_snapshot(object, false, 35)
         })
     }
 
