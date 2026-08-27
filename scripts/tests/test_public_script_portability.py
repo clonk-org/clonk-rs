@@ -6,6 +6,7 @@ import unittest
 
 from _repo import REPOSITORY
 
+
 PINNED_ORACLE_REVISION = "7d43b47b7d789b533f32d005e64596e0a07019cd"
 
 
@@ -65,11 +66,21 @@ class PublicScriptPortabilityTests(unittest.TestCase):
         )
 
     def test_deep_sea_benchmark_uses_the_standard_temp_environment(self):
-        benchmark = (
-            REPOSITORY / "scripts/run-deep-sea-gpu-benchmark.sh"
+        # Every Deep Sea arm builds its fixture through the shared helper, so
+        # the temp-environment contract is asserted where it now lives rather
+        # than once per wrapper.
+        fixture = (
+            REPOSITORY / "scripts/deep-sea-benchmark-fixture.sh"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("${TMPDIR:-/tmp}", benchmark)
+        self.assertIn("${TMPDIR:-/tmp}", fixture)
+
+        for wrapper in ("scripts/run-deep-sea-gpu-benchmark.sh",):
+            with self.subTest(wrapper=wrapper):
+                self.assertIn(
+                    "deep-sea-benchmark-fixture.sh",
+                    (REPOSITORY / wrapper).read_text(encoding="utf-8"),
+                )
 
     def test_deep_sea_benchmark_assigns_two_distinct_players_to_ordered_teams(self):
         with tempfile.TemporaryDirectory() as temporary:
