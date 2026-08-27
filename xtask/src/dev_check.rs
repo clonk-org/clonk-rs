@@ -694,6 +694,19 @@ fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
         ],
         reason,
     );
+    // `compat` is a directory, not a file: production children plus the
+    // `compat/tests/part_*.rs` fragments. Routing on the basename alone
+    // stopped modelling the family the moment it was split, so the family is
+    // recognised by its path.
+    if is_engine_compat_path(path) {
+        add_engine_filter(
+            plan,
+            "real-scenario-smoke",
+            "real_scenario_harness::",
+            CheckKind::Headless,
+            reason,
+        );
+    }
     let file = path.rsplit('/').next().unwrap_or("");
     match file {
         "scenario.rs" | "definition.rs" | "init_placement.rs" | "player.rs" | "player_file.rs" => {
@@ -761,7 +774,8 @@ fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
                 reason,
             );
         }
-        "compat.rs" | "effect.rs" | "script_constants.rs" | "lib.rs" => {
+        // `compat.rs` is handled by path above, with the rest of its family.
+        "effect.rs" | "script_constants.rs" | "lib.rs" => {
             add_engine_filter(
                 plan,
                 "real-scenario-smoke",
@@ -791,6 +805,15 @@ fn add_script_checks(plan: &mut CheckPlan, reason: &str) {
         &["nextest", "run", "-p", "clonk-script", "--test", "it"],
         reason,
     );
+}
+
+/// Whether a changed path belongs to the engine's compatibility family.
+///
+/// Both the parent module and everything under the directory it became, so a
+/// future split of another file into a directory does not silently drop that
+/// family's domain checks the way this one did.
+fn is_engine_compat_path(path: &str) -> bool {
+    path.ends_with("/compat.rs") || path.contains("/compat/")
 }
 
 fn add_engine_filter(plan: &mut CheckPlan, id: &str, filter: &str, kind: CheckKind, reason: &str) {
@@ -1585,6 +1608,45 @@ fn plan_for_paths(paths: &[&str], full: bool) -> CheckPlan {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Every part of the compat family schedules the compat domain's checks,
+    /// not just the file that used to be the whole of it.
+    ///
+    /// `compat.rs` became a directory: production children plus eleven
+    /// `compat/tests/part_*.rs` fragments. Routing on the changed file's
+    /// basename stopped modelling the family the moment it was split, so an
+    /// edit to a child quietly skipped the real-scenario smoke check that the
+    /// same edit to the parent still scheduled.
+    #[test]
+    fn every_compat_path_schedules_the_compat_domain_checks() {
+        let smoke_planned = |path: &str| {
+            plan_for_paths(&[path], false)
+                .commands
+                .iter()
+                .any(|command| command.id == "real-scenario-smoke")
+        };
+
+        for path in [
+            "crates/clonk-engine/src/compat.rs",
+            "crates/clonk-engine/src/compat/objects.rs",
+            "crates/clonk-engine/src/compat/players.rs",
+            "crates/clonk-engine/src/compat/menus_messages.rs",
+            "crates/clonk-engine/src/compat/tests/part_01.rs",
+            "crates/clonk-engine/src/compat/tests/part_11.rs",
+        ] {
+            assert!(
+                smoke_planned(path),
+                "{path} belongs to the compat family and must schedule its checks"
+            );
+        }
+
+        // And routing stays change-aware: an unrelated engine edit is not
+        // promoted into the compat domain.
+        assert!(
+            !smoke_planned("crates/clonk-engine/src/material.rs"),
+            "an unrelated engine file must not pick up compat's checks"
+        );
+    }
 
     #[test]
     fn detect_resolves_the_hoisted_repository_root() {
