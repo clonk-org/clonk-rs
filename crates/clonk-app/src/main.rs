@@ -733,12 +733,24 @@ fn run() -> Result<()> {
 
     // Handle headless frame dump: render one in-game sandbox frame to PNG and exit.
     if let Some(dump_path) = &cli.dump_frame {
-        return run_sandbox_dump(dump_path, cli.test_frames, app_paths.as_ref(), runtime);
+        return run_sandbox_dump(
+            dump_path,
+            cli.test_frames,
+            &classic,
+            app_paths.as_ref(),
+            runtime,
+        );
     }
 
     // Handle headless menu dump: render one startup-menu frame to PNG and exit.
     if let Some(dump_path) = &cli.dump_menu_frame {
-        return run_menu_dump(dump_path, &cli.menu_view, app_paths.as_ref(), runtime);
+        return run_menu_dump(
+            dump_path,
+            &cli.menu_view,
+            &classic,
+            app_paths.as_ref(),
+            runtime,
+        );
     }
 
     // Ahead of `validate_classic_loader_graphics_config` deliberately: the

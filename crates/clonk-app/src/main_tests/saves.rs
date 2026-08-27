@@ -1551,6 +1551,18 @@ fn duplicate_music_records_exclude_only_the_record_that_started() {
 }
 
 #[test]
+fn capture_setup_applies_the_launch_compatibility_profile() {
+    use crate::settings::CompatProfile;
+
+    let classic = parse_classic_command_line(&[OsString::from(
+        "/compatprofile:legacy-clonk",
+    )]);
+    let app = prepare_capture_app(new_state_only_menu_app(320, 200), &classic).test_value();
+
+    main_assert_eq!(app.config.compat_profile => CompatProfile::LegacyClonk);
+}
+
+#[test]
 fn menu_dump_writes_main_menu_png_at_1280x720() {
     clonk_logging::init();
 
@@ -1562,6 +1574,7 @@ fn menu_dump_writes_main_menu_png_at_1280x720() {
     run_menu_dump(
         &path,
         "main",
+        &ClassicCommandLine::default(),
         Some(&app_paths),
         test_runtime_config_with("Player", false),
     )
@@ -1620,6 +1633,7 @@ fn two_menu_dumps_are_byte_identical_once_the_capture_procedure_has_a_player() {
         run_menu_dump(
             &path,
             "main",
+            &ClassicCommandLine::default(),
             Some(&app_paths),
             test_runtime_config_with("Player", false),
         )

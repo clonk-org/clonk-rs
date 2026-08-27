@@ -8138,6 +8138,14 @@ pub(crate) fn test_scenario_load(
     }
 }
 
+pub(crate) fn prepare_capture_app(
+    mut app: GameApp,
+    classic: &ClassicCommandLine,
+) -> Result<GameApp> {
+    app.apply_classic_command_line(classic)?;
+    Ok(app)
+}
+
 /// Headless: boot the sandbox scenario, advance `test_frames` simulation frames,
 /// render one in-game frame to the renderer's CPU surface, and write it as a PNG.
 /// No window/event loop, so the in-game scene can be captured for rendering-parity
@@ -8145,21 +8153,25 @@ pub(crate) fn test_scenario_load(
 pub(crate) fn run_sandbox_dump(
     dump_path: &std::path::Path,
     test_frames: u32,
+    classic: &ClassicCommandLine,
     app_paths: Option<&Arc<AppPaths>>,
     runtime: RuntimeConfig,
 ) -> Result<()> {
     use std::thread;
     use std::time::Duration;
 
-    let mut app = GameApp::new_with_debug_hud(
-        1280,
-        720,
-        AudioOptions::default(),
-        app_paths.map(|v| &**v),
-        runtime,
-        false,
-    )
-    .context("failed to initialise app for frame dump")?;
+    let mut app = prepare_capture_app(
+        GameApp::new_with_debug_hud(
+            1280,
+            720,
+            AudioOptions::default(),
+            app_paths.map(|v| &**v),
+            runtime,
+            false,
+        )
+        .context("failed to initialise app for frame dump")?,
+        classic,
+    )?;
     app.auto_start_sandbox = true;
 
     // Pump update() until async boot finishes and the sandbox auto-starts (Running).
@@ -8228,21 +8240,25 @@ fn options_sheet_by_name(name: &str) -> Option<clonk_frontend::startup_options_d
 pub(crate) fn run_menu_dump(
     dump_path: &std::path::Path,
     menu_view: &str,
+    classic: &ClassicCommandLine,
     app_paths: Option<&Arc<AppPaths>>,
     runtime: RuntimeConfig,
 ) -> Result<()> {
     use std::thread;
     use std::time::Duration;
 
-    let mut app = GameApp::new_with_debug_hud(
-        1280,
-        720,
-        AudioOptions::default(),
-        app_paths.map(|v| &**v),
-        runtime,
-        false,
-    )
-    .context("failed to initialise app for menu dump")?;
+    let mut app = prepare_capture_app(
+        GameApp::new_with_debug_hud(
+            1280,
+            720,
+            AudioOptions::default(),
+            app_paths.map(|v| &**v),
+            runtime,
+            false,
+        )
+        .context("failed to initialise app for menu dump")?,
+        classic,
+    )?;
 
     // Pump update() until async boot finishes and the startup menu is shown.
     let mut booted = false;
