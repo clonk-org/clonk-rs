@@ -86,7 +86,13 @@ impl Engine {
     pub(crate) fn actualize_ownerless_fow_objects_for_new_player(&mut self) {
         // C4Player::Init walks Game.Objects First -> Next. `exec_list` is the
         // reverse C++ master list, hence the reversed iterator here.
-        let object_ids = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let object_ids = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         for object_id in object_ids {
             let ownerless = self.find_object_index(object_id).is_some_and(|index| {
                 let object = &self.objects[index];
@@ -107,7 +113,7 @@ impl Engine {
         }
         // C4ObjectList::AssignPlrViewRange walks Last -> Prev, which is the
         // stored order of the reverse-master `exec_list`.
-        let object_ids = self.exec_list.clone();
+        let object_ids = self.execution.exec_list.clone();
         for object_id in object_ids {
             self.actualize_object_fow_view_range(object_id);
         }
@@ -390,15 +396,16 @@ impl Engine {
             return Ok(());
         };
         let mut visited = HashSet::new();
-        let mut next = self.exec_list.last().copied();
+        let mut next = self.execution.exec_list.last().copied();
         while let Some(object_id) = next {
             visited.insert(object_id);
             let successors = self
+                .execution
                 .exec_list
                 .iter()
                 .position(|candidate| *candidate == object_id)
                 .map(|position| {
-                    self.exec_list[..position]
+                    self.execution.exec_list[..position]
                         .iter()
                         .rev()
                         .copied()
@@ -421,18 +428,19 @@ impl Engine {
                 }
             }
             next = if let Some(position) = self
+                .execution
                 .exec_list
                 .iter()
                 .position(|candidate| *candidate == object_id)
             {
-                self.exec_list[..position]
+                self.execution.exec_list[..position]
                     .iter()
                     .rev()
                     .copied()
                     .find(|candidate| !visited.contains(candidate))
             } else {
                 successors.into_iter().find(|candidate| {
-                    !visited.contains(candidate) && self.exec_list.contains(candidate)
+                    !visited.contains(candidate) && self.execution.exec_list.contains(candidate)
                 })
             };
         }
@@ -737,11 +745,12 @@ impl Engine {
         let master_list_order = master_list_order.unwrap_or_else(|| {
             #[cfg(test)]
             EXEC_LIST_MASTER_ORDER_SCANS.with(|count| count.set(count.get() + 1));
-            self.exec_list
+            self.execution
+                .exec_list
                 .iter()
                 .rev()
                 .position(|&id| id == object.id)
-                .unwrap_or_else(|| self.exec_list.len().saturating_add(index))
+                .unwrap_or_else(|| self.execution.exec_list.len().saturating_add(index))
         });
         let (
             procedure,

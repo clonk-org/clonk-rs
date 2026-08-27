@@ -44,6 +44,7 @@ func FxSpawnStart()
     spawn_fixture!(engine, "CCFX");
 
     let children = engine
+        .execution
         .exec_list
         .iter()
         .rev()

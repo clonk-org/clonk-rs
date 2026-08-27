@@ -317,7 +317,8 @@ func FxHighStop(object target, int number, int reason)
 
     assert_eq!(
         engine
-            .inactive_exec_list
+            .execution
+            .inactive
             .iter()
             .rev()
             .copied()
@@ -367,6 +368,7 @@ func FxSpawnStart()
     );
 
     let children = engine
+        .execution
         .exec_list
         .iter()
         .rev()
@@ -421,6 +423,7 @@ func FxSpawnStart()
     ]));
 
     let definitions = engine
+        .execution
         .exec_list
         .iter()
         .rev()

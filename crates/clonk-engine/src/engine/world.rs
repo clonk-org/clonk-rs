@@ -464,7 +464,7 @@ impl Engine {
         // (C4GameObjects.cpp:739-769).
         let mut seen = HashSet::with_capacity(self.objects.len());
         let mut records = Vec::with_capacity(self.objects.len());
-        for &id in self.exec_list.iter().rev() {
+        for &id in self.execution.exec_list.iter().rev() {
             let Some(index) = self.find_object_index(id) else {
                 continue;
             };
@@ -492,7 +492,13 @@ impl Engine {
         let record = self
             .find_object_index(object_id)
             .and_then(|index| self.sector_record_for_object(&self.objects[index]));
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         let Some(sectors) = self.sectors.as_mut() else {
             return;
         };

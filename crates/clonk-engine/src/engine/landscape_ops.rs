@@ -2431,7 +2431,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands
+            self.execution
+                .pending_object_order_commands
                 .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if !audio_events.is_empty() {

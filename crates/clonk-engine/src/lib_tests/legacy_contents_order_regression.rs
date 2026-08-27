@@ -154,7 +154,7 @@ fn legacy_link_repair_sorts_omitted_contained_children() {
     // C4GameObjects::Load walks the forward main list; Engine::exec_list is
     // its reverse representation. Two omitted equal-key children make that
     // traversal observable because each Add(stContents) prepends its cluster.
-    engine.exec_list = vec![parent, first, omitted_a, omitted_b];
+    engine.execution.exec_list = vec![parent, first, omitted_a, omitted_b];
 
     engine.restore_legacy_object_links(
         &[(first, parent), (omitted_a, parent), (omitted_b, parent)],
@@ -182,7 +182,7 @@ fn legacy_link_repair_interleaves_contained_and_contents_in_master_order() {
     let first_parent = spawn_fixture!(engine, "CONT", with_id: ObjectId::new(2));
     let later_parent = spawn_fixture!(engine, "CONT", with_id: ObjectId::new(3));
     // Native forward master order is child, first_parent, later_parent.
-    engine.exec_list = vec![later_parent, first_parent, child];
+    engine.execution.exec_list = vec![later_parent, first_parent, child];
 
     engine.restore_legacy_object_links(
         &[(child, first_parent)],
@@ -220,7 +220,7 @@ fn legacy_link_repair_deduplicates_when_each_parent_is_visited() {
     let duplicate = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(3));
     let middle = spawn_fixture!(engine, "OTHR", with_id: ObjectId::new(4));
     // Native forward master order is inserted, parent, duplicate, middle.
-    engine.exec_list = vec![middle, duplicate, parent, inserted];
+    engine.execution.exec_list = vec![middle, duplicate, parent, inserted];
 
     engine.restore_legacy_object_links(
         &[(inserted, parent)],

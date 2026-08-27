@@ -436,7 +436,7 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn debug_exec_order(&self) -> Vec<ObjectId> {
-        self.exec_list.clone()
+        self.execution.exec_list.clone()
     }
 
     /// C4ObjectList::Add stMain insertion (C4ObjectList.cpp:110-216) kept
@@ -469,11 +469,12 @@ impl Engine {
         if std::env::var("LC_EXECDBG").is_ok() {
             crate::rng::rng_trace_line(
                 self.rng.trace_index,
-                &format!("FIXORDER len={}", self.exec_list.len()),
+                &format!("FIXORDER len={}", self.execution.exec_list.len()),
             );
         }
-        let mut keyed: Vec<(i32, usize, ObjectId)> = Vec::with_capacity(self.exec_list.len());
-        for (position, &id) in self.exec_list.iter().enumerate() {
+        let mut keyed: Vec<(i32, usize, ObjectId)> =
+            Vec::with_capacity(self.execution.exec_list.len());
+        for (position, &id) in self.execution.exec_list.iter().enumerate() {
             let Some(index) = self.find_object_index(id) else {
                 continue;
             };
@@ -505,9 +506,15 @@ impl Engine {
         keyed.sort_by_key(|&(sort_bit, position, _)| (sort_bit, position));
         let sorted_ids = keyed.into_iter().map(|(_, _, id)| id).collect::<Vec<_>>();
         for (position, id) in positions.into_iter().zip(sorted_ids) {
-            self.exec_list[position] = id;
+            self.execution.exec_list[position] = id;
         }
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         if let Some(sectors) = self.sectors.as_mut() {
             sectors.set_master_order(master_order);
         }
@@ -518,10 +525,12 @@ impl Engine {
     /// list is the C++ main list reversed, so Before/After are reversed too.
     #[doc(hidden)]
     pub fn execute_object_order_commands(&mut self) {
-        if self.pending_object_order_commands.is_empty() && !self.resort_any_object {
+        if self.execution.pending_object_order_commands.is_empty()
+            && !self.execution.resort_any_object
+        {
             return;
         }
-        let commands = std::mem::take(&mut self.pending_object_order_commands);
+        let commands = std::mem::take(&mut self.execution.pending_object_order_commands);
 
         let sort_all = commands
             .iter()
@@ -533,7 +542,7 @@ impl Engine {
                 _ => None,
             })
             .collect();
-        self.resort_any_object |= !resort_objects.is_empty()
+        self.execution.resort_any_object |= !resort_objects.is_empty()
             || commands
                 .iter()
                 .any(|command| matches!(command, ObjectOrderCommand::ResortUnsortedSweep));
@@ -552,9 +561,9 @@ impl Engine {
             self.sort_exec_list_by_category();
         }
 
-        if self.resort_any_object {
+        if self.execution.resort_any_object {
             self.resort_all_unsorted();
-            self.resort_any_object = false;
+            self.execution.resort_any_object = false;
         }
 
         // C4ObjResort nodes are pushed at the list head: newest first.
@@ -588,14 +597,16 @@ impl Engine {
         // it outside that traversal, and the final ResortProc=null discards
         // it. Native Resort flags are a separate game-level trigger and stay
         // armed for the next post-CrossCheck sweep.
-        self.pending_object_order_commands.retain(|command| {
-            matches!(
-                command,
-                ObjectOrderCommand::ResortObject(_)
-                    | ObjectOrderCommand::ResortUnsortedSweep
-                    | ObjectOrderCommand::SortByCategory
-            )
-        });
+        self.execution
+            .pending_object_order_commands
+            .retain(|command| {
+                matches!(
+                    command,
+                    ObjectOrderCommand::ResortObject(_)
+                        | ObjectOrderCommand::ResortUnsortedSweep
+                        | ObjectOrderCommand::SortByCategory
+                )
+            });
     }
 
     /// Invoke one C4ObjResort OrderFunc through the script host captured at
@@ -715,8 +726,8 @@ impl Engine {
     /// reverse representation, so master index zero maps to its final slot.
     fn object_order_master_id(&self, master_index: usize) -> Option<ObjectId> {
         let reverse_offset = master_index.checked_add(1)?;
-        let exec_index = self.exec_list.len().checked_sub(reverse_offset)?;
-        self.exec_list.get(exec_index).copied()
+        let exec_index = self.execution.exec_list.len().checked_sub(reverse_offset)?;
+        self.execution.exec_list.get(exec_index).copied()
     }
 
     fn object_order_master_active(&self, master_index: usize) -> bool {
@@ -748,21 +759,29 @@ impl Engine {
         let Some(second_offset) = second.checked_add(1) else {
             return false;
         };
-        let Some(first_exec) = self.exec_list.len().checked_sub(first_offset) else {
+        let Some(first_exec) = self.execution.exec_list.len().checked_sub(first_offset) else {
             return false;
         };
-        let Some(second_exec) = self.exec_list.len().checked_sub(second_offset) else {
+        let Some(second_exec) = self.execution.exec_list.len().checked_sub(second_offset) else {
             return false;
         };
-        if first_exec >= self.exec_list.len() || second_exec >= self.exec_list.len() {
+        if first_exec >= self.execution.exec_list.len()
+            || second_exec >= self.execution.exec_list.len()
+        {
             return false;
         }
-        self.exec_list.swap(first_exec, second_exec);
+        self.execution.exec_list.swap(first_exec, second_exec);
         // Swapping payloads changes Game.Objects immediately. Existing
         // physical sector vectors stay untouched until UpdatePosResort, but
         // any object added or re-added by a later comparator must rank
         // against this new live master order.
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         if let Some(sectors) = self.sectors.as_mut() {
             sectors.set_master_order(master_order);
         }
@@ -775,7 +794,7 @@ impl Engine {
     /// intentionally tests the moving link's category without its Status —
     /// matching the legacy `pLnk`/`pNextLnk` typo.
     fn execute_order_function_all(&mut self, order: &ObjectOrderFunction, category: i32) {
-        let mut cursor = self.exec_list.len().checked_sub(1);
+        let mut cursor = self.execution.exec_list.len().checked_sub(1);
         let mut bit = 1;
         while bit < CATEGORY_SORT_LIMIT {
             if category & bit == 0 {
@@ -924,6 +943,7 @@ impl Engine {
             return false;
         }
         let Some(origin) = self
+            .execution
             .exec_list
             .iter()
             .rev()
@@ -934,7 +954,7 @@ impl Engine {
 
         let mut move_after = None;
         let mut position = origin + 1;
-        while position < self.exec_list.len() {
+        while position < self.execution.exec_list.len() {
             let Some(candidate) = self.object_order_master_id(position) else {
                 break;
             };
@@ -1025,8 +1045,8 @@ impl Engine {
         // unified Rust ledger slots while performing the remove/insert over
         // the logical Game.Objects links (including retained Deleted links).
         let mut inactive_slots = Vec::new();
-        let mut logical_links = Vec::with_capacity(self.exec_list.len());
-        for (position, &id) in self.exec_list.iter().enumerate() {
+        let mut logical_links = Vec::with_capacity(self.execution.exec_list.len());
+        for (position, &id) in self.execution.exec_list.iter().enumerate() {
             let inactive = self
                 .find_object_index(id)
                 .is_some_and(|index| self.objects[index].state.status == ObjectStatus::Inactive);
@@ -1058,7 +1078,7 @@ impl Engine {
         for (position, inactive) in inactive_slots {
             logical_links.insert(position.min(logical_links.len()), inactive);
         }
-        self.exec_list = logical_links;
+        self.execution.exec_list = logical_links;
         true
     }
 
@@ -1068,6 +1088,7 @@ impl Engine {
     /// insertion scans.
     pub(crate) fn resort_all_unsorted(&mut self) {
         let resort_order = self
+            .execution
             .exec_list
             .iter()
             .rev()
@@ -1092,6 +1113,7 @@ impl Engine {
 
     fn sort_exec_list_by_category(&mut self) {
         let mut keyed = self
+            .execution
             .exec_list
             .iter()
             .enumerate()
@@ -1115,9 +1137,15 @@ impl Engine {
             .into_iter()
             .zip(keyed.into_iter().map(|(_, _, id)| id))
         {
-            self.exec_list[position] = id;
+            self.execution.exec_list[position] = id;
         }
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         if let Some(sectors) = self.sectors.as_mut() {
             sectors.set_master_order(master_order);
         }
@@ -1130,14 +1158,20 @@ impl Engine {
         if self.objects[object_index].state.status == ObjectStatus::Inactive {
             return;
         }
-        let Some(position) = self.exec_list.iter().position(|&id| id == object) else {
+        let Some(position) = self.execution.exec_list.iter().position(|&id| id == object) else {
             return;
         };
-        self.exec_list.remove(position);
+        self.execution.exec_list.remove(position);
         if self.objects[object_index].destroyed
             || self.objects[object_index].state.status == ObjectStatus::Deleted
         {
-            let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+            let master_order = self
+                .execution
+                .exec_list
+                .iter()
+                .rev()
+                .copied()
+                .collect::<Vec<_>>();
             if let Some(sectors) = self.sectors.as_mut() {
                 sectors.set_master_order(master_order);
             }
@@ -1176,6 +1210,7 @@ impl Engine {
             return false;
         }
         let logical_links = self
+            .execution
             .exec_list
             .iter()
             .copied()
@@ -1209,15 +1244,21 @@ impl Engine {
     }
 
     pub(crate) fn insert_exec_link(&mut self, position: usize, id: ObjectId) {
-        self.exec_list.insert(position, id);
-        self.exec_list_insert_generation = self.exec_list_insert_generation.wrapping_add(1);
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        self.execution.exec_list.insert(position, id);
+        self.execution.insert_generation = self.execution.insert_generation.wrapping_add(1);
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         if let Some(sectors) = self.sectors.as_mut() {
             sectors.set_master_order(master_order);
         }
-        if let Some(cursor) = self.exec_cursor {
+        if let Some(cursor) = self.execution.cursor {
             if position < cursor {
-                self.exec_cursor = Some(cursor + 1);
+                self.execution.cursor = Some(cursor + 1);
             }
         }
     }
@@ -1233,10 +1274,12 @@ impl Engine {
             sectors,
         } = preview;
         let next_exec = self
-            .exec_cursor
-            .and_then(|cursor| self.exec_list.get(cursor).copied());
-        let previous_cursor = self.exec_cursor;
+            .execution
+            .cursor
+            .and_then(|cursor| self.execution.exec_list.get(cursor).copied());
+        let previous_cursor = self.execution.cursor;
         let retained_ledger_slots = self
+            .execution
             .exec_list
             .iter()
             .copied()
@@ -1264,12 +1307,19 @@ impl Engine {
         for (position, id) in retained_ledger_slots {
             exact.insert(position.min(exact.len()), id);
         }
-        if self.exec_list != exact {
-            self.exec_list = exact;
-            self.exec_list_insert_generation = self.exec_list_insert_generation.wrapping_add(1);
-            self.exec_cursor = next_exec
-                .and_then(|id| self.exec_list.iter().position(|candidate| *candidate == id))
-                .or_else(|| previous_cursor.map(|cursor| cursor.min(self.exec_list.len())));
+        if self.execution.exec_list != exact {
+            self.execution.exec_list = exact;
+            self.execution.insert_generation = self.execution.insert_generation.wrapping_add(1);
+            self.execution.cursor = next_exec
+                .and_then(|id| {
+                    self.execution
+                        .exec_list
+                        .iter()
+                        .position(|candidate| *candidate == id)
+                })
+                .or_else(|| {
+                    previous_cursor.map(|cursor| cursor.min(self.execution.exec_list.len()))
+                });
         }
         let inactive_exec_list = inactive_order
             .into_iter()
@@ -1281,7 +1331,7 @@ impl Engine {
                 })
             })
             .collect();
-        self.inactive_exec_list = inactive_exec_list;
+        self.execution.inactive = inactive_exec_list;
         if let Some(mut sectors) = sectors {
             sectors.set_master_order(master_order);
             self.sectors = Some(sectors);
@@ -1293,9 +1343,9 @@ impl Engine {
     /// C4ObjectList::Add(stMain) for `Game.Objects.InactiveObjects`, stored
     /// in the same reversed representation as `exec_list`.
     pub(crate) fn insert_into_inactive_list(&mut self, id: ObjectId, loaded: bool) {
-        self.inactive_exec_list.retain(|other| *other != id);
+        self.execution.inactive.retain(|other| *other != id);
         if loaded {
-            self.inactive_exec_list.push(id);
+            self.execution.inactive.push(id);
             return;
         }
         let Some(index) = self.find_object_index(id) else {
@@ -1309,14 +1359,14 @@ impl Engine {
                 .unwrap_or(false)
         };
         if is_line(self, index) {
-            self.inactive_exec_list.insert(0, id);
+            self.execution.inactive.insert(0, id);
             return;
         }
         let category = self.objects[index].state.category;
         let sort_category = category & CATEGORY_SORT_LIMIT;
         let definition_id = self.objects[index].definition_id.clone();
         if category & CATEGORY_STATIC_BACK == 0 {
-            if let Some(position) = self.inactive_exec_list.iter().rposition(|&other| {
+            if let Some(position) = self.execution.inactive.iter().rposition(|&other| {
                 self.find_object_index(other).is_some_and(|other_index| {
                     let object = &self.objects[other_index];
                     !object.destroyed
@@ -1325,11 +1375,11 @@ impl Engine {
                         && object.definition_id == definition_id
                 })
             }) {
-                self.inactive_exec_list.insert(position + 1, id);
+                self.execution.inactive.insert(position + 1, id);
                 return;
             }
         }
-        let bracket_position = self.inactive_exec_list.iter().rposition(|&other| {
+        let bracket_position = self.execution.inactive.iter().rposition(|&other| {
             self.find_object_index(other).is_some_and(|other_index| {
                 let object = &self.objects[other_index];
                 !object.destroyed
@@ -1338,8 +1388,8 @@ impl Engine {
             })
         });
         match bracket_position {
-            Some(position) => self.inactive_exec_list.insert(position + 1, id),
-            None => self.inactive_exec_list.insert(0, id),
+            Some(position) => self.execution.inactive.insert(position + 1, id),
+            None => self.execution.inactive.insert(0, id),
         }
     }
 
@@ -1353,7 +1403,7 @@ impl Engine {
             return;
         }
         if previous == ObjectStatus::Inactive {
-            self.inactive_exec_list.retain(|other| *other != id);
+            self.execution.inactive.retain(|other| *other != id);
         }
         if previous == ObjectStatus::Inactive && current == ObjectStatus::Normal {
             if let Some(index) = self.find_object_index(id) {
@@ -1362,11 +1412,16 @@ impl Engine {
             }
             // StatusActivate calls Game.Objects.Add(this), so it receives a
             // fresh stMain position rather than recovering its old slot.
-            if let Some(position) = self.exec_list.iter().position(|other| *other == id) {
-                self.exec_list.remove(position);
-                if let Some(cursor) = self.exec_cursor {
+            if let Some(position) = self
+                .execution
+                .exec_list
+                .iter()
+                .position(|other| *other == id)
+            {
+                self.execution.exec_list.remove(position);
+                if let Some(cursor) = self.execution.cursor {
                     if position < cursor {
-                        self.exec_cursor = Some(cursor - 1);
+                        self.execution.cursor = Some(cursor - 1);
                     }
                 }
             }
@@ -1381,8 +1436,8 @@ impl Engine {
     /// ordering ledger. Normal runtime transitions update the list eagerly;
     /// this fallback only inserts missing live inactive objects.
     pub(crate) fn reconcile_inactive_list(&mut self) {
-        let previous = std::mem::take(&mut self.inactive_exec_list);
-        self.inactive_exec_list = previous
+        let previous = std::mem::take(&mut self.execution.inactive);
+        self.execution.inactive = previous
             .into_iter()
             .filter(|&id| {
                 self.find_object_index(id).is_some_and(|index| {
@@ -1397,7 +1452,7 @@ impl Engine {
             .filter(|object| {
                 !object.destroyed
                     && object.state.status == ObjectStatus::Inactive
-                    && !self.inactive_exec_list.contains(&object.id)
+                    && !self.execution.inactive.contains(&object.id)
             })
             .map(|object| object.id)
             .collect::<Vec<_>>();
@@ -1448,13 +1503,19 @@ impl Engine {
         ignored: Option<&HashSet<ObjectId>>,
     ) -> usize {
         if loaded {
-            return self.exec_list.len();
+            return self.execution.exec_list.len();
         }
         if is_line || unsorted {
             return 0;
         }
         let sort_category = category & CATEGORY_SORT_LIMIT;
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         // The scans consider live sorted links only (Status && !Unsorted,
         // :156,:168). Runtime removals are pruned separately.
         let live_index = |engine: &Self, other: ObjectId| {

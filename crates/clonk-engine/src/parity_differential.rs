@@ -6623,7 +6623,7 @@ fn parity_differential_matches_cpp_golden() {
             .iter()
             .map(|row| ids[row["name"].as_str().expect("row name")])
             .collect::<Vec<_>>();
-        engine.exec_list = master_order.iter().rev().copied().collect();
+        engine.execution.exec_list = master_order.iter().rev().copied().collect();
 
         let rng_before = &case["rng_before"];
         expect_eq(
@@ -6844,7 +6844,7 @@ fn parity_differential_matches_cpp_golden() {
             )
             .expect("blast caller spawns");
         master_order.push(caller_id);
-        engine.exec_list = master_order.iter().rev().copied().collect();
+        engine.execution.exec_list = master_order.iter().rev().copied().collect();
 
         let compares_rng = case.get("rng_before").is_some();
         if compares_rng {

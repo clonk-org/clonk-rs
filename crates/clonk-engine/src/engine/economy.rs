@@ -3322,7 +3322,13 @@ impl Engine {
         // saves when a later parent's list retargets a child whose earlier
         // Contained link was just repaired (C4GameObjects.cpp:597-631).
         // `exec_list` stores the reverse of that native list view.
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         for object_id in master_order {
             if !active.contains(&object_id) {
                 continue;

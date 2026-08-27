@@ -13,7 +13,7 @@ impl Engine {
         if let Some(landscape) = &mut self.landscape {
             landscape.finish_surface32_draw();
         }
-        self.exec_cursor = None;
+        self.execution.cursor = None;
         self.frame += 1;
         // C4Game::Ticks only arms the external one-second timer; it does not
         // increment Game.Time itself (C4Game.cpp:1899-1913).
@@ -92,6 +92,7 @@ impl Engine {
                 .collect::<HashSet<_>>()
         });
         let master_list_indices = self
+            .execution
             .exec_list
             .iter()
             .rev()
@@ -183,7 +184,12 @@ impl Engine {
                         master_list_order: master_list_indices
                             .get(&object.id)
                             .copied()
-                            .unwrap_or_else(|| self.exec_list.len().saturating_add(fallback_order)),
+                            .unwrap_or_else(|| {
+                                self.execution
+                                    .exec_list
+                                    .len()
+                                    .saturating_add(fallback_order)
+                            }),
                         definition_id: object.definition_id.clone(),
                         position: object.state.position,
                         fixed_position: object.fixed_position,
@@ -300,11 +306,12 @@ impl Engine {
         // Prune ids whose objects were removed since the last frame, then
         // map to indices. Any live object missing from the list would be
         // a missed insertion site — execute it last and say so loudly.
-        let mut exec_list = std::mem::take(&mut self.exec_list);
+        let mut exec_list = std::mem::take(&mut self.execution.exec_list);
         exec_list.retain(|&id| self.find_object_index(id).is_some());
-        self.exec_list = exec_list;
+        self.execution.exec_list = exec_list;
         let mut duplicate_exec_order = duplicate_object_ids.then(|| {
-            self.exec_list
+            self.execution
+                .exec_list
                 .iter()
                 .filter_map(|&id| self.find_object_index(id))
                 .collect::<Vec<_>>()
@@ -312,8 +319,13 @@ impl Engine {
         let listed_indices = duplicate_exec_order
             .as_ref()
             .map(|order| order.iter().copied().collect::<HashSet<_>>());
-        let listed_ids =
-            (!duplicate_object_ids).then(|| self.exec_list.iter().copied().collect::<HashSet<_>>());
+        let listed_ids = (!duplicate_object_ids).then(|| {
+            self.execution
+                .exec_list
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+        });
         for idx in 0..self.objects.len() {
             let object = &self.objects[idx];
             // Inactive objects belong only to C4GameObjects::InactiveObjects;
@@ -331,7 +343,7 @@ impl Engine {
                     object = object_id.as_u64(),
                     "active object missing from exec_list; appending"
                 );
-                self.insert_exec_link(self.exec_list.len(), object_id);
+                self.insert_exec_link(self.execution.exec_list.len(), object_id);
                 if let Some(exec_order) = duplicate_exec_order.as_mut() {
                     exec_order.push(idx);
                 }
@@ -341,8 +353,8 @@ impl Engine {
         // `exec_list` is that master list reversed. Refresh the ephemeral
         // rank after pruning/fixing/appending so HashMap iteration can never
         // decide an equal-distance command target.
-        Self::refresh_command_master_list_order(&self.exec_list, &mut command_snapshots);
-        let mut command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
+        Self::refresh_command_master_list_order(&self.execution.exec_list, &mut command_snapshots);
+        let mut command_snapshot_exec_insert_generation = self.execution.insert_generation;
         if let Some(traced) = coach_debug_id().filter(|_| (1..=300).contains(&frame)) {
             if let Some(idx) = self.find_object_index(ObjectId::new(traced)) {
                 let object = &self.objects[idx];
@@ -383,7 +395,8 @@ impl Engine {
             };
             if hit {
                 let exec_order = duplicate_exec_order.clone().unwrap_or_else(|| {
-                    self.exec_list
+                    self.execution
+                        .exec_list
                         .iter()
                         .filter_map(|&id| self.find_object_index(id))
                         .collect()
@@ -402,11 +415,12 @@ impl Engine {
                 }
             }
         }
-        self.exec_cursor = Some(0);
+        self.execution.cursor = Some(0);
         let mut previous_exec_object = None;
         while self
-            .exec_cursor
-            .is_some_and(|cursor| cursor < self.exec_list.len())
+            .execution
+            .cursor
+            .is_some_and(|cursor| cursor < self.execution.exec_list.len())
         {
             // Native removal paths can leave through many early-continue
             // arms. Clear their layer pointers before the next object gets
@@ -420,14 +434,17 @@ impl Engine {
             }) {
                 self.clear_destroyed_object_layers();
             }
-            if command_snapshot_exec_insert_generation != self.exec_list_insert_generation {
-                Self::refresh_command_master_list_order(&self.exec_list, &mut command_snapshots);
-                command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
+            if command_snapshot_exec_insert_generation != self.execution.insert_generation {
+                Self::refresh_command_master_list_order(
+                    &self.execution.exec_list,
+                    &mut command_snapshots,
+                );
+                command_snapshot_exec_insert_generation = self.execution.insert_generation;
             }
-            let cursor = self.exec_cursor.unwrap_or_default();
-            let current_id = self.exec_list[cursor];
+            let cursor = self.execution.cursor.unwrap_or_default();
+            let current_id = self.execution.exec_list[cursor];
             previous_exec_object = Some(current_id);
-            self.exec_cursor = Some(cursor + 1);
+            self.execution.cursor = Some(cursor + 1);
             let Some(idx) = self.find_object_index(current_id) else {
                 continue;
             };
@@ -445,6 +462,7 @@ impl Engine {
                     .front_command_object_dependencies(self.objects[idx].state.action.target);
                 if object_command_dependencies.is_none() && !command_snapshots_are_full {
                     let master_list_indices = self
+                        .execution
                         .exec_list
                         .iter()
                         .rev()
@@ -689,10 +707,10 @@ impl Engine {
                         .collect();
                     command_snapshots_are_full = true;
                     Self::refresh_command_master_list_order(
-                        &self.exec_list,
+                        &self.execution.exec_list,
                         &mut command_snapshots,
                     );
-                    command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
+                    command_snapshot_exec_insert_generation = self.execution.insert_generation;
                 }
 
                 if !queue_events.is_empty() {
@@ -780,7 +798,8 @@ impl Engine {
                         if !player_commands.is_empty() {
                             self.apply_player_commands(player_commands)?;
                         }
-                        self.pending_object_order_commands
+                        self.execution
+                            .pending_object_order_commands
                             .extend(object_order_commands);
                         self.apply_next_mission_commands(next_mission_commands);
                         if !audio_events.is_empty() {
@@ -1392,7 +1411,8 @@ impl Engine {
                     if !player_commands.is_empty() {
                         self.apply_player_commands(player_commands)?;
                     }
-                    self.pending_object_order_commands
+                    self.execution
+                        .pending_object_order_commands
                         .extend(object_order_commands);
                     self.apply_next_mission_commands(next_mission_commands);
 
@@ -1612,7 +1632,8 @@ impl Engine {
                         if !player_commands.is_empty() {
                             self.apply_player_commands(player_commands)?;
                         }
-                        self.pending_object_order_commands
+                        self.execution
+                            .pending_object_order_commands
                             .extend(object_order_commands);
                         self.apply_next_mission_commands(next_mission_commands);
                         if !landscape_ops.is_empty() {
@@ -1764,7 +1785,7 @@ impl Engine {
                 let master_list_order = command_snapshots
                     .get(&object_id)
                     .map(|snapshot| snapshot.master_list_order)
-                    .unwrap_or_else(|| self.exec_list.len().saturating_add(idx));
+                    .unwrap_or_else(|| self.execution.exec_list.len().saturating_add(idx));
                 command_snapshots.insert(
                     object_id,
                     CommandObjectSnapshot {
@@ -1827,7 +1848,7 @@ impl Engine {
                 });
             }
         }
-        self.exec_cursor = None;
+        self.execution.cursor = None;
 
         // CreateObject is synchronous inside C4Object::Execute. Rust defers
         // materialization only so a freshly linked object cannot enter the
@@ -3129,7 +3150,8 @@ impl Engine {
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
-        self.pending_object_order_commands
+        self.execution
+            .pending_object_order_commands
             .extend(object_order_commands);
         self.apply_next_mission_commands(next_mission_commands);
 
@@ -3472,7 +3494,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands
+            self.execution
+                .pending_object_order_commands
                 .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if !audio_events.is_empty() {
@@ -3882,7 +3905,8 @@ impl Engine {
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
-                self.pending_object_order_commands
+                self.execution
+                    .pending_object_order_commands
                     .extend(object_order_commands);
                 self.apply_next_mission_commands(next_mission_commands);
                 if !audio_events.is_empty() {
@@ -4143,7 +4167,7 @@ mod tests {
         restored
             .restore_state(&state)
             .expect("duplicate ids retain the public restore behavior");
-        assert_eq!(restored.exec_list, [duplicate_id]);
+        assert_eq!(restored.execution.exec_list, [duplicate_id]);
         let canonical = restored
             .find_object_index(duplicate_id)
             .expect("duplicate id resolves to one restored object");
@@ -4151,7 +4175,7 @@ mod tests {
 
         restored.tick().expect("duplicate-id frame advances");
 
-        assert_eq!(restored.exec_list, [duplicate_id, duplicate_id]);
+        assert_eq!(restored.execution.exec_list, [duplicate_id, duplicate_id]);
         let canonical = restored
             .find_object_index(duplicate_id)
             .expect("duplicate id still resolves after execution");

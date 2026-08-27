@@ -587,7 +587,13 @@ impl Engine {
     /// overlapping-mask re-put chain, then call UpdateSolidMask for every
     /// active object in the same post-resort master-list order.
     pub(crate) fn synchronize_solid_masks(&mut self) {
-        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let master_order = self
+            .execution
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
         for &id in &master_order {
             let Some(index) = self.find_object_index(id) else {
                 continue;

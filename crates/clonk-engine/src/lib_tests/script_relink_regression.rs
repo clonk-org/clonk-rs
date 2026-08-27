@@ -461,11 +461,11 @@ fn relink_keeps_global_resort_lookup_bound_to_the_declaring_definition() {
 
     assert_eq!(call(&mut engine, caller, "Trigger"), Value::Bool(true));
     let [ObjectOrderCommand::OrderFuncAll { order, category }] =
-        engine.pending_object_order_commands.as_slice()
+        engine.execution.pending_object_order_commands.as_slice()
     else {
         panic!(
             "unexpected relinked order queue: {:?}",
-            engine.pending_object_order_commands
+            engine.execution.pending_object_order_commands
         );
     };
     assert_eq!(order.host_identity, declaring_script.host_identity());
@@ -510,7 +510,7 @@ fn retained_system_host_owns_and_executes_its_local_resort_comparator() {
 
     assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
     let [ObjectOrderCommand::OrderFuncAll { order, .. }] =
-        engine.pending_object_order_commands.as_slice()
+        engine.execution.pending_object_order_commands.as_slice()
     else {
         panic!("expected one System-host OrderFunc request");
     };
@@ -563,7 +563,7 @@ fn global_resort_comparator_executes_without_a_definition_context() {
 
     assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
     let [ObjectOrderCommand::OrderFuncAll { order, .. }] =
-        engine.pending_object_order_commands.as_slice()
+        engine.execution.pending_object_order_commands.as_slice()
     else {
         panic!("expected one global-comparator OrderFunc request");
     };

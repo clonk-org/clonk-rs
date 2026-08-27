@@ -58,7 +58,7 @@ fn restore_reputs_overlapping_masks_in_master_object_order() {
     );
 
     crate::TestValueExt::test_value(engine.restore_state(&state));
-    assert_eq!(engine.exec_list, vec![first, second]);
+    assert_eq!(engine.execution.exec_list, vec![first, second]);
     let first_index = crate::TestValueExt::test_value(engine.find_object_index(first));
     let first_bake =
         crate::TestValueExt::test_value(engine.objects[first_index].solid_mask_bake.as_ref());

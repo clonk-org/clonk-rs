@@ -261,7 +261,7 @@ impl Engine {
         &mut self,
         player: i32,
     ) -> Result<(Vec<DefinitionId>, Vec<DefinitionId>), EngineError> {
-        let rivalry = self.exec_list.iter().rev().any(|&object_id| {
+        let rivalry = self.execution.exec_list.iter().rev().any(|&object_id| {
             let Some(index) = self.find_object_index(object_id) else {
                 return false;
             };
@@ -280,7 +280,8 @@ impl Engine {
             // again from the current master list (C4ObjectList.cpp:58-78).
             let goal = {
                 let mut seen = HashSet::new();
-                self.exec_list
+                self.execution
+                    .exec_list
                     .iter()
                     .rev()
                     .filter_map(|&object_id| {
@@ -303,14 +304,19 @@ impl Engine {
             // C4ObjectList::Find re-resolves the first live instance for
             // every distinct goal ID; an earlier callback may have removed
             // the instance that originally contributed the ID.
-            let target = self.exec_list.iter().rev().find_map(|&object_id| {
-                let index = self.find_object_index(object_id)?;
-                let object = &self.objects[index];
-                (!object.destroyed
-                    && object.state.status.is_active()
-                    && object.definition_id == goal)
-                    .then_some(index)
-            });
+            let target = self
+                .execution
+                .exec_list
+                .iter()
+                .rev()
+                .find_map(|&object_id| {
+                    let index = self.find_object_index(object_id)?;
+                    let object = &self.objects[index];
+                    (!object.destroyed
+                        && object.state.status.is_active()
+                        && object.definition_id == goal)
+                        .then_some(index)
+                });
             let is_fulfilled = if let Some(index) = target {
                 let (function, args) = if rivalry {
                     ("IsFulfilledforPlr", vec![Value::Int(player)])
@@ -333,14 +339,18 @@ impl Engine {
     /// First active object with this definition in C++ master-list order.
     /// Player goal/rule menu commands re-resolve the object at click time.
     pub fn first_active_object_for_definition(&self, definition: &str) -> Option<ObjectId> {
-        self.exec_list.iter().rev().find_map(|&object_id| {
-            let index = self.find_object_index(object_id)?;
-            let object = &self.objects[index];
-            (!object.destroyed
-                && object.state.status.is_active()
-                && object.definition_id == definition)
-                .then_some(object_id)
-        })
+        self.execution
+            .exec_list
+            .iter()
+            .rev()
+            .find_map(|&object_id| {
+                let index = self.find_object_index(object_id)?;
+                let object = &self.objects[index];
+                (!object.destroyed
+                    && object.state.status.is_active()
+                    && object.definition_id == definition)
+                    .then_some(object_id)
+            })
     }
 
     /// Installs the active language table's `IDS_BTN_NEXTSCENARIO` and
@@ -441,7 +451,8 @@ impl Engine {
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
-        self.pending_object_order_commands
+        self.execution
+            .pending_object_order_commands
             .extend(object_order_commands);
         self.apply_next_mission_commands(next_mission_commands);
 

@@ -2683,7 +2683,7 @@ fn engine_grbroadcast_uses_master_order_and_rechecks_later_category() {
     let skipped = engine.spawn_test_object(SpawnConfig::new("SKIP"));
     let mutator = engine.spawn_test_object(SpawnConfig::new("MUTR"));
     unit_assert_eq!(
-        engine.exec_list.iter().rev().copied().collect::<Vec<_>>() =>
+        engine.execution.exec_list.iter().rev().copied().collect::<Vec<_>>() =>
         vec![mutator, skipped, tail, promoted],
         "fixture must distinguish forward master order from storage order"
     );

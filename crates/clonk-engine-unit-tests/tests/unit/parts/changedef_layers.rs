@@ -3123,7 +3123,7 @@ fn shake_objects_matches_cpp_master_order_gate_ledger() {
         row_ids["attached_gate_rejected"],
         row_ids["attached_mnone"],
     ];
-    engine.exec_list = master_order.iter().rev().copied().collect();
+    engine.execution.exec_list = master_order.iter().rev().copied().collect();
     unit_assert_eq!((engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()) => (500, 3_424_448_854, 0));
 
     let before = rows

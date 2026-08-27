@@ -704,6 +704,7 @@ fn lazy_master_order_ignores_stale_object_index_cache() {
     .state
     .status = ObjectStatus::Inactive;
     let expected = engine
+        .execution
         .exec_list
         .iter()
         .rev()
@@ -729,7 +730,13 @@ fn lazy_master_order_reads_live_statuses_without_projecting_a_table() {
     for _ in 0..64 {
         spawn_fixture!(engine, "ORDR");
     }
-    let expected = engine.exec_list.iter().rev().copied().collect::<Vec<_>>();
+    let expected = engine
+        .execution
+        .exec_list
+        .iter()
+        .rev()
+        .copied()
+        .collect::<Vec<_>>();
 
     HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS.with(|count| count.set(0));
     let world = engine.host_world_context_for_object(0);
@@ -2518,6 +2525,7 @@ fn callback_geometry_update_preserves_unrelated_physical_sector_order() {
     engine.objects[older_index].state.category = CATEGORY_OBJECT;
     engine.objects[newer_index].state.category = CATEGORY_STRUCTURE;
     engine
+        .execution
         .pending_object_order_commands
         .push(ObjectOrderCommand::SortByCategory);
     engine.execute_object_order_commands();
@@ -2616,6 +2624,7 @@ fn effect_batch_geometry_preview_preserves_callback_entry_sector_order() {
     engine.objects[older_index].state.category = CATEGORY_OBJECT;
     engine.objects[newer_index].state.category = CATEGORY_STRUCTURE;
     engine
+        .execution
         .pending_object_order_commands
         .push(ObjectOrderCommand::SortByCategory);
     engine.execute_object_order_commands();
@@ -2732,6 +2741,7 @@ fn effect_batch_status_relink_persists_callback_final_sector_order() {
     engine.objects[older_index].state.category = CATEGORY_OBJECT;
     engine.objects[newer_index].state.category = CATEGORY_STRUCTURE;
     engine
+        .execution
         .pending_object_order_commands
         .push(ObjectOrderCommand::SortByCategory);
     engine.execute_object_order_commands();

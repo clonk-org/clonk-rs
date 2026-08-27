@@ -638,7 +638,7 @@ fn order_func_global_resort_sorts_synchronously_before_next_comparison() {
         vec![1, 3, 2, 5, 4],
         "later script in the same comparator sees the synchronous category order"
     );
-    unit_assert!(engine.pending_object_order_commands.is_empty(), "comparator-global Resort() must not survive as a deferred SortByCategory");
+    unit_assert!(engine.execution.pending_object_order_commands.is_empty(), "comparator-global Resort() must not survive as a deferred SortByCategory");
 }
 
 #[test]
@@ -646,7 +646,7 @@ fn order_func_whole_sort_treats_inactive_exec_hole_as_absent_and_fixed() {
     let (mut engine, logger, ids) = order_func_resort_fixture(&[(2, 2), (3, 3), (1, 1), (4, 4)]);
     let inactive = spawn_fixture!(engine, "RSRT", with_category: CATEGORY_STRUCTURE, with_position: Vector2::new(9, 9), with_status: ObjectStatus::Inactive, with_loaded: true);
     let physical_master = [ids[&4], inactive, ids[&1], ids[&3], ids[&2]];
-    engine.exec_list = std::iter::once(logger)
+    engine.execution.exec_list = std::iter::once(logger)
         .chain(physical_master.iter().rev().copied())
         .collect();
 
@@ -676,7 +676,7 @@ fn order_func_single_sort_crosses_inactive_exec_hole_without_moving_it() {
         order_func_resort_fixture(&[(5, 5), (4, 3), (3, 4), (2, 1), (1, 4)]);
     let inactive = spawn_fixture!(engine, "RSRT", with_category: CATEGORY_STRUCTURE, with_position: Vector2::new(9, 9), with_status: ObjectStatus::Inactive, with_loaded: true);
     let physical_master = [ids[&1], inactive, ids[&2], ids[&3], ids[&4], ids[&5]];
-    engine.exec_list = std::iter::once(logger)
+    engine.execution.exec_list = std::iter::once(logger)
         .chain(physical_master.iter().rev().copied())
         .collect();
 
@@ -709,14 +709,14 @@ fn reentrant_resort_trigger_does_not_remark_object_after_whole_sort_cleanup() {
         "whole Sort cleanup consumes the reentrant Resort object's Unsorted flag"
     );
     unit_assert_eq!(
-        engine.pending_object_order_commands =>
+        engine.execution.pending_object_order_commands =>
         [ObjectOrderCommand::ResortUnsortedSweep],
         "only the already-armed global sweep survives ExecuteResorts"
     );
 
     engine.execute_object_order_commands();
     unit_assert_eq!(order_func_resort_master_order(&engine, &ids) => sorted_master, "the retained trigger must not recreate the consumed Unsorted flag");
-    unit_assert!(engine.pending_object_order_commands.is_empty());
+    unit_assert!(engine.execution.pending_object_order_commands.is_empty());
 }
 
 #[test]
@@ -826,7 +826,7 @@ func Reorder(pRelative, pSort, fAfter) {
     // Unsorted bit is pending (for example, after ChangeDef).
     engine.objects[b_index].unsorted = true;
     engine
-        .pending_object_order_commands
+        .execution.pending_object_order_commands
         .push(ObjectOrderCommand::SetRelative {
             relative_to: c,
             object: b,
@@ -841,7 +841,7 @@ func Reorder(pRelative, pSort, fAfter) {
     // (C4GameObjects.cpp:360-369).
     engine.objects[b_index].state.status = ObjectStatus::Inactive;
     engine
-        .pending_object_order_commands
+        .execution.pending_object_order_commands
         .push(ObjectOrderCommand::SetRelative {
             relative_to: c,
             object: b,
@@ -889,7 +889,7 @@ func ResortExplicit(object target) { Resort(target); }
 
     for function in ["ResortArrow", "ResortExplicit"] {
         engine
-            .pending_object_order_commands
+            .execution.pending_object_order_commands
             .push(ObjectOrderCommand::SetRelative {
                 relative_to: b,
                 object: a2,
@@ -901,12 +901,12 @@ func ResortExplicit(object target) { Resort(target); }
         let a1_index = engine.test_object_index(a1);
         unit_assert_eq!(engine.call_object_function(a1_index, function, vec![Value::Object(a2.as_u64())],).expect("Resort call succeeds") => Value::Nil);
         unit_assert_eq!(engine.debug_exec_order() => vec![a1, b, a2], "per-object Resort is deferred");
-        unit_assert_eq!(engine.pending_object_order_commands => [ObjectOrderCommand::ResortObject(a2)]);
+        unit_assert_eq!(engine.execution.pending_object_order_commands => [ObjectOrderCommand::ResortObject(a2)]);
         engine.execute_object_order_commands();
         unit_assert_eq!(engine.debug_exec_order() => vec![a1, a2, b]);
     }
 
-    engine.pending_object_order_commands.extend([
+    engine.execution.pending_object_order_commands.extend([
         ObjectOrderCommand::ResortObject(a1),
         ObjectOrderCommand::ResortObject(a2),
     ]);
@@ -1043,7 +1043,7 @@ fn same_frame_spawn_ignores_a_destroyed_definition_cluster_anchor() {
     // Main-list Before is exec-list After. Put the future tombstone at
     // the master front so it is the first apparent SAME cluster anchor.
     engine
-        .pending_object_order_commands
+        .execution.pending_object_order_commands
         .push(ObjectOrderCommand::SetRelative {
             relative_to: spawner,
             object: victim,
@@ -1101,7 +1101,7 @@ fn inactive_exec_list_holes_do_not_participate_in_add_or_unsorted_sweeps() {
         .position(|id| *id == inactive)
         .test_value();
     engine
-        .pending_object_order_commands
+        .execution.pending_object_order_commands
         .push(ObjectOrderCommand::SetRelative {
             relative_to: newcomer,
             object: high,
@@ -1126,7 +1126,7 @@ fn inactive_exec_list_holes_do_not_participate_in_add_or_unsorted_sweeps() {
     let inactive_index = engine.test_object_index(inactive);
     engine.objects[inactive_index].unsorted = true;
     engine
-        .pending_object_order_commands
+        .execution.pending_object_order_commands
         .push(ObjectOrderCommand::ResortObject(high));
     engine.execute_object_order_commands();
 
@@ -1151,7 +1151,7 @@ fn inactive_exec_list_holes_do_not_participate_in_add_or_unsorted_sweeps() {
         .position(|id| *id == inactive)
         .test_value();
     engine
-        .pending_object_order_commands
+        .execution.pending_object_order_commands
         .push(ObjectOrderCommand::SortByCategory);
     engine.execute_object_order_commands();
     unit_assert_eq!(
@@ -1218,7 +1218,7 @@ fn global_resort_stably_sorts_by_raw_masked_category() {
         .call_scenario_script_function("Sort", Vec::new())
         .test_value();
     unit_assert_eq!(engine.debug_exec_order() => vec![a, b, c, d, e]);
-    unit_assert_eq!(engine.pending_object_order_commands => [ObjectOrderCommand::SortByCategory]);
+    unit_assert_eq!(engine.execution.pending_object_order_commands => [ObjectOrderCommand::SortByCategory]);
 
     engine.execute_object_order_commands();
     unit_assert_eq!(engine.debug_exec_order() => vec![b, d, a, c, e]);
