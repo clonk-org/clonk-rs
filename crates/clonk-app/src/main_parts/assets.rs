@@ -1633,14 +1633,14 @@ pub(crate) fn select_loader_source(
         }
     }
 
+    // Exhaustion is an ordinary fatal in C++, not an unimplemented path: Init
+    // logs this reason itself and returns false, and the caller then logs
+    // IDS_PRC_ERRLOADER (src/C4LoaderScreen.cpp:83-86). The pattern list is
+    // printed png/bmp/jpg/jpeg, which is none of the search orders above.
     chosen.with_context(|| {
         format!(
-            "no classic loader found for specification `{}` or Loader* fallback",
-            if specification.is_empty() {
-                "Loader*"
-            } else {
-                specification
-            }
+            "No loaders found for loader specification: {}/{}/{}/{}",
+            patterns.png, patterns.bmp, patterns.jpg, patterns.jpeg
         )
     })
 }

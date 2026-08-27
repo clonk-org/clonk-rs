@@ -3333,6 +3333,38 @@ fn loader_selector_repeats_explicit_extension_passes_and_cpp_wildcards() {
 }
 
 #[test]
+fn loader_exhaustion_reports_the_native_four_pattern_diagnostic() {
+    // C4LoaderScreen::Init logs its own reason before returning false, and the
+    // pattern list it prints is png/bmp/jpg/jpeg -- deliberately not the order
+    // any of the three search passes uses (src/C4LoaderScreen.cpp:83-86).
+    let directory = tempdir();
+    let group = Group::open(directory.path()).test_value();
+    let graphics = group.clone();
+    let error = select_loader_source(&[group], &graphics, "MissingLoader", |_| 0)
+        .err()
+        .expect("an empty group exhausts every loader pass");
+    main_assert_eq!(
+        format!("{error}") =>
+        "No loaders found for loader specification: \
+         MissingLoader.png/MissingLoader.bmp/MissingLoader.jpg/MissingLoader.jpeg"
+    );
+
+    // An empty specification becomes "Loader*" before the extensions are
+    // defaulted, so the reported patterns are the wildcards (:36-37).
+    let directory = tempdir();
+    let group = Group::open(directory.path()).test_value();
+    let graphics = group.clone();
+    let error = select_loader_source(&[group], &graphics, "", |_| 0)
+        .err()
+        .expect("an empty group exhausts the wildcard passes too");
+    main_assert_eq!(
+        format!("{error}") =>
+        "No loaders found for loader specification: \
+         Loader*.png/Loader*.bmp/Loader*.jpg/Loader*.jpeg"
+    );
+}
+
+#[test]
 fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
     let directory = tempdir();
     let image_path = directory.path().join("pixel.png");
