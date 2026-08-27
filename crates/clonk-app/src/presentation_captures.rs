@@ -38,7 +38,7 @@ pub struct CaptureScreen {
     /// (clonk-org/clonk-rs#1298). Defaults to `pixel`, so a screen has to opt
     /// into the weaker term explicitly.
     #[serde(default = "default_comparison")]
-    pub comparison: String,
+    pub comparison: ComparisonTerm,
     /// The `port_assets` classes this screen renders, when it is on the
     /// `layout` term. Naming them is what keeps the weaker term from being a
     /// blanket excuse.
@@ -57,8 +57,18 @@ pub struct CaptureScreen {
     pub blocker: Option<CaptureBlocker>,
 }
 
-fn default_comparison() -> String {
-    "pixel".to_string()
+fn default_comparison() -> ComparisonTerm {
+    ComparisonTerm::Pixel
+}
+
+/// The evidence a screen promises to compare.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ComparisonTerm {
+    /// Pixel equality within the manifest's surface tolerance.
+    Pixel,
+    /// Ordered control geometry, captions and resolved wrapping.
+    Layout,
 }
 
 /// A class of port-authored asset that puts a screen on the `layout` term.
@@ -488,12 +498,14 @@ mod tests {
             .collect::<BTreeSet<_>>();
         for screen in screens() {
             assert!(
-                matches!(screen.comparison.as_str(), "pixel" | "layout"),
-                "{}: unknown comparison term `{}`",
-                screen.id,
-                screen.comparison
+                matches!(
+                    screen.comparison,
+                    ComparisonTerm::Pixel | ComparisonTerm::Layout
+                ),
+                "{}: unknown comparison term",
+                screen.id
             );
-            if screen.comparison == "layout" {
+            if screen.comparison == ComparisonTerm::Layout {
                 assert!(
                     !screen.port_assets.is_empty(),
                     "{}: compared on layout without naming a port asset class",
@@ -565,7 +577,7 @@ mod tests {
     fn an_identical_pair_matches_on_either_surface() {
         for surface in [CaptureSurface::Cpu, CaptureSurface::Gpu] {
             assert_eq!(
-                compare_capture("startup-main", surface, 1_280, 720, &plane(9), &plane(9)),
+                compare_capture("gameplay", surface, 1_280, 720, &plane(9), &plane(9)),
                 Ok(())
             );
         }
@@ -583,7 +595,7 @@ mod tests {
 
         assert!(matches!(
             compare_capture(
-                "startup-main",
+                "gameplay",
                 CaptureSurface::Cpu,
                 1_280,
                 720,
@@ -598,7 +610,7 @@ mod tests {
         ));
         assert_eq!(
             compare_capture(
-                "startup-main",
+                "gameplay",
                 CaptureSurface::Gpu,
                 1_280,
                 720,
@@ -609,7 +621,7 @@ mod tests {
         );
         assert!(matches!(
             compare_capture(
-                "startup-main",
+                "gameplay",
                 CaptureSurface::Gpu,
                 1_280,
                 720,
@@ -639,7 +651,7 @@ mod tests {
             differing_pixels,
             ..
         }) = compare_capture(
-            "startup-main",
+            "gameplay",
             CaptureSurface::Cpu,
             1_280,
             720,
@@ -660,7 +672,7 @@ mod tests {
     fn a_capture_that_is_not_the_fixed_geometry_is_rejected() {
         assert!(matches!(
             compare_capture(
-                "startup-main",
+                "gameplay",
                 CaptureSurface::Cpu,
                 640,
                 480,
@@ -671,7 +683,7 @@ mod tests {
         ));
         assert!(matches!(
             compare_capture(
-                "startup-main",
+                "gameplay",
                 CaptureSurface::Cpu,
                 1_280,
                 720,
