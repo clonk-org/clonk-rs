@@ -346,7 +346,7 @@ impl GameApp {
                     target_object: clonk_engine::SCRIPT_SCOPE_CONSOLE,
                     strictness: self.running_console_script_strictness(),
                     script,
-                    by_client: if self.control_playback.is_some() {
+                    by_client: if self.records.playback.is_some() {
                         -1
                     } else {
                         0

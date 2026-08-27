@@ -2954,7 +2954,7 @@ impl GameApp {
                 }
                 NetDlgAction::RecordingChanged(record) => {
                     self.startup.view_flags.record = record;
-                    self.recording_enabled = record && self.recordings_dir.is_some();
+                    self.records.enabled = record && self.records.directory.is_some();
                     // `OnBtnRecord` likewise mutates memory only (:847-850).
                     self.config
                         .deferred
@@ -4890,9 +4890,9 @@ impl GameApp {
         if session == NetworkSessionTeardown::Clear {
             self.clear_live_network_session();
         }
-        self.live_save_seed = None;
-        self.recording_template = None;
-        self.control_playback = None;
+        self.records.live_save_seed = None;
+        self.records.template = None;
+        self.records.playback = None;
         self.saves.deferred_network_recreation.clear();
         self.saves.network_recreation_progress = None;
         self.dialogs.messages.clear();

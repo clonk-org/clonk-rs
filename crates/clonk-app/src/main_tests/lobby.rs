@@ -7165,7 +7165,7 @@ fn finishing_recording_deletes_stale_final_infos_for_an_empty_roster() {
     let mut app = new_state_only_running_sandbox_app();
     app.control_player_infos = ControlPlayerInfoRegistry::default();
     install_test_recording_template(&mut app, output_path.clone());
-    some_mut(&mut app.recording_template)
+    some_mut(&mut app.records.template)
         .group
         .add_file("RecPlayerInfos.txt", b"stale final roster".to_vec())
         .test_value();
@@ -11175,8 +11175,8 @@ fn frozen_lobby_executes_synchronized_activation_immediately() {
 
     main_assert!(app.control_clients.is_activated(3));
     main_assert!(app.network_sync.scheduled.is_empty());
-    main_assert!(app.recording.is_none());
-    main_assert!(app.recording_template.is_some());
+    main_assert!(app.records.session.is_none());
+    main_assert!(app.records.template.is_some());
 }
 
 #[test]

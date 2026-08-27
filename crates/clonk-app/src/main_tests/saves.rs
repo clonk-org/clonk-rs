@@ -129,7 +129,7 @@ fn initial_record_uses_the_preinitialize_game_snapshot() {
             .test_value();
     let scenario = FrontendScenario::from_command_line(&scenario_path);
     let mut app = new_state_only_menu_app(320, 200);
-    app.recordings_dir = Some(directory.path().join("Records.c4f"));
+    app.records.directory = Some(directory.path().join("Records.c4f"));
 
     let initial_game_data = clonk_engine::InitialNetworkGameData {
         frame: 41,
@@ -148,7 +148,7 @@ fn initial_record_uses_the_preinitialize_game_snapshot() {
         None,
     )
     .test_value();
-    let packed = app.recording_template.test_ref().group.pack().test_value();
+    let packed = app.records.template.test_ref().group.pack().test_value();
     let record = Group::from_memory(PathBuf::from("Snapshot.c4s"), packed).test_value();
     let game = String::from_utf8(record.read_file("Game.txt").test_value()).test_value();
 
@@ -187,7 +187,7 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
             .test_value();
     let scenario = FrontendScenario::from_command_line(&scenario_path);
     let mut app = new_state_only_menu_app(320, 200);
-    app.recordings_dir = Some(directory.path().join("Records.c4f"));
+    app.records.directory = Some(directory.path().join("Records.c4f"));
     app.control_player_infos
         .apply(clonk_engine::PlayerInfoControlData::new(
             0,
@@ -257,7 +257,7 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
     // the initial record's current roster.
     app.control_player_infos
         .resume_joined_savegame_player(17, 0, false);
-    let packed = app.recording_template.test_ref().group.pack().test_value();
+    let packed = app.records.template.test_ref().group.pack().test_value();
     let record = Group::from_memory(PathBuf::from("Loaded.c4s"), packed).test_value();
     main_assert_eq!(record.read_file("SavePlayerInfos.txt").expect("original restore roster") => b"original saved roster");
     main_assert_eq!(record.read_file("Title.png").expect("loaded save title") => b"saved game screenshot");
@@ -500,7 +500,7 @@ fn classic_record_stream_is_converted_and_activated() {
     let output_path = fixture.path().join("League.c4s");
     main_assert_eq!(app.classic_command_line.scenario.as_deref() => Some(output_path.as_path()));
     main_assert_eq!(app.active_scenario.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(output_path.as_path()));
-    main_assert!(app.control_playback.is_some());
+    main_assert!(app.records.playback.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(!app.classic_record_stream_activation_pending);
@@ -814,7 +814,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             color: 0x0044_5566,
         })
     );
-    main_assert!(app.control_playback.is_some());
+    main_assert!(app.records.playback.is_some());
     app.apply_ready_controls(
         0,
         vec![NetworkControl::ClientUpdate(
@@ -2584,7 +2584,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     main_assert_eq!(app.config.mission_access.snapshot() => "Secret;Beta");
     main_assert!(!app.config.show_folder_maps);
     main_assert!(app.startup.view_flags.record);
-    main_assert_eq!(app.recording_enabled => app.recordings_dir.is_some());
+    main_assert_eq!(app.records.enabled => app.records.directory.is_some());
     main_assert!(app.startup.view_flags.fair_crew);
     main_assert_eq!(app.startup.options_dialog.as_ref().expect("recreated Options dialog").active_sheet() => OptionsSheet::Network);
     main_assert!(
@@ -3025,7 +3025,7 @@ fn record_index_and_basename_match_cpp_directory_scan() {
 fn forced_recording_rejects_missing_prepared_storage() {
     let mut app = new_state_only_running_sandbox_app();
     main_assert_eq!(app.start_recording(true) => Err("recording storage was not prepared".to_string()));
-    main_assert!(app.recording.is_none());
+    main_assert!(app.records.session.is_none());
 }
 
 #[test]
@@ -3033,14 +3033,14 @@ fn synchronize_record_request_starts_with_the_executing_control_list() {
     let directory = tempdir();
     let output_path = directory.path().join("001-Runtime.c4s");
     let mut app = new_state_only_running_sandbox_app();
-    app.recording_enabled = false;
+    app.records.enabled = false;
     install_test_recording_template(&mut app, output_path.clone());
-    app.runtime_record_requested = true;
+    app.records.runtime_requested = true;
     let synchronize = saves_fixture!(synchronize: false, true);
 
     app.apply_ready_controls(0, vec![NetworkControl::Synchronize(synchronize.clone())])
         .test_value();
-    main_assert!(app.recording.is_some(), "the sync request arms recording");
+    main_assert!(app.records.session.is_some(), "the sync request arms recording");
     main_assert!(app.finish_recording().is_none());
 
     let group = Group::open(output_path).test_value();
@@ -3062,10 +3062,10 @@ fn any_synchronize_starts_only_an_explicitly_requested_runtime_record() {
     )
     .test_value();
 
-    main_assert!(app.recording.is_none());
-    main_assert!(app.recording_template.is_some());
+    main_assert!(app.records.session.is_none());
+    main_assert!(app.records.template.is_some());
 
-    app.runtime_record_requested = true;
+    app.records.runtime_requested = true;
     app.apply_synchronized_controls(
         1,
         vec![NetworkControl::Synchronize(
@@ -3074,8 +3074,8 @@ fn any_synchronize_starts_only_an_explicitly_requested_runtime_record() {
     )
     .test_value();
 
-    main_assert!(!app.runtime_record_requested);
-    main_assert!(app.recording.is_some());
+    main_assert!(!app.records.runtime_requested);
+    main_assert!(app.records.session.is_some());
 }
 
 #[test]
@@ -3266,7 +3266,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     app.engine
         .test_player_mut(player_number)
         .set_game_join_time(25);
-    app.control_playback =
+    app.records.playback =
         Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.engine.set_replay_control(true);
     app.apply_synchronized_controls(2, vec![synchronize()])
@@ -3305,9 +3305,9 @@ fn developer_console_runtime_record_waits_for_its_queued_synchronize() {
 
     main_assert!(app.developer_console_runtime_record_possible());
     main_assert!(app.developer_console_request_runtime_record().expect("queue console runtime record"));
-    main_assert!(app.runtime_record_requested);
+    main_assert!(app.records.runtime_requested);
     main_assert!(!app.developer_console_runtime_record_possible());
-    main_assert!(app.recording.is_none());
+    main_assert!(app.records.session.is_none());
 
     let decided = commands.take_submitted_decided_controls();
     main_assert_eq!(decided => vec![(tick, clonk_engine::ControlPacket::Synchronize(saves_fixture!(synchronize: false, true),), false,)]);
@@ -3319,8 +3319,8 @@ fn developer_console_runtime_record_waits_for_its_queued_synchronize() {
         )],
     )
     .test_value();
-    main_assert!(!app.runtime_record_requested);
-    main_assert!(app.recording.is_some());
+    main_assert!(!app.records.runtime_requested);
+    main_assert!(app.records.session.is_some());
 }
 
 #[test]
@@ -3366,7 +3366,7 @@ fn ctrlrec_control_executes_at_start_of_recorded_frame() {
     let packet = recorded_right_control(app.players.local_owner);
     let mut writer = ControlRecordWriter::new();
     writer.record_packet(1, &packet).test_value();
-    app.control_playback = Some(ControlRecordPlayback::from_bytes(&writer.finish(1)).test_value());
+    app.records.playback = Some(ControlRecordPlayback::from_bytes(&writer.finish(1)).test_value());
     app.engine.set_replay_control(true);
 
     app.test_update();
@@ -3452,7 +3452,7 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
     main_assert!(dump.contains(&format!("    Com={}\r\n", clonk_engine::COM_RIGHT)));
     main_assert!(dump.contains(&format!("  Com={}\r\n", clonk_engine::COM_UP)));
     main_assert!(!dump.contains(&format!("  Com={}\r\n", clonk_engine::COM_LEFT)));
-    app.control_playback = Some(ControlRecordPlayback::from_chunks(replay_chunks));
+    app.records.playback = Some(ControlRecordPlayback::from_chunks(replay_chunks));
     app.engine.set_replay_control(true);
     app.engine.set_control_host(false);
     app.test_update();
@@ -3492,14 +3492,14 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
 #[test]
 fn ctrlrec_end_finishes_the_replay_and_restores_local_control() {
     let mut app = new_classic_running_sandbox_app();
-    app.control_playback =
+    app.records.playback =
         Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.engine.set_replay_control(true);
     app.engine.set_control_host(false);
 
     app.test_update();
 
-    main_assert!(app.control_playback.is_none());
+    main_assert!(app.records.playback.is_none());
     main_assert!(app.engine.is_control_host());
     main_assert!(app.snapshot.game_over);
 }
@@ -4887,7 +4887,7 @@ fn save_demo_folder_controls_recording_directory() {
         test_runtime_config_with("Player", true),
     )
     .test_value();
-    main_assert_eq!(app.recordings_dir.as_deref() => Some(relative_records.as_path()));
+    main_assert_eq!(app.records.directory.as_deref() => Some(relative_records.as_path()));
 
     persist_config_value(
         &paths,

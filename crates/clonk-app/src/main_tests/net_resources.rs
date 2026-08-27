@@ -2201,7 +2201,7 @@ fn resource_join_record_copies_player_group_for_replay() {
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(output_path);
     app.active_scenario = Some(scenario);
-    app.control_playback = Some(
+    app.records.playback = Some(
         ControlRecordPlayback::from_bytes(&record.read_file("CtrlRec.c4b").test_value())
             .test_value(),
     );
@@ -2355,7 +2355,7 @@ fn offline_recreation_captures_malformed_source_before_failed_join() {
         wild_takeovers: Vec::new(),
     };
     let mut app = new_state_only_running_sandbox_app();
-    app.recording_enabled = true;
+    app.records.enabled = true;
     let mut engine = clonk_engine::Engine::new();
 
     let (_, _, captured) = app

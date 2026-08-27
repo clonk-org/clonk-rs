@@ -218,7 +218,7 @@ impl GameApp {
         if !self.console_mode {
             return false;
         }
-        if self.control_playback.is_some() {
+        if self.records.playback.is_some() {
             self.developer_console_editing_enabled = false;
         }
         let view = self.developer_console_view_model();
@@ -756,7 +756,7 @@ impl GameApp {
         paths: &[PathBuf],
         editing: bool,
     ) -> std::result::Result<usize, String> {
-        if !editing || self.mode != AppMode::Running || self.control_playback.is_some() {
+        if !editing || self.mode != AppMode::Running || self.records.playback.is_some() {
             return Ok(0);
         }
         let network_enabled = self.network.is_some();
@@ -792,7 +792,7 @@ impl GameApp {
     ) -> std::result::Result<bool, String> {
         if !editing
             || self.mode != AppMode::Running
-            || self.control_playback.is_some()
+            || self.records.playback.is_some()
             || self.engine.player(player).is_none()
         {
             return Ok(false);
@@ -906,9 +906,9 @@ impl GameApp {
 
     pub(crate) fn developer_console_runtime_record_possible(&self) -> bool {
         self.mode == AppMode::Running
-            && !self.runtime_record_requested
-            && self.control_playback.is_none()
-            && self.recording.is_none()
+            && !self.records.runtime_requested
+            && self.records.playback.is_none()
+            && self.records.session.is_none()
     }
 
     /// `C4GameControl::RequestRuntimeRecord`: disable the item immediately,
@@ -920,7 +920,7 @@ impl GameApp {
         if !self.developer_console_runtime_record_possible() {
             return Ok(false);
         }
-        self.runtime_record_requested = true;
+        self.records.runtime_requested = true;
         let tick = self.local_control_submission_tick();
         let result = if let Some(network) = self.network.as_ref() {
             network
@@ -940,7 +940,7 @@ impl GameApp {
             .map_err(|error| error.to_string())
         };
         if let Err(error) = result {
-            self.runtime_record_requested = false;
+            self.records.runtime_requested = false;
             return Err(error);
         }
         Ok(true)
@@ -979,7 +979,7 @@ impl GameApp {
             target_object: clonk_engine::SCRIPT_SCOPE_CONSOLE,
             strictness: self.running_console_script_strictness(),
             script,
-            by_client: if self.control_playback.is_some() {
+            by_client: if self.records.playback.is_some() {
                 -1
             } else {
                 0
@@ -1147,11 +1147,11 @@ impl GameApp {
         retained_definition_modules: Option<&[String]>,
         retained_definition_save_paths: Option<(&str, &str)>,
     ) -> std::result::Result<(), String> {
-        self.runtime_record_requested = false;
-        self.live_save_seed = None;
-        self.recording_template = None;
+        self.records.runtime_requested = false;
+        self.records.live_save_seed = None;
+        self.records.template = None;
         let Some(scenario_path) = scenario.path.as_deref() else {
-            return if self.recordings_dir.is_none() {
+            return if self.records.directory.is_none() {
                 Ok(())
             } else {
                 Err("recording requires a filesystem-backed scenario".to_string())
@@ -1186,7 +1186,7 @@ impl GameApp {
             parameters: recording_parameters.clone(),
             scenario_defaults: scenario_defaults.clone(),
         };
-        self.live_save_seed = Some(runtime_seed.clone());
+        self.records.live_save_seed = Some(runtime_seed.clone());
         // Runtime recording still needs the seed above. The initial SaveData
         // projection and its pointer denumeration, however, exist only when
         // Config.General.Record (or league recording) actually starts a
@@ -1196,7 +1196,7 @@ impl GameApp {
         };
         let reconstruct_loaded_runtime =
             matches!(initial_source, InitialRecordingSource::Loaded { .. });
-        let Some(dir) = self.recordings_dir.as_ref() else {
+        let Some(dir) = self.records.directory.as_ref() else {
             return Ok(());
         };
         self.prepare_recording_root(dir)
@@ -1569,7 +1569,7 @@ impl GameApp {
         // a fresh binary CtrlRec, while native leaves copied CtrlRec.txt and
         // RecPlayerInfos.txt alone until playback/Stop handles them.
         group.remove_entry("CtrlRec.c4b");
-        self.recording_template = Some(RecordingTemplate {
+        self.records.template = Some(RecordingTemplate {
             group,
             output_path,
             initial_stream_chunk,
@@ -1585,8 +1585,9 @@ impl GameApp {
     pub(crate) fn prepare_runtime_recording_at_synchronize(
         &mut self,
     ) -> std::result::Result<(), String> {
-        let Some(seed) = self.live_save_seed.clone().or_else(|| {
-            self.recording_template
+        let Some(seed) = self.records.live_save_seed.clone().or_else(|| {
+            self.records
+                .template
                 .as_ref()
                 .and_then(|template| template.runtime_seed.clone())
         }) else {
@@ -1595,7 +1596,8 @@ impl GameApp {
             return Ok(());
         };
         let dir = self
-            .recordings_dir
+            .records
+            .directory
             .as_ref()
             .ok_or_else(|| "runtime recording has no record directory".to_string())?;
         self.prepare_recording_root(dir)
@@ -1807,7 +1809,7 @@ impl GameApp {
             ));
         }
         group.remove_entry("CtrlRec.c4b");
-        self.recording_template = Some(RecordingTemplate {
+        self.records.template = Some(RecordingTemplate {
             group,
             output_path,
             initial_stream_chunk: Vec::new(),
@@ -1820,12 +1822,12 @@ impl GameApp {
 
     pub(crate) fn start_recording(&mut self, force: bool) -> std::result::Result<bool, String> {
         self.engine.set_recording_active(false);
-        if !force && !self.recording_enabled {
-            self.recording = None;
+        if !force && !self.records.enabled {
+            self.records.session = None;
             return Ok(false);
         }
-        let Some(mut template) = self.recording_template.take() else {
-            self.recording = None;
+        let Some(mut template) = self.records.template.take() else {
+            self.records.session = None;
             return Err("recording storage was not prepared".to_string());
         };
         // C++ creates and unpacks the record group before it opens CtrlRec.
@@ -1876,7 +1878,7 @@ impl GameApp {
                 .append_league_record_bytes(&template.initial_stream_chunk)
                 .map_err(|error| error.to_string())?;
         }
-        self.recording = Some(RecordingSession::new(template, league_streaming, ctrl_rec));
+        self.records.session = Some(RecordingSession::new(template, league_streaming, ctrl_rec));
         self.engine.set_recording_active(true);
         Ok(true)
     }
@@ -1884,7 +1886,7 @@ impl GameApp {
     pub(crate) fn record_control_packet(&mut self, packet: &clonk_engine::ControlPacket) {
         self.record_control_resource_file(packet);
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-        let stream_delta = if let Some(session) = self.recording.as_mut() {
+        let stream_delta = if let Some(session) = self.records.session.as_mut() {
             if let Err(error) = session.writer.record_packet(frame, packet) {
                 tracing::warn!(%error, "failed to append immediate CtrlRec packet");
                 None
@@ -1905,7 +1907,7 @@ impl GameApp {
             self.record_control_resource_file(packet);
         }
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-        let stream_delta = if let Some(session) = self.recording.as_mut() {
+        let stream_delta = if let Some(session) = self.records.session.as_mut() {
             if let Err(error) = session.writer.record_controls(frame, packets) {
                 tracing::warn!(%error, "failed to append CtrlRec control list");
                 None
@@ -1982,7 +1984,8 @@ impl GameApp {
         prejoin_bytes: Option<&[u8]>,
     ) {
         let Some(league_streaming) = self
-            .recording
+            .records
+            .session
             .as_ref()
             .map(|session| session.league_streaming)
         else {
@@ -2047,7 +2050,7 @@ impl GameApp {
                 return;
             }
         }
-        let Some(session) = self.recording.as_mut() else {
+        let Some(session) = self.records.session.as_mut() else {
             return;
         };
         if let Err(error) = write_folder_save_entry(&session.output_path, &target, &local_file) {
@@ -2092,11 +2095,15 @@ impl GameApp {
     }
 
     pub(crate) fn finish_recording(&mut self) -> Option<LeagueEndRecord> {
-        self.runtime_record_requested = false;
+        self.records.runtime_requested = false;
         self.engine.set_recording_active(false);
-        self.recording.as_ref()?;
+        self.records.session.as_ref()?;
         let (league_streaming, stream_delta) = {
-            let session = self.recording.as_mut().expect("recording checked above");
+            let session = self
+                .records
+                .session
+                .as_mut()
+                .expect("recording checked above");
             (session.league_streaming, session.take_stream_delta())
         };
         self.append_league_record_stream_bytes(stream_delta);
@@ -2109,7 +2116,8 @@ impl GameApp {
             }
         }
         let (description_title, description_definition_modules) = self
-            .recording
+            .records
+            .session
             .as_ref()
             .map(|session| {
                 (
@@ -2124,7 +2132,11 @@ impl GameApp {
             ClassicSaveDescriptionKind::Record,
         );
         let final_player_info_snapshot = self.recording_player_info_snapshot();
-        let session = self.recording.take().expect("recording checked above");
+        let session = self
+            .records
+            .session
+            .take()
+            .expect("recording checked above");
         let RecordingSession {
             writer,
             mut ctrl_rec,

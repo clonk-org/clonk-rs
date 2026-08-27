@@ -7977,7 +7977,7 @@ impl GameApp {
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
         let offline_local = self.network.is_none()
-            && self.control_playback.is_none()
+            && self.records.playback.is_none()
             && join.at_client == self.offline_local_client_id();
         let locally_controlled =
             !info.is_script_player() && (local_client_id == Some(join.at_client) || offline_local);
@@ -7993,7 +7993,8 @@ impl GameApp {
                     }
                 })
                 .or_else(|| {
-                    self.control_playback
+                    self.records
+                        .playback
                         .is_some()
                         .then(|| self.replay_record_player_group(core).ok())
                         .flatten()
@@ -8032,7 +8033,7 @@ impl GameApp {
                     // file under `<id>-<name>` (C4Control.cpp:765-769); the
                     // port has no extracted path, and the name alone is
                     // already unique per resource.
-                    self.control_playback.is_some().then(|| {
+                    self.records.playback.is_some().then(|| {
                         String::from_utf8_lossy(&recorded_player_resource_name(core)).into_owned()
                     })
                 }),
@@ -8089,7 +8090,7 @@ impl GameApp {
                             return Ok(());
                         }
                     }
-                } else if self.control_playback.is_some() {
+                } else if self.records.playback.is_some() {
                     if !self.begin_player_list_join(&info, joined_player_file.as_deref()) {
                         return Ok(());
                     }

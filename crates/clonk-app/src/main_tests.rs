@@ -2857,7 +2857,7 @@ fn install_test_recording_template(app: &mut GameApp, output_path: PathBuf) {
     group
         .add_file("Sentinel.txt", b"preserved".to_vec())
         .test_value();
-    app.recording_template = Some(RecordingTemplate {
+    app.records.template = Some(RecordingTemplate {
         group,
         output_path,
         initial_stream_chunk: Vec::new(),

@@ -1412,7 +1412,7 @@ impl GameApp {
             crate::effective_max_refresh_delay_ms(&native_config, self.display_refresh_period_ms);
         let record = load_recording_flag(paths);
         self.startup.view_flags.record = record;
-        self.recording_enabled = record && self.recordings_dir.is_some();
+        self.records.enabled = record && self.records.directory.is_some();
         self.startup.view_flags.fair_crew = load_fair_crew_flag(paths);
         self.graphics_smoke_level = load_graphics_smoke_level(paths);
         self.engine.set_smoke_level(self.graphics_smoke_level);
@@ -2449,7 +2449,7 @@ impl GameApp {
                 }
                 GameOptionAction::RecordPreferenceChanged(enabled) => {
                     self.startup.view_flags.record = enabled;
-                    self.recording_enabled = enabled && self.recordings_dir.is_some();
+                    self.records.enabled = enabled && self.records.directory.is_some();
                     self.persist_game_option_value(
                         "General",
                         "Record",

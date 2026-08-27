@@ -2147,7 +2147,7 @@ fn packed_material_alias_removes_the_host_material_projection() {
         Some(prepared.definition_save_paths()),
     )
     .test_value();
-    let recording_seed = app.live_save_seed.test_ref();
+    let recording_seed = app.records.live_save_seed.test_ref();
     main_assert_eq!(recording_seed.definition_modules => ["Material.c4g"]);
     main_assert_eq!(
                 (
@@ -4792,10 +4792,10 @@ fn synchronized_player_file_remote_gates_leave_profile_untouched() {
 fn developer_console_latches_no_input_and_reflects_pending_network_pause() {
     let mut app = new_state_only_running_sandbox_app();
     app.console_mode = true;
-    app.control_playback =
+    app.records.playback =
         Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.sync_developer_console_view();
-    app.control_playback = None;
+    app.records.playback = None;
     app.sync_developer_console_view();
     main_assert!(!app.developer_console.view_model().editing);
 
@@ -10584,8 +10584,8 @@ fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
     main_assert_eq!(joins[0].0 => 3);
     main_assert_eq!((joins[0].1.at_client, joins[0].1.info_id) => (3, 31));
     main_assert!(app.network_control_running);
-    main_assert!(app.recording.is_none());
-    main_assert!(app.recording_template.is_some());
+    main_assert!(app.records.session.is_none());
+    main_assert!(app.records.template.is_some());
 }
 
 #[test]
