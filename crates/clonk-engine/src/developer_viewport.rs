@@ -113,6 +113,194 @@ pub struct ScrollBarLayout {
     pub vertical: ScrollBar,
 }
 
+/// Which bar a press is on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollAxis {
+    Horizontal,
+    Vertical,
+}
+
+/// The region of a bar a press landed on, named for the `WM_?SCROLL`
+/// notification Win32 would send for it (`C4Viewport.cpp:123-147`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollBarPart {
+    /// `SB_LINELEFT` / `SB_LINEUP`.
+    LineBack,
+    /// `SB_LINERIGHT` / `SB_LINEDOWN`.
+    LineForward,
+    /// `SB_PAGELEFT` / `SB_PAGEUP`.
+    PageBack,
+    /// `SB_PAGERIGHT` / `SB_PAGEDOWN`.
+    PageForward,
+    /// `SB_THUMBTRACK` / `SB_THUMBPOSITION`, which carry a position rather
+    /// than a step.
+    Thumb,
+}
+
+/// One resolved press.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrollBarPress {
+    pub axis: ScrollAxis,
+    pub part: ScrollBarPart,
+}
+
+/// How much of each end of a track is an arrow button.
+///
+/// The arrows are this port's own: the reference macOS build compiles
+/// `ScrollBarsByViewPosition` away entirely (`C4Viewport.cpp:634-635`), so
+/// there is no native geometry to mirror — only the four regions the Win32
+/// messages divide a bar into.
+const ARROW_EXTENT: i32 = 12;
+
+/// Which part of which bar a press landed on, or `None` for the viewport
+/// itself.
+pub fn scroll_bar_hit(layout: &ScrollBarLayout, point: (i32, i32)) -> Option<ScrollBarPress> {
+    [
+        (ScrollAxis::Horizontal, layout.horizontal),
+        (ScrollAxis::Vertical, layout.vertical),
+    ]
+    .into_iter()
+    .find_map(|(axis, bar)| {
+        within(bar.track, point).then(|| ScrollBarPress {
+            axis,
+            part: bar_part(axis, bar, point),
+        })
+    })
+}
+
+/// The step a non-thumb press performs, as `(dx, dy)`.
+///
+/// `view` is the viewport's own extent. The vertical page deliberately takes
+/// the **width**: `case SB_PAGEUP: cvp->ViewY -= cvp->ViewWdt;` and its
+/// `SB_PAGEDOWN` twin (`C4Viewport.cpp:139-146`). It reads like a slip and may
+/// be one, but it is what the oracle does, and a viewport is rarely square.
+pub fn scroll_bar_step(axis: ScrollAxis, part: ScrollBarPart, view: (i32, i32)) -> (i32, i32) {
+    let magnitude = match part {
+        ScrollBarPart::LineBack | ScrollBarPart::LineForward => VIEWPORT_SCROLL_SPEED,
+        // Both pages are `ViewWdt`.
+        ScrollBarPart::PageBack | ScrollBarPart::PageForward => view.0,
+        ScrollBarPart::Thumb => return (0, 0),
+    };
+    let signed = match part {
+        ScrollBarPart::LineBack | ScrollBarPart::PageBack => -magnitude,
+        _ => magnitude,
+    };
+    match axis {
+        ScrollAxis::Horizontal => (signed, 0),
+        ScrollAxis::Vertical => (0, signed),
+    }
+}
+
+/// The view origin a thumb at this pointer position names.
+///
+/// `SB_THUMBTRACK` assigns its position straight to `ViewX`/`ViewY`
+/// (`C4Viewport.cpp:125,137`), so this follows the pointer rather than
+/// accumulating a delta — a drag that leaves the track and comes back lands
+/// where the pointer is, not where it would have crawled to.
+pub fn scroll_bar_thumb_position(
+    axis: ScrollAxis,
+    layout: &ScrollBarLayout,
+    range: ScrollRange,
+    point: (i32, i32),
+) -> i32 {
+    let (track, along) = match axis {
+        ScrollAxis::Horizontal => (layout.horizontal.track, point.0 - layout.horizontal.track.x),
+        ScrollAxis::Vertical => (layout.vertical.track, point.1 - layout.vertical.track.y),
+    };
+    let span = match axis {
+        ScrollAxis::Horizontal => track.width,
+        ScrollAxis::Vertical => track.height,
+    }
+    .max(1);
+    // A full page is already on screen, so the last reachable origin is that
+    // much short of the end.
+    let reach = (range.max - range.page).max(0);
+    let scaled = i64::from(along.clamp(0, span)) * i64::from(reach) / i64::from(span);
+    i32::try_from(scaled).unwrap_or(reach).clamp(0, reach)
+}
+
+/// The two arrow boxes at the ends of a bar, in drawing order.
+///
+/// Derived from the same rule `bar_part` hit-tests with, so what is drawn and
+/// what answers a press cannot drift apart.
+pub fn scroll_bar_arrows(bar: ScrollBar) -> [BarRect; 2] {
+    let horizontal = bar.track.width >= bar.track.height;
+    let span = if horizontal {
+        bar.track.width
+    } else {
+        bar.track.height
+    };
+    let arrow = ARROW_EXTENT.min(span / 3).max(0);
+    if horizontal {
+        [
+            BarRect {
+                width: arrow,
+                ..bar.track
+            },
+            BarRect {
+                x: bar.track.x + bar.track.width - arrow,
+                width: arrow,
+                ..bar.track
+            },
+        ]
+    } else {
+        [
+            BarRect {
+                height: arrow,
+                ..bar.track
+            },
+            BarRect {
+                y: bar.track.y + bar.track.height - arrow,
+                height: arrow,
+                ..bar.track
+            },
+        ]
+    }
+}
+
+fn bar_part(axis: ScrollAxis, bar: ScrollBar, point: (i32, i32)) -> ScrollBarPart {
+    let (start, span, along, thumb_start, thumb_span) = match axis {
+        ScrollAxis::Horizontal => (
+            bar.track.x,
+            bar.track.width,
+            point.0,
+            bar.thumb.x,
+            bar.thumb.width,
+        ),
+        ScrollAxis::Vertical => (
+            bar.track.y,
+            bar.track.height,
+            point.1,
+            bar.thumb.y,
+            bar.thumb.height,
+        ),
+    };
+    // The arrows never eat more than a third of the bar each, so a short track
+    // stays usable as a track.
+    let arrow = ARROW_EXTENT.min(span / 3);
+    if arrow > 0 && along < start + arrow {
+        return ScrollBarPart::LineBack;
+    }
+    if arrow > 0 && along >= start + span - arrow {
+        return ScrollBarPart::LineForward;
+    }
+    if along >= thumb_start && along < thumb_start + thumb_span {
+        return ScrollBarPart::Thumb;
+    }
+    if along < thumb_start {
+        ScrollBarPart::PageBack
+    } else {
+        ScrollBarPart::PageForward
+    }
+}
+
+fn within(rect: BarRect, point: (i32, i32)) -> bool {
+    point.0 >= rect.x
+        && point.0 < rect.x + rect.width
+        && point.1 >= rect.y
+        && point.1 < rect.y + rect.height
+}
+
 /// The shortest thumb that still reads as a thumb rather than a mark.
 const MINIMUM_THUMB: i32 = 4;
 
@@ -309,6 +497,177 @@ pub fn route_viewport_event(mode: CursorMode) -> ViewportEventRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A press on a bar resolves to the scroll message Win32 would send.
+    ///
+    /// `C4ViewportWindow::WindowProc` handles `WM_HSCROLL`/`WM_VSCROLL` by
+    /// their notification code (`C4Viewport.cpp:123-147`), and those codes are
+    /// what a click on an arrow, a track or a thumb produces. The arrows are
+    /// this port's own rectangles — the reference macOS build draws no bars at
+    /// all — but the four regions they divide the bar into are the native ones.
+    #[test]
+    fn a_press_on_a_bar_resolves_to_its_native_scroll_code() {
+        const THICKNESS: i32 = 8;
+        let ranges = scroll_ranges(false, 400, 200, 200, 100, 1000, 500);
+        let layout = scroll_bar_layout(ranges, 300, 200, THICKNESS).expect("unlocked bars");
+
+        let horizontal = layout.horizontal;
+        let middle_y = horizontal.track.y + horizontal.track.height / 2;
+        assert_eq!(
+            scroll_bar_hit(&layout, (horizontal.track.x + 1, middle_y)),
+            Some(ScrollBarPress {
+                axis: ScrollAxis::Horizontal,
+                part: ScrollBarPart::LineBack,
+            }),
+            "the leading arrow"
+        );
+        assert_eq!(
+            scroll_bar_hit(
+                &layout,
+                (horizontal.track.x + horizontal.track.width - 2, middle_y)
+            ),
+            Some(ScrollBarPress {
+                axis: ScrollAxis::Horizontal,
+                part: ScrollBarPart::LineForward,
+            }),
+            "and the trailing one"
+        );
+        assert_eq!(
+            scroll_bar_hit(
+                &layout,
+                (horizontal.thumb.x + horizontal.thumb.width / 2, middle_y)
+            ),
+            Some(ScrollBarPress {
+                axis: ScrollAxis::Horizontal,
+                part: ScrollBarPart::Thumb,
+            })
+        );
+        // The track either side of the thumb pages.
+        assert_eq!(
+            scroll_bar_hit(&layout, (horizontal.thumb.x - 1, middle_y)),
+            Some(ScrollBarPress {
+                axis: ScrollAxis::Horizontal,
+                part: ScrollBarPart::PageBack,
+            })
+        );
+
+        // The vertical bar answers on its own axis.
+        let vertical = layout.vertical;
+        assert_eq!(
+            scroll_bar_hit(
+                &layout,
+                (
+                    vertical.track.x + vertical.track.width / 2,
+                    vertical.thumb.y + vertical.thumb.height + 1
+                )
+            ),
+            Some(ScrollBarPress {
+                axis: ScrollAxis::Vertical,
+                part: ScrollBarPart::PageForward,
+            })
+        );
+
+        // Anywhere else is the viewport's, not the chrome's.
+        assert_eq!(scroll_bar_hit(&layout, (10, 10)), None);
+    }
+
+    /// Every step is exactly what its `WM_?SCROLL` arm does — including the
+    /// vertical page, which C++ takes from `ViewWdt` rather than `ViewHgt`.
+    ///
+    /// `case SB_PAGEUP: cvp->ViewY -= cvp->ViewWdt;` and `SB_PAGEDOWN`
+    /// likewise (`C4Viewport.cpp:139-146`). It reads like a typo and may well
+    /// be one, but it is what the oracle does and a viewport is not square.
+    #[test]
+    fn scroll_steps_match_their_native_arms_including_the_vertical_page_width() {
+        let view = (200, 100);
+        assert_eq!(
+            scroll_bar_step(ScrollAxis::Horizontal, ScrollBarPart::LineBack, view),
+            (-VIEWPORT_SCROLL_SPEED, 0)
+        );
+        assert_eq!(
+            scroll_bar_step(ScrollAxis::Horizontal, ScrollBarPart::LineForward, view),
+            (VIEWPORT_SCROLL_SPEED, 0)
+        );
+        assert_eq!(
+            scroll_bar_step(ScrollAxis::Vertical, ScrollBarPart::LineForward, view),
+            (0, VIEWPORT_SCROLL_SPEED)
+        );
+        assert_eq!(
+            scroll_bar_step(ScrollAxis::Horizontal, ScrollBarPart::PageForward, view),
+            (view.0, 0),
+            "a horizontal page is the viewport width"
+        );
+        assert_eq!(
+            scroll_bar_step(ScrollAxis::Vertical, ScrollBarPart::PageForward, view),
+            (0, view.0),
+            "and so is a vertical one, which is the native quirk"
+        );
+        assert_eq!(
+            scroll_bar_step(ScrollAxis::Vertical, ScrollBarPart::PageBack, view),
+            (0, -view.0)
+        );
+        // The thumb is a position, not a step.
+        assert_eq!(
+            scroll_bar_step(ScrollAxis::Vertical, ScrollBarPart::Thumb, view),
+            (0, 0)
+        );
+    }
+
+    /// Dragging the thumb sets the view origin from where the pointer is.
+    ///
+    /// `SB_THUMBTRACK` assigns `HIWORD(wParam)` straight to `ViewX`/`ViewY`
+    /// (`C4Viewport.cpp:125,137`), so the position follows the pointer rather
+    /// than accumulating a delta.
+    #[test]
+    fn a_thumb_drag_maps_the_pointer_onto_the_view_origin() {
+        const THICKNESS: i32 = 8;
+        let ranges = scroll_ranges(false, 0, 0, 200, 100, 1000, 500);
+        let layout = scroll_bar_layout(ranges, 300, 200, THICKNESS).expect("unlocked bars");
+        let (horizontal_range, vertical_range) = ranges.expect("unlocked ranges");
+
+        let track = layout.horizontal.track;
+        assert_eq!(
+            scroll_bar_thumb_position(
+                ScrollAxis::Horizontal,
+                &layout,
+                horizontal_range,
+                (track.x, 0)
+            ),
+            0,
+            "the left end is the start of the landscape"
+        );
+        assert_eq!(
+            scroll_bar_thumb_position(
+                ScrollAxis::Horizontal,
+                &layout,
+                horizontal_range,
+                (track.x + track.width, 0)
+            ),
+            horizontal_range.max - horizontal_range.page,
+            "and the right end is as far as a full page can reach"
+        );
+        // Past either end clamps rather than running off.
+        assert_eq!(
+            scroll_bar_thumb_position(
+                ScrollAxis::Horizontal,
+                &layout,
+                horizontal_range,
+                (track.x - 500, 0)
+            ),
+            0
+        );
+
+        let vertical_track = layout.vertical.track;
+        assert_eq!(
+            scroll_bar_thumb_position(
+                ScrollAxis::Vertical,
+                &layout,
+                vertical_range,
+                (0, vertical_track.y + vertical_track.height)
+            ),
+            vertical_range.max - vertical_range.page
+        );
+    }
 
     /// The bars are drawn from `ScrollBarsByViewPosition`'s own numbers, so
     /// the thumb has to carry `nPage` as its extent and `nPos` as its offset

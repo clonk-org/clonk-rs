@@ -5407,6 +5407,116 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
     runtime_assert!(!app.developer_property_page_click(button, extent));
 }
 
+/// The bars answer their own presses, and only while they are shown.
+///
+/// `WM_HSCROLL`/`WM_VSCROLL` reach the viewport from separate child controls
+/// (`C4Viewport.cpp:123-147`), which Windows dispatches to before the viewport
+/// sees a message — so a press on the chrome is never also a press on the
+/// world. `ScrollBarsByViewPosition` returns false while the player lock is on
+/// (`:272`), and there is then nothing to press.
+#[test]
+fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lock() {
+    use clonk_engine::developer_viewport::{scroll_bar_layout, scroll_ranges, ScrollAxis};
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    // A viewport starts player-locked, and a locked one has no bars at all
+    // (`C4Viewport.cpp:272`), so unlocking is what puts them on screen.
+    let identity = open_local_test_console_viewport(&mut app);
+    let other = open_local_test_console_viewport(&mut app);
+    runtime_assert!(app.console_viewport_player_lock(identity));
+    runtime_assert!(!app.toggle_console_viewport_player_lock(identity));
+    runtime_assert!(!app.toggle_console_viewport_player_lock(other));
+    let extent = (400u32, 250u32);
+    // Draw once so the window has a projection and a view of its own.
+    let _ = app.render_console_viewport(identity, extent.0, extent.1);
+    let _ = app.render_console_viewport(other, extent.0, extent.1);
+
+    let bars = |app: &GameApp, identity: u64| {
+        let (view_x, view_y, view_width, view_height) =
+            app.graphics.detached_viewport_view(identity)?;
+        let landscape = app.snapshot.landscape.as_ref()?;
+        let ranges = scroll_ranges(
+            app.console_viewport_player_lock(identity),
+            view_x,
+            view_y,
+            view_width,
+            view_height,
+            landscape.width() as i32,
+            landscape.estimated_height().max(1),
+        )?;
+        scroll_bar_layout(Some(ranges), extent.0 as i32, extent.1 as i32, 6)
+    };
+    let layout = bars(&app, identity).test_value();
+
+    // A press away from the chrome is not the chrome's.
+    runtime_assert!(!app.console_viewport_scroll_press(identity, (4, 4), extent));
+
+    // The trailing arrow of the horizontal bar steps the view right.
+    let before = app.graphics.detached_viewport_view(identity).test_value().0;
+    let track = layout.horizontal.track;
+    runtime_assert!(app.console_viewport_scroll_press(
+        identity,
+        (
+            track.x + track.width - 2,
+            track.y + track.height / 2
+        ),
+        extent
+    ));
+    let after = app.graphics.detached_viewport_view(identity).test_value().0;
+    runtime_assert!(after > before, "the arrow scrolled right: {before} -> {after}");
+
+    // A press on the thumb captures instead of stepping.
+    let thumb = layout.horizontal.thumb;
+    let held = app.graphics.detached_viewport_view(identity).test_value().0;
+    runtime_assert!(app.console_viewport_scroll_press(
+        identity,
+        (thumb.x + thumb.width / 2, track.y + track.height / 2),
+        extent
+    ));
+    runtime_assert_eq!(
+        app.console_viewport_scroll_drag => Some((identity, ScrollAxis::Horizontal))
+    );
+    runtime_assert_eq!(
+        app.graphics.detached_viewport_view(identity).test_value().0 => held,
+        "grabbing the thumb does not move it",
+    );
+
+    // The capture belongs to this viewport alone.
+    runtime_assert!(
+        !app.console_viewport_scroll_drag(other, (track.x + track.width, 0), extent),
+        "another window's motion is not this drag"
+    );
+    runtime_assert!(app.console_viewport_scroll_drag(
+        identity,
+        (track.x + track.width, track.y),
+        extent
+    ));
+    let dragged = app.graphics.detached_viewport_view(identity).test_value().0;
+    runtime_assert!(dragged > held, "the drag moved the view: {held} -> {dragged}");
+
+    // Releasing ends it, and a second release is nobody's.
+    runtime_assert!(app.console_viewport_scroll_release());
+    runtime_assert!(!app.console_viewport_scroll_release());
+    runtime_assert!(app.console_viewport_scroll_drag.is_none());
+
+    // Locked, there are no bars and nothing takes a press.
+    runtime_assert!(app.toggle_console_viewport_player_lock(identity));
+    runtime_assert!(app.console_viewport_player_lock(identity));
+    runtime_assert!(bars(&app, identity).is_none(), "a locked viewport draws none");
+    runtime_assert!(
+        !app.console_viewport_scroll_press(
+            identity,
+            (
+                track.x + track.width - 2,
+                track.y + track.height / 2
+            ),
+            extent
+        ),
+        "and answers no press where they were"
+    );
+}
+
 /// The keyboard cursor is separate from the selection, as GTK's is.
 ///
 /// `gtk_tree_selection_set_mode(selection, GTK_SELECTION_MULTIPLE)`
