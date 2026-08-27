@@ -3004,6 +3004,27 @@ fn classic_loader_scale_numbers_require_full_decimal_i32() {
 }
 
 #[test]
+fn an_unopenable_graphics_group_reports_the_native_two_argument_diagnostic() {
+    // C4LoaderScreen::Init reports a graphics group it cannot open as
+    // IDS_PRC_NOGFXFILE with two arguments -- the group's own name and the
+    // C4Group error -- and returns false (src/C4LoaderScreen.cpp:61-66).
+    let _lock = env_lock().lock();
+    let install_root = tempdir();
+    let user_data = tempdir();
+    // An install that resolves, but whose Graphics.c4g is absent: C++ reaches
+    // the same state when Config.AtExePath(C4CFN_Graphics) will not open.
+    fs::create_dir_all(install_root.path().join("planet/System.c4g")).test_value();
+    let (_guard, paths) = guarded_test_app_paths(Some(install_root.path()), user_data.path());
+    let error = main_graphics_group(&paths)
+        .expect_err("an install without Graphics.c4g cannot open it");
+    let reported = format!("{error:#}");
+    main_assert!(
+        reported.starts_with("Error at graphics file Graphics.c4g: "),
+        "the port must name the group and its error the way C++ does: {reported}"
+    );
+}
+
+#[test]
 fn assetless_loading_mode_fails_instead_of_drawing_generic_loader() {
     let mut app = new_menu_app(320, 200);
     app.mode = AppMode::Loading;
