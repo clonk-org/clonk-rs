@@ -4790,6 +4790,50 @@ fn developer_file_monitor_arms_registers_then_dispatches_definition_reloads() {
     );
 }
 
+/// The middle button reaches the tool picker, and only on an unheld release.
+///
+/// `C4Viewport`'s editor arm is the only one with a middle-button case at all
+/// — `WM_MBUTTONUP -> Console.EditCursor.MiddleButtonUp()`
+/// (`C4Viewport.cpp:190`), with no `WM_MBUTTONDOWN` on either side — and
+/// `MiddleButtonUp` is `if (Hold) return; ApplyToolPicker();`
+/// (`C4EditCursor.cpp:343-348`). A stroke in progress therefore swallows it,
+/// which is what keeps a middle click during a drag from redefining the
+/// material being drawn with.
+#[test]
+fn a_detached_viewport_middle_release_picks_only_when_nothing_is_held() {
+    use clonk_engine::developer_tools::Tool;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Draw;
+    let identity = open_test_console_viewport(&mut app, None);
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+    let local = (40, 30);
+
+    app.developer_tools.set_tool(Tool::Brush, false);
+    app.developer_tools.press(10, 10);
+    runtime_assert!(app.developer_tools.holding(), "the stroke is held");
+    runtime_assert!(
+        !app.console_viewport_middle_release(identity, local, 1.0),
+        "a middle release during a held stroke picks nothing"
+    );
+
+    app.developer_tools.release(10, 10);
+    runtime_assert!(
+        app.console_viewport_middle_release(identity, local, 1.0),
+        "an unheld middle release reaches the picker"
+    );
+
+    // The edit cursor's own hold gates it too: `MiddleButtonUp` reads the one
+    // `Hold` both arms of the cursor share.
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.edit_cursor_hold = true;
+    runtime_assert!(
+        !app.console_viewport_middle_release(identity, local, 1.0),
+        "a held edit-cursor gesture swallows it in the same way"
+    );
+}
+
 #[test]
 fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();

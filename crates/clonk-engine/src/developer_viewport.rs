@@ -485,12 +485,19 @@ pub enum ViewportEventRoute {
     EditorSink,
 }
 
-/// Play routes to mouse control; Edit and Draw route to the editor
-/// (`C4Viewport.cpp:150-193` dispatches on `Console.EditCursor.GetMode()`).
-pub fn route_viewport_event(mode: CursorMode) -> ViewportEventRoute {
+/// Where one viewport window's pointer input goes.
+///
+/// The native gate is a conjunction — `Game.MouseControl.IsViewport(cvp) &&
+/// Console.EditCursor.GetMode() == C4CNS_ModePlay` (`C4Viewport.cpp:151`) —
+/// and everything else falls to the `else` arm, the edit cursor
+/// (`:174-193`). `IsViewport` is an identity comparison against the single
+/// viewport the control is assigned to (`C4MouseControl.cpp:165-167`), so with
+/// several windows open at most one of them can take the mouse-control arm
+/// however they are all configured.
+pub fn route_viewport_event(mode: CursorMode, owns_mouse_control: bool) -> ViewportEventRoute {
     match mode {
-        CursorMode::Play => ViewportEventRoute::MouseControl,
-        CursorMode::Edit | CursorMode::Draw => ViewportEventRoute::EditorSink,
+        CursorMode::Play if owns_mouse_control => ViewportEventRoute::MouseControl,
+        CursorMode::Play | CursorMode::Edit | CursorMode::Draw => ViewportEventRoute::EditorSink,
     }
 }
 
@@ -873,16 +880,41 @@ mod tests {
         // Input routes by cursor mode; the concrete edit behaviour belongs to
         // the edit cursor's selection/drag/context-menu work.
         assert_eq!(
-            route_viewport_event(CursorMode::Play),
+            route_viewport_event(CursorMode::Play, true),
             ViewportEventRoute::MouseControl
         );
         assert_eq!(
-            route_viewport_event(CursorMode::Edit),
+            route_viewport_event(CursorMode::Edit, true),
             ViewportEventRoute::EditorSink
         );
         assert_eq!(
-            route_viewport_event(CursorMode::Draw),
+            route_viewport_event(CursorMode::Draw, true),
             ViewportEventRoute::EditorSink
         );
+    }
+
+    /// Play mode alone does not send a viewport's input to mouse control.
+    ///
+    /// The native gate is `Game.MouseControl.IsViewport(cvp) &&
+    /// Console.EditCursor.GetMode() == C4CNS_ModePlay`
+    /// (`C4Viewport.cpp:151`), and `IsViewport` is an identity comparison
+    /// against the one viewport the control is assigned to
+    /// (`C4MouseControl.cpp:165-167`). With several detached windows open
+    /// only one of them can be that viewport; the rest take the `else` arm and
+    /// keep talking to the edit cursor, in Play mode as in any other.
+    #[test]
+    fn only_the_mouse_controls_own_viewport_leaves_the_editor_sink() {
+        assert_eq!(
+            route_viewport_event(CursorMode::Play, false),
+            ViewportEventRoute::EditorSink,
+            "a second Play-mode window is not the mouse-control viewport"
+        );
+        for mode in [CursorMode::Edit, CursorMode::Draw] {
+            assert_eq!(
+                route_viewport_event(mode, true),
+                ViewportEventRoute::EditorSink,
+                "owning the mouse control does not override the editor modes"
+            );
+        }
     }
 }

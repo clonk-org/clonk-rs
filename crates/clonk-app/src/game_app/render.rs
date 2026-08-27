@@ -4770,6 +4770,30 @@ impl GameApp {
     /// The release carries no coordinates of its own: C++ reads the `X`/`Y`
     /// the window's preceding motion message already stored, which is exactly
     /// what the tools' retained cursor holds.
+    /// A middle-button release inside a console viewport window.
+    ///
+    /// `C4EditCursor::MiddleButtonUp` is `if (Hold) return; ApplyToolPicker();`
+    /// (`C4EditCursor.cpp:343-348`) — the picker whatever tool is selected, and
+    /// nothing at all while a drag is held. It exists only in the editor arm
+    /// of `C4Viewport`'s dispatch (`C4Viewport.cpp:190`), so the Play arm never
+    /// sees a middle button and neither does this.
+    /// Returns whether the picker ran, which is what a window redraws for.
+    pub(crate) fn console_viewport_middle_release(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        scale: f32,
+    ) -> bool {
+        if self.edit_cursor_hold || self.developer_tools.holding() {
+            return false;
+        }
+        let Some((x, y)) = self.console_viewport_world(identity, local, scale) else {
+            return false;
+        };
+        self.console_apply_tool_picker(x, y);
+        true
+    }
+
     /// `C4EditCursor::ApplyToolPicker` (`C4EditCursor.cpp:698-731`) — what the
     /// picker samples goes into the tools dialog, not onto the landscape.
     fn console_apply_tool_picker(&mut self, x: i32, y: i32) {
