@@ -49,6 +49,8 @@ const PREVIEW_SIZE: i32 = 48;
 const GRADE_WIDTH: i32 = 20;
 const IFT_COLUMN_WIDTH: i32 = 52;
 const LIST_ROW_HEIGHT: i32 = 14;
+/// Wide enough for `IDS_BTN_RELOADDEF` at the page's small face.
+const RELOAD_BUTTON_WIDTH: i32 = 88;
 
 /// Everything the Tools page draws, resolved by the caller so the view never
 /// reaches into the engine.
@@ -662,15 +664,80 @@ fn grade_at(rect: IntRect, y: i32) -> i32 {
     GRADE_MAX - offset * (GRADE_MAX - GRADE_MIN) / travel
 }
 
-/// The property page: `C4PropertyDlg`'s read-only text box (`IDC_EDITOUTPUT`).
-pub(crate) fn render_property_page(surface: &mut Surface, font: &dyn TextFont, text: &str) {
-    surface.fill(WINDOW_BACKGROUND);
-    let rect = IntRect::new(
-        PADDING,
-        PADDING,
-        (surface.width() as i32 - PADDING * 2).max(1),
-        (surface.height() as i32 - PADDING * 2).max(1),
+/// The one control on the property page that a click can reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PropertyPageAction {
+    /// `IDC_BUTTONRELOADDEF` (`C4PropertyDlg.cpp:74-76`).
+    ReloadDef,
+}
+
+/// Where the property page's two controls sit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PropertyPageLayout {
+    /// `IDC_EDITOUTPUT`, the read-only text box.
+    pub(crate) output: IntRect,
+    /// `IDC_BUTTONRELOADDEF`.
+    pub(crate) reload: IntRect,
+}
+
+/// `C4PropertyDlg` is a native dialog resource, so its geometry does not
+/// survive into this port; only the fact that the page carries the output box
+/// and the reload button does. The button takes the bottom row and the box
+/// keeps the rest, and on a page too short for both the button wins — it is
+/// the only thing here a click can reach.
+pub(crate) fn property_page_layout(width: u32, height: u32) -> PropertyPageLayout {
+    let width = width.max(1) as i32;
+    let height = height.max(1) as i32;
+    // A page smaller than its own padding still has to place both controls
+    // inside it: the toolbox window has no minimum size of its own.
+    let origin_x = PADDING.min(width - 1);
+    let origin_y = PADDING.min(height - 1);
+    let content = IntRect::new(
+        origin_x,
+        origin_y,
+        (width - origin_x - PADDING).clamp(1, width - origin_x),
+        (height - origin_y - PADDING).clamp(1, height - origin_y),
     );
+    let button_height = BUTTON_HEIGHT.min(content.h);
+    let button_width = RELOAD_BUTTON_WIDTH.min(content.w);
+    let reload = IntRect::new(
+        content.x + content.w - button_width,
+        content.y + content.h - button_height,
+        button_width,
+        button_height,
+    );
+    let output_height = (content.h - button_height - NARROW_GAP).max(1);
+    PropertyPageLayout {
+        output: IntRect::new(content.x, content.y, content.w, output_height),
+        reload,
+    }
+}
+
+/// Which control a click lands on, if any.
+pub(crate) fn property_page_hit(
+    extent: (u32, u32),
+    point: (i32, i32),
+) -> Option<PropertyPageAction> {
+    let layout = property_page_layout(extent.0, extent.1);
+    contains(layout.reload, GuiPoint::new(point.0 as f32, point.1 as f32))
+        .then_some(PropertyPageAction::ReloadDef)
+}
+
+/// The property page: `C4PropertyDlg`'s read-only text box (`IDC_EDITOUTPUT`)
+/// and its `IDC_BUTTONRELOADDEF` button.
+///
+/// The button is enabled on `Console.Editing` alone (`C4PropertyDlg.cpp:117`),
+/// with no selection condition of its own.
+pub(crate) fn render_property_page(
+    surface: &mut Surface,
+    font: &dyn TextFont,
+    text: &str,
+    reload_enabled: bool,
+    reload_label: &str,
+) {
+    surface.fill(WINDOW_BACKGROUND);
+    let layout = property_page_layout(surface.width(), surface.height());
+    let rect = layout.output;
     draw_sunken(surface, rect, CONTROL_BACKGROUND);
     let rows = ((rect.h - 2) / LIST_ROW_HEIGHT).max(0) as usize;
     for (row, line) in text.lines().take(rows).enumerate() {
@@ -689,6 +756,20 @@ pub(crate) fn render_property_page(surface: &mut Surface, font: &dyn TextFont, t
             3,
         );
     }
+    draw_raised(surface, layout.reload, WINDOW_BACKGROUND);
+    draw_fitted_text(
+        surface,
+        font,
+        layout.reload,
+        reload_label,
+        if reload_enabled {
+            CONTROL_TEXT
+        } else {
+            DISABLED_TEXT
+        },
+        SMALL_FONT_SIZE,
+        4,
+    );
 }
 
 /// Centres a rendered sample inside the sunken preview box, clipped to it.
@@ -726,6 +807,59 @@ fn blit_preview_sample(surface: &mut Surface, rect: IntRect, sample: &clonk_fron
 ))]
 mod tests {
     use super::*;
+
+    /// The page is the read-only output box plus one button, and the box gives
+    /// up the row the button needs rather than being drawn under it.
+    ///
+    /// `C4PropertyDlg` is `IDC_EDITOUTPUT` and `IDC_BUTTONRELOADDEF` in one
+    /// dialog (`C4PropertyDlg.cpp:74-76,117`); only where they sit is this
+    /// port's own decision.
+    #[test]
+    fn the_property_page_reserves_its_reload_button_below_the_output_box() {
+        let extent = (240, 160);
+        let layout = property_page_layout(extent.0, extent.1);
+
+        assert!(
+            layout.output.y + layout.output.h <= layout.reload.y,
+            "the output box ends before the button starts: {layout:?}"
+        );
+        assert!(layout.reload.h > 0 && layout.reload.w > 0);
+        assert!(
+            layout.reload.y + layout.reload.h <= extent.1 as i32,
+            "the button stays inside the page"
+        );
+
+        let inside = (
+            layout.reload.x + layout.reload.w / 2,
+            layout.reload.y + layout.reload.h / 2,
+        );
+        assert_eq!(
+            property_page_hit(extent, inside),
+            Some(PropertyPageAction::ReloadDef)
+        );
+        assert_eq!(
+            property_page_hit(extent, (layout.output.x + 1, layout.output.y + 1)),
+            None,
+            "the output box is read-only and claims no click"
+        );
+    }
+
+    /// A page too short for both keeps the button rather than drawing it off
+    /// the edge, because the button is the only thing on the page a click can
+    /// reach at all.
+    #[test]
+    fn a_short_property_page_still_places_its_button_inside() {
+        for height in [1_u32, 8, 20, 32] {
+            let layout = property_page_layout(120, height);
+            assert!(
+                layout.reload.y >= 0 && layout.reload.y + layout.reload.h <= height.max(1) as i32,
+                "height {height} put the button at {:?}",
+                layout.reload
+            );
+            assert!(layout.output.h >= 1, "height {height} left no output box");
+        }
+    }
+
     use clonk_engine::developer_landscape::TOOL_SKY_MATERIAL;
     use clonk_graphics::{BitmapFont, PixelFormat};
 
@@ -1014,7 +1148,14 @@ mod tests {
         ] {
             let mut surface = Surface::new(width, height, PixelFormat::Rgba8888);
             model.render(&mut surface, &font);
-            render_property_page(&mut surface, &font, "Type: Rock (ROCK)\nOwner: Ada");
+            render_property_page(
+                &mut surface,
+                &font,
+                "Type: Rock (ROCK)\nOwner: Ada",
+                true,
+                "Reload def",
+            );
+            let _ = property_page_hit((width, height), (5, 5));
             // A hit anywhere is either a real action or nothing; it never
             // indexes past a catalogue.
             for point in [(0, 0), (width as i32 - 1, height as i32 - 1), (5, 5)] {
