@@ -28,6 +28,30 @@ class RoundSummaryTests(unittest.TestCase):
 
         self.assertEqual(summary["desyncs"], 1)
 
+    def test_the_oracles_own_wording_for_a_sync_loss_is_counted(self):
+        """Only the non-host compares, so the oracle is sometimes the only judge.
+
+        `C4ControlSyncCheck::Execute` returns immediately on the control host
+        (`C4Control.cpp:469-472`) and the peer that does compare announces
+        `Network: Synchronization loss!` (`C4Control.cpp:500`). Matching only
+        the port's wording therefore reports a clean zero for every direction
+        the oracle joins in — the one direction where the port cannot see the
+        divergence at all.
+        """
+
+        summary = MODULE.summarize_round(
+            host_log="Player join: HostPlayer\nPlayer join: ClientPlayer\n",
+            client_log=(
+                "[info] Network: Synchronization loss!\n"
+                "[info] Network: Client Frm 100 Ctrl 50 Rnc 4495 Rn3 0 Cpx 253200 "
+                "PXS 0 MMi 0 Obc 700 Oei 705 Sct 1240\n"
+                "[info] Network: Host Frm 100 Ctrl 50 Rnc 4495 Rn3 0 Cpx 253200 "
+                "PXS 0 MMi 0 Obc 700 Oei 705 Sct 1238\n"
+            ),
+        )
+
+        self.assertEqual(summary["desyncs"], 1)
+
     def test_a_round_only_the_host_joined_is_not_a_valid_measurement(self):
         """A solo host still simulates, logs and looks healthy.
 
@@ -112,6 +136,75 @@ class CommandTests(unittest.TestCase):
         self.assertIn("/tcpport:21500", command)
         self.assertNotIn("/join:127.0.0.1:21502", command)
 
+    def test_the_oracle_client_joins_with_the_same_engine_parameters(self):
+        """The joining direction differs only in the prologue, not the join.
+
+        `/join:`, `/tcpport:` and `/udpport:` are read by the same
+        `C4Game::ParseCommandLine` loop the port mirrors
+        (`C4Game.cpp:3239-3266`), so the two engines swap freely on the
+        joining side once the config reaches the oracle the way it reads it.
+        """
+
+        ports = MODULE.RoundPorts(
+            host_tcp=21500,
+            host_udp=21501,
+            reference=21502,
+            client_tcp=21510,
+            client_udp=21511,
+        )
+        command = MODULE.build_client_command(
+            binary=Path("/oracle/clonk"),
+            config=Path("/run/client/config.ini"),
+            player_name="ClientPlayer",
+            profile=Path("/run/profiles/ClientPlayer.c4p"),
+            ports=ports,
+            engine="cpp",
+        )
+
+        self.assertIn("/config:/run/client/config.ini", command)
+        self.assertNotIn("--config", command)
+        self.assertIn("/join:127.0.0.1:21502", command)
+        self.assertIn("/tcpport:21510", command)
+        self.assertIn("/udpport:21511", command)
+
+    def test_the_oracle_host_takes_its_config_and_player_as_engine_parameters(self):
+        """The oracle ignores the port's long options rather than refusing them.
+
+        `C4Application::DoInit` reads the config path only from `/config:`
+        (`C4Application.cpp:86`), and `C4Game::ParseCommandLine` skips every
+        parameter it does not recognise (`C4Game.cpp:3141-3292`). Handing the
+        oracle `--config <path>` therefore leaves it on its compiled-in
+        defaults — the standard reference port rather than the round's — and
+        the two peers never meet, with nothing in either log to say why.
+        """
+
+        ports = MODULE.RoundPorts(
+            host_tcp=21500,
+            host_udp=21501,
+            reference=21502,
+            client_tcp=21510,
+            client_udp=21511,
+        )
+        command = MODULE.build_host_command(
+            binary=Path("/oracle/clonk"),
+            config=Path("/run/host/config.ini"),
+            player_name="HostPlayer",
+            profile=Path("/run/profiles/HostPlayer.c4p"),
+            scenario=Path("/oracle/Melees.c4f/Massif.c4s"),
+            ports=ports,
+            engine="cpp",
+        )
+
+        self.assertIn("/config:/run/host/config.ini", command)
+        self.assertIn("/run/profiles/HostPlayer.c4p", command)
+        self.assertNotIn("--config", command)
+        self.assertNotIn("--headless", command)
+        self.assertNotIn("--player-name", command)
+        # The rest of the line is the shared engine vocabulary.
+        for token in ("/network", "/lobby", "/console", "/nosignup"):
+            self.assertIn(token, command)
+        self.assertIn("/tcpport:21500", command)
+
     def test_every_peer_keeps_its_stdin_open(self):
         """A console engine quits the moment stdin reports end of file.
 
@@ -184,6 +277,34 @@ class ScenarioGuardTests(unittest.TestCase):
                 install_root=install_root,
             )
 
+    def test_a_scenario_reached_through_a_link_stays_inside_the_root(self):
+        """The engine walks the path it was handed, links and all.
+
+        Both engines derive the install root from the scenario path's own
+        ancestors, and the oracle reaches every group through a symlink into a
+        working checkout. Resolving the path first would move the scenario out
+        of the root the engine will actually use and reject a correct setup —
+        while the engine, given the resolved path, really would pick the other
+        root.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout" / "content" / "Melees.c4f"
+            checkout.mkdir(parents=True)
+            (checkout / "Massif.c4s").mkdir()
+
+            install_root = root / "oracle"
+            install_root.mkdir()
+            (install_root / "Melees.c4f").symlink_to(checkout)
+
+            MODULE.validate_scenario_inside_install_root(
+                scenario=MODULE.engine_path(
+                    install_root / "Melees.c4f" / "Massif.c4s"
+                ),
+                install_root=MODULE.engine_path(install_root),
+            )
+
     def test_a_single_player_scenario_is_rejected_before_anything_starts(self):
         """`MaxPlayer=1` produces a round that looks like a client defect.
 
@@ -210,6 +331,203 @@ class ScenarioGuardTests(unittest.TestCase):
             MODULE.require_multiplayer_scenario(melee)
             with self.assertRaisesRegex(MODULE.HarnessError, "MaxPlayer"):
                 MODULE.require_multiplayer_scenario(solo)
+
+
+class DirectionTests(unittest.TestCase):
+    def test_a_mixed_direction_without_an_oracle_is_refused(self):
+        """Falling back to the port would relabel the control run as mixed.
+
+        The control and the two mixed directions differ only in which binary
+        each peer runs, and every round prints the same summary either way. A
+        direction that quietly ran port-against-port would answer this issue's
+        question with the answer it already has.
+        """
+
+        with self.assertRaisesRegex(MODULE.HarnessError, "oracle"):
+            MODULE.resolve_peers(
+                direction="cpp-host",
+                port_binary=Path("/engine/clonk-app"),
+                port_root=Path("/repository"),
+                oracle_binary=None,
+            )
+
+    def test_the_oracle_is_rooted_where_its_groups_are(self):
+        """A `USE_CONSOLE` build reads its groups from beside the executable.
+
+        That is a property of the build rather than a convention, so the root
+        is derived from the binary instead of asked for — one fewer argument
+        to get wrong, and the wrong value here is a silent content difference
+        rather than a startup failure.
+        """
+
+        host, client = MODULE.resolve_peers(
+            direction="cpp-client",
+            port_binary=Path("/engine/clonk-app"),
+            port_root=Path("/repository"),
+            oracle_binary=Path("/oracle/build-console/clonk"),
+        )
+
+        self.assertEqual(host.engine, MODULE.RUST)
+        self.assertEqual(host.install_root, Path("/repository"))
+        self.assertEqual(client.engine, MODULE.CPP)
+        self.assertEqual(client.binary, Path("/oracle/build-console/clonk"))
+        self.assertEqual(client.install_root, Path("/oracle/build-console"))
+
+    def test_the_oracle_is_named_relative_to_the_directory_it_runs_in(self):
+        """The engine throws away the working directory it was given.
+
+        `main` opens on macOS with
+        `chdir(dirname(dirname(dirname(dirname(argv[0])))))`
+        (`C4WinMain.cpp:231-239`) to climb out of `Clonk.app/Contents/MacOS/`.
+        A console build is not in a bundle, so an absolute name walks four
+        real directories out of the install root: measured on the pinned
+        build, `/…/legacyclonk-oracle-pin/build-console/clonk` lands the
+        process in `/Users/…/Documents/code`.
+
+        The engine then says only `Error opening system group file
+        (System.c4g)!` and carries on into a run that never opens a lobby —
+        from outside, a host that failed to bring networking up.
+        """
+
+        _, client = MODULE.resolve_peers(
+            direction="cpp-client",
+            port_binary=Path("/repository/target/play/clonk-app"),
+            port_root=Path("/repository"),
+            oracle_binary=Path("/oracle/build-console/clonk"),
+        )
+
+        self.assertEqual(client.argv0, "./clonk")
+
+    def test_the_port_keeps_the_binary_path_it_was_given(self):
+        """The port's binary sits under its root rather than in it.
+
+        Only a peer whose executable lives *in* its install root can name
+        itself relative to it, so the control run is untouched by this.
+        """
+
+        host, _ = MODULE.resolve_peers(
+            direction="control",
+            port_binary=Path("/repository/target/play/clonk-app"),
+            port_root=Path("/repository"),
+            oracle_binary=None,
+        )
+
+        self.assertEqual(host.argv0, "/repository/target/play/clonk-app")
+
+    def test_the_control_direction_runs_the_port_on_both_sides(self):
+        """The control is still one binary and one root, as it was."""
+
+        host, client = MODULE.resolve_peers(
+            direction="control",
+            port_binary=Path("/engine/clonk-app"),
+            port_root=Path("/repository"),
+            oracle_binary=None,
+        )
+
+        self.assertEqual((host.engine, client.engine), (MODULE.RUST, MODULE.RUST))
+        self.assertEqual(host.install_root, client.install_root)
+
+
+class SharedContentTests(unittest.TestCase):
+    def test_two_roots_serving_different_shared_groups_are_rejected(self):
+        """A mixed round needs two install roots, and they must agree.
+
+        Each engine resolves its groups from its own root — the port from the
+        repository, the oracle from the directory its executable sits in — so
+        a mixed round is the first configuration where the two can disagree.
+        When they do, the peers build different worlds from the same scenario
+        and the round ends in what looks like a simulation divergence.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / "shared"
+            (shared / "planet").mkdir(parents=True)
+            (shared / "content").mkdir(parents=True)
+            (shared / "planet" / "System.c4g").write_text("system", encoding="ascii")
+            (shared / "content" / "Material.c4g").write_text("material", encoding="ascii")
+
+            oracle = root / "oracle"
+            oracle.mkdir()
+            (oracle / "System.c4g").symlink_to(shared / "planet" / "System.c4g")
+            (oracle / "Material.c4g").symlink_to(shared / "content" / "Material.c4g")
+
+            MODULE.validate_shared_content_roots(
+                host_root=shared, client_root=oracle
+            )
+
+            # The same layout with one group of its own is not the same content.
+            divergent = root / "divergent"
+            divergent.mkdir()
+            (divergent / "System.c4g").write_text("other system", encoding="ascii")
+            (divergent / "Material.c4g").symlink_to(shared / "content" / "Material.c4g")
+
+            with self.assertRaisesRegex(MODULE.HarnessError, "System.c4g"):
+                MODULE.validate_shared_content_roots(
+                    host_root=shared, client_root=divergent
+                )
+
+    def test_two_separate_copies_of_the_same_content_are_accepted(self):
+        """What has to match is the bytes, not the path they arrive by.
+
+        A worktree carries its own `content/` while the oracle's links point
+        at the main checkout, so the two roots reach the same submodule commit
+        through different files. Comparing paths would reject every mixed run
+        outside the main checkout — a guard that fires on the normal case
+        teaches people to remove it.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / "worktree", root / "checkout"
+            for copy in (first, second):
+                (copy / "planet" / "System.c4g").mkdir(parents=True)
+                (copy / "content" / "Material.c4g").mkdir(parents=True)
+                (copy / "planet" / "System.c4g" / "Rule.c4d").write_text(
+                    "rule", encoding="ascii"
+                )
+                (copy / "content" / "Material.c4g" / "Earth.c4m").write_text(
+                    "earth", encoding="ascii"
+                )
+
+            MODULE.validate_shared_content_roots(
+                host_root=first, client_root=second
+            )
+
+            (second / "content" / "Material.c4g" / "Earth.c4m").write_text(
+                "sand", encoding="ascii"
+            )
+            with self.assertRaisesRegex(MODULE.HarnessError, "Material.c4g"):
+                MODULE.validate_shared_content_roots(
+                    host_root=first, client_root=second
+                )
+
+    def test_a_dangling_group_link_is_named_rather_than_played_through(self):
+        """The oracle's group links point outside its own tree.
+
+        They have pointed into a deleted worktree before, which leaves the
+        peer with no group where it expects one. The engine does not stop for
+        that, so the round runs and only the comparison at the end is wrong —
+        or, worse, is not.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / "shared"
+            (shared / "planet").mkdir(parents=True)
+            (shared / "content").mkdir(parents=True)
+            (shared / "planet" / "System.c4g").write_text("system", encoding="ascii")
+            (shared / "content" / "Material.c4g").write_text("material", encoding="ascii")
+
+            oracle = root / "oracle"
+            oracle.mkdir()
+            (oracle / "System.c4g").symlink_to(root / "deleted-worktree" / "System.c4g")
+            (oracle / "Material.c4g").symlink_to(shared / "content" / "Material.c4g")
+
+            with self.assertRaisesRegex(MODULE.HarnessError, "System.c4g"):
+                MODULE.validate_shared_content_roots(
+                    host_root=shared, client_root=oracle
+                )
 
 
 if __name__ == "__main__":
