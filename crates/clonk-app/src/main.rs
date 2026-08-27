@@ -2642,8 +2642,13 @@ impl GameApp {
             persisted_mission_access: mission_access.snapshot(),
             mission_access,
             process_group_maker,
-            save_description_language_table,
-            save_description_language,
+            saves: SaveState {
+                // The two language values are computed above; the rest of the
+                // save state starts empty.
+                description_language_table: save_description_language_table,
+                description_language: save_description_language,
+                ..SaveState::default()
+            },
             show_folder_maps,
             show_commands_requests,
             allow_scripting_in_replays,
@@ -2660,10 +2665,6 @@ impl GameApp {
             retained_gpu_presentation_active: false,
             retained_gpu_ordered_capture_active: false,
             retained_native_capture_surface: None,
-            pending_gpu_thumbnail_paths: VecDeque::new(),
-            pending_native_save_thumbnails: VecDeque::new(),
-            background_save_worker: None,
-            last_native_save_timings: None,
             pending_options_display_requests: VecDeque::new(),
             gamepads_enabled,
             gamepad_input_enabled: gamepads_enabled,
@@ -2891,8 +2892,6 @@ impl GameApp {
             pending_host_rejoin: None,
             host_local_alternate_colors_by_resource,
             host_local_player_info_ids,
-            deferred_network_savegame_recreation: Vec::new(),
-            network_savegame_recreation_progress: None,
             generated_team_name_template,
             network_team_assignment,
             admission_resources: AdmissionResourceStore::default(),
@@ -2920,7 +2919,6 @@ impl GameApp {
             local_owner: runtime.player_owner,
             player_name: player_name.clone(),
             selected_player_file,
-            last_save_path: None,
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
@@ -3042,7 +3040,7 @@ impl GameApp {
             debug_hud: false,
         };
         if let Some(existing) = existing_quick_save_path() {
-            app.last_save_path = Some(existing);
+            app.saves.last_path = Some(existing);
         }
         app.sync_scenario_game_option_bounds();
         if matches!(app.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
@@ -4828,7 +4826,7 @@ impl GameApp {
         save.source_title_png = fs::read(path.with_extension("png")).ok();
         let save = migrate_save_file(save)?;
         self.apply_loaded_game(save)?;
-        self.last_save_path = Some(path.to_path_buf());
+        self.saves.last_path = Some(path.to_path_buf());
         Ok(())
     }
 
@@ -6470,8 +6468,8 @@ impl GameApp {
     fn reload_application_language_resources(&mut self) -> Result<String> {
         let bytes_table = load_runtime_language_bytes_table(self.app_paths.as_ref())?;
         let table = load_runtime_language_table(self.app_paths.as_ref())?;
-        self.save_description_language_table = Some(bytes_table);
-        self.save_description_language = materialized_save_description_language(
+        self.saves.description_language_table = Some(bytes_table);
+        self.saves.description_language = materialized_save_description_language(
             &load_native_config_bytes(self.app_paths.as_ref()),
         );
         let generated_team_name_template = generated_team_name_template(&table);
@@ -8323,7 +8321,8 @@ impl GameApp {
     fn quick_load(&mut self) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         let candidate = self
-            .last_save_path
+            .saves
+            .last_path
             .clone()
             .unwrap_or_else(default_quick_save_path);
         let path = if candidate.exists() {

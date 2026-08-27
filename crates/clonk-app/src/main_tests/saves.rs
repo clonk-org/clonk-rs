@@ -2012,7 +2012,7 @@ fn retained_gpu_save_thumbnail_waits_for_the_presented_frame() {
 
     app.write_save_thumbnail(&save_path).test_value();
 
-    main_assert_eq!(app.pending_gpu_thumbnail_paths.iter().collect::<Vec<_>>() => vec![&thumbnail_path]);
+    main_assert_eq!(app.saves.pending_gpu_thumbnail_paths.iter().collect::<Vec<_>>() => vec![&thumbnail_path]);
     main_assert!(!thumbnail_path.exists(), "the stale CPU surface must not be written before GPU readback");
 }
 
@@ -4967,8 +4967,8 @@ fn quick_save_round_trips_state() {
             .insert(saved_player_info_id, saved_big_icon.clone());
 
         app.quick_save().test_value();
-        main_assert!(app.last_save_path.as_ref().map(|path| path.ends_with(QUICK_SAVE_FILE)).unwrap_or(false), "quick save should note the save path");
-        let save_bytes = fs::read(app.last_save_path.as_ref().unwrap()).test_value();
+        main_assert!(app.saves.last_path.as_ref().map(|path| path.ends_with(QUICK_SAVE_FILE)).unwrap_or(false), "quick save should note the save path");
+        let save_bytes = fs::read(app.saves.last_path.as_ref().unwrap()).test_value();
         main_assert!(
             !save_bytes.contains(&b'\n'),
             "virtual saves use compact JSON to minimize synchronous disk I/O"
@@ -5076,7 +5076,7 @@ fn quick_save_persists_across_sessions() {
             // asserting the fresh session is at the menu (not mid-game).
             wait_for_menu(&mut app);
 
-            main_assert!(app.last_save_path.as_ref().map(|path| path.ends_with(QUICK_SAVE_FILE)).unwrap_or(false), "expected quick save path to be remembered");
+            main_assert!(app.saves.last_path.as_ref().map(|path| path.ends_with(QUICK_SAVE_FILE)).unwrap_or(false), "expected quick save path to be remembered");
             main_assert!(matches!(app.mode, AppMode::Menu), "new session should start in menu");
 
             app.quick_load().test_value();

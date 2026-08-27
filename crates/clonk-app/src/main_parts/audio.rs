@@ -1150,9 +1150,9 @@ pub(crate) fn present_retained_gpu_frame_profiled(
         // (clonk-org/clonk-rs#359).
         world_zoom: app.graphics.viewport_zoom(),
     };
-    let request_native_save_readback = !app.pending_native_save_thumbnails.is_empty();
+    let request_native_save_readback = !app.saves.pending_native_thumbnails.is_empty();
     let request_current_readback =
-        !app.pending_screenshots.is_empty() || !app.pending_gpu_thumbnail_paths.is_empty();
+        !app.pending_screenshots.is_empty() || !app.saves.pending_gpu_thumbnail_paths.is_empty();
     // A screenshot needs every presented pixel; a frame wanted only for save
     // thumbnails does not. Reducing on the GPU maps the 200x150 result instead
     // of the complete frame — about 117 KiB rather than 31.6 MiB at 4K.
@@ -1311,7 +1311,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
                 Ok(frame) => Some(frame),
                 Err(error) => {
                     tracing::warn!(
-                        saves = app.pending_native_save_thumbnails.len(),
+                        saves = app.saves.pending_native_thumbnails.len(),
                         ?error,
                         "failed to read previous retained GPU frame for native saves"
                     );
@@ -1337,7 +1337,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
             match read_result {
                 Ok(frame) => Some(frame),
                 Err(error) => {
-                    while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
+                    while let Some(path) = app.saves.pending_gpu_thumbnail_paths.pop_front() {
                         tracing::warn!(
                             path = %path.display(),
                             ?error,
@@ -1365,7 +1365,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
             .context("retained GPU device failed while completing readback")?;
     }
 
-    if !app.pending_native_save_thumbnails.is_empty() {
+    if !app.saves.pending_native_thumbnails.is_empty() {
         let title_png = previous_native_frame
             .as_ref()
             .or(current_frame.as_ref())
@@ -1375,7 +1375,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
                     Ok(encoded) => Some(encoded),
                     Err(error) => {
                         tracing::warn!(
-                            saves = app.pending_native_save_thumbnails.len(),
+                            saves = app.saves.pending_native_thumbnails.len(),
                             ?error,
                             "failed to encode retained GPU frame for native saves"
                         );
@@ -1387,10 +1387,10 @@ pub(crate) fn present_retained_gpu_frame_profiled(
     }
 
     if let Some(frame) = current_frame.as_mut() {
-        if !app.pending_gpu_thumbnail_paths.is_empty() {
+        if !app.saves.pending_gpu_thumbnail_paths.is_empty() {
             match encode_presented_save_thumbnail(frame.extent[0], frame.extent[1], &frame.rgba) {
                 Ok(encoded) => {
-                    while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
+                    while let Some(path) = app.saves.pending_gpu_thumbnail_paths.pop_front() {
                         let result = (|| -> Result<()> {
                             let mut file = File::create(&path).with_context(|| {
                                 format!("failed to create thumbnail at {}", path.display())
@@ -1410,7 +1410,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
                     }
                 }
                 Err(error) => {
-                    while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
+                    while let Some(path) = app.saves.pending_gpu_thumbnail_paths.pop_front() {
                         tracing::warn!(
                             path = %path.display(),
                             ?error,
@@ -2455,7 +2455,7 @@ pub(crate) fn handle_window_event(
         }
         _ => {}
     }
-    if !app.pending_native_save_thumbnails.is_empty() {
+    if !app.saves.pending_native_thumbnails.is_empty() {
         window.request_redraw();
     }
     if app.take_exit_request() {

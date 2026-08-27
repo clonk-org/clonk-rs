@@ -73,6 +73,35 @@ pub(crate) struct ChatState {
     pub(crate) lobby_drag_anchor: Option<usize>,
 }
 
+/// The app's side of saving a game: where it writes, what it still owes,
+/// and the language the description is written in.
+///
+/// The engine owns the deterministic save primitives; everything here is
+/// I/O and presentation around them, and it moves as a unit — a save picks
+/// a path, queues a thumbnail the renderer has not produced yet, and hands
+/// the write to a background worker whose timings the next save reports.
+#[derive(Default)]
+pub(crate) struct SaveState {
+    /// Byte-exact process-global resource table used by LoadResStr. Unlike a
+    /// file reload at save time, this changes only when Options reloads the
+    /// application language.
+    pub(crate) description_language_table: Option<RuntimeLanguageBytesTable>,
+    /// First two bytes of the materialized Config.General.Language used for
+    /// C4GameSave's Desc??.rtf entry name.
+    pub(crate) description_language: Vec<u8>,
+    pub(crate) pending_gpu_thumbnail_paths: VecDeque<PathBuf>,
+    pub(crate) pending_native_thumbnails: VecDeque<PendingNativeSaveThumbnail>,
+    pub(crate) background_worker:
+        Option<save_worker::BackgroundSaveWorker<save_worker::BackgroundSaveCompletion>>,
+    pub(crate) last_native_timings: Option<save_worker::NativeSaveTimings>,
+    pub(crate) last_path: Option<PathBuf>,
+    /// Joined infos selected by RestoreSavegameInfos for the distinct
+    /// RecreatePlayers phase. They must never fall back into normal network
+    /// JoinPlayer issuance while legacy runtime-player loading is deferred.
+    pub(crate) deferred_network_recreation: Vec<(i32, i32)>,
+    pub(crate) network_recreation_progress: Option<NetworkSavegameRecreationProgress>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -122,13 +151,8 @@ pub(crate) struct GameApp {
     /// Process-global C4Group maker captured from `Config.General.Name` once
     /// during application initialization, like `C4Group_SetMaker`.
     pub(crate) process_group_maker: LegacyCString,
-    /// Byte-exact process-global resource table used by LoadResStr. Unlike a
-    /// file reload at save time, this changes only when Options reloads the
-    /// application language.
-    pub(crate) save_description_language_table: Option<RuntimeLanguageBytesTable>,
-    /// First two bytes of the materialized Config.General.Language used for
-    /// C4GameSave's Desc??.rtf entry name.
-    pub(crate) save_description_language: Vec<u8>,
+    /// Where a save writes, what it still owes, and in which language.
+    pub(crate) saves: SaveState,
     /// `Config.Graphics.ShowFolderMaps`, default-on like C4ConfigGraphics.
     pub(crate) show_folder_maps: bool,
     /// Process-local Config.Graphics.ShowCommands enable requests shared
@@ -169,11 +193,6 @@ pub(crate) struct GameApp {
     pub(crate) retained_gpu_ordered_capture_active: bool,
     /// Reused command-only target for scale-native physical text layers.
     pub(crate) retained_native_capture_surface: Option<Surface>,
-    pub(crate) pending_gpu_thumbnail_paths: VecDeque<PathBuf>,
-    pub(crate) pending_native_save_thumbnails: VecDeque<PendingNativeSaveThumbnail>,
-    pub(crate) background_save_worker:
-        Option<save_worker::BackgroundSaveWorker<save_worker::BackgroundSaveCompletion>>,
-    pub(crate) last_native_save_timings: Option<save_worker::NativeSaveTimings>,
     pub(crate) pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
     /// Current `Config.General.GamepadEnabled` value used by each new
     /// `C4Player::InitControl` analogue.
@@ -801,11 +820,6 @@ pub(crate) struct GameApp {
     /// Resource IDs are global and may also be referenced by a remote row, so
     /// they cannot by themselves prove ownership of the local-only color.
     pub(crate) host_local_player_info_ids: HashSet<i32>,
-    /// Joined infos selected by RestoreSavegameInfos for the distinct
-    /// RecreatePlayers phase. They must never fall back into normal network
-    /// JoinPlayer issuance while legacy runtime-player loading is deferred.
-    pub(crate) deferred_network_savegame_recreation: Vec<(i32, i32)>,
-    pub(crate) network_savegame_recreation_progress: Option<NetworkSavegameRecreationProgress>,
     /// Frozen Application.ResStrTable template used by GenerateDefaultTeams.
     pub(crate) generated_team_name_template: LegacyCString,
     pub(crate) network_team_assignment: Option<NetworkTeamAssignmentState>,
@@ -851,7 +865,6 @@ pub(crate) struct GameApp {
     pub(crate) local_owner: i32,
     pub(crate) player_name: String,
     pub(crate) selected_player_file: Option<PlayerFile>,
-    pub(crate) last_save_path: Option<PathBuf>,
     pub(crate) object_sprites: HashMap<String, DefinitionSprite>,
     pub(crate) sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     pub(crate) loading_state: Option<ScenarioLoadingState>,

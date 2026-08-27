@@ -4868,8 +4868,8 @@ impl GameApp {
         self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;
-        self.deferred_network_savegame_recreation.clear();
-        self.network_savegame_recreation_progress = None;
+        self.saves.deferred_network_recreation.clear();
+        self.saves.network_recreation_progress = None;
         self.message_dialogs.clear();
         self.message_dialog_active_index = None;
         self.message_dialog_pointer_capture_index = None;

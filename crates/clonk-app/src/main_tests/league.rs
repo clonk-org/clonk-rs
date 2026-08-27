@@ -4022,7 +4022,7 @@ fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
 
     app.prepare_network_savegame_recreation(false).test_value();
 
-    main_assert_eq!(app.deferred_network_savegame_recreation => vec![(3, 7)]);
+    main_assert_eq!(app.saves.deferred_network_recreation => vec![(3, 7)]);
     main_assert_eq!(app.engine.snapshot().player_info_league_scores.get(&7) => Some(&55));
     main_assert!(!app.engine.snapshot().player_info_league_scores.contains_key(&91));
     main_assert!(app.engine.teams()[0].player_ids.is_empty());

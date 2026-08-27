@@ -11592,7 +11592,7 @@ fn change_to_local_during_savegame_recreation_retains_completed_profile_files() 
         name: native(b"Local survivor"),
         nick: native(b"Survivor nick"),
     })]);
-    app.network_savegame_recreation_progress = Some(NetworkSavegameRecreationProgress::default());
+    app.saves.network_recreation_progress = Some(NetworkSavegameRecreationProgress::default());
     app.admission_resources.register_lobby_resource(&completed);
     app.admission_resources
         .mark_complete(completed.id, completed_path.clone());
@@ -14108,7 +14108,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
     ));
     app.prepare_recording_for(&frontend, &scenario_data, None, None, None)
         .test_value();
-    app.save_description_language = b"US".to_vec();
+    app.saves.description_language = b"US".to_vec();
     let mut landscape = clonk_engine::Landscape::flat(2, 1);
     main_assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
     landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
@@ -14209,10 +14209,10 @@ fn save_to_slot_writes_native_c4group_savegame() {
     app.retained_gpu_presentation_active = true;
     let gpu_slot = save_root.join("Missions.c4f").join("Missions9.c4s");
     app.save_to_slot(9);
-    main_assert!(app.pending_native_save_thumbnails.is_empty());
+    main_assert!(app.saves.pending_native_thumbnails.is_empty());
     app.finish_background_save_jobs();
-    main_assert_eq!(app.pending_native_save_thumbnails.len() => 1);
-    main_assert_eq!(app.pending_native_save_thumbnails[0].path => gpu_slot);
+    main_assert_eq!(app.saves.pending_native_thumbnails.len() => 1);
+    main_assert_eq!(app.saves.pending_native_thumbnails[0].path => gpu_slot);
     main_assert!(gpu_slot.exists());
     main_assert!(!app.savegame_slots()[8].free);
     let mut later_state = app.engine.capture_state();
@@ -14221,7 +14221,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
     let gpu_title =
         encode_presented_save_thumbnail(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]).test_value();
     app.finish_pending_native_save_thumbnails(Some(&gpu_title));
-    main_assert!(app.pending_native_save_thumbnails.is_empty());
+    main_assert!(app.saves.pending_native_thumbnails.is_empty());
     let gpu_saved = Group::open(&gpu_slot).test_value();
     main_assert_eq!(gpu_saved.read_file("Title.png").expect("read retained GPU title") => gpu_title);
     main_assert_eq!(
@@ -14264,9 +14264,9 @@ fn save_to_slot_writes_native_c4group_savegame() {
 
     let teardown_slot = save_root.join("Missions.c4f").join("Missions7.c4s");
     app.save_to_slot(7);
-    main_assert!(app.background_save_worker.is_some());
+    main_assert!(app.saves.background_worker.is_some());
     app.return_to_menu();
-    main_assert!(app.pending_native_save_thumbnails.is_empty());
+    main_assert!(app.saves.pending_native_thumbnails.is_empty());
     main_assert_eq!(
         Group::open(&teardown_slot)
             .expect("open teardown-flushed slot")
@@ -14328,7 +14328,7 @@ fn network_quicksave_latency_report() {
     ));
     host.prepare_recording_for(&frontend, &scenario_data, None, None, None)
         .test_value();
-    host.save_description_language = b"US".to_vec();
+    host.saves.description_language = b"US".to_vec();
     let mut landscape = clonk_engine::Landscape::flat(1024, 512);
     main_assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
     landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
@@ -14378,7 +14378,7 @@ fn network_quicksave_latency_report() {
     let worker_wait_started = Instant::now();
     host.finish_background_save_jobs();
     let worker_finish_wait = worker_wait_started.elapsed();
-    let timings = host.last_native_save_timings.expect("native save timings");
+    let timings = host.saves.last_native_timings.expect("native save timings");
     let presend_after = host
         .network_control_clock
         .expect("host control clock remains")
