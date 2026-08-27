@@ -822,7 +822,10 @@ impl Engine {
     /// empty epoch.
     #[doc(hidden)]
     pub fn clear_fair_crew_physicals(&mut self) {
-        self.fair_crew_physical_cache.borrow_mut().clear();
+        self.definition_order
+            .fair_crew_physical_cache
+            .borrow_mut()
+            .clear();
     }
 
     pub fn set_fair_crew_forced(&mut self, fair_crew_forced: bool) {

@@ -279,7 +279,7 @@ impl Engine {
                         self.fair_crew_strength,
                         1_000,
                         &info_definition_id,
-                        &self.fair_crew_physical_cache,
+                        &self.definition_order.fair_crew_physical_cache,
                     ),
                 }
             }

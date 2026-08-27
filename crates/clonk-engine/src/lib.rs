@@ -7339,6 +7339,52 @@ pub struct ScenarioBatch {
     pub script_counter: Option<i32>,
 }
 
+/// The definition orders and every view derived from `Engine::definitions`.
+///
+/// The two orders are genuinely different keys on the same table — C++ links
+/// scripts in child registration order while `Game.Defs` is sorted by ID — and
+/// the five caches below are all projections of that same table, invalidated
+/// together on any definition mutation. Held flat they invite a cache to be
+/// dropped without its siblings; held here, "definitions changed" has one
+/// place to say so.
+///
+/// `definitions` itself deliberately stays on `Engine`: it is the authority
+/// these derive from, not another derivation, and test bodies name it.
+#[derive(Default)]
+pub(crate) struct DefinitionOrderState {
+    /// Definition registration order — C++ links scripts in child
+    /// registration order (C4AulScript::Child0 walk, C4AulLink.cpp:31),
+    /// which decides the overload chain when several appends hit the same
+    /// target function.
+    pub(crate) load_order: Vec<DefinitionId>,
+    /// Runtime `Game.Defs` order after C4DefList::SortByID. This is distinct
+    /// from script-host registration order, which still controls linking.
+    pub(crate) runtime_order: Rc<Vec<DefinitionId>>,
+    /// Shared metadata view of `definitions` for host contexts; definitions
+    /// only change while loading, so this is built once and dropped on any
+    /// definition mutation (host contexts are built per script callback and
+    /// re-cloning every ActionLibrary there dominated tick time).
+    pub(crate) metadata_cache:
+        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>>>,
+    /// Immutable command-facing definition fields. Command execution consults
+    /// this table every tick, while definitions only change during loading.
+    /// Sharing one table avoids cloning IDs and rescanning every ActMap on
+    /// each frame and immediate command continuation.
+    pub(crate) command_snapshot_cache:
+        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, CommandDefinitionSnapshot>>>>,
+    /// Native `C4Def::pFairCrewPhysical`: one lazily filled projection per
+    /// definition, shared by engine reads and every copied script host world.
+    /// Derived definition state is intentionally absent from EngineState.
+    pub(crate) fair_crew_physical_cache: FairCrewPhysicalCache,
+    /// Definition/script lookup data shared by copied host worlds. These
+    /// tables change only at definition-load or script-relink boundaries.
+    pub(crate) host_tables_cache: std::cell::RefCell<Option<Rc<compat::HostDefinitionTables>>>,
+    /// Cached pending-spawn solid-mask descriptors. Sprite pixel payloads
+    /// remain Arc-shared; host contexts only clone this Rc table.
+    pub(crate) solid_mask_metadata_cache:
+        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::HostSolidMaskMetadata>>>>,
+}
+
 /// `Game.pScenarioSections` and the bookkeeping that materializes it.
 ///
 /// The five parts move together: a section is discovered into `sections`,
@@ -8043,14 +8089,8 @@ pub struct Engine {
     /// consumed into keyed maps and `.any()` predicates.
     #[doc(hidden)]
     pub(crate) definitions: rustc_hash::FxHashMap<DefinitionId, Definition>,
-    /// Definition registration order — C++ links scripts in child
-    /// registration order (C4AulScript::Child0 walk, C4AulLink.cpp:31),
-    /// which decides the overload chain when several appends hit the same
-    /// target function.
-    definition_load_order: Vec<DefinitionId>,
-    /// Runtime `Game.Defs` order after C4DefList::SortByID. This is distinct
-    /// from script-host registration order, which still controls linking.
-    runtime_definition_order: Rc<Vec<DefinitionId>>,
+    /// The two definition orders and every view derived from `definitions`.
+    definition_order: DefinitionOrderState,
     /// The engine-global `static` table (Game.ScriptEngine.GlobalNamed):
     /// one shared named-variable table for every script host (scenario
     /// script, definitions, appended scripts). pub(crate) for tests.
@@ -8088,29 +8128,6 @@ pub struct Engine {
     /// Generation-stamped id->index map: CrossCheck resolves object ids per
     /// candidate pair and the former linear scan dominated tick time.
     object_index_cache: std::cell::RefCell<(u64, rustc_hash::FxHashMap<ObjectId, usize>)>,
-    /// Shared metadata view of `definitions` for host contexts; definitions
-    /// only change while loading, so this is built once and dropped on any
-    /// definition mutation (host contexts are built per script callback and
-    /// re-cloning every ActionLibrary there dominated tick time).
-    definition_metadata_cache:
-        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>>>,
-    /// Immutable command-facing definition fields. Command execution consults
-    /// this table every tick, while definitions only change during loading.
-    /// Sharing one table avoids cloning IDs and rescanning every ActMap on
-    /// each frame and immediate command continuation.
-    command_definition_snapshot_cache:
-        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, CommandDefinitionSnapshot>>>>,
-    /// Native `C4Def::pFairCrewPhysical`: one lazily filled projection per
-    /// definition, shared by engine reads and every copied script host world.
-    /// Derived definition state is intentionally absent from EngineState.
-    fair_crew_physical_cache: FairCrewPhysicalCache,
-    /// Definition/script lookup data shared by copied host worlds. These
-    /// tables change only at definition-load or script-relink boundaries.
-    host_definition_tables_cache: std::cell::RefCell<Option<Rc<compat::HostDefinitionTables>>>,
-    /// Cached pending-spawn solid-mask descriptors. Sprite pixel payloads
-    /// remain Arc-shared; host contexts only clone this Rc table.
-    solid_mask_metadata_cache:
-        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::HostSolidMaskMetadata>>>>,
     #[doc(hidden)]
     pub materials: MaterialSet,
     /// Shared view of `materials` for host contexts (FnMaterial);
@@ -10458,8 +10475,12 @@ impl Engine {
                 compat::DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
             ),
             definitions: rustc_hash::FxHashMap::default(),
-            definition_load_order: Vec::new(),
-            runtime_definition_order: Rc::new(Vec::new()),
+            definition_order: DefinitionOrderState {
+                // `FairCrewPhysicalCache` is a shared handle rather than an
+                // owned table, so it is the one member Default cannot supply.
+                fair_crew_physical_cache: Rc::new(RefCell::new(HashMap::new())),
+                ..DefinitionOrderState::default()
+            },
             script_globals: clonk_script::new_global_variables(),
             script_global_slots: clonk_script::new_global_slots(),
             script_global_consts,
@@ -10469,11 +10490,6 @@ impl Engine {
             reloaded_global_definitions: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, rustc_hash::FxHashMap::default())),
-            definition_metadata_cache: std::cell::RefCell::new(None),
-            command_definition_snapshot_cache: std::cell::RefCell::new(None),
-            fair_crew_physical_cache: Rc::new(RefCell::new(HashMap::new())),
-            host_definition_tables_cache: std::cell::RefCell::new(None),
-            solid_mask_metadata_cache: std::cell::RefCell::new(None),
             materials: MaterialSet::default(),
             materials_shared: std::cell::RefCell::new(None),
             objects: Vec::new(),
@@ -11275,7 +11291,7 @@ impl Engine {
 
     pub fn monitored_definition_directories(&self) -> Vec<std::path::PathBuf> {
         let mut directories = Vec::new();
-        for id in self.definition_load_order.iter() {
+        for id in self.definition_order.load_order.iter() {
             let Some(path) = self
                 .definitions
                 .get(id.as_str())
@@ -11304,7 +11320,7 @@ impl Engine {
     /// only case that arises.
     pub fn definition_id_for_source_path(&self, path: &str) -> Option<String> {
         let candidate = std::path::Path::new(path);
-        self.definition_load_order.iter().find_map(|id| {
+        self.definition_order.load_order.iter().find_map(|id| {
             let definition = self.definitions.get(id.as_str())?;
             (definition.source_path()? == candidate).then(|| id.as_str().to_string())
         })

@@ -45,7 +45,7 @@ impl Engine {
             let global_effects = self.global_effects.clone();
             let particle_defs = self.particle_system.def_names();
             let definition_metadata_table = self.definition_metadata_table();
-            let definition_order = Rc::clone(&self.runtime_definition_order);
+            let definition_order = Rc::clone(&self.definition_order.runtime_order);
             let network_game = self.network_game;
             let engine_next_object_id = self.next_object_id;
             let scenario_script_counter = self.scenario_script_counter;

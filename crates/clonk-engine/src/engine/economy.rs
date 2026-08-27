@@ -1476,7 +1476,7 @@ impl Engine {
             self.fair_crew_strength,
             rank_base,
             &definition_id,
-            &self.fair_crew_physical_cache,
+            &self.definition_order.fair_crew_physical_cache,
         ) {
             FairCrewProjectionStart::Cached(physical) => return physical,
             FairCrewProjectionStart::New { physical, rank } => (physical, rank),
@@ -1531,7 +1531,8 @@ impl Engine {
                     .and_then(Value::as_c4_int)
                     .unwrap_or_default();
                 physical.set_by_name(name, value);
-                self.fair_crew_physical_cache
+                self.definition_order
+                    .fair_crew_physical_cache
                     .borrow_mut()
                     .insert(definition_id.clone(), physical);
             }
@@ -1557,7 +1558,7 @@ impl Engine {
                 self.fair_crew_strength,
                 1_000,
                 &definition_id,
-                &self.fair_crew_physical_cache,
+                &self.definition_order.fair_crew_physical_cache,
             );
         };
         let rank_base = definition.rank_base().unwrap_or(1_000);
@@ -1614,6 +1615,7 @@ impl Engine {
                     .filter(|id| self.definitions.contains_key(id))
                     .unwrap_or_else(|| object.definition_id.clone());
                 if let Some(physical) = self
+                    .definition_order
                     .fair_crew_physical_cache
                     .borrow()
                     .get(&definition_id)
@@ -1650,6 +1652,7 @@ impl Engine {
             &object.definition_id
         };
         !self
+            .definition_order
             .fair_crew_physical_cache
             .borrow()
             .contains_key(definition_id)
