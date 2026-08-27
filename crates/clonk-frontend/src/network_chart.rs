@@ -201,6 +201,15 @@ pub struct NetworkChartLayout {
     pub tabs: Vec<NetworkChartTabLayout>,
 }
 
+/// Which title widgets a layout draws for itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitleWidgets {
+    /// The in-game dialog, which paints its own caption and close icon.
+    Dialog,
+    /// A console child window, whose chrome supplies both.
+    ConsoleWindow,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetworkChartDialogAction {
     Ignored,
@@ -316,23 +325,74 @@ impl NetworkChartDialog {
         preferred: IntRect,
         resources: NetworkChartResources<'_>,
     ) -> NetworkChartLayout {
-        let (x, y) = self
-            .position
-            .unwrap_or((preferred.x + 30, preferred.y + 30));
-        let bounds = IntRect::new(
-            x,
-            y,
-            NETWORK_CHART_DIALOG_WIDTH,
-            NETWORK_CHART_DIALOG_HEIGHT,
-        );
-        let caption_height = resources.fonts.text.line_height.max(MIN_CAPTION_HEIGHT);
-        let caption = IntRect::new(bounds.x, bounds.y, bounds.w, caption_height);
-        let close_button = IntRect::new(
-            caption.x + caption.w - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_INSET,
-            caption.y + CLOSE_BUTTON_INSET,
-            CLOSE_BUTTON_SIZE,
-            CLOSE_BUTTON_SIZE,
-        );
+        self.layout_with_title_widgets(preferred, resources, TitleWidgets::Dialog)
+    }
+
+    /// The same dialog laid out for a console child window.
+    ///
+    /// `C4ChartDialog` is not a viewport dialog, so `Dialog::Show` gives it a
+    /// real child window of the console (`C4GuiDialogs.cpp:305-320,659-661`).
+    /// That window carries the title and the close box, and `Dialog::Draw`
+    /// paints the dialog into its client area (`:479-489`) — so `extent` is
+    /// the whole of the dialog rather than a rect to place it inside.
+    pub fn console_layout(
+        &self,
+        extent: IntRect,
+        resources: NetworkChartResources<'_>,
+    ) -> NetworkChartLayout {
+        self.layout_with_title_widgets(extent, resources, TitleWidgets::ConsoleWindow)
+    }
+
+    /// The size a console window has to be to hold this dialog.
+    ///
+    /// `Dialog::UpdateSize` sizes the window from the dialog's own bounds
+    /// (`C4GuiDialogs.cpp:445-473`), and the chart's are fixed.
+    pub const fn console_window_extent() -> (u32, u32) {
+        (
+            NETWORK_CHART_DIALOG_WIDTH as u32,
+            NETWORK_CHART_DIALOG_HEIGHT as u32,
+        )
+    }
+
+    fn layout_with_title_widgets(
+        &self,
+        preferred: IntRect,
+        resources: NetworkChartResources<'_>,
+        title_widgets: TitleWidgets,
+    ) -> NetworkChartLayout {
+        let bounds = match title_widgets {
+            TitleWidgets::Dialog => {
+                let (x, y) = self
+                    .position
+                    .unwrap_or((preferred.x + 30, preferred.y + 30));
+                IntRect::new(
+                    x,
+                    y,
+                    NETWORK_CHART_DIALOG_WIDTH,
+                    NETWORK_CHART_DIALOG_HEIGHT,
+                )
+            }
+            // The window is the dialog; a console dialog has no placement of
+            // its own, because the window manager owns where it sits.
+            TitleWidgets::ConsoleWindow => preferred,
+        };
+        let caption_height = match title_widgets {
+            TitleWidgets::Dialog => resources.fonts.text.line_height.max(MIN_CAPTION_HEIGHT),
+            TitleWidgets::ConsoleWindow => 0,
+        };
+        let (caption, close_button) = match title_widgets {
+            TitleWidgets::Dialog => {
+                let caption = IntRect::new(bounds.x, bounds.y, bounds.w, caption_height);
+                let close_button = IntRect::new(
+                    caption.x + caption.w - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_INSET,
+                    caption.y + CLOSE_BUTTON_INSET,
+                    CLOSE_BUTTON_SIZE,
+                    CLOSE_BUTTON_SIZE,
+                );
+                (Some(caption), Some(close_button))
+            }
+            TitleWidgets::ConsoleWindow => (None, None),
+        };
         let tabular = IntRect::new(
             bounds.x + TABULAR_INSET,
             bounds.y + caption_height + TABULAR_INSET,
@@ -368,8 +428,8 @@ impl NetworkChartDialog {
             .collect();
         NetworkChartLayout {
             bounds,
-            caption: Some(caption),
-            close_button: Some(close_button),
+            caption,
+            close_button,
             tabular,
             chart,
             tabs,
@@ -418,6 +478,27 @@ impl NetworkChartDialog {
             ));
             self.close_pressed = false;
             return NetworkChartDialogAction::Captured;
+        }
+        if let Some(tab) = layout.tabs.iter().find(|tab| contains(tab.bounds, point)) {
+            self.active_tab = tab.index;
+        }
+        NetworkChartDialogAction::Handled
+    }
+
+    /// The same press against a console child window.
+    ///
+    /// The window chrome owns moving and closing, so the only element left to
+    /// hit is a sheet tab — which `C4GUI::Tabular` selects on button down just
+    /// as it does in the shared screen.
+    pub fn console_pointer_down(
+        &mut self,
+        point: GuiPoint,
+        extent: IntRect,
+        resources: NetworkChartResources<'_>,
+    ) -> NetworkChartDialogAction {
+        let layout = self.console_layout(extent, resources);
+        if !contains(layout.bounds, point) {
+            return NetworkChartDialogAction::Ignored;
         }
         if let Some(tab) = layout.tabs.iter().find(|tab| contains(tab.bounds, point)) {
             self.active_tab = tab.index;
@@ -1018,6 +1099,112 @@ mod tests {
         assert_eq!(*topology, clonk_graphics::GpuPrimitiveTopology::LineList);
         assert_eq!(*alpha_mode, clonk_graphics::GpuSolidAlphaMode::SourceOver);
         assert_eq!(*clip, Some(clonk_graphics::Rect::new(1, 1, 10, 6)));
+    }
+
+    fn measuring_fonts() -> ClonkFontSet {
+        ClonkFontSet {
+            title: clonk_graphics::clonk_font::ClonkFont::new(34),
+            caption: clonk_graphics::clonk_font::ClonkFont::new(25),
+            text: clonk_graphics::clonk_font::ClonkFont::new(22),
+            main_small: clonk_graphics::clonk_font::ClonkFont::new(20),
+            mini: clonk_graphics::clonk_font::ClonkFont::new(18),
+        }
+    }
+
+    fn measuring_resources<'a>(
+        fonts: &'a ClonkFontSet,
+        art: &'a ImageData,
+    ) -> NetworkChartResources<'a> {
+        NetworkChartResources {
+            skin: ClassicGuiSkin::new(art, art, art, None),
+            fonts,
+            icons: art,
+        }
+    }
+
+    /// A console child window draws its own title bar and close box, so the
+    /// dialog inside it must not draw a second pair.
+    ///
+    /// `Dialog::Draw` paints the dialog into the window's client area
+    /// (`C4GuiDialogs.cpp:479-489`), which begins where a fullscreen dialog's
+    /// caption strip would be — so dropping the widgets also moves everything
+    /// below them up by the caption's height.
+    #[test]
+    fn the_console_chart_drops_the_widgets_its_window_provides() {
+        let fonts = measuring_fonts();
+        let art = ImageData::new(1, 1, vec![0; 4]);
+        let resources = measuring_resources(&fonts, &art);
+        let dialog = NetworkChartDialog::new(true);
+
+        let window = IntRect::new(
+            0,
+            0,
+            NETWORK_CHART_DIALOG_WIDTH,
+            NETWORK_CHART_DIALOG_HEIGHT,
+        );
+        let console = dialog.console_layout(window, resources);
+
+        assert_eq!(console.bounds, window, "the dialog fills its own window");
+        assert_eq!(console.caption, None);
+        assert_eq!(console.close_button, None);
+        assert_eq!(
+            console.tabular.y,
+            window.y + TABULAR_INSET,
+            "no caption strip means no row reserved for one"
+        );
+
+        let fullscreen = dialog.layout(window, resources);
+        let caption = fullscreen.caption.expect("a fullscreen dialog is titled");
+        assert!(fullscreen.close_button.is_some());
+        assert_eq!(
+            fullscreen.tabular.y,
+            fullscreen.bounds.y + caption.h + TABULAR_INSET,
+            "the fullscreen sheet sits under its own caption"
+        );
+        assert_eq!(
+            console.tabular.h - fullscreen.tabular.h,
+            caption.h,
+            "the sheet reclaims exactly the height the caption gave up"
+        );
+    }
+
+    /// With no caption and no close box there is nothing for the pointer to
+    /// grab: the window manager moves the window and closes it.
+    #[test]
+    fn a_console_chart_has_no_drag_element_and_no_close_target() {
+        let fonts = measuring_fonts();
+        let art = ImageData::new(1, 1, vec![0; 4]);
+        let resources = measuring_resources(&fonts, &art);
+        let mut dialog = NetworkChartDialog::new(true);
+        let window = IntRect::new(
+            0,
+            0,
+            NETWORK_CHART_DIALOG_WIDTH,
+            NETWORK_CHART_DIALOG_HEIGHT,
+        );
+        let console = dialog.console_layout(window, resources);
+
+        // Where a fullscreen dialog would have put its close icon.
+        let fullscreen = dialog.layout(window, resources);
+        let close = fullscreen
+            .close_button
+            .expect("a fullscreen dialog has a close icon");
+        let over_close = GuiPoint::new(
+            (close.x + close.w / 2) as f32,
+            (close.y + close.h / 2) as f32,
+        );
+
+        assert!(!contains_widget(console.caption, over_close));
+        assert!(!contains_widget(console.close_button, over_close));
+
+        // Tabs still select, which is the input the window chrome does not own.
+        let tab = console.tabs[2].bounds;
+        let over_tab = GuiPoint::new((tab.x + tab.w / 2) as f32, (tab.y + tab.h / 2) as f32);
+        assert_eq!(
+            dialog.console_pointer_down(over_tab, window, resources),
+            NetworkChartDialogAction::Handled
+        );
+        assert_eq!(dialog.active_tab_index(), 2);
     }
 
     #[test]
