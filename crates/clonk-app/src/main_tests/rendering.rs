@@ -2818,6 +2818,31 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
 }
 
 #[test]
+fn an_empty_configured_font_name_fails_before_any_font_lookup() {
+    // C4FontLoader::InitFont rejects an empty name up front, logging
+    // IDS_ERR_INITFONTS and returning false before it consults FontDefs at all
+    // (src/C4Fonts.cpp:176-183); InitFonts then fails the whole loader
+    // (src/C4GraphicsResource.cpp:156-165). "Endeavour" is only the *missing*
+    // key's default (src/C4Config.cpp:390) -- an explicitly empty value is a
+    // configured empty name, not an absent one.
+    let _lock = env_lock().lock();
+    let root = tempdir();
+    install_global_gui_and_loader_test_root(root.path());
+    let user = root.path().join("user");
+    let (_guard, paths) = isolated_test_app_paths(root.path(), user.as_path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nFontName=\nFontSize=14\n").test_value();
+
+    let error = resolve_classic_font_bundle(&paths, None, &[], &[])
+        .err()
+        .expect("an empty font name cannot initialize fonts");
+    main_assert!(
+        format!("{error:#}").contains("Error initializing fonts"),
+        "the empty-name branch is the one C++ logs for: {error:#}"
+    );
+}
+
+#[test]
 fn general_font_size_sixteen_builds_the_cpp_derived_app_bundle() {
     let _lock = env_lock().lock();
     let root = tempdir();
