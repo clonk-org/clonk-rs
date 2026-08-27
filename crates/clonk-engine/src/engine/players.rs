@@ -906,7 +906,8 @@ impl Engine {
         let mut magic = valid_entries(&start.magic);
         if magic.is_empty() {
             magic = self
-                .runtime_definition_order
+                .definition_order
+                .runtime_order
                 .iter()
                 .filter(|id| {
                     self.definitions

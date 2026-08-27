@@ -39,14 +39,19 @@ impl Engine {
             return false;
         }
         let definition_id = DefinitionId::from(id);
-        self.definition_load_order
+        self.definition_order
+            .load_order
             .retain(|entry| entry != &definition_id);
-        Rc::make_mut(&mut self.runtime_definition_order).retain(|entry| entry != &definition_id);
+        Rc::make_mut(&mut self.definition_order.runtime_order)
+            .retain(|entry| entry != &definition_id);
         self.script_link_sources.retain(|source| {
             !matches!(source, ScriptLinkSource::Definition(entry) if entry == &definition_id)
         });
-        self.definition_metadata_cache.borrow_mut().take();
-        self.command_definition_snapshot_cache.borrow_mut().take();
+        self.definition_order.metadata_cache.borrow_mut().take();
+        self.definition_order
+            .command_snapshot_cache
+            .borrow_mut()
+            .take();
         self.invalidate_host_definition_tables();
         true
     }
@@ -134,8 +139,8 @@ impl Engine {
         let definition_id = DefinitionId::from(id.as_str());
         self.script_link_sources
             .push(ScriptLinkSource::Definition(definition_id.clone()));
-        self.definition_load_order.push(definition_id.clone());
-        let runtime_order = Rc::make_mut(&mut self.runtime_definition_order);
+        self.definition_order.load_order.push(definition_id.clone());
+        let runtime_order = Rc::make_mut(&mut self.definition_order.runtime_order);
         runtime_order.push(definition_id);
         runtime_order.sort_unstable_by_key(|id| {
             definition_id_to_c4id(id.as_str())
@@ -143,10 +148,16 @@ impl Engine {
                 .unwrap_or_default()
         });
         self.definitions.insert(id, definition);
-        self.definition_metadata_cache.borrow_mut().take();
-        self.command_definition_snapshot_cache.borrow_mut().take();
+        self.definition_order.metadata_cache.borrow_mut().take();
+        self.definition_order
+            .command_snapshot_cache
+            .borrow_mut()
+            .take();
         self.invalidate_host_definition_tables();
-        self.solid_mask_metadata_cache.borrow_mut().take();
+        self.definition_order
+            .solid_mask_metadata_cache
+            .borrow_mut()
+            .take();
         Ok(())
     }
 
@@ -340,7 +351,7 @@ impl Engine {
             return;
         }
 
-        let ordered_ids = self.definition_load_order.clone();
+        let ordered_ids = self.definition_order.load_order.clone();
         for source in self.script_link_sources.clone() {
             let (source_script, source_id, targets) = match source {
                 ScriptLinkSource::Script {
@@ -427,10 +438,16 @@ impl Engine {
                 }
             }
         }
-        self.definition_metadata_cache.borrow_mut().take();
-        self.command_definition_snapshot_cache.borrow_mut().take();
+        self.definition_order.metadata_cache.borrow_mut().take();
+        self.definition_order
+            .command_snapshot_cache
+            .borrow_mut()
+            .take();
         self.invalidate_host_definition_tables();
-        self.solid_mask_metadata_cache.borrow_mut().take();
+        self.definition_order
+            .solid_mask_metadata_cache
+            .borrow_mut()
+            .take();
     }
 
     fn rebuild_global_script_functions(&mut self) {
@@ -557,8 +574,11 @@ impl Engine {
 
         let table = (!functions.is_empty()).then(|| Arc::new(functions));
         self.distribute_global_script_functions(table, function_order);
-        self.definition_metadata_cache.borrow_mut().take();
-        self.solid_mask_metadata_cache.borrow_mut().take();
+        self.definition_order.metadata_cache.borrow_mut().take();
+        self.definition_order
+            .solid_mask_metadata_cache
+            .borrow_mut()
+            .take();
     }
 
     /// `C4AulScript::Parse` reports a hard `inherited` with no overload target
@@ -695,8 +715,11 @@ impl Engine {
         self.rebuild_global_script_functions();
         self.resolve_appends();
         self.resolve_includes()?;
-        self.definition_metadata_cache.borrow_mut().take();
-        self.solid_mask_metadata_cache.borrow_mut().take();
+        self.definition_order.metadata_cache.borrow_mut().take();
+        self.definition_order
+            .solid_mask_metadata_cache
+            .borrow_mut()
+            .take();
         Ok(())
     }
 
@@ -791,10 +814,16 @@ impl Engine {
     }
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
-        self.definition_metadata_cache.borrow_mut().take();
-        self.command_definition_snapshot_cache.borrow_mut().take();
+        self.definition_order.metadata_cache.borrow_mut().take();
+        self.definition_order
+            .command_snapshot_cache
+            .borrow_mut()
+            .take();
         self.invalidate_host_definition_tables();
-        self.solid_mask_metadata_cache.borrow_mut().take();
+        self.definition_order
+            .solid_mask_metadata_cache
+            .borrow_mut()
+            .take();
         fn resolve_definition(
             engine: &mut Engine,
             child_id: &str,
@@ -864,7 +893,7 @@ impl Engine {
 
         // C4AulScriptEngine resolves child scripts in registration order;
         // this also makes the skipped edge deterministic for include cycles.
-        let definition_ids = self.definition_load_order.clone();
+        let definition_ids = self.definition_order.load_order.clone();
         let mut resolving = HashSet::new();
         let mut resolved = HashSet::new();
         for definition_id in definition_ids {
@@ -917,12 +946,12 @@ impl Engine {
 
         // Native AfterLink resolves these only once the complete function
         // tree exists. UnLink/reload clears the cache before rebuilding it.
-        for definition_id in self.definition_load_order.clone() {
+        for definition_id in self.definition_order.load_order.clone() {
             if let Some(definition) = self.definitions.get_mut(&definition_id) {
                 definition.link_callbacks();
             }
         }
-        self.definition_metadata_cache.borrow_mut().take();
+        self.definition_order.metadata_cache.borrow_mut().take();
 
         // Last, once appends and includes have placed every function on the
         // host that owns it. C4Aul binds `inherited` with all func tables
@@ -1691,7 +1720,7 @@ impl Engine {
                         self.fair_crew_strength,
                         1_000,
                         &info_definition_id,
-                        &self.fair_crew_physical_cache,
+                        &self.definition_order.fair_crew_physical_cache,
                     );
                 }
             }

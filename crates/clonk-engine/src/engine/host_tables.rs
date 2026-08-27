@@ -11,7 +11,7 @@ impl Engine {
     ) -> Rc<HashMap<DefinitionId, DefinitionMetadata>> {
         #[cfg(test)]
         DEFINITION_METADATA_TABLE_READS.with(|count| count.set(count.get().saturating_add(1)));
-        let mut cache = self.definition_metadata_cache.borrow_mut();
+        let mut cache = self.definition_order.metadata_cache.borrow_mut();
         if let Some(table) = cache.as_ref() {
             return Rc::clone(table);
         }
@@ -107,7 +107,7 @@ impl Engine {
     pub(crate) fn command_definition_snapshot_table(
         &self,
     ) -> Rc<HashMap<DefinitionId, CommandDefinitionSnapshot>> {
-        let mut cache = self.command_definition_snapshot_cache.borrow_mut();
+        let mut cache = self.definition_order.command_snapshot_cache.borrow_mut();
         if let Some(table) = cache.as_ref() {
             return Rc::clone(table);
         }
@@ -156,7 +156,7 @@ impl Engine {
     }
 
     pub(crate) fn host_definition_tables(&self) -> Rc<compat::HostDefinitionTables> {
-        let mut cache = self.host_definition_tables_cache.borrow_mut();
+        let mut cache = self.definition_order.host_tables_cache.borrow_mut();
         if let Some(tables) = cache.as_ref() {
             return Rc::clone(tables);
         }
@@ -232,11 +232,11 @@ impl Engine {
     }
 
     pub(crate) fn invalidate_host_definition_tables(&self) {
-        self.host_definition_tables_cache.borrow_mut().take();
+        self.definition_order.host_tables_cache.borrow_mut().take();
     }
 
     fn solid_mask_metadata_table(&self) -> Rc<HashMap<DefinitionId, HostSolidMaskMetadata>> {
-        let mut cache = self.solid_mask_metadata_cache.borrow_mut();
+        let mut cache = self.definition_order.solid_mask_metadata_cache.borrow_mut();
         if let Some(table) = cache.as_ref() {
             return Rc::clone(table);
         }
@@ -843,7 +843,7 @@ impl Engine {
         .with_player_info_ids(self.players.values().map(Player::player_info_id))
         .with_league_scores(Rc::clone(&self.player_info_league_scores))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
-        .with_definition_order(Rc::clone(&self.runtime_definition_order))
+        .with_definition_order(Rc::clone(&self.definition_order.runtime_order))
         .with_definition_tables(
             host_definition_tables,
             self.base_auto_sell_enabled,
@@ -890,7 +890,7 @@ impl Engine {
         .with_fire_particles_loaded(self.particle_system.is_fire_particle_loaded())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
-        .with_fair_crew_physical_cache(Rc::clone(&self.fair_crew_physical_cache))
+        .with_fair_crew_physical_cache(Rc::clone(&self.definition_order.fair_crew_physical_cache))
         .with_control_host(
             self.control_host,
             Rc::clone(&self.host_requests.player_info_updates),
@@ -1199,8 +1199,11 @@ impl Engine {
             let mut function_order = self.global_script_function_order.clone();
             function_order.extend(scenario_global_order);
             self.distribute_global_script_functions(table, function_order);
-            self.definition_metadata_cache.borrow_mut().take();
-            self.solid_mask_metadata_cache.borrow_mut().take();
+            self.definition_order.metadata_cache.borrow_mut().take();
+            self.definition_order
+                .solid_mask_metadata_cache
+                .borrow_mut()
+                .take();
         }
         script.set_global_functions(self.global_script_functions.clone());
         self.scenario_script = Some(script);
@@ -1212,7 +1215,7 @@ impl Engine {
     /// before environment placement (C4Game.cpp:112, 2505-2520). Calls are
     /// fail-safe, but host side effects made before an error still commit.
     pub(crate) fn initialize_definition_scripts(&mut self) -> Result<Vec<ObjectId>, EngineError> {
-        let definition_ids = Rc::clone(&self.runtime_definition_order);
+        let definition_ids = Rc::clone(&self.definition_order.runtime_order);
         let mut created = Vec::new();
         for definition_id in definition_ids.iter() {
             let Some((script_name, script)) = self
@@ -1280,7 +1283,7 @@ impl Engine {
         let particle_defs = self.particle_system.def_names();
         let definition_scripts = self.definition_script_table();
         let definition_metadata_table = self.definition_metadata_table();
-        let definition_order = Rc::clone(&self.runtime_definition_order);
+        let definition_order = Rc::clone(&self.definition_order.runtime_order);
         let network_game = self.network_game;
         let next_object_id = self.next_object_id;
         let scenario_script_counter = self.scenario_script_counter;
@@ -1422,7 +1425,7 @@ impl Engine {
         let particle_defs = self.particle_system.def_names();
         let definition_scripts = self.definition_script_table();
         let definition_metadata_for_call = self.definition_metadata_table();
-        let definition_order = Rc::clone(&self.runtime_definition_order);
+        let definition_order = Rc::clone(&self.definition_order.runtime_order);
         let network_game = self.network_game;
         let engine_next_object_id = self.next_object_id;
         let scenario_script_counter = self.scenario_script_counter;

@@ -3941,7 +3941,7 @@ impl Engine {
                 } => {
                     if let Some(definition) = self.definitions.get_mut(&definition_id) {
                         definition.set_name(name);
-                        self.definition_metadata_cache.borrow_mut().take();
+                        self.definition_order.metadata_cache.borrow_mut().take();
                     }
                 }
                 PlayerCommand::SetCrewInfoName {
