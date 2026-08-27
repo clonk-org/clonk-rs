@@ -3626,12 +3626,37 @@ impl GameApp {
                     &mut surface,
                     font.as_ref(),
                     &text,
+                    self.developer_property_scroll,
                     self.developer_console_editing(),
                     &self.runtime_resource_text("IDS_BTN_RELOADDEF", "Reload def"),
                 );
             }
         }
         surface
+    }
+
+    /// How many lines the property pane currently shows, for a caller sizing
+    /// its view.
+    pub(crate) fn developer_property_page_line_count(&self) -> usize {
+        self.developer_property_page_text().lines().count()
+    }
+
+    /// One wheel notch over the property page.
+    ///
+    /// The output is a scrolled text view (`C4PropertyDlg.cpp:128-140`), so a
+    /// notch moves the retained first visible line and nothing else. Returns
+    /// whether the view actually moved, so a caller only redraws when it did.
+    pub(crate) fn scroll_developer_property_page(&mut self, lines: i32, height: u32) -> bool {
+        use crate::developer_toolbox_view::property_output_capacity;
+
+        let lines_available = self.developer_property_page_text().lines().count();
+        let before = self.developer_property_scroll;
+        self.developer_property_scroll.scroll_by(
+            lines,
+            lines_available,
+            property_output_capacity(height),
+        );
+        self.developer_property_scroll != before
     }
 
     /// A click on whichever page the toolbox shows.

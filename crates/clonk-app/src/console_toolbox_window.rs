@@ -731,6 +731,39 @@ pub(crate) fn handle_developer_toolbox_event(
                 toolbox.surface.last_pointer = (position.x as i32, position.y as i32);
             }
         }
+        // The property output is a scrolled text view
+        // (`C4PropertyDlg.cpp:128-140`); the tools page has nothing to scroll.
+        Event::WindowEvent {
+            event: WindowEvent::MouseWheel { delta, .. },
+            ..
+        } => {
+            use crate::developer_windows::ToolboxPage;
+            use clonk_engine::developer_viewport::{wheel_scroll_step, WheelDelta};
+
+            if app.developer_toolbox.current_page() != Some(ToolboxPage::Property) {
+                return;
+            }
+            let Some(toolbox) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_toolbox_mut)
+            else {
+                return;
+            };
+            let height = toolbox.surface_extent().1;
+            let delta = match delta {
+                winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                    WheelDelta::Lines { x: *x, y: *y }
+                }
+                winit::event::MouseScrollDelta::PixelDelta(position) => WheelDelta::Pixels {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                },
+            };
+            let (_, lines) = wheel_scroll_step(delta);
+            if lines != 0 && app.scroll_developer_property_page(lines, height) {
+                windows.request_redraw(key);
+            }
+        }
         Event::WindowEvent {
             event:
                 WindowEvent::MouseInput {

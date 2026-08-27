@@ -664,6 +664,58 @@ fn grade_at(rect: IntRect, y: i32) -> i32 {
     GRADE_MAX - offset * (GRADE_MAX - GRADE_MIN) / travel
 }
 
+/// A retained first-visible-line, for a pane whose content is replaced wholesale.
+///
+/// `C4PropertyDlg::Update` reads `EM_GETFIRSTVISIBLELINE`, replaces the text
+/// and scrolls back to it (`C4PropertyDlg.cpp:257-262`). It runs on every
+/// Tick35 and every selection change, so the position has to survive the
+/// replacement or the pane snaps to the top several times a second.
+///
+/// The line is kept **unclamped**: an object with less to say does not throw
+/// away where the user was, so re-selecting a longer one comes back to it.
+/// That is the same property the Win32 edit control has, where `EM_LINESCROLL`
+/// clamps the scroll without changing what a later, longer text can reach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LineScroll {
+    first: usize,
+}
+
+impl LineScroll {
+    /// The first visible line for the content as it stands now.
+    pub(crate) fn window(&self, lines: usize, capacity: usize) -> usize {
+        self.first.min(Self::last_top(lines, capacity))
+    }
+
+    /// Scroll by whole lines, as a wheel notch or a bar arrow does.
+    pub(crate) fn scroll_by(&mut self, delta: i32, lines: usize, capacity: usize) {
+        let last = Self::last_top(lines, capacity);
+        let current = i64::try_from(self.first.min(last)).unwrap_or(i64::MAX);
+        let target = current.saturating_add(i64::from(delta)).max(0);
+        self.first = usize::try_from(target).unwrap_or(usize::MAX).min(last);
+    }
+
+    /// The highest first line that still fills the view.
+    fn last_top(lines: usize, capacity: usize) -> usize {
+        lines.saturating_sub(capacity)
+    }
+}
+
+/// How many lines the output box shows at this page height.
+pub(crate) fn property_output_capacity(height: u32) -> usize {
+    let layout = property_page_layout(1, height);
+    ((layout.output.h - 2) / LIST_ROW_HEIGHT).max(1) as usize
+}
+
+/// The slice of output the box shows: its first line and how many.
+pub(crate) fn property_output_window(
+    lines: usize,
+    scroll: LineScroll,
+    height: u32,
+) -> (usize, usize) {
+    let capacity = property_output_capacity(height);
+    (scroll.window(lines, capacity), capacity)
+}
+
 /// The one control on the property page that a click can reach.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PropertyPageAction {
@@ -732,6 +784,7 @@ pub(crate) fn render_property_page(
     surface: &mut Surface,
     font: &dyn TextFont,
     text: &str,
+    scroll: LineScroll,
     reload_enabled: bool,
     reload_label: &str,
 ) {
@@ -739,8 +792,8 @@ pub(crate) fn render_property_page(
     let layout = property_page_layout(surface.width(), surface.height());
     let rect = layout.output;
     draw_sunken(surface, rect, CONTROL_BACKGROUND);
-    let rows = ((rect.h - 2) / LIST_ROW_HEIGHT).max(0) as usize;
-    for (row, line) in text.lines().take(rows).enumerate() {
+    let (first, rows) = property_output_window(text.lines().count(), scroll, surface.height());
+    for (row, line) in text.lines().skip(first).take(rows).enumerate() {
         draw_fitted_text(
             surface,
             font,
@@ -807,6 +860,54 @@ fn blit_preview_sample(surface: &mut Surface, rect: IntRect, sample: &clonk_fron
 ))]
 mod tests {
     use super::*;
+
+    /// The output box keeps the line it was showing across a rebuild.
+    ///
+    /// `C4PropertyDlg::Update` reads `EM_GETFIRSTVISIBLELINE`, replaces the
+    /// whole text, and scrolls back to it (`C4PropertyDlg.cpp:257-262`) — and
+    /// it runs on every Tick35 and every selection change, so without that the
+    /// pane would snap to the top three times a second.
+    #[test]
+    fn the_property_output_keeps_its_first_visible_line_across_a_rebuild() {
+        let capacity = 6;
+        let mut scroll = LineScroll::default();
+        assert_eq!(scroll.window(40, capacity), 0);
+
+        scroll.scroll_by(9, 40, capacity);
+        assert_eq!(scroll.window(40, capacity), 9);
+        // The text is replaced wholesale; the position is not part of it.
+        assert_eq!(scroll.window(40, capacity), 9);
+
+        // A shorter object pins the view to the last full page.
+        assert_eq!(scroll.window(12, capacity), 6);
+        assert_eq!(scroll.window(4, capacity), 0);
+        // Selecting nothing at all is one line, and is not a scroll *write*:
+        // the retained line comes back when the output grows again, which is
+        // what makes a Tick35 rebuild non-destructive.
+        assert_eq!(scroll.window(1, capacity), 0);
+        assert_eq!(scroll.window(40, capacity), 9);
+
+        // Scrolling clamps rather than running off either end.
+        scroll.scroll_by(-100, 40, capacity);
+        assert_eq!(scroll.window(40, capacity), 0);
+        scroll.scroll_by(100, 40, capacity);
+        assert_eq!(scroll.window(40, capacity), 34);
+    }
+
+    /// The output box shows the retained slice, not always the first one.
+    #[test]
+    fn the_property_output_window_reports_the_retained_slice() {
+        let extent = (240u32, 160u32);
+        let capacity = property_output_capacity(extent.1);
+        assert!(capacity > 1, "the test page has room for several lines");
+
+        let mut scroll = LineScroll::default();
+        scroll.scroll_by(3, 100, capacity);
+        assert_eq!(property_output_window(100, scroll, extent.1), (3, capacity));
+        // Output that no longer reaches the retained line falls back to what
+        // it can show.
+        assert_eq!(property_output_window(2, scroll, extent.1), (0, capacity));
+    }
 
     /// The page is the read-only output box plus one button, and the box gives
     /// up the row the button needs rather than being drawn under it.
@@ -1152,6 +1253,7 @@ mod tests {
                 &mut surface,
                 &font,
                 "Type: Rock (ROCK)\nOwner: Ada",
+                LineScroll::default(),
                 true,
                 "Reload def",
             );
