@@ -6,6 +6,10 @@ import unittest
 
 from _repo import REPOSITORY
 
+METRIC_LINE = (
+    "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=1.000000 successful_present_submissions={total} retained_gpu_present_submissions={gpu} cpu_present_submissions={cpu} presentation_submission_fps=1.000000 refreshed_frames=1 simulation_frames=1 simulation_fps=1.000000 automatic_graphics_skips=0"
+)
+
 PINNED_ORACLE_REVISION = "7d43b47b7d789b533f32d005e64596e0a07019cd"
 
 
@@ -65,11 +69,24 @@ class PublicScriptPortabilityTests(unittest.TestCase):
         )
 
     def test_deep_sea_benchmark_uses_the_standard_temp_environment(self):
-        benchmark = (
-            REPOSITORY / "scripts/run-deep-sea-gpu-benchmark.sh"
+        # Every Deep Sea arm builds its fixture through the shared helper, so
+        # the temp-environment contract is asserted where it now lives rather
+        # than once per wrapper.
+        fixture = (
+            REPOSITORY / "scripts/deep-sea-benchmark-fixture.sh"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("${TMPDIR:-/tmp}", benchmark)
+        self.assertIn("${TMPDIR:-/tmp}", fixture)
+
+        for wrapper in (
+            "scripts/run-deep-sea-gpu-benchmark.sh",
+            "scripts/run-deep-sea-software-benchmark.sh",
+        ):
+            with self.subTest(wrapper=wrapper):
+                self.assertIn(
+                    "deep-sea-benchmark-fixture.sh",
+                    (REPOSITORY / wrapper).read_text(encoding="utf-8"),
+                )
 
     def test_deep_sea_benchmark_assigns_two_distinct_players_to_ordered_teams(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -111,6 +128,60 @@ class PublicScriptPortabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def _software_benchmark_with_counts(self, temporary, gpu, cpu):
+        """Run the software wrapper against a binary reporting these counts."""
+        binary = temporary / "fake-clonk-app"
+        binary.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            'test "${LC_SOFTWARE_PRESENTATION:-}" = "1"\n'
+            'printf "%s\\n" "'
+            + METRIC_LINE.format(gpu=gpu, cpu=cpu, total=gpu + cpu)
+            + '"\n',
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update({"LC_APP_BINARY": str(binary), "TMPDIR": str(temporary)})
+        return subprocess.run(
+            [str(REPOSITORY / "scripts/run-deep-sea-software-benchmark.sh"), "1"],
+            cwd=REPOSITORY,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_software_benchmark_requests_software_presentation_and_accepts_it(self):
+        # The wrapper's fake binary asserts LC_SOFTWARE_PRESENTATION itself, so
+        # a run that forgot to request it fails before any counting.
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._software_benchmark_with_counts(
+                pathlib.Path(temporary), gpu=0, cpu=36
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_software_benchmark_rejects_a_run_that_presented_through_the_gpu(self):
+        # An unarmed run produces a complete, healthy-looking distribution of
+        # the wrong path. It has to fail rather than be published as software.
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._software_benchmark_with_counts(
+                pathlib.Path(temporary), gpu=36, cpu=0
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("LC_SOFTWARE_PRESENTATION did not take", result.stderr)
+
+    def test_software_benchmark_rejects_a_run_with_no_software_presentations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._software_benchmark_with_counts(
+                pathlib.Path(temporary), gpu=0, cpu=0
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no software presentations were measured", result.stderr)
 
     def test_deep_sea_benchmark_rejects_a_nonplaying_runtime_context(self):
         with tempfile.TemporaryDirectory() as temporary:

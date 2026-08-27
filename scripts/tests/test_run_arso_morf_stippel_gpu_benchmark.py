@@ -316,6 +316,10 @@ class NativeCadenceTests(unittest.TestCase):
         "max_graphics_pass_ms=9.000000 graphics_pass_sample_count=3 "
         "graphics_pass_p50_ms=7.000000 graphics_pass_p95_ms=9.000000 "
         "graphics_pass_p99_ms=9.000000 "
+"max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
+        "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
+        "max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 "
+        "surface_reallocations=0 max_reallocation_ms=0.000000 reallocation_p50_ms=0.000000 reallocation_p95_ms=0.000000 reallocation_p99_ms=0.000000 "
         "graphics_pass_samples_ns=[5000000, 7000000, 9000000]"
     )
     CONTEXT_LINE = (
@@ -478,7 +482,15 @@ class NativeCadenceTests(unittest.TestCase):
             .replace("refreshed_frames=3", "refreshed_frames=0")
             .replace("graphics_pass_sample_count=3", "graphics_pass_sample_count=0")
             .replace(
+"max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
+                "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
+                "max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 "
+                "surface_reallocations=0 max_reallocation_ms=0.000000 reallocation_p50_ms=0.000000 reallocation_p95_ms=0.000000 reallocation_p99_ms=0.000000 "
                 "graphics_pass_samples_ns=[5000000, 7000000, 9000000]",
+"max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
+                "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
+                "max_simulation_ms=0.500000 simulation_p50_ms=0.500000 simulation_p95_ms=0.500000 simulation_p99_ms=0.500000 max_frame_ms=28.000000 frame_p50_ms=28.000000 frame_p95_ms=28.000000 frame_p99_ms=28.000000 frame_sample_count=1 "
+                "surface_reallocations=0 max_reallocation_ms=0.000000 reallocation_p50_ms=0.000000 reallocation_p95_ms=0.000000 reallocation_p99_ms=0.000000 "
                 "graphics_pass_samples_ns=[]",
             )
         )

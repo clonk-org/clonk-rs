@@ -519,6 +519,73 @@ most the native 28ms game tick, and `automatic_graphics_skips=0`. Record the
 machine line together with the commit, content revision, display size, hardware,
 OS, and power state; do not compare runs with different fingerprints.
 
+### Deep Sea software-presentation benchmark
+
+The software arm of the same workload, for the primary window's `softbuffer`
+fallback:
+
+```sh
+# Run from the repository root.
+cargo build --release --offline --locked -p clonk-app --bin clonk-app
+scripts/run-deep-sea-software-benchmark.sh 20
+```
+
+Both arms build their fixture through `scripts/deep-sea-benchmark-fixture.sh`,
+so the GPU wrapper beside it is the reference run for the same scenario, seed,
+players and configuration. Run them back to back on an otherwise idle machine
+and record both machine lines; the two renderers do not produce identical
+pixels, and that is not a presenter failure.
+
+Unlike the GPU arm, this one does **not** assert the native 28ms tick. Software
+presentation is being measured here, not qualified — a machine that cannot hold
+the tick through it is the evidence, not a failure. What it does assert is that
+it measured the path it claims to:
+
+- exactly one metric line;
+- `cpu_present_submissions` greater than zero;
+- `retained_gpu_present_submissions` exactly zero.
+
+An unarmed run produces a complete, healthy-looking distribution of the *other*
+path, so it exits non-zero rather than publishing a mislabelled one.
+
+The machine line separates four costs that used to be one number. The graphics
+pass is timed from its start through `present()`, so on its own it cannot say
+whether a slow frame was composition or the platform copy:
+
+| Field group | Covers |
+| --- | --- |
+| `max_simulation_ms`, `simulation_p50/p95/p99_ms` | The simulation burst, sampled once per event-loop iteration. |
+| `max_raster_ms`, `raster_p50/p95/p99_ms` | The graphics pass with its present subtracted — CPU composition. |
+| `max_present_ms`, `present_p50/p95/p99_ms` | `SoftwarePresenter::present`: the CPU frame copied into the window buffer and shown. |
+| `max_frame_ms`, `frame_p50/p95/p99_ms`, `frame_sample_count` | The complete frame, including iterations that skipped their render. |
+| `surface_reallocations`, `max_reallocation_ms`, `reallocation_p50/p95/p99_ms` | Buffer reallocation, which is setup cost. |
+
+Reallocation is counted separately so it cannot hide inside a steady-state
+distribution and read as the presenter being slow. A steady-state result should
+report `surface_reallocations=0`; a window that resized is a resize
+measurement, and the two are not comparable. Record both arms with the commit,
+content revision, resolution, `Graphics.Scale`, scenario, OS, window system,
+CPU, and presentation backend, exactly as [Comparable runs](#comparable-runs)
+requires.
+
+#### Presentation detail does not respond to the presenter
+
+Reviewed decision, recorded rather than implemented as a threshold:
+**software presentation does not get a detail policy of its own.**
+
+`PresentationDetail::record_graphics_pass` already steps detail down after
+`DETAIL_STEP_DOWN_PASSES` graphics passes over the simulation budget, and the
+pass it judges is timed *through* `present()`. Whatever the destination costs
+is therefore already inside the number the governor reads, on either path. A
+presenter-specific threshold would measure the same microseconds twice and
+could step detail down for a cost the existing governor had already answered.
+
+The split above exists to make that reviewable: if a future measurement shows
+`present_p99_ms` dominating a frame that `raster_p99_ms` alone would have kept
+inside budget, the evidence for a separate threshold will be in the machine
+line, and this decision can be revisited against it rather than in the
+abstract.
+
 ### HarpoonRace 24-player process benchmark
 
 The other opt-in end-to-end benchmark starts a real classic

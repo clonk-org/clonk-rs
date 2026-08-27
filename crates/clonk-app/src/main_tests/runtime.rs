@@ -88,7 +88,8 @@ fn tap_runtime_key(app: &mut GameApp, key: VirtualKeyCode) {
 }
 
 fn startup_player_focus(app: &GameApp) -> clonk_frontend::startup_plrsel::PlrSelControl {
-    app.startup.player_dialog
+    app.startup
+        .player_dialog
         .as_ref()
         .expect("player dialog")
         .focused_control()
@@ -98,7 +99,8 @@ fn selected_options_control_set(
     app: &GameApp,
     device: clonk_frontend::startup_options_controls::ControlDevice,
 ) -> usize {
-    app.startup.options_dialog
+    app.startup
+        .options_dialog
         .as_ref()
         .unwrap()
         .controls()
@@ -1352,6 +1354,117 @@ fn retained_gpu_artifact_fingerprints_the_device_adapter_fields() {
 }
 
 #[test]
+fn presentation_benchmark_keeps_surface_reallocations_out_of_the_frame_samples() {
+    // Reallocating the presentation buffer is setup cost, not an ordinary
+    // frame, and it is exactly the cost that would otherwise hide inside a
+    // steady-state distribution and be read as the presenter being slow. It is
+    // counted and timed on its own so a report can show a measurement window
+    // that contained none.
+    let base = Instant::now();
+    let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+    runtime_assert_eq!(benchmark.poll(true, base, 0) => None);
+    let measuring = base + PRESENTATION_BENCHMARK_WARMUP;
+    runtime_assert_eq!(benchmark.poll(true, measuring, 0) => None);
+
+    benchmark.record_frame_pass(
+        measuring,
+        Duration::from_millis(4),
+        Duration::from_millis(16),
+    );
+    benchmark.record_surface_reallocation(measuring, Duration::from_millis(120));
+    benchmark.record_frame_pass(
+        measuring,
+        Duration::from_millis(4),
+        Duration::from_millis(16),
+    );
+
+    let report = benchmark
+        .poll(true, measuring + Duration::from_secs(3), 0)
+        .test_value();
+    runtime_assert_eq!(
+        report.surface_reallocations => 1;
+        report.reallocation_max => Duration::from_millis(120);
+        // The two ordinary frames are the whole frame distribution.
+        report.frame_samples.len() => 2;
+        report.frame_max => Duration::from_millis(16);
+    );
+}
+
+#[test]
+fn presentation_benchmark_records_simulation_and_complete_frame_distributions() {
+    // A presenter's budget is only readable against the frame it has to fit
+    // inside, and against the simulation sharing that frame. Both are per
+    // loop iteration rather than per submission -- a frame that skips its
+    // render still simulates -- so they are recorded separately from the
+    // presentation samples.
+    let base = Instant::now();
+    let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+    runtime_assert_eq!(benchmark.poll(true, base, 0) => None);
+    let measuring = base + PRESENTATION_BENCHMARK_WARMUP;
+    runtime_assert_eq!(benchmark.poll(true, measuring, 0) => None);
+
+    for (simulation, frame) in [(4, 16), (6, 20), (8, 33)] {
+        benchmark.record_frame_pass(
+            measuring + Duration::from_millis(frame),
+            Duration::from_millis(simulation),
+            Duration::from_millis(frame),
+        );
+    }
+    // A frame outside the measurement window is not a sample.
+    benchmark.record_frame_pass(
+        measuring + Duration::from_secs(4),
+        Duration::from_millis(999),
+        Duration::from_millis(999),
+    );
+
+    let report = benchmark
+        .poll(true, measuring + Duration::from_secs(3), 0)
+        .test_value();
+    runtime_assert_eq!(
+        report.simulation_p50 => Duration::from_millis(6);
+        report.simulation_max => Duration::from_millis(8);
+        report.frame_p50 => Duration::from_millis(20);
+        report.frame_max => Duration::from_millis(33);
+        report.frame_samples.len() => 3;
+    );
+}
+
+#[test]
+fn presentation_benchmark_separates_the_present_from_the_raster_it_follows() {
+    // The graphics pass is timed from its start through `present()`, so a
+    // single number cannot say whether a slow frame was composition or the
+    // platform copy. The software presenter makes the difference the whole
+    // question: `SoftwarePresenter::present` copies the CPU frame into the
+    // window buffer, where the retained GPU path hands off a texture.
+    let base = Instant::now();
+    let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+    runtime_assert_eq!(benchmark.poll(true, base, 0) => None);
+    let measuring = base + PRESENTATION_BENCHMARK_WARMUP;
+    runtime_assert_eq!(benchmark.poll(true, measuring, 0) => None);
+
+    for (graphics, present) in [(20, 8), (30, 10), (40, 12)] {
+        benchmark.record_successful_presentation(
+            measuring + Duration::from_millis(graphics),
+            Duration::from_millis(graphics),
+            Duration::from_millis(present),
+            true,
+            PresentationPath::Cpu,
+        );
+    }
+
+    let report = benchmark
+        .poll(true, measuring + Duration::from_secs(3), 0)
+        .test_value();
+    runtime_assert_eq!(
+        report.present_p50 => Duration::from_millis(10);
+        report.present_max => Duration::from_millis(12);
+        // Raster is what the pass cost before the copy, per sample.
+        report.raster_p50 => Duration::from_millis(20);
+        report.raster_max => Duration::from_millis(28);
+    );
+}
+
+#[test]
 fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
     let base = Instant::now();
     let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
@@ -1360,6 +1473,7 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
     benchmark.record_successful_presentation(
         base,
         Duration::from_millis(100),
+        Duration::from_micros(200),
         true,
         PresentationPath::RetainedGpu,
     );
@@ -1373,12 +1487,14 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
     benchmark.record_successful_presentation(
         base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(10),
         Duration::from_millis(10),
+        Duration::from_micros(200),
         true,
         PresentationPath::RetainedGpu,
     );
     benchmark.record_successful_presentation(
         base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(20),
         Duration::from_millis(20),
+        Duration::from_micros(200),
         false,
         PresentationPath::Cpu,
     );
@@ -1406,7 +1522,7 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
         report.graphics_p99 => Duration::from_millis(20);
         report.graphics_samples => vec![Duration::from_millis(10), Duration::from_millis(20)];
         report.machine_line() =>
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]";
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 max_present_ms=0.200000 present_p50_ms=0.200000 present_p95_ms=0.200000 present_p99_ms=0.200000 max_raster_ms=19.800000 raster_p50_ms=9.800000 raster_p95_ms=19.800000 raster_p99_ms=19.800000 max_simulation_ms=0.000000 simulation_p50_ms=0.000000 simulation_p95_ms=0.000000 simulation_p99_ms=0.000000 max_frame_ms=0.000000 frame_p50_ms=0.000000 frame_p95_ms=0.000000 frame_p99_ms=0.000000 frame_sample_count=0 surface_reallocations=0 max_reallocation_ms=0.000000 reallocation_p50_ms=0.000000 reallocation_p95_ms=0.000000 reallocation_p99_ms=0.000000 graphics_pass_samples_ns=[10000000,20000000]";
         benchmark.poll(true, base + Duration::from_secs(10), 999) => None;
     );
 }
@@ -1446,6 +1562,7 @@ fn runtime_benchmark_window_does_not_require_a_visible_surface() {
     benchmark.record_successful_presentation(
         deadline,
         Duration::from_millis(10),
+        Duration::from_micros(200),
         true,
         PresentationPath::RetainedGpu,
     );
@@ -1472,12 +1589,14 @@ fn presentation_benchmark_retains_raw_gpu_profiles_only_inside_its_half_open_win
     benchmark.record_successful_retained_gpu_presentation(
         started,
         Duration::from_nanos(11),
+        Duration::from_nanos(3),
         true,
         profile,
     );
     benchmark.record_successful_retained_gpu_presentation(
         deadline,
         Duration::from_nanos(13),
+        Duration::from_nanos(3),
         true,
         profile,
     );
@@ -2005,7 +2124,8 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     )
     .test_value();
     let scenario = app
-        .scensel.catalog
+        .scensel
+        .catalog
         .get("TwoPlayers.c4s")
         .cloned()
         .test_value();
@@ -2070,7 +2190,8 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     )
     .test_value();
     let scenario = app
-        .scensel.catalog
+        .scensel
+        .catalog
         .get("TwoPlayers.c4s")
         .cloned()
         .test_value();
@@ -3018,12 +3139,14 @@ fn player_typeahead_and_apps_route_through_selected_row() {
     }
     app.test_text_input('T');
     let (selected, anchor) = app
-        .startup.player_dialog
+        .startup
+        .player_dialog
         .test_ref()
         .keyboard_context_target()
         .test_value();
     assert_eq!(selected, 2);
-    app.startup.player_dialog
+    app.startup
+        .player_dialog
         .test_mut()
         .set_pointer_position(Some(GuiPoint::new(639.0, 479.0)));
 
@@ -3145,7 +3268,8 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
     let selector = app
-        .startup.player_properties_dialog
+        .startup
+        .player_properties_dialog
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .test_value();
@@ -3157,7 +3281,8 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
 
     for _ in 0..6 {
         let actions = app
-            .startup.player_properties_dialog
+            .startup
+            .player_properties_dialog
             .test_mut()
             .controller
             .handle_key_down(KeyCode::Tab);
@@ -3179,7 +3304,8 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         ),
     ] {
         let actions = app
-            .startup.player_properties_dialog
+            .startup
+            .player_properties_dialog
             .test_mut()
             .controller
             .handle_key_down(key);
@@ -3189,13 +3315,15 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         );
     }
     let actions = app
-        .startup.player_properties_dialog
+        .startup
+        .player_properties_dialog
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Enter);
     app.process_startup_player_properties_actions(actions);
     let selector = app
-        .startup.player_properties_dialog
+        .startup
+        .player_properties_dialog
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .test_value();
@@ -3212,7 +3340,8 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
     );
 
     let actions = app
-        .startup.player_properties_dialog
+        .startup
+        .player_properties_dialog
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
@@ -3469,7 +3598,8 @@ fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
     let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
     wait_for_menu(&mut app);
     app.open_options_menu();
-    app.startup.options_dialog
+    app.startup
+        .options_dialog
         .as_mut()
         .test_value()
         .program_mut()
@@ -3560,7 +3690,8 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
     app.test_key(VirtualKeyCode::Digit1, ElementState::Pressed);
     runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 3);
 
-    app.startup.options_dialog
+    app.startup
+        .options_dialog
         .as_mut()
         .test_value()
         .restore_sheet(OptionsSheet::Gamepad);
@@ -4049,8 +4180,12 @@ fn unconfigured_stick_and_hat_emit_no_gameplay_controls() {
     let mut app = new_running_sandbox_app();
     app.gamepad_bindings = GamepadBindings::from_config(&Config::new());
     app.local_controls = LocalControlRegistry::default();
-    app.local_controls
-        .initialize(test_local_control_init(app.players.local_owner, 4, false, false));
+    app.local_controls.initialize(test_local_control_init(
+        app.players.local_owner,
+        4,
+        false,
+        false,
+    ));
     let slot = GamepadSlot::new(0);
 
     app.test_gamepad_events([gamepad_direction_event(
@@ -4075,7 +4210,11 @@ fn unconfigured_stick_and_hat_emit_no_gameplay_controls() {
         gamepad_direction_event(slot, ControlButton::Left, ElementState::Pressed),
     ]);
 
-    let pressed = app.engine.test_player(app.players.local_owner).control.pressed_coms;
+    let pressed = app
+        .engine
+        .test_player(app.players.local_owner)
+        .control
+        .pressed_coms;
     assert_eq!(pressed, 0);
 }
 
@@ -4099,8 +4238,12 @@ fn axis_up_fires_dig_and_hat_zero_fires_configured_left() {
     let mut app = new_running_sandbox_app();
     app.gamepad_bindings = GamepadBindings::from_config(&config);
     app.local_controls = LocalControlRegistry::default();
-    app.local_controls
-        .initialize(test_local_control_init(app.players.local_owner, 4, false, false));
+    app.local_controls.initialize(test_local_control_init(
+        app.players.local_owner,
+        4,
+        false,
+        false,
+    ));
     let slot = GamepadSlot::new(0);
 
     app.test_gamepad_events([
@@ -4118,7 +4261,11 @@ fn axis_up_fires_dig_and_hat_zero_fires_configured_left() {
         gamepad_direction_event(slot, ControlButton::Left, ElementState::Pressed),
     ]);
 
-    let pressed = app.engine.test_player(app.players.local_owner).control.pressed_coms;
+    let pressed = app
+        .engine
+        .test_player(app.players.local_owner)
+        .control
+        .pressed_coms;
     assert_ne!(pressed & (1 << clonk_engine::COM_DIG), 0);
     assert_ne!(pressed & (1 << clonk_engine::COM_LEFT), 0);
 }
@@ -5273,7 +5420,11 @@ fn console_edit_cursor_keys_cycle_the_mode_and_delete_the_selection() {
     // Fullscreen is not KEYSCOPE_Console: neither key acts there.
     let mut fullscreen = new_lightweight_running_sandbox_app();
     fullscreen.developer_console_edit_mode = ConsoleEditMode::Play;
-    press_console_key(&mut fullscreen, VirtualKeyCode::Space, ModifiersState::empty());
+    press_console_key(
+        &mut fullscreen,
+        VirtualKeyCode::Space,
+        ModifiersState::empty(),
+    );
     runtime_assert_eq!(
         fullscreen.developer_console_edit_mode => ConsoleEditMode::Play,
         "KEYSCOPE_Console actions are inert outside the console",
@@ -5473,9 +5624,9 @@ fn the_property_page_reload_target_is_the_single_selected_definition() {
 /// dispatched", which is the observable difference.
 #[test]
 fn the_property_page_reload_button_dispatches_only_a_single_selection() {
-    use clonk_engine::developer_selection::SelectionWriter;
     use crate::developer_toolbox_view::property_page_layout;
     use crate::developer_windows::ToolboxPage;
+    use clonk_engine::developer_selection::SelectionWriter;
 
     let extent = (240u32, 160u32);
     let layout = property_page_layout(extent.0, extent.1);
@@ -5593,14 +5744,14 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
     let track = layout.horizontal.track;
     runtime_assert!(app.console_viewport_scroll_press(
         identity,
-        (
-            track.x + track.width - 2,
-            track.y + track.height / 2
-        ),
+        (track.x + track.width - 2, track.y + track.height / 2),
         extent
     ));
     let after = app.graphics.detached_viewport_view(identity).test_value().0;
-    runtime_assert!(after > before, "the arrow scrolled right: {before} -> {after}");
+    runtime_assert!(
+        after > before,
+        "the arrow scrolled right: {before} -> {after}"
+    );
 
     // A press on the thumb captures instead of stepping.
     let thumb = layout.horizontal.thumb;
@@ -5629,7 +5780,10 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
         extent
     ));
     let dragged = app.graphics.detached_viewport_view(identity).test_value().0;
-    runtime_assert!(dragged > held, "the drag moved the view: {held} -> {dragged}");
+    runtime_assert!(
+        dragged > held,
+        "the drag moved the view: {held} -> {dragged}"
+    );
 
     // Releasing ends it, and a second release is nobody's.
     runtime_assert!(app.console_viewport_scroll_release());
@@ -5639,14 +5793,14 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
     // Locked, there are no bars and nothing takes a press.
     runtime_assert!(app.toggle_console_viewport_player_lock(identity));
     runtime_assert!(app.console_viewport_player_lock(identity));
-    runtime_assert!(bars(&app, identity).is_none(), "a locked viewport draws none");
+    runtime_assert!(
+        bars(&app, identity).is_none(),
+        "a locked viewport draws none"
+    );
     runtime_assert!(
         !app.console_viewport_scroll_press(
             identity,
-            (
-                track.x + track.width - 2,
-                track.y + track.height / 2
-            ),
+            (track.x + track.width - 2, track.y + track.height / 2),
             extent
         ),
         "and answers no press where they were"
@@ -5835,9 +5989,9 @@ fn the_property_script_completion_is_the_public_engine_and_selected_definition()
 /// pane — in GTK the bar is a sibling widget and the pane never sees the event.
 #[test]
 fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane() {
-    use clonk_engine::developer_selection::SelectionWriter;
     use crate::developer_object_list_view::object_list_bar;
     use crate::main_app_state::DeveloperPane;
+    use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
@@ -6051,8 +6205,8 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
 /// what is already selected.
 #[test]
 fn object_list_arrow_keys_move_the_selection_and_ctrl_moves_only_the_cursor() {
-    use clonk_engine::developer_selection::SelectionWriter;
     use crate::developer_object_list_view::ObjectListKey;
+    use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
@@ -6122,8 +6276,7 @@ fn object_list_arrow_keys_move_the_selection_and_ctrl_moves_only_the_cursor() {
     runtime_assert_eq!(extended => range, "Shift covers the anchor through the cursor");
 
     // A click resets both, the way `set_cursor` does.
-    app.developer_selection
-        .clear(SelectionWriter::ObjectTree);
+    app.developer_selection.clear(SelectionWriter::ObjectTree);
     let rect = crate::developer_object_list_view::object_list_row_rect_for_test(1, 200);
     app.developer_object_list_click((rect.x + rect.w - 4, rect.y + rect.h / 2), (200, height));
     runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[1].id));
@@ -6138,8 +6291,8 @@ fn object_list_arrow_keys_move_the_selection_and_ctrl_moves_only_the_cursor() {
 /// without touching what the view has open.
 #[test]
 fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
-    use clonk_engine::developer_selection::SelectionWriter;
     use crate::developer_object_list_view::{expander_rect, ObjectListRow};
+    use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
@@ -6165,10 +6318,7 @@ fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
 
     // The contained object is not drawn while its container is closed.
     let rows = app.developer_object_list_rows_for_test();
-    let index = rows
-        .iter()
-        .position(|row| row.id == container)
-        .test_value();
+    let index = rows.iter().position(|row| row.id == container).test_value();
     runtime_assert!(rows[index].has_children, "the container holds one object");
     runtime_assert!(!rows[index].expanded);
     runtime_assert!(
@@ -6207,10 +6357,7 @@ fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
         .replace(SelectionWriter::EditCursor, held);
     let index = row_of(&app, held).test_value();
     let rect = crate::developer_object_list_view::object_list_row_rect_for_test(index, extent.0);
-    app.developer_object_list_click(
-        (rect.x + rect.w - 4, rect.y + rect.h / 2),
-        extent,
-    );
+    app.developer_object_list_click((rect.x + rect.w - 4, rect.y + rect.h / 2), extent);
     runtime_assert_eq!(app.developer_selection.objects() => &[held]);
 }
 
@@ -6224,8 +6371,8 @@ fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
 /// itself moves.
 #[test]
 fn the_object_list_scroll_survives_rebuilds_and_follows_only_a_new_selection() {
-    use clonk_engine::developer_selection::SelectionWriter;
     use crate::developer_object_list_view::ObjectListScroll;
+    use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
@@ -6302,9 +6449,9 @@ fn the_object_list_scroll_survives_rebuilds_and_follows_only_a_new_selection() {
 /// box.
 #[test]
 fn the_property_output_scroll_survives_a_refresh_and_clamps_for_a_shorter_object() {
-    use clonk_engine::developer_selection::SelectionWriter;
     use crate::developer_toolbox_view::{property_output_capacity, property_output_window};
     use crate::developer_windows::ToolboxPage;
+    use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
@@ -7436,7 +7583,8 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     modified_first.test_modifiers(ModifiersState::ALT);
     modified_first.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     runtime_assert!(modified_first
-        .live_input.pressed_engine_keys
+        .live_input
+        .pressed_engine_keys
         .contains(&VirtualKeyCode::F3));
     modified_first.test_modifiers(ModifiersState::empty());
     modified_first.test_key(VirtualKeyCode::F3, ElementState::Pressed);
@@ -7474,7 +7622,8 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     changed_on_release.test_modifiers(ModifiersState::CONTROL);
     changed_on_release.test_key(VirtualKeyCode::F3, ElementState::Released);
     runtime_assert!(!changed_on_release
-        .live_input.pressed_engine_keys
+        .live_input
+        .pressed_engine_keys
         .contains(&VirtualKeyCode::F3));
     changed_on_release
         .engine
@@ -7621,7 +7770,9 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
                 assert!(app.open_object_menu().expect("open object state"));
             }
             Layer::Observer => {
-                app.engine.remove_player(app.players.local_owner).test_value();
+                app.engine
+                    .remove_player(app.players.local_owner)
+                    .test_value();
                 app.engine.set_local_players([]);
                 app.snapshot = app.engine.snapshot();
             }
@@ -8490,7 +8641,11 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
             .control
             .control_style = true;
         app.test_modifiers(modifiers);
-        let pressed_coms = app.engine.test_player(app.players.local_owner).control.pressed_coms;
+        let pressed_coms = app
+            .engine
+            .test_player(app.players.local_owner)
+            .control
+            .pressed_coms;
         let pressed_engine_keys = app.live_input.pressed_engine_keys.clone();
         assert!(app.show_startup_hint);
 
@@ -8554,7 +8709,8 @@ fn unresolved_runtime_help_language_fails_typed_before_pixels() {
     let mut app = new_classic_running_sandbox_app();
     app.dialogs.help_visible = true;
     app.dialogs.help_text_cache = OnceLock::new();
-    app.dialogs.help_text_cache
+    app.dialogs
+        .help_text_cache
         .set(Err("LanguageZZ.txt cannot be resolved".to_string()))
         .test_value();
     let before_surface = app.graphics.surface().pixels().to_vec();
@@ -9571,7 +9727,6 @@ fn console_play_and_halt_track_the_live_offline_halt_count() {
     runtime_assert!(!app.developer_console_view_model().halted);
 }
 
-
 // `FullscreenPauseToggle` is registered with a gamepad-capable `C4CustomKey`
 // like every other global action (src/C4Game.cpp:3429), and
 // `LoadCustomConfig` replaces its code with whatever `[Keys]` holds
@@ -9773,7 +9928,10 @@ fn runtime_pause_has_no_default_gamepad_binding() {
 
     app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
         .test_value();
-    runtime_assert!(app.runtime_halt_active(), "the K_PAUSE default still pauses");
+    runtime_assert!(
+        app.runtime_halt_active(),
+        "the K_PAUSE default still pauses"
+    );
 }
 
 // `C4Game::TogglePause` refuses while the evaluation dialog owns the halt, and
@@ -9802,7 +9960,6 @@ fn runtime_pause_gamepad_override_is_refused_under_the_evaluation_dialog() {
     );
 }
 
-
 // Player controls register with `PRIO_PlrControl` (src/C4Game.cpp:3455-3461),
 // above the `PRIO_Base` pause callback, so a set that claims the same gamepad
 // code owns it and the game must not pause.
@@ -9829,7 +9986,6 @@ fn runtime_pause_gamepad_override_yields_to_a_colliding_player_control() {
     .test_value();
     runtime_assert!(!app.runtime_halt_active());
 }
-
 
 // `C4Game::InitKeyboard` registers every global action through one
 // `C4CustomKey` path and `LoadCustomConfig` rebinds any of them
@@ -9984,7 +10140,6 @@ fn runtime_gamepad_stats_toggle_yields_its_code_to_the_actions_it_shadows() {
         "the earlier registration owns the shared code"
     );
 }
-
 
 // `NetObsNextPlayer` is KEYSCOPE_FreeView (src/C4Game.cpp:3443), so it needs
 // an ownerless primary viewport exactly as the scroll keys do — even though it

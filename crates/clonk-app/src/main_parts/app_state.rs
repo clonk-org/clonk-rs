@@ -3796,6 +3796,22 @@ struct PresentationBenchmarkMeasurement {
     graphics_total: Duration,
     graphics_max: Duration,
     graphics_samples: Vec<Duration>,
+    /// The platform copy/present alone, taken out of the graphics pass it is
+    /// timed inside. The software presenter copies the whole CPU frame here,
+    /// so this is the term that separates composition cost from destination
+    /// cost.
+    present_samples: Vec<Duration>,
+    /// The graphics pass with its present subtracted, per sample.
+    raster_samples: Vec<Duration>,
+    /// One sample per event-loop iteration, not per submission: a frame that
+    /// skips its render still simulates, and the presenter's budget is only
+    /// readable against the complete frame it has to fit inside.
+    simulation_samples: Vec<Duration>,
+    frame_samples: Vec<Duration>,
+    /// Presentation-buffer reallocations, which are setup cost rather than
+    /// ordinary frames. Kept out of `frame_samples` so a steady-state
+    /// distribution cannot hide one.
+    reallocation_samples: Vec<Duration>,
     retained_gpu_profiles: Vec<ReconciledRetainedGpuFrameProfile>,
     gpu_timestamp_frames: Vec<gpu_renderer::GpuTimestampFrame>,
 }
@@ -3817,6 +3833,32 @@ pub(crate) struct PresentationBenchmarkReport {
     pub(crate) graphics_p95: Duration,
     pub(crate) graphics_p99: Duration,
     pub(crate) graphics_samples: Vec<Duration>,
+    pub(crate) present_max: Duration,
+    pub(crate) present_p50: Duration,
+    pub(crate) present_p95: Duration,
+    pub(crate) present_p99: Duration,
+    pub(crate) present_samples: Vec<Duration>,
+    pub(crate) raster_max: Duration,
+    pub(crate) raster_p50: Duration,
+    pub(crate) raster_p95: Duration,
+    pub(crate) raster_p99: Duration,
+    pub(crate) raster_samples: Vec<Duration>,
+    pub(crate) simulation_max: Duration,
+    pub(crate) simulation_p50: Duration,
+    pub(crate) simulation_p95: Duration,
+    pub(crate) simulation_p99: Duration,
+    pub(crate) simulation_samples: Vec<Duration>,
+    pub(crate) frame_max: Duration,
+    pub(crate) frame_p50: Duration,
+    pub(crate) frame_p95: Duration,
+    pub(crate) frame_p99: Duration,
+    pub(crate) frame_samples: Vec<Duration>,
+    pub(crate) surface_reallocations: u64,
+    pub(crate) reallocation_max: Duration,
+    pub(crate) reallocation_p50: Duration,
+    pub(crate) reallocation_p95: Duration,
+    pub(crate) reallocation_p99: Duration,
+    pub(crate) reallocation_samples: Vec<Duration>,
     pub(crate) retained_gpu_profiles: Vec<ReconciledRetainedGpuFrameProfile>,
     pub(crate) gpu_timestamp_frames: Vec<gpu_renderer::GpuTimestampFrame>,
 }
@@ -3833,7 +3875,7 @@ impl PresentationBenchmarkReport {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} retained_gpu_present_submissions={} cpu_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} automatic_graphics_skips={} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6} graphics_pass_sample_count={} graphics_pass_p50_ms={:.6} graphics_pass_p95_ms={:.6} graphics_pass_p99_ms={:.6} graphics_pass_samples_ns=[{graphics_samples_ns}]",
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} retained_gpu_present_submissions={} cpu_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} automatic_graphics_skips={} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6} graphics_pass_sample_count={} graphics_pass_p50_ms={:.6} graphics_pass_p95_ms={:.6} graphics_pass_p99_ms={:.6} max_present_ms={:.6} present_p50_ms={:.6} present_p95_ms={:.6} present_p99_ms={:.6} max_raster_ms={:.6} raster_p50_ms={:.6} raster_p95_ms={:.6} raster_p99_ms={:.6} max_simulation_ms={:.6} simulation_p50_ms={:.6} simulation_p95_ms={:.6} simulation_p99_ms={:.6} max_frame_ms={:.6} frame_p50_ms={:.6} frame_p95_ms={:.6} frame_p99_ms={:.6} frame_sample_count={} surface_reallocations={} max_reallocation_ms={:.6} reallocation_p50_ms={:.6} reallocation_p95_ms={:.6} reallocation_p99_ms={:.6} graphics_pass_samples_ns=[{graphics_samples_ns}]",
             self.submissions,
             self.retained_gpu_submissions,
             self.cpu_submissions,
@@ -3846,6 +3888,28 @@ impl PresentationBenchmarkReport {
             self.graphics_p50.as_secs_f64() * 1_000.0,
             self.graphics_p95.as_secs_f64() * 1_000.0,
             self.graphics_p99.as_secs_f64() * 1_000.0,
+            self.present_max.as_secs_f64() * 1_000.0,
+            self.present_p50.as_secs_f64() * 1_000.0,
+            self.present_p95.as_secs_f64() * 1_000.0,
+            self.present_p99.as_secs_f64() * 1_000.0,
+            self.raster_max.as_secs_f64() * 1_000.0,
+            self.raster_p50.as_secs_f64() * 1_000.0,
+            self.raster_p95.as_secs_f64() * 1_000.0,
+            self.raster_p99.as_secs_f64() * 1_000.0,
+            self.simulation_max.as_secs_f64() * 1_000.0,
+            self.simulation_p50.as_secs_f64() * 1_000.0,
+            self.simulation_p95.as_secs_f64() * 1_000.0,
+            self.simulation_p99.as_secs_f64() * 1_000.0,
+            self.frame_max.as_secs_f64() * 1_000.0,
+            self.frame_p50.as_secs_f64() * 1_000.0,
+            self.frame_p95.as_secs_f64() * 1_000.0,
+            self.frame_p99.as_secs_f64() * 1_000.0,
+            self.frame_samples.len(),
+            self.surface_reallocations,
+            self.reallocation_max.as_secs_f64() * 1_000.0,
+            self.reallocation_p50.as_secs_f64() * 1_000.0,
+            self.reallocation_p95.as_secs_f64() * 1_000.0,
+            self.reallocation_p99.as_secs_f64() * 1_000.0,
         )
     }
 }
@@ -3952,6 +4016,18 @@ impl PresentationBenchmark {
         let gpu_timestamp_frames = std::mem::take(&mut self.measurement.gpu_timestamp_frames);
         let (graphics_p50, graphics_p95, graphics_p99) =
             graphics_pass_percentiles(&graphics_samples);
+        let present_samples = std::mem::take(&mut self.measurement.present_samples);
+        let raster_samples = std::mem::take(&mut self.measurement.raster_samples);
+        let (present_p50, present_p95, present_p99) = graphics_pass_percentiles(&present_samples);
+        let (raster_p50, raster_p95, raster_p99) = graphics_pass_percentiles(&raster_samples);
+        let simulation_samples = std::mem::take(&mut self.measurement.simulation_samples);
+        let frame_samples = std::mem::take(&mut self.measurement.frame_samples);
+        let (simulation_p50, simulation_p95, simulation_p99) =
+            graphics_pass_percentiles(&simulation_samples);
+        let (frame_p50, frame_p95, frame_p99) = graphics_pass_percentiles(&frame_samples);
+        let reallocation_samples = std::mem::take(&mut self.measurement.reallocation_samples);
+        let (reallocation_p50, reallocation_p95, reallocation_p99) =
+            graphics_pass_percentiles(&reallocation_samples);
         Some(PresentationBenchmarkReport {
             elapsed,
             submissions,
@@ -3968,6 +4044,36 @@ impl PresentationBenchmark {
             graphics_p95,
             graphics_p99,
             graphics_samples,
+            present_max: present_samples.iter().copied().max().unwrap_or_default(),
+            present_p50,
+            present_p95,
+            present_p99,
+            present_samples,
+            raster_max: raster_samples.iter().copied().max().unwrap_or_default(),
+            raster_p50,
+            raster_p95,
+            raster_p99,
+            raster_samples,
+            simulation_max: simulation_samples.iter().copied().max().unwrap_or_default(),
+            simulation_p50,
+            simulation_p95,
+            simulation_p99,
+            simulation_samples,
+            frame_max: frame_samples.iter().copied().max().unwrap_or_default(),
+            frame_p50,
+            frame_p95,
+            frame_p99,
+            frame_samples,
+            surface_reallocations: reallocation_samples.len() as u64,
+            reallocation_max: reallocation_samples
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or_default(),
+            reallocation_p50,
+            reallocation_p95,
+            reallocation_p99,
+            reallocation_samples,
             retained_gpu_profiles,
             gpu_timestamp_frames,
         })
@@ -3983,12 +4089,14 @@ impl PresentationBenchmark {
         &mut self,
         now: Instant,
         graphics_duration: Duration,
+        present_duration: Duration,
         refreshed: bool,
         path: PresentationPath,
     ) {
         self.record_successful_presentation_with_profile(
             now,
             graphics_duration,
+            present_duration,
             refreshed,
             path,
             None,
@@ -3999,12 +4107,14 @@ impl PresentationBenchmark {
         &mut self,
         now: Instant,
         graphics_duration: Duration,
+        present_duration: Duration,
         refreshed: bool,
         profile: RetainedGpuFrameProfile,
     ) {
         self.record_successful_presentation_with_profile(
             now,
             graphics_duration,
+            present_duration,
             refreshed,
             PresentationPath::RetainedGpu,
             Some(profile),
@@ -4015,6 +4125,7 @@ impl PresentationBenchmark {
         &mut self,
         now: Instant,
         graphics_duration: Duration,
+        present_duration: Duration,
         refreshed: bool,
         path: PresentationPath,
         retained_gpu_profile: Option<RetainedGpuFrameProfile>,
@@ -4054,6 +4165,50 @@ impl PresentationBenchmark {
             .saturating_add(graphics_duration);
         self.measurement.graphics_max = self.measurement.graphics_max.max(graphics_duration);
         self.measurement.graphics_samples.push(graphics_duration);
+        self.measurement.present_samples.push(present_duration);
+        // Saturating: the present is timed inside the pass, so it cannot
+        // exceed it, but a clock that reports otherwise must not wrap.
+        self.measurement
+            .raster_samples
+            .push(graphics_duration.saturating_sub(present_duration));
+    }
+
+    /// One event-loop iteration: how long the simulation burst took, and how
+    /// long the whole frame took. Recorded for every iteration inside the
+    /// measurement window, whether or not it presented.
+    pub(crate) fn record_frame_pass(
+        &mut self,
+        now: Instant,
+        simulation_duration: Duration,
+        frame_duration: Duration,
+    ) {
+        if self.finished {
+            return;
+        }
+        let Some(started) = self.measurement.started else {
+            return;
+        };
+        if now >= started + self.window {
+            return;
+        }
+        self.measurement
+            .simulation_samples
+            .push(simulation_duration);
+        self.measurement.frame_samples.push(frame_duration);
+    }
+
+    /// One presentation-buffer reallocation, timed on its own.
+    pub(crate) fn record_surface_reallocation(&mut self, now: Instant, duration: Duration) {
+        if self.finished {
+            return;
+        }
+        let Some(started) = self.measurement.started else {
+            return;
+        };
+        if now >= started + self.window {
+            return;
+        }
+        self.measurement.reallocation_samples.push(duration);
     }
 
     pub(crate) fn record_automatic_graphics_skip(&mut self) {

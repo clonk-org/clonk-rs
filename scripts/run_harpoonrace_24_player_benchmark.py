@@ -86,6 +86,8 @@ INTEGER_METRICS = {
     "simulation_frames",
     "automatic_graphics_skips",
     "graphics_pass_sample_count",
+    "frame_sample_count",
+    "surface_reallocations",
 }
 FLOAT_METRICS = {
     "elapsed_seconds",
@@ -96,6 +98,34 @@ FLOAT_METRICS = {
     "graphics_pass_p50_ms",
     "graphics_pass_p95_ms",
     "graphics_pass_p99_ms",
+    # The platform copy/present, split out of the graphics pass it is timed
+    # inside, and the composition that precedes it. Required, so a binary that
+    # predates the split is rejected rather than silently reported without it.
+    "max_present_ms",
+    "present_p50_ms",
+    "present_p95_ms",
+    "present_p99_ms",
+    "max_raster_ms",
+    "raster_p50_ms",
+    "raster_p95_ms",
+    "raster_p99_ms",
+    # The simulation burst and the complete frame it shares with presentation.
+    # Sampled per event-loop iteration, so a frame that skipped its render is
+    # still represented here.
+    "max_simulation_ms",
+    "simulation_p50_ms",
+    "simulation_p95_ms",
+    "simulation_p99_ms",
+    "max_frame_ms",
+    "frame_p50_ms",
+    "frame_p95_ms",
+    "frame_p99_ms",
+    # Buffer reallocation is setup cost, reported apart from the steady-state
+    # frames so a window that contained one is visible rather than absorbed.
+    "max_reallocation_ms",
+    "reallocation_p50_ms",
+    "reallocation_p95_ms",
+    "reallocation_p99_ms",
 }
 REQUIRED_METRICS = INTEGER_METRICS | FLOAT_METRICS | {
     "graphics_pass_samples_ns"
