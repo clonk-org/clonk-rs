@@ -86,6 +86,9 @@ struct Profile {
     /// models peers that already hold every resource, which is what every
     /// profile assumed before.
     resource_bytes: u64,
+    /// Carry host-to-peer control through real `ReliableUdpEndpointCore`
+    /// instances instead of the modelled reliable stream.
+    real_endpoints: bool,
 }
 
 /// Fragment size the transfer is cut into. Nominal, like every other payload
@@ -139,6 +142,7 @@ fn profiles() -> Vec<Profile> {
             clients: 4,
             host_uplink_bps: 0,
             resource_bytes: 0,
+            real_endpoints: false,
         },
         Profile {
             name: "slow-cpu-only",
@@ -148,6 +152,7 @@ fn profiles() -> Vec<Profile> {
             clients: 4,
             host_uplink_bps: 0,
             resource_bytes: 0,
+            real_endpoints: false,
         },
         Profile {
             name: "bad-link-only",
@@ -157,6 +162,7 @@ fn profiles() -> Vec<Profile> {
             clients: 4,
             host_uplink_bps: 0,
             resource_bytes: 0,
+            real_endpoints: false,
         },
         Profile {
             name: "potato-dialup",
@@ -166,6 +172,7 @@ fn profiles() -> Vec<Profile> {
             clients: 4,
             host_uplink_bps: HOST_UPLINK_BPS,
             resource_bytes: 0,
+            real_endpoints: false,
         },
         Profile {
             name: "pi4-hotel-wifi",
@@ -175,6 +182,7 @@ fn profiles() -> Vec<Profile> {
             clients: 4,
             host_uplink_bps: 0,
             resource_bytes: 0,
+            real_endpoints: false,
         },
         Profile {
             name: "potato-dialup-8p",
@@ -185,6 +193,7 @@ fn profiles() -> Vec<Profile> {
             clients: 8,
             host_uplink_bps: HOST_UPLINK_BPS,
             resource_bytes: 0,
+            real_endpoints: false,
         },
         Profile {
             name: "joining-download",
@@ -195,6 +204,18 @@ fn profiles() -> Vec<Profile> {
             clients: 4,
             host_uplink_bps: HOST_UPLINK_BPS,
             resource_bytes: 128 * 1024,
+            real_endpoints: false,
+        },
+        Profile {
+            name: "real-endpoints",
+            description: "control carried by the shipped ReliableUDP endpoints rather than \
+                          the modelled stream, so repair and ordering are the real ones",
+            link: Some(hotel_wifi()),
+            cpu: None,
+            clients: 4,
+            host_uplink_bps: HOST_UPLINK_BPS,
+            resource_bytes: 0,
+            real_endpoints: true,
         },
     ]
 }
@@ -229,6 +250,7 @@ impl Profile {
             } else {
                 0
             },
+            real_endpoints: self.real_endpoints,
             ..SessionConfig::default()
         }
     }
@@ -307,6 +329,8 @@ struct Coverage {
     host_uplink_delays: u64,
     resource_fragments: u64,
     resource_stalls: u64,
+    endpoint_deliveries: u64,
+    endpoint_retransmissions: u64,
 }
 
 impl Coverage {
@@ -335,6 +359,12 @@ impl Coverage {
         }
         if self.resource_stalls == 0 {
             missing.push("no control aggregate was ever withheld behind a fragment");
+        }
+        if self.endpoint_deliveries == 0 {
+            missing.push("no control reached a peer through a real endpoint");
+        }
+        if self.endpoint_retransmissions == 0 {
+            missing.push("no real endpoint ever repaired a lost datagram");
         }
         missing
     }
@@ -389,6 +419,8 @@ fn measure(
         resource_stall_us_total += report.resource_stream.stall_total.as_micros() as u64;
         coverage.resource_fragments += report.resource_stream.fragments_sent as u64;
         coverage.resource_stalls += report.resource_stream.stalls as u64;
+        coverage.endpoint_deliveries += report.endpoint_stream.packets_delivered as u64;
+        coverage.endpoint_retransmissions += report.endpoint_stream.retransmissions as u64;
     }
 
     // The transport view of the same link, which is where datagram-level loss
@@ -688,7 +720,8 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
         println!(
             "\ncoverage ok: {} stalls, {} forced ticks, {} dropped inputs, {} datagram drops \
              ({} from full queues), {} payloads held back by the shared host uplink, \
-             {} resource fragments on the ordered stream ({} aggregates withheld behind one)",
+             {} resource fragments on the ordered stream ({} aggregates withheld behind one), \
+             {} control payloads delivered by real endpoints ({} datagrams they repaired)",
             coverage.stalls,
             coverage.forced,
             coverage.dropped_inputs,
@@ -696,7 +729,9 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
             coverage.queue_drops,
             coverage.host_uplink_delays,
             coverage.resource_fragments,
-            coverage.resource_stalls
+            coverage.resource_stalls,
+            coverage.endpoint_deliveries,
+            coverage.endpoint_retransmissions
         );
     }
 

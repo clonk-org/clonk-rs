@@ -69,8 +69,17 @@ network-quality number.
   saturate it. Oversubscribing the pipe makes the queue grow without bound, and
   the profile then measures an uplink that cannot carry the transfer at all —
   true, but it drowns the stall this profile exists to isolate.
-- The transport-level view (`clonk_network::sim`) and the session view
-  (`clonk_network::sim_session`) are separate models. The session harness does not
-  drive real `ReliableUdpEndpointCore` endpoints; it drives the real
-  `ControlCoordinator` over a modelled link. Tracked by
-  clonk-org/clonk-rs#1231.
+- **The two views can now be composed, and one profile does.** The transport
+  view (`clonk_network::sim`) drives real `ReliableUdpEndpointCore` endpoints;
+  the session view (`clonk_network::sim_session`) drives the real
+  `ControlCoordinator`. `real-endpoints` runs both at once: host-to-peer control
+  goes out through the shipped endpoints, so fragmentation, acknowledgement,
+  retransmission timing and ordered delivery are the real ones rather than the
+  modelled stream's opaque payload and fixed recheck interval. The tick travels
+  as bytes in the payload, because a real endpoint carries a packet rather than
+  a packet plus a label. The sweep fails if no control ever reaches a peer that
+  way or if no endpoint ever repairs a lost datagram.
+
+  Every other profile keeps the modelled stream, deliberately: it is cheaper,
+  and each one's numbers are calibrated against it. `real_endpoints` is opted
+  into per profile rather than switched on globally.
