@@ -5362,13 +5362,17 @@ pub(crate) fn build_startup_loader(
     // unopenable Graphics.c4g.
     let graphics = main_graphics_group(paths)?;
     let registrations = startup_loader_registrations(paths)?;
-    validate_classic_loader_font(paths, None, &registrations)?;
     validate_loader_graphics_font_sources(&registrations)?;
     let tier = highest_loader_tier(&registrations)?;
     let selected = select_loader_with_safe_random(&tier, &graphics, STARTUP_LOADER_SPECIFICATION)?;
     let selected_filename = selected.presentation_filename();
     let selection = LoaderSelection::startup(selected_filename)?;
     let background = decode_selected_loader(&selected)?;
+    // InitFonts is the step after fctBackground.Load, not before the seek
+    // (src/C4LoaderScreen.cpp:88-96), so a font that cannot initialize must not
+    // pre-empt the loader search: with both broken, C++ reports the missing
+    // loader.
+    validate_classic_loader_font(paths, None, &registrations)?;
     let resources = classic_loader_resources(assets, &registrations, &graphics)?;
     let screen = LoaderScreen::new(
         selection,
