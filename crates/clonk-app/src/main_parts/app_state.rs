@@ -437,6 +437,14 @@ pub(crate) struct GameApp {
     /// the *fullscreen* layout, which console mode never renders, so a
     /// detached window's pointer routing has no other source of its own
     /// `ViewX`/`ViewY` (`C4Viewport.cpp:1146`).
+    /// The object list's retained scroll position, and the selection it was
+    /// last moved for. `C4ObjectListDlg::Update` rebuilds the model on every
+    /// object change and only moves the view when the *cursor* changes
+    /// (`C4ObjectListDlg.cpp:599-646,747-780`), so the reveal has to fire on a
+    /// selection change rather than on every frame — otherwise scrolling away
+    /// from the selection would be impossible.
+    pub(crate) developer_object_list_scroll: crate::developer_object_list_view::ObjectListScroll,
+    pub(crate) developer_object_list_revealed: Option<clonk_engine::ObjectId>,
     pub(crate) console_viewport_projections:
         std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
     /// The last pointer position in world coordinates, so a held drag can

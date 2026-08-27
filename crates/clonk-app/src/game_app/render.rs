@@ -3470,14 +3470,58 @@ impl GameApp {
             clonk_graphics::PixelFormat::Rgba8888,
         );
         let rows = self.developer_object_list_rows();
+        self.reveal_developer_object_list_selection(&rows, height);
         let font = self.assets.font_arc();
         crate::developer_object_list_view::render_object_list(
             &mut surface,
             font.as_ref(),
             &rows,
             self.developer_selection.objects(),
+            self.developer_object_list_scroll,
         );
         surface
+    }
+
+    /// Bring a newly selected row into view, once per selection.
+    ///
+    /// The list mirrors the edit cursor, so the selection also moves from a
+    /// viewport click. `C4ObjectListDlg::Update` reacts to that by setting the
+    /// cursor, which the scrolled window follows; it does not re-scroll while
+    /// the selection stands, which is what leaves the user free to scroll
+    /// away from it.
+    fn reveal_developer_object_list_selection(
+        &mut self,
+        rows: &[crate::developer_object_list_view::ObjectListRow],
+        height: u32,
+    ) {
+        let selected = self.developer_selection.objects().first().copied();
+        if selected == self.developer_object_list_revealed {
+            return;
+        }
+        self.developer_object_list_revealed = selected;
+        let Some(row) = selected.and_then(|id| rows.iter().position(|row| row.id == id)) else {
+            return;
+        };
+        self.developer_object_list_scroll
+            .reveal(row, rows.len(), height);
+    }
+
+    /// How many rows the list currently has, for a caller sizing its view.
+    pub(crate) fn developer_object_list_row_count(&self) -> usize {
+        self.developer_object_list_rows().len()
+    }
+
+    /// One wheel notch over the object list.
+    ///
+    /// The tree lives in an automatic scrolled window
+    /// (`C4ObjectListDlg.cpp:747-780`), so the wheel moves the view and
+    /// nothing else — it does not change the selection.
+    pub(crate) fn scroll_developer_object_list(&mut self, rows_delta: i32, height: u32) -> bool {
+        let rows = self.developer_object_list_rows().len();
+        let before = self.developer_object_list_scroll;
+        self.developer_object_list_scroll
+            .scroll_by(rows_delta, rows, height);
+        self.developer_object_list_scroll != before
     }
 
     /// The list's rows, rebuilt from the live snapshot.
@@ -3541,15 +3585,9 @@ impl GameApp {
         use clonk_engine::developer_selection::SelectionWriter;
 
         let rows = self.developer_object_list_rows();
-        let selected_row = rows.iter().position(|row| {
-            self.developer_selection
-                .objects()
-                .first()
-                .is_some_and(|id| row.id == *id)
-        });
         match crate::developer_object_list_view::object_list_hit(
             &rows,
-            selected_row,
+            self.developer_object_list_scroll,
             extent.0,
             extent.1,
             point,

@@ -215,6 +215,36 @@ pub(crate) fn handle_developer_object_list_event(
                 list.surface.last_pointer = (position.x as i32, position.y as i32);
             }
         }
+        // The tree sits in an automatic scrolled window
+        // (`C4ObjectListDlg.cpp:747-780`), so the wheel moves the view and
+        // leaves the selection alone.
+        Event::WindowEvent {
+            event: WindowEvent::MouseWheel { delta, .. },
+            ..
+        } => {
+            use clonk_engine::developer_viewport::{wheel_scroll_step, WheelDelta};
+
+            let Some(list) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_object_list_mut)
+            else {
+                return;
+            };
+            let height = list.surface_extent().1;
+            let delta = match delta {
+                winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                    WheelDelta::Lines { x: *x, y: *y }
+                }
+                winit::event::MouseScrollDelta::PixelDelta(position) => WheelDelta::Pixels {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                },
+            };
+            let (_, rows_delta) = wheel_scroll_step(delta);
+            if rows_delta != 0 && app.scroll_developer_object_list(rows_delta, height) {
+                windows.request_redraw(key);
+            }
+        }
         Event::WindowEvent {
             event:
                 WindowEvent::MouseInput {

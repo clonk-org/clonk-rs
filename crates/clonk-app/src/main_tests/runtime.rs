@@ -5407,6 +5407,85 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
     runtime_assert!(!app.developer_property_page_click(button, extent));
 }
 
+/// The list's scroll survives the rebuilds a live round produces, and moves
+/// only when the selection it mirrors changes.
+///
+/// `C4ObjectListDlg::Update` rebuilds the model on every object change
+/// (`C4ObjectListDlg.cpp:599-646`) while the position lives in the scrolled
+/// window around it (`:747-780`). A wheel notch is therefore not undone by the
+/// next spawned object, and the view follows the cursor only when the cursor
+/// itself moves.
+#[test]
+fn the_object_list_scroll_survives_rebuilds_and_follows_only_a_new_selection() {
+    use clonk_engine::developer_selection::SelectionWriter;
+    use crate::developer_object_list_view::ObjectListScroll;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    let definition = app
+        .snapshot
+        .objects
+        .first()
+        .test_value()
+        .definition_id
+        .clone();
+    // Enough rows that a window can be scrolled at all.
+    let mut spawned = Vec::new();
+    for _ in 0..60 {
+        spawned.push(
+            app.engine
+                .spawn_test_object(clonk_engine::SpawnConfig::new(definition.clone())),
+        );
+    }
+    app.snapshot = app.engine.snapshot();
+    let height = 240u32;
+    let capacity = ObjectListScroll::capacity(height);
+    runtime_assert!(
+        app.developer_object_list_row_count() > capacity,
+        "the tree has to be longer than one page to scroll"
+    );
+
+    runtime_assert!(
+        app.scroll_developer_object_list(4, height),
+        "a wheel notch moves the retained view"
+    );
+    let scrolled = app.developer_object_list_scroll;
+    let _ = app.render_developer_object_list(200, height);
+    runtime_assert_eq!(
+        app.developer_object_list_scroll => scrolled,
+        "drawing the list does not move it",
+    );
+
+    // A live mutation rebuilds the rows; the position is not part of them.
+    let extra = app
+        .engine
+        .spawn_test_object(clonk_engine::SpawnConfig::new(definition.clone()));
+    app.snapshot = app.engine.snapshot();
+    let _ = app.render_developer_object_list(200, height);
+    runtime_assert_eq!(
+        app.developer_object_list_scroll => scrolled,
+        "a spawned object does not scroll the list",
+    );
+
+    // Selecting an offscreen row does move it, once.
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, extra);
+    let _ = app.render_developer_object_list(200, height);
+    let revealed = app.developer_object_list_scroll;
+    runtime_assert!(
+        revealed != scrolled,
+        "the new selection was offscreen and brought the view with it"
+    );
+    // Scroll away from the revealed row: the direction that always has room.
+    runtime_assert!(app.scroll_developer_object_list(3, height));
+    let moved_away = app.developer_object_list_scroll;
+    let _ = app.render_developer_object_list(200, height);
+    runtime_assert_eq!(
+        app.developer_object_list_scroll => moved_away,
+        "the same selection does not drag the view back",
+    );
+}
+
 // C4Console.cpp:1353-1356 and C4ObjectListDlg.cpp:599-646,726-787 — the
 // Objects component opens the object list, whose rows are the ported
 // object tree and whose clicks write the edit cursor's selection.

@@ -2764,6 +2764,8 @@ impl GameApp {
             developer_selection: Default::default(),
             developer_tools: Default::default(),
             developer_tools_open_combo: None,
+            developer_object_list_scroll: Default::default(),
+            developer_object_list_revealed: None,
             console_viewport_projections: Default::default(),
             edit_cursor_drop_target: None,
             edit_cursor_tick_frame: None,
