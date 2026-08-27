@@ -637,7 +637,7 @@ pub(crate) fn draw_scensel_dynamic(
             surface,
             x + 4,
             top + 4 + book_fonts.text.line_height,
-            "Press Esc to clear search.",
+            scenario_menu.enhanced_search_clear_hint(),
             [0, 0, 0, 255],
             clonk_graphics::clonk_font::TextAlign::Left,
             false,

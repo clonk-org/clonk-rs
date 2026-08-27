@@ -4835,6 +4835,7 @@ pub(crate) struct MenuState {
     /// the dialog, changing both presence and mouse-over z-order.
     pub(crate) scensel_title_present: bool,
     pub(crate) scensel_title_topmost: bool,
+    enhanced_search_resources: EnhancedSearchResources,
 }
 
 #[derive(Clone, Debug)]
@@ -6644,6 +6645,53 @@ impl MenuLayer {
     }
 }
 
+/// The port's enhanced scenario search is an accepted divergence from C++, so
+/// its presentation has no oracle strings to mirror; these are port-owned
+/// `IDS_` entries in `planet/System.c4g`, read from the same frozen active
+/// language table every other startup string comes from
+/// (clonk-org/clonk-rs#1175). The defaults are the English wording the search
+/// shipped with, so a table that lacks the keys reads exactly as before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EnhancedSearchResources {
+    /// `IDS_MSG_SEARCHRESULTS` — matches, total, noun.
+    pub(crate) results: String,
+    /// `IDS_MSG_SEARCHNOMATCHES` — total, noun.
+    pub(crate) no_matches: String,
+    /// `IDS_MSG_SEARCHNORESULT` — the term that matched nothing.
+    pub(crate) no_result: String,
+    /// `IDS_MSG_SEARCHCLEARHINT`.
+    pub(crate) clear_hint: String,
+    /// `IDS_MSG_SEARCHSCENARIO` / `IDS_MSG_SEARCHSCENARIOS`. A separate noun,
+    /// not the capitalized `IDS_TYPE_SCENARIO` this sentence would misuse, and
+    /// two whole sentences: a language that inflects the count differently can
+    /// reorder the format string without losing the singular/plural choice.
+    pub(crate) scenario: String,
+    pub(crate) scenarios: String,
+}
+
+impl Default for EnhancedSearchResources {
+    fn default() -> Self {
+        Self {
+            results: "%d of %d %s".to_string(),
+            no_matches: "No matches among %d %s".to_string(),
+            no_result: "No scenarios match \"%s\".".to_string(),
+            clear_hint: "Press Esc to clear search.".to_string(),
+            scenario: "scenario".to_string(),
+            scenarios: "scenarios".to_string(),
+        }
+    }
+}
+
+impl EnhancedSearchResources {
+    fn noun(&self, count: usize) -> &str {
+        if count == 1 {
+            &self.scenario
+        } else {
+            &self.scenarios
+        }
+    }
+}
+
 impl MenuState {
     pub(crate) fn new(menu: StartupMenu, entries: Vec<FrontendScenario>) -> Self {
         let visible_entries = entries.clone();
@@ -6671,7 +6719,19 @@ impl MenuState {
             include_back: true,
             scensel_title_present: true,
             scensel_title_topmost: false,
+            enhanced_search_resources: EnhancedSearchResources::default(),
         }
+    }
+
+    /// Installs the active language table's enhanced-search wording. Called
+    /// whenever the process language table is (re)loaded, so an Options
+    /// language change reaches the next drawn caption.
+    pub(crate) fn set_enhanced_search_resources(&mut self, resources: EnhancedSearchResources) {
+        self.enhanced_search_resources = resources;
+    }
+
+    pub(crate) fn enhanced_search_clear_hint(&self) -> &str {
+        &self.enhanced_search_resources.clear_hint
     }
 
     /// Switches Back-row injection and rebuilds the visible entries.
@@ -6880,21 +6940,15 @@ impl MenuState {
 
     pub(crate) fn enhanced_search_caption(&self) -> Option<String> {
         self.enhanced_search_active.then(|| {
-            let scenario_label = if self.enhanced_search_total == 1 {
-                "scenario"
-            } else {
-                "scenarios"
-            };
+            let resources = &self.enhanced_search_resources;
+            let total = self.enhanced_search_total.to_string();
+            let noun = resources.noun(self.enhanced_search_total);
             if self.visible_entries.is_empty() {
-                format!(
-                    "No matches among {} {scenario_label}",
-                    self.enhanced_search_total
-                )
+                format_resource_string(resources.no_matches.clone(), &[&total, noun])
             } else {
-                format!(
-                    "{} of {} {scenario_label}",
-                    self.visible_entries.len(),
-                    self.enhanced_search_total
+                format_resource_string(
+                    resources.results.clone(),
+                    &[&self.visible_entries.len().to_string(), &total, noun],
                 )
             }
         })
@@ -6902,9 +6956,9 @@ impl MenuState {
 
     pub(crate) fn enhanced_search_empty_message(&self) -> Option<String> {
         (self.enhanced_search_active && self.visible_entries.is_empty()).then(|| {
-            format!(
-                "No scenarios match \"{}\".",
-                self.applied_search_text.trim()
+            format_resource_string(
+                self.enhanced_search_resources.no_result.clone(),
+                &[self.applied_search_text.trim()],
             )
         })
     }
