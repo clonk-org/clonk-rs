@@ -3851,11 +3851,13 @@ impl GameApp {
                 .render(&mut surface, font.as_ref()),
             ToolboxPage::Property => {
                 let text = self.developer_property_page_text();
+                let script = self.developer_property_script_input.clone();
                 crate::developer_toolbox_view::render_property_page(
                     &mut surface,
                     font.as_ref(),
                     &text,
                     self.developer_property_scroll,
+                    &script,
                     self.developer_console_editing(),
                     &self.runtime_resource_text("IDS_BTN_RELOADDEF", "Reload def"),
                 );
@@ -4139,6 +4141,63 @@ impl GameApp {
         self.developer_console_editing()
             .then(|| self.developer_property_selected_definition())
             .flatten()
+    }
+
+    /// What has been typed into the script entry.
+    pub(crate) fn developer_property_script_input(&self) -> &str {
+        &self.developer_property_script_input
+    }
+
+    /// Append typed text, if the control is enabled.
+    ///
+    /// `EnableWindow(GetDlgItem(hDialog, IDC_COMBOINPUT), Console.Editing)`
+    /// (`C4PropertyDlg.cpp:117`) is the entry's whole gate; a disabled combo
+    /// box takes no keystroke. Returns whether it did.
+    pub(crate) fn type_developer_property_script(&mut self, text: &str) -> bool {
+        if !self.developer_console_editing() || text.is_empty() {
+            return false;
+        }
+        self.developer_property_script_input.push_str(text);
+        true
+    }
+
+    /// Remove the last character, if the control is enabled.
+    pub(crate) fn backspace_developer_property_script(&mut self) -> bool {
+        if !self.developer_console_editing() {
+            return false;
+        }
+        self.developer_property_script_input.pop().is_some()
+    }
+
+    /// Enter: run what was typed on the live selection.
+    ///
+    /// `OnScriptActivate` calls `Console.EditCursor.In(text)` for nonempty
+    /// text only (`C4PropertyDlg.cpp:394-399`); `In` wraps the selection into
+    /// the `EMMO_Script` control this already had. Returns whether anything
+    /// was submitted.
+    pub(crate) fn submit_developer_property_script(&mut self) -> Result<bool, EngineError> {
+        if !self.developer_console_editing() || self.developer_property_script_input.is_empty() {
+            return Ok(false);
+        }
+        let script = std::mem::take(&mut self.developer_property_script_input);
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        self.submit_editor_selection_script(&script, &objects)?;
+        Ok(true)
+    }
+
+    /// What the script entry offers to complete.
+    ///
+    /// The selected definition is the same `idSelectedDef` the reload button
+    /// takes: only a single selection names one (`C4PropertyDlg.cpp:175,
+    /// 248-249`), and `UpdateInputCtrl` is handed that object or nothing.
+    pub(crate) fn developer_property_script_completions(&self) -> Vec<String> {
+        self.engine
+            .property_script_completions(self.developer_property_selected_definition().as_deref())
     }
 
     /// `C4PropertyDlg::idSelectedDef` — the reload button's target.

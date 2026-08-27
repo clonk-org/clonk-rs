@@ -959,6 +959,36 @@ impl Engine {
             .is_some_and(|definition| definition.has_function(function))
     }
 
+    /// The script-entry completion corpus for a selected definition, or for
+    /// none.
+    ///
+    /// `C4PropertyDlg::UpdateInputCtrl` fills its combo box from two sources
+    /// (`C4PropertyDlg.cpp:336-370`): every public function the script engine
+    /// holds — the same group `C4Console::UpdateInputCtrl` uses, which is why
+    /// this reuses [`Engine::console_script_completion_catalog`] rather than
+    /// filtering `GetPublic` a second time — and, only when exactly one object
+    /// is selected, every `AA_PUBLIC` function of that object's definition
+    /// script, walked in `GetSFunc` order.
+    ///
+    /// The definition's own functions come **first**: Win32 inserts them at
+    /// index zero above a divider (`:359-365`). That is also the only useful
+    /// order, since the engine's built-ins would otherwise bury the handful of
+    /// functions the selected object actually has.
+    pub fn property_script_completions(&self, definition_id: Option<&str>) -> Vec<String> {
+        let engine_functions = self.console_script_completion_catalog().engine_functions;
+        let Some(definition) = definition_id.and_then(|id| self.definitions.get(id)) else {
+            return engine_functions;
+        };
+        let mut names: Vec<String> = definition
+            .script
+            .local_functions_in_get_sfunc_order()
+            .filter(|(_, function)| function.access == clonk_script::AccessLevel::Public)
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.extend(engine_functions);
+        names
+    }
+
     /// The first caption segment returned by `C4ScriptHost::GetControlDesc`.
     /// A nonempty raw descriptor may intentionally begin with `|`, yielding
     /// an empty caption rather than falling back to the receiver's name.
