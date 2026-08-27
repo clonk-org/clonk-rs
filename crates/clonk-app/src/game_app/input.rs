@@ -3090,17 +3090,29 @@ impl GameApp {
         if state != ElementState::Pressed {
             return Ok(false);
         }
+        self.toggle_runtime_join_admission();
+        Ok(true)
+    }
+
+    /// `C4Network2::ToggleAllowJoin`'s host-side work
+    /// (`src/C4Network2.cpp:799-804,841-849`).
+    ///
+    /// Separated from the key handler because the callback is registered on a
+    /// `C4CustomKey` and is therefore reachable from more than one device. A
+    /// process that is not the network host consumes the code and changes
+    /// nothing, which is why this returns unit rather than a claim.
+    pub(crate) fn toggle_runtime_join_admission(&mut self) {
         if !matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
-            return Ok(true);
+            return;
         }
         let currently_allowed = self.runtime_join_admission_allowed();
         let allowed = !currently_allowed;
         let Some(network) = self.network.as_ref() else {
-            return Ok(true);
+            return;
         };
         if let Err(error) = network.set_join_allowed(allowed) {
             tracing::error!(%error, allowed, "failed to change runtime join admission");
-            return Ok(true);
+            return;
         }
         self.runtime_network_join_allowed = Some(allowed);
         if let Some(NetworkMode::Host(HostSettings {
@@ -3127,7 +3139,6 @@ impl GameApp {
             Err(error) => tracing::warn!(%error, "failed to prepare runtime-join flash message"),
         }
         self.refresh_runtime_client_list();
-        Ok(true)
     }
 
     /// Runs the default-unbound PRIO_Base NetStatsToggle, the last entry of
