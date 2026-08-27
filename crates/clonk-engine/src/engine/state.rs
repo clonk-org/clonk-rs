@@ -3170,20 +3170,21 @@ impl Engine {
         flags: i32,
         preserve_ids: Vec<ObjectId>,
     ) -> Result<bool, EngineError> {
-        if !self.scenario_current_section_registered {
+        if !self.scenario_section_state.current_registered {
             // C4Game::LoadScenarioSection creates the implicit current/root
             // node before it even looks up the requested target. Its
             // constructor prepends the node to Game.pScenarioSections.
-            let current = self.current_scenario_section.to_ascii_lowercase();
-            if self.scenario_sections.contains_key(&current) {
-                self.scenario_section_order
+            let current = self.scenario_section_state.current.to_ascii_lowercase();
+            if self.scenario_section_state.sections.contains_key(&current) {
+                self.scenario_section_state
+                    .order
                     .retain(|section| section != &current);
-                self.scenario_section_order.insert(0, current);
+                self.scenario_section_state.order.insert(0, current);
             }
-            self.scenario_current_section_registered = true;
+            self.scenario_section_state.current_registered = true;
         }
         let key = name.to_ascii_lowercase();
-        let Some(target) = self.scenario_sections.get(&key) else {
+        let Some(target) = self.scenario_section_state.sections.get(&key) else {
             return Ok(false);
         };
 
@@ -3203,7 +3204,7 @@ impl Engine {
         let preserved = preserve_ids.into_iter().collect::<HashSet<_>>();
         let departing_pxs = self.pxs_system.clone();
         let departing_mass_movers = self.mass_movers.clone();
-        let departing_key = self.current_scenario_section.to_ascii_lowercase();
+        let departing_key = self.scenario_section_state.current.to_ascii_lowercase();
         let changing_section = key != departing_key;
         // Objects.Save enumerates both active and inactive lists even though
         // a section file decompiles active non-player objects only. Capture
@@ -3261,7 +3262,8 @@ impl Engine {
                 Vec::new()
             };
             let mut current = self
-                .scenario_sections
+                .scenario_section_state
+                .sections
                 .get(&departing_key)
                 .cloned()
                 .expect("departing section remains registered");
@@ -3327,7 +3329,7 @@ impl Engine {
                 flags & 2 != 0,
             )
             .map_err(|error| EngineError::ScenarioSectionSave {
-                section: self.current_scenario_section.clone(),
+                section: self.scenario_section_state.current.clone(),
                 detail: error.to_string(),
             })?;
             current.frozen_group = Some(frozen_group);
@@ -3345,7 +3347,9 @@ impl Engine {
                     landscape.clear_retained_map();
                 }
             }
-            self.scenario_sections.insert(departing_key, current);
+            self.scenario_section_state
+                .sections
+                .insert(departing_key, current);
         }
 
         // Native removes the active object list through AssignRemoval and
@@ -3365,7 +3369,8 @@ impl Engine {
         state = self.capture_state();
 
         let target = self
-            .scenario_sections
+            .scenario_section_state
+            .sections
             .get(&key)
             .cloned()
             .expect("section presence checked above");
@@ -3671,8 +3676,8 @@ impl Engine {
         if !target.no_initialize && landscape_loaded && keep_map_creator {
             self.run_post_init_map_callbacks(&post_init_map_callbacks)?;
         }
-        self.current_scenario_section = target.name;
-        self.last_scenario_section_flags = Some(flags);
+        self.scenario_section_state.current = target.name;
+        self.scenario_section_state.last_flags = Some(flags);
         Ok(true)
     }
 

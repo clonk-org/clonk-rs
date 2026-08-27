@@ -739,7 +739,8 @@ fn resumed_non_main_implicit_root_reopens_after_saved_departure() {
     assert!(engine.load_test_section("Main", 3, Vec::new()));
     assert!(
         engine
-            .scenario_sections
+            .scenario_section_state
+            .sections
             .get("cave")
             .is_some_and(|section| section.frozen_group.is_some()),
         "C4S_SAVE_LANDSCAPE | C4S_SAVE_OBJECTS creates the temp group"
@@ -782,7 +783,8 @@ fn section_object_save_enumerates_active_and_inactive_compiler_caches() {
 
     let frozen = crate::TestValueExt::test_value(
         engine
-            .scenario_sections
+            .scenario_section_state
+            .sections
             .get("main")
             .and_then(|section| section.frozen_group.clone()),
     );
@@ -1048,7 +1050,8 @@ fn saved_section_freezes_changed_map_before_exact_reload_discards_it() {
     assert!(engine.load_test_section("next", 1, Vec::new()));
     let frozen = crate::TestValueExt::test_value(
         engine
-            .scenario_sections
+            .scenario_section_state
+            .sections
             .get("main")
             .and_then(|section| section.frozen_group.clone()),
     );
@@ -1282,7 +1285,8 @@ fn section_save_preserves_overlapping_inactive_solid_mask_like_cpp() {
     ));
     let saved = crate::TestValueExt::test_value(
         engine
-            .scenario_sections
+            .scenario_section_state
+            .sections
             .get("main")
             .and_then(|section| section.landscape.as_ref()),
     );

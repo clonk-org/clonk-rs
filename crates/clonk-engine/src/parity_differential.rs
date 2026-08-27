@@ -13998,7 +13998,8 @@ protected func ContactBottom()
                 let modified = case.modified.contains(configured);
                 let key = configured.to_ascii_lowercase();
                 let section = engine
-                    .scenario_sections
+                    .scenario_section_state
+                    .sections
                     .get_mut(&key)
                     .unwrap_or_else(|| panic!("{label}: `{configured}` was not configured"));
                 section.modified = modified;

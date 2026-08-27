@@ -7339,6 +7339,32 @@ pub struct ScenarioBatch {
     pub script_counter: Option<i32>,
 }
 
+/// `Game.pScenarioSections` and the bookkeeping that materializes it.
+///
+/// The five parts move together: a section is discovered into `sections`,
+/// takes its place in `order`, and the implicit current node joins that list
+/// only once `current_registered` says C++ would have created
+/// `pCurrentScenarioSection`. Held flat they read as five unrelated fields,
+/// and the invariant that `order` names exactly the registered members of
+/// `sections` has nowhere to live.
+#[derive(Clone, Default)]
+pub(crate) struct ScenarioSectionState {
+    /// Runtime-loadable `Sect*.c4g` payloads plus the implicit main section.
+    /// Keys are ASCII-lowercase because C4ScenarioSection lookup is
+    /// case-insensitive (C4Game.cpp:4101-4104).
+    pub(crate) sections: HashMap<String, RuntimeScenarioSection>,
+    /// `Game.pScenarioSections` linked-list traversal order. Each discovered
+    /// named section is prepended; the implicit current node joins only when
+    /// the first LoadScenarioSection call prepends it.
+    pub(crate) order: Vec<String>,
+    /// Whether C++ has materialized `pCurrentScenarioSection`. Compiling
+    /// CurrentScenarioSection from Game.txt does not create this pointer; the
+    /// first LoadScenarioSection call does and prepends it to the list.
+    pub(crate) current_registered: bool,
+    pub(crate) current: String,
+    pub(crate) last_flags: Option<i32>,
+}
+
 #[derive(Clone)]
 struct RuntimeScenarioSection {
     name: String,
@@ -8349,20 +8375,8 @@ pub struct Engine {
     /// GetScenarioVal. Kept independently of evaluated landscape/weather
     /// state, exactly like C++ retains C4Scenario beside those subsystems.
     scenario_values: Rc<scenario::ScenarioValueStore>,
-    /// Runtime-loadable `Sect*.c4g` payloads plus the implicit main section.
-    /// Keys are ASCII-lowercase because C4ScenarioSection lookup is
-    /// case-insensitive (C4Game.cpp:4101-4104).
-    scenario_sections: HashMap<String, RuntimeScenarioSection>,
-    /// `Game.pScenarioSections` linked-list traversal order. Each discovered
-    /// named section is prepended; the implicit current node joins only when
-    /// the first LoadScenarioSection call prepends it.
-    scenario_section_order: Vec<String>,
-    /// Whether C++ has materialized `pCurrentScenarioSection`. Compiling
-    /// CurrentScenarioSection from Game.txt does not create this pointer; the
-    /// first LoadScenarioSection call does and prepends it to the list.
-    scenario_current_section_registered: bool,
-    current_scenario_section: String,
-    last_scenario_section_flags: Option<i32>,
+    /// `Game.pScenarioSections` and everything that materializes it.
+    scenario_section_state: ScenarioSectionState,
     /// Per-player crew info lists (C4Player::CrewInfoList): the roster
     /// GetIdle/New recruit from at join.
     crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
@@ -10579,11 +10593,12 @@ impl Engine {
             standard_names: None,
             map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
             scenario_values: Rc::new(scenario::ScenarioValueStore::default()),
-            scenario_sections: HashMap::new(),
-            scenario_section_order: Vec::new(),
-            scenario_current_section_registered: false,
-            current_scenario_section: "main".to_string(),
-            last_scenario_section_flags: None,
+            scenario_section_state: ScenarioSectionState {
+                // `Game.CurrentScenarioSection` starts at the implicit main
+                // section; the rest of the list is empty until discovery.
+                current: "main".to_string(),
+                ..ScenarioSectionState::default()
+            },
             crew_rosters: HashMap::new(),
             crew_info_order: HashMap::new(),
             crew_object_infos: Rc::new(HashMap::new()),
