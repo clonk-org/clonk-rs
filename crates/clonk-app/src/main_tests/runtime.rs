@@ -3538,7 +3538,7 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
         &app.bindings,
         &app.gamepad_bindings,
         3,
-        app.gamepad_gui_control,
+        app.config.gamepad_gui_control,
     );
     let dialog = app.startup_options_dialog.test_mut();
     *dialog.controls_mut() = controls;
@@ -7719,7 +7719,7 @@ fn runtime_resource_lookup_uses_the_process_loaded_language_table() {
         "IDS_TEST_PROCESS_RESOURCE".to_string(),
         "process cached É".to_string(),
     );
-    app.runtime_language_charset = RuntimeHelpCharset::Windows1252;
+    app.config.language_charset = RuntimeHelpCharset::Windows1252;
 
     runtime_assert_eq!(
         app.runtime_resource_text("IDS_TEST_PROCESS_RESOURCE", "fallback") => "process cached É";
@@ -7758,7 +7758,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     let mut app = new_real_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
     app.reload_application_language_resources().test_value();
-    runtime_assert_eq!(app.runtime_language_charset => RuntimeHelpCharset::Windows1252);
+    runtime_assert_eq!(app.config.language_charset => RuntimeHelpCharset::Windows1252);
 
     fs::write(&language, table("Mutated", "UTF-8")).test_value();
     let disk = load_runtime_language_table(Some(paths)).test_value();
@@ -7856,7 +7856,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
 
     app.reload_application_language_resources().test_value();
     runtime_assert_eq!(
-        app.runtime_language_charset => RuntimeHelpCharset::Utf8;
+        app.config.language_charset => RuntimeHelpCharset::Utf8;
         app.runtime_resource_text("IDS_MSG_SELECT", "fallback") => "Mutated select %s";
         app.new_startup_player_properties_controller(0, 0).comment() => "Mutated new player";
         load_options_program_state(Some(paths), Some(&app.startup_tooltip_resources),).no_language_info => "Mutated no language info";
@@ -7905,11 +7905,11 @@ fn runtime_join_flash_keeps_the_process_language_charset_until_reload() {
     let flash = app.runtime_flash_message.test_ref();
     runtime_assert_eq!(flash.text.chars().count() => 300, "the retained CP1252 table keeps all 300 one-byte characters");
     assert!(flash.text.chars().all(|character| character == '\u{e9}'));
-    runtime_assert_eq!(app.runtime_language_charset => RuntimeHelpCharset::Windows1252);
+    runtime_assert_eq!(app.config.language_charset => RuntimeHelpCharset::Windows1252);
 
     app.reload_application_language_resources().test_value();
     runtime_assert_eq!(
-        app.runtime_language_charset => RuntimeHelpCharset::Utf8;
+        app.config.language_charset => RuntimeHelpCharset::Utf8;
         app.classic_lobby_option_labels().runtime_join_free => "Reloaded free";
     );
 }
@@ -8951,7 +8951,7 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
     assert!(app.display_flags.clock);
     assert!(app.display_flags.fps);
     assert_eq!(app.display_flags.upper_board, UpperBoardMode::Small);
-    assert_eq!(app.deferred_config.len(), 5);
+    assert_eq!(app.config.deferred.len(), 5);
 
     runtime_assert_eq!(fs::read(paths.config_file()).test_value() => initial_config, "Display toggles mutate the process-local config only until shutdown");
     app.flush_deferred_config();

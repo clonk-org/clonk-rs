@@ -166,6 +166,50 @@ pub(crate) struct SoundState {
     pub(crate) frontend_attempted_for_entry: bool,
 }
 
+/// Persisted configuration, the deferred writes that have not reached it
+/// yet, and the process-level latches read from it.
+///
+/// C++ mutates one process-wide `Config` and saves it once in
+/// `C4Application::Clear` (C4Application.cpp:351-367), so the deferred
+/// writes and the values already on disk are two halves of one thing:
+/// reading a setting has to consult both, and a round that earns mission
+/// access must know what was already written to avoid rewriting it every
+/// frame. The gamepad and display latches are process-local projections of
+/// the same config, captured at the points native captures them.
+pub(crate) struct ConfigState {
+    /// Ordinary runtime config toggles, held until a clean shutdown the way
+    /// C++ mutates its process-wide `Config` and saves once in
+    /// `C4Application::Clear` (C4Application.cpp:351-367).
+    pub(crate) deferred: crate::deferred_config::DeferredConfig,
+    /// The one operating mode this run resolved to, from the launch override
+    /// or the persisted `General.CompatProfile` key
+    /// (`crate::settings::resolve_compat_profile`). Held as state rather than
+    /// re-read per use so a host and the clients it admits cannot disagree
+    /// about it mid-session.
+    pub(crate) compat_profile: crate::settings::CompatProfile,
+    /// Encoding of the process-global resource table. `LoadResStr` reads the
+    /// same already-loaded table as the UTF-8 presentation helpers; retain
+    /// its source charset so byte-returning call sites do not reopen it.
+    pub(crate) language_charset: RuntimeHelpCharset,
+    /// Process-local Config.General.MissionAccess shared across fresh games.
+    pub(crate) mission_access: MissionAccessStore,
+    /// The mission-access list already on disk, so a round that earns one
+    /// writes once rather than on every frame that follows.
+    pub(crate) persisted_mission_access: String,
+    /// `Config.Graphics.ShowFolderMaps`, default-on like C4ConfigGraphics.
+    pub(crate) show_folder_maps: bool,
+    /// Process-local Config.Graphics.ShowCommands enable requests shared
+    /// across fresh engines.
+    pub(crate) show_commands_requests: ShowCommandsRequestStore,
+    /// Current `Config.General.GamepadEnabled` value used by each new
+    /// `C4Player::InitControl` analogue.
+    pub(crate) gamepads_enabled: bool,
+    /// Startup-time gamepad subsystem gate. Native does not create or later
+    /// poll `C4GamePadControl` when this was false during application init.
+    pub(crate) gamepad_input_enabled: bool,
+    pub(crate) gamepad_gui_control: bool,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -203,25 +247,13 @@ pub(crate) struct GameApp {
     /// after an Options language selection; retaining it also prevents
     /// per-frame network-browser/console lookup from reopening System.c4g.
     pub(crate) startup_tooltip_resources: HashMap<String, String>,
-    /// Encoding of the process-global resource table. `LoadResStr` reads the
-    /// same already-loaded table as the UTF-8 presentation helpers; retain
-    /// its source charset so byte-returning call sites do not reopen it.
-    pub(crate) runtime_language_charset: RuntimeHelpCharset,
-    /// Process-local Config.General.MissionAccess shared across fresh games.
-    pub(crate) mission_access: MissionAccessStore,
-    /// The mission-access list already on disk, so a round that earns one
-    /// writes once rather than on every frame that follows.
-    pub(crate) persisted_mission_access: String,
     /// Process-global C4Group maker captured from `Config.General.Name` once
     /// during application initialization, like `C4Group_SetMaker`.
     pub(crate) process_group_maker: LegacyCString,
+    /// Persisted config, its deferred writes, and the latches over it.
+    pub(crate) config: ConfigState,
     /// Where a save writes, what it still owes, and in which language.
     pub(crate) saves: SaveState,
-    /// `Config.Graphics.ShowFolderMaps`, default-on like C4ConfigGraphics.
-    pub(crate) show_folder_maps: bool,
-    /// Process-local Config.Graphics.ShowCommands enable requests shared
-    /// across fresh engines.
-    pub(crate) show_commands_requests: ShowCommandsRequestStore,
     /// Process-local `Config.General.AllowScriptingInReplays`; native reads
     /// this from its already-loaded configuration while replay controls run.
     pub(crate) allow_scripting_in_replays: bool,
@@ -258,27 +290,16 @@ pub(crate) struct GameApp {
     /// Reused command-only target for scale-native physical text layers.
     pub(crate) retained_native_capture_surface: Option<Surface>,
     pub(crate) pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
-    /// Current `Config.General.GamepadEnabled` value used by each new
-    /// `C4Player::InitControl` analogue.
-    pub(crate) gamepads_enabled: bool,
-    /// Startup-time gamepad subsystem gate. Native does not create or later
-    /// poll `C4GamePadControl` when this was false during application init.
-    pub(crate) gamepad_input_enabled: bool,
     pub(crate) gamepads: GamepadManager,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
     pub(crate) sec1_timer_call_count: usize,
-    pub(crate) gamepad_gui_control: bool,
     pub(crate) snapshot: SimulationSnapshot,
     pub(crate) focus_id: Option<ObjectId>,
     pub(crate) focus_snapshot: Option<clonk_engine::ObjectSnapshot>,
     pub(crate) frame_text: String,
     pub(crate) status_text: String,
-    /// Ordinary runtime config toggles, held until a clean shutdown the way
-    /// C++ mutates its process-wide `Config` and saves once in
-    /// `C4Application::Clear` (C4Application.cpp:351-367).
-    pub(crate) deferred_config: crate::deferred_config::DeferredConfig,
     pub(crate) startup_restart_diagnostics: StartupRestartDiagnostics,
     pub(crate) energy_fraction: f32,
     pub(crate) scenario_label: String,
@@ -931,12 +952,6 @@ pub(crate) struct GameApp {
     pub(crate) incoming_update: Option<PathBuf>,
     /// A one-shot update check requested by `/update` or `clonk:update`.
     pub(crate) update_check_requested: bool,
-    /// The one operating mode this run resolved to, from the launch override
-    /// or the persisted `General.CompatProfile` key
-    /// (`crate::settings::resolve_compat_profile`). Held as state rather than
-    /// re-read per use so a host and the clients it admits cannot disagree
-    /// about it mid-session.
-    pub(crate) compat_profile: crate::settings::CompatProfile,
     /// The update query in flight, if any (`C4UpdateDlg::CheckForUpdates`
     /// waiting on its `C4Network2VersionInfoClient`, cpp:280-300).
     pub(crate) update_check: Option<PendingUpdateCheck>,

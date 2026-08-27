@@ -554,7 +554,7 @@ impl GameApp {
             .menu_state
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
-        self.mission_access.update_modules(modules, remove);
+        self.config.mission_access.update_modules(modules, remove);
         // Both native mutation sites change `Config.General.MissionAccess` in
         // memory alone — `FnGainMissionAccess` (C4Script.cpp:2466-2471) and this
         // cheat-code entry (C4StartupScenSelDlg.cpp:1838-1846). The port writes
@@ -2117,7 +2117,7 @@ impl GameApp {
                 startup,
                 &external_player_paths,
                 replay_save_game,
-                self.gamepads_enabled,
+                self.config.gamepads_enabled,
                 scenario_data.disables_mouse(),
             )
             .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
@@ -2401,7 +2401,7 @@ impl GameApp {
                         owner: predicted_owner,
                         preferred_set: player_file.pref_control,
                         prefers_mouse: player_file.pref_mouse,
-                        gamepads_enabled: self.gamepads_enabled,
+                        gamepads_enabled: self.config.gamepads_enabled,
                         replay: false,
                         disable_mouse: !self.mouse_control_allowed,
                     });

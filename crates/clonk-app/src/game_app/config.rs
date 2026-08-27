@@ -863,8 +863,7 @@ impl GameApp {
                     } else {
                         labels.runtime_join_barred
                     };
-                    match self
-                        .prepare_runtime_flash_message(&message, self.runtime_language_charset)
+                    match self.prepare_runtime_flash_message(&message, self.config.language_charset)
                     {
                         Ok(message) => self.runtime_flash_message = message,
                         Err(error) => {
@@ -893,7 +892,7 @@ impl GameApp {
         let selected = self.startup_options_dialog.as_ref().and_then(|dialog| {
             (self.mode == AppMode::Menu
                 && self.startup_view == StartupView::Options
-                && self.gamepads_enabled)
+                && self.config.gamepads_enabled)
                 .then(|| dialog.controls().selected_set(ControlDevice::Gamepad))
         });
         self.gamepads
@@ -1074,7 +1073,7 @@ impl GameApp {
                     }
                 }
                 OptionsDlgAction::GamepadGuiControlChanged(enabled) => {
-                    self.gamepad_gui_control = enabled;
+                    self.config.gamepad_gui_control = enabled;
                     self.play_ui_sound("ArrowHit");
                     // `RecreateDialog(false)` (C4StartupOptionsDlg.cpp:437)
                     // constructs a whole new dialog through `SwitchDialog`
@@ -1325,7 +1324,7 @@ impl GameApp {
         }
         // The editor is a view of the live `Config`, so it has to show what this
         // session already changed rather than the values still on disk.
-        for (section, entries) in self.deferred_config.pending_by_section() {
+        for (section, entries) in self.config.deferred.pending_by_section() {
             for (key, text) in entries {
                 config.set_in(Some(&section), key, text);
             }
@@ -1385,7 +1384,7 @@ impl GameApp {
             ("Startup", "HideMsgStartDedicated"),
             ("Startup", "HideMsgPlrNoTakeOver"),
         ] {
-            self.deferred_config.clear(section, key);
+            self.config.deferred.clear(section, key);
         }
         self.clear_deferred_display_toggles();
         let paths = self.app_paths.as_ref();
@@ -1394,7 +1393,7 @@ impl GameApp {
         self.display_flags.is_fullscreen = is_fullscreen;
         self.white_lobby_chat = load_white_lobby_chat(paths);
         self.show_log_timestamps = load_show_log_timestamps(paths);
-        self.show_folder_maps = load_show_folder_maps(paths);
+        self.config.show_folder_maps = load_show_folder_maps(paths);
         self.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
         let native_config = load_native_config_bytes(paths);
         self.allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
@@ -1410,7 +1409,7 @@ impl GameApp {
         self.engine
             .set_fire_particles(self.display_flags.fire_particles);
         self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
-        self.mission_access = paths
+        self.config.mission_access = paths
             .and_then(|paths| match load_configured_mission_access(paths) {
                 Ok(access) => Some(MissionAccessStore::new(access)),
                 Err(error) => {
@@ -1419,15 +1418,15 @@ impl GameApp {
                 }
             })
             .unwrap_or_default();
-        self.persisted_mission_access = self.mission_access.snapshot();
+        self.config.persisted_mission_access = self.config.mission_access.snapshot();
         self.engine
-            .set_mission_access_store(self.mission_access.clone());
+            .set_mission_access_store(self.config.mission_access.clone());
         self.bindings = KeyboardBindings::load(paths);
         self.gamepad_bindings = GamepadBindings::load(paths);
         self.gamepads
             .set_axis_calibrations(self.gamepad_bindings.axis_calibrations());
-        self.gamepads_enabled = load_gamepads_enabled(paths);
-        self.gamepad_gui_control = load_gamepad_gui_control(paths);
+        self.config.gamepads_enabled = load_gamepads_enabled(paths);
+        self.config.gamepad_gui_control = load_gamepad_gui_control(paths);
         self.engine
             .set_control_key_names(configured_control_key_names(&self.bindings));
 
@@ -1872,7 +1871,7 @@ impl GameApp {
                 &self.bindings,
                 &self.gamepad_bindings,
                 self.gamepads.connected_count(),
-                self.gamepad_gui_control,
+                self.config.gamepad_gui_control,
             ),
             load_options_network_state(self.app_paths.as_ref()),
         );
@@ -1981,7 +1980,7 @@ impl GameApp {
             dialog.network(),
             &self.bindings,
             &self.gamepad_bindings,
-            self.gamepad_gui_control,
+            self.config.gamepad_gui_control,
         ))
     }
 
@@ -1996,7 +1995,7 @@ impl GameApp {
             dialog.network(),
             &self.bindings,
             &self.gamepad_bindings,
-            self.gamepad_gui_control,
+            self.config.gamepad_gui_control,
         );
         Some(())
     }
@@ -2023,13 +2022,17 @@ impl GameApp {
     /// divergence behind clonk-org/clonk-rs#50. Runtime toggles keep C++'s
     /// timing in `DeferredConfig`.
     pub(crate) fn persist_mission_access_if_changed(&mut self) {
-        if self.mission_access.matches(&self.persisted_mission_access) {
+        if self
+            .config
+            .mission_access
+            .matches(&self.config.persisted_mission_access)
+        {
             return;
         }
-        let access = self.mission_access.snapshot();
+        let access = self.config.mission_access.snapshot();
         // Retrying a failed write every frame would only repeat the warning,
         // so the list counts as persisted either way.
-        self.persisted_mission_access = access.clone();
+        self.config.persisted_mission_access = access.clone();
         let Some(paths) = self.app_paths.clone() else {
             return;
         };
@@ -2044,7 +2047,7 @@ impl GameApp {
         let Some(paths) = self.app_paths.clone() else {
             return;
         };
-        for (section, entries) in self.deferred_config.take_by_section() {
+        for (section, entries) in self.config.deferred.take_by_section() {
             let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_native()))
@@ -2180,7 +2183,8 @@ impl GameApp {
     ) -> clonk_frontend::game_option_buttons::GameOptionValues {
         let mut values = load_scenario_game_option_values(self.app_paths.as_ref());
         let pending_bool = |section: &str, key: &str| {
-            self.deferred_config
+            self.config
+                .deferred
                 .get(section, key)
                 .and_then(parse_native_config_bool)
         };
@@ -2196,10 +2200,10 @@ impl GameApp {
         if let Some(fair_crew) = pending_bool("General", "NoCrew") {
             values.fair_crew = fair_crew;
         }
-        if let Some(password) = self.deferred_config.get("Network", "LastPassword") {
+        if let Some(password) = self.config.deferred.get("Network", "LastPassword") {
             values.last_password = password.to_owned();
         }
-        if let Some(comment) = self.deferred_config.get("Network", "Comment") {
+        if let Some(comment) = self.config.deferred.get("Network", "Comment") {
             values.comment = comment.to_owned();
         }
         values
@@ -2220,7 +2224,7 @@ impl GameApp {
     /// surface, so an eager write here would keep a change a crash should have
     /// discarded.
     pub(crate) fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
-        self.deferred_config.set(section, key, value);
+        self.config.deferred.set(section, key, value);
     }
 
     /// The escaped-string form of [`Self::persist_game_option_value`], for a
@@ -2235,7 +2239,8 @@ impl GameApp {
             );
             return;
         };
-        self.deferred_config
+        self.config
+            .deferred
             .set_escaped(section, key, value, native);
     }
 
@@ -2269,7 +2274,7 @@ impl GameApp {
         // runtime toggle this session made, not just the redirect. `set_in`
         // picks each field's own value format, including the escaped-string
         // ones.
-        for (pending_section, entries) in self.deferred_config.pending_by_section() {
+        for (pending_section, entries) in self.config.deferred.pending_by_section() {
             for (pending_key, text) in entries {
                 config.set_in(Some(&pending_section), pending_key, text);
             }
@@ -2281,7 +2286,7 @@ impl GameApp {
         save_config_preserving_native_general_booleans(&config, &path, None, None)?;
         // Only now that the write succeeded: a failed save must stay
         // recoverable by the ordinary shutdown flush.
-        self.deferred_config.take_by_section();
+        self.config.deferred.take_by_section();
         Ok(())
     }
 
@@ -2325,7 +2330,7 @@ impl GameApp {
             | DisplayToggle::ShowCommandKeys
             | DisplayToggle::WhiteChat => return,
         };
-        self.deferred_config.set(section, key, value);
+        self.config.deferred.set(section, key, value);
     }
 
     pub(crate) fn apply_display_flags_to_config(&self, config: &mut Config) {
@@ -2365,7 +2370,7 @@ impl GameApp {
             ("General", "FPS"),
             ("Graphics", "UpperBoard"),
         ] {
-            self.deferred_config.clear(section, key);
+            self.config.deferred.clear(section, key);
         }
     }
 

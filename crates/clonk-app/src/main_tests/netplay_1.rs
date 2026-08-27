@@ -1970,7 +1970,7 @@ fn n1_assert_mission_access_grant(grant: N1MissionAccessGrant) {
             app = new_menu_app_with_paths(640, 480, &paths);
         }
         N1MissionAccessGrant::MemoryOnly => {
-            app.mission_access.update_modules("other;lock", false);
+            app.config.mission_access.update_modules("other;lock", false);
             main_assert_eq!(
                 load_configured_mission_access(&paths).expect("read stale config access") =>
                 "",
@@ -2935,7 +2935,7 @@ fn control_rate_submits_relative_set_and_waits_for_echo() {
     app.execute_control_set(sets[0]);
     main_assert_eq!(app.engine.control_rate() => 7);
     main_assert_eq!(app.network_control_clock.unwrap().control_rate() => 7);
-    main_assert_eq!(app.deferred_config.get("Network", "ControlRate") => Some("7"), "only the authoritative host echo records the next-session setting");
+    main_assert_eq!(app.config.deferred.get("Network", "ControlRate") => Some("7"), "only the authoritative host echo records the next-session setting");
     // C4ControlSet updates memory; shutdown saves it (C4Control.cpp:141).
     app.flush_deferred_config();
     main_assert_eq!(Config::load(paths.config_file()).expect("reload echoed control rate").get_in(Some("Network"), "ControlRate") => Some("7"));
@@ -2964,7 +2964,7 @@ fn runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
         .is_some_and(|lobby| lobby.runtime_join_allowed));
     main_assert_eq!(n1_lobby_option(&app, LobbyOptionKind::RuntimeJoin).map(|row| row.value.as_str()) => Some("Runtime join allowed"));
     // C4GameOptions only updates NoRuntimeJoin in memory (C4GameOptions.cpp:169).
-    main_assert_eq!(app.deferred_config.get("Network", "NoRuntimeJoin") => Some("0"));
+    main_assert_eq!(app.config.deferred.get("Network", "NoRuntimeJoin") => Some("0"));
     app.flush_deferred_config();
     main_assert_eq!(Config::load(paths.config_file()).expect("reload enabled runtime-join policy").get_in(Some("Network"), "NoRuntimeJoin") => Some("0"));
 
@@ -3071,7 +3071,7 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
     main_assert!(app.host_lobby_countdown.is_none());
     // ShowMessageModal updates the in-memory flag (C4GameLobby.cpp:462).
-    main_assert_eq!(app.deferred_config.get("Startup", "HideMsgPlrNoTakeOver") => Some("1"));
+    main_assert_eq!(app.config.deferred.get("Startup", "HideMsgPlrNoTakeOver") => Some("1"));
     app.flush_deferred_config();
     main_assert_eq!(Config::load(paths.config_file()).expect("load persisted warning preference").get_in(Some("Startup"), "HideMsgPlrNoTakeOver") => Some("1"));
 
@@ -3233,7 +3233,7 @@ fn a_running_host_advertises_only_the_profile_it_can_claim() {
 
     // An ordinary session advertises nothing, so its reference stays exactly
     // what a host that never heard of the profile publishes.
-    app.compat_profile = crate::settings::CompatProfile::Normal;
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
     app.publish_running_host_reference();
     main_assert_eq!(
         app.advertised_game_reference
@@ -3246,7 +3246,7 @@ fn a_running_host_advertises_only_the_profile_it_can_claim() {
 
     // Requesting a profile the contract cannot back publishes nothing either —
     // and the request itself is left alone.
-    app.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     app.publish_running_host_reference();
     let advertised = app
         .advertised_game_reference
@@ -3263,7 +3263,7 @@ fn a_running_host_advertises_only_the_profile_it_can_claim() {
         "the advertised profile follows what may be claimed, not what was asked"
     );
     main_assert_eq!(
-        app.compat_profile => crate::settings::CompatProfile::LegacyClonk,
+        app.config.compat_profile => crate::settings::CompatProfile::LegacyClonk,
         "and the request is never rewritten by publishing"
     );
     if !crate::compat_readiness::is_ready() {
@@ -3293,7 +3293,7 @@ fn a_reference_naming_a_profile_this_client_cannot_match_is_refused() {
 
     // Ordinary session: the silent legacy host is joinable, a profile-bearing
     // one is not.
-    app.compat_profile = crate::settings::CompatProfile::Normal;
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
     main_assert_eq!(
         app.network_reference_profile_refusal(&silent) => None,
         "a stock C++ host names no profile and must stay joinable"
@@ -3306,7 +3306,7 @@ fn a_reference_naming_a_profile_this_client_cannot_match_is_refused() {
 
     // Asking for the host's profile does not by itself make the join legal —
     // what matters is whether this session can *claim* it.
-    app.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let claimed = app.claimed_compat_profile();
     let matched = app.network_reference_profile_refusal(&legacy);
     if claimed == crate::settings::CompatProfile::LegacyClonk {
@@ -3344,7 +3344,7 @@ fn a_reference_naming_a_profile_this_client_cannot_match_is_refused() {
 
     // And the match itself is case-insensitive: an ordinary session joins a
     // host that spells the ordinary profile in any case.
-    app.compat_profile = crate::settings::CompatProfile::Normal;
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
     let spelled = clonk_network::NetworkGameReference {
         compat_profile: Some(
             crate::settings::CompatProfile::Normal

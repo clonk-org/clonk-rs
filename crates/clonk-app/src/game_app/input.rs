@@ -3140,7 +3140,7 @@ impl GameApp {
         } else {
             labels.runtime_join_barred
         };
-        match self.prepare_runtime_flash_message(&message, self.runtime_language_charset) {
+        match self.prepare_runtime_flash_message(&message, self.config.language_charset) {
             Ok(message) => self.runtime_flash_message = message,
             Err(error) => tracing::warn!(%error, "failed to prepare runtime-join flash message"),
         }
@@ -5307,7 +5307,7 @@ impl GameApp {
     }
 
     pub(crate) fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
-        if !self.gamepad_input_enabled {
+        if !self.config.gamepad_input_enabled {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -5320,7 +5320,7 @@ impl GameApp {
             self.gamepad_bindings
                 .replace_axis_calibrations(calibrations);
         }
-        let gamepad_gui_control = self.gamepad_gui_control;
+        let gamepad_gui_control = self.config.gamepad_gui_control;
         self.process_sourced_gamepad_event_batch(events, gamepad_gui_control)
     }
 
@@ -5365,7 +5365,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         use clonk_frontend::runtime_client_list::RuntimeClientListAction;
 
-        if !self.gamepad_input_enabled {
+        if !self.config.gamepad_input_enabled {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;

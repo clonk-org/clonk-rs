@@ -1182,7 +1182,7 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     // therefore sits in the deferred store, and the file still holds the
     // previous value until a save surface runs.
     main_assert_eq!(
-        app.deferred_config.get("General", "NoCrew") => Some("false"),
+        app.config.deferred.get("General", "NoCrew") => Some("false"),
         "the fair-crew flip is pending rather than written"
     );
     main_assert!(!app.scenario_game_option_values().fair_crew);
@@ -1275,7 +1275,7 @@ fn a_game_option_reaches_the_file_only_at_a_save_surface() {
     ])
     .test_value();
 
-    main_assert_eq!(app.deferred_config.get("General", "Record") => Some("1"));
+    main_assert_eq!(app.config.deferred.get("General", "Record") => Some("1"));
     let unflushed = Config::load(paths.config_file()).test_value();
     main_assert_eq!(unflushed.get_in(Some("General"), "Record") => Some("0"));
     main_assert_eq!(unflushed.get_in(Some("Network"), "Comment") => Some("old comment"), "the file keeps what this session started from");
@@ -4550,7 +4550,7 @@ fn a_deferred_participant_list_is_flushed_in_its_quoted_native_form() {
     app.app_paths = Some(paths.clone());
 
     app.defer_participant_list("Alice.c4p;Bob.c4p");
-    main_assert_eq!(app.deferred_config.get("General", "Participants") => Some("Alice.c4p;Bob.c4p"), "the running session reads its own pending list");
+    main_assert_eq!(app.config.deferred.get("General", "Participants") => Some("Alice.c4p;Bob.c4p"), "the running session reads its own pending list");
 
     app.flush_deferred_config();
 

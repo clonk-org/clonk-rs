@@ -1115,7 +1115,7 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
     main_assert_eq!(redirected.get_in(Some("Graphics"), "ShowClock") => Some("true"));
     main_assert_eq!(redirected.get_in(Some("General"), "FPS") => Some("true"));
     main_assert_eq!(redirected.get_in(Some("Graphics"), "UpperBoard") => Some("Small"));
-    main_assert_eq!(app.deferred_config.len() => 0);
+    main_assert_eq!(app.config.deferred.len() => 0);
     main_assert_eq!(app.message_dialogs.len() => 1);
     let applied = &app.message_dialogs[0].state;
     main_assert_eq!(applied.caption() => "Server Redirection");
@@ -5311,7 +5311,7 @@ fn compat_profile_launch_override_is_parsed_but_never_persisted() {
 
     let mut app = new_state_only_menu_app(320, 200);
     app.apply_classic_command_line(&parsed).test_value();
-    main_assert_eq!(app.compat_profile => CompatProfile::LegacyClonk);
+    main_assert_eq!(app.config.compat_profile => CompatProfile::LegacyClonk);
 }
 
 /// The compatibility profile takes the Shared Bases fallback away, and
@@ -5339,7 +5339,7 @@ fn compat_profile_takes_away_the_shared_base_fallback() {
     let parsed = parse_classic_command_line(&[OsString::from("/compatprofile:legacy-clonk")]);
     let mut app = new_state_only_menu_app(320, 200);
     app.apply_classic_command_line(&parsed).test_value();
-    main_assert_eq!(app.compat_profile => CompatProfile::LegacyClonk);
+    main_assert_eq!(app.config.compat_profile => CompatProfile::LegacyClonk);
     assert!(
         !app.engine.shared_bases(),
         "the resolved profile must reach the engine, not just the app field"
@@ -5364,7 +5364,7 @@ fn a_compatibility_session_withholds_the_content_appendto_divergences() {
         ("Helpers.c".to_string(), "/* shipped */".to_string()),
     ];
 
-    app.compat_profile = crate::settings::CompatProfile::Normal;
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
     let normal = app.global_scripts_for_session();
     main_assert_eq!(
         normal.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>()
@@ -5372,7 +5372,7 @@ fn a_compatibility_session_withholds_the_content_appendto_divergences() {
         "normal Rust-only play loads every shipped script, in order"
     );
 
-    app.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let compat = app.global_scripts_for_session();
     main_assert_eq!(
         compat.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>()
@@ -5421,12 +5421,12 @@ fn starting_a_session_installs_the_profiles_ingame_game_tick() {
         app.engine.game_tick_delay_ms() => clonk_engine::DEFAULT_GAME_TICK_DELAY_MS
     );
 
-    app.compat_profile = CompatProfile::LegacyClonk;
+    app.config.compat_profile = CompatProfile::LegacyClonk;
     app.configure_running_state("compat session".to_string(), 0);
     main_assert_eq!(app.engine.game_tick_delay_ms() => CPP_INGAME_GAME_TICK_DELAY_MS);
 
     // ... and a normal-profile session keeps the port's cadence.
-    app.compat_profile = CompatProfile::Normal;
+    app.config.compat_profile = CompatProfile::Normal;
     app.configure_running_state("normal session".to_string(), 0);
     main_assert_eq!(
         app.engine.game_tick_delay_ms() => clonk_engine::DEFAULT_GAME_TICK_DELAY_MS

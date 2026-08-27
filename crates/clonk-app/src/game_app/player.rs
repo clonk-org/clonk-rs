@@ -328,7 +328,7 @@ impl GameApp {
             owner: self.local_owner,
             preferred_set: 0,
             prefers_mouse: true,
-            gamepads_enabled: self.gamepads_enabled,
+            gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         });
@@ -524,7 +524,7 @@ impl GameApp {
         // for AutoStop players, so the compatibility profile withholds the
         // classic release the port otherwise synchronizes.
         controls.set_classic_release_enabled(
-            self.compat_profile == crate::settings::CompatProfile::Normal,
+            self.config.compat_profile == crate::settings::CompatProfile::Normal,
         );
         self.local_controls = controls;
     }

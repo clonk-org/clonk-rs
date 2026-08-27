@@ -282,7 +282,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
 
     let locked = app.scensel.catalog["Locked.c4s"].clone();
     main_assert!(locked.is_playable, "denied rows remain actionable");
-    main_assert!(!locked.has_mission_access(&app.mission_access));
+    main_assert!(!locked.has_mission_access(&app.config.mission_access));
     app.enter_scenario_folder("Map.c4f");
     main_assert_eq!(app.menu_state.current_map().expect("mission-gated map view").scenarios.len() => 0, "a denied scenario produces no map button");
     app.menu_state.leave_folder();
@@ -316,14 +316,14 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     )])
     .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    main_assert_eq!(app.mission_access.snapshot() => "secret");
+    main_assert_eq!(app.config.mission_access.snapshot() => "secret");
     // C++ keeps this in memory until a save (C4Script.cpp:2466-2471;
     // C4StartupScenSelDlg.cpp:1838-1856); the port writes earned access
     // straight out instead (`persist_mission_access_if_changed`).
     main_assert_eq!(load_configured_mission_access(&paths).expect("read saved mission access") => "secret");
     main_assert_eq!(app.scensel.entry_enabled.get("Locked.c4s") => Some(&true));
     main_assert_eq!(app.scensel.entry_enabled.get("Native.c4s") => Some(&false));
-    main_assert!(locked.has_mission_access(&app.mission_access));
+    main_assert!(locked.has_mission_access(&app.config.mission_access));
     app.enter_scenario_folder("Map.c4f");
     main_assert_eq!(
         app.menu_state
@@ -342,7 +342,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     app.apply_scenario_mission_access(&native_password)
         .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    main_assert_eq!(app.mission_access.snapshot() => format!("secret;{native_password}"));
+    main_assert_eq!(app.config.mission_access.snapshot() => format!("secret;{native_password}"));
     main_assert_eq!(app.scensel.entry_enabled.get("Native.c4s") => Some(&true));
     main_assert_eq!(app.scensel.entry_enabled.get("TooFew.c4s") => Some(&false));
     main_assert_eq!(
@@ -2324,7 +2324,7 @@ fn scensel_alt_m_updates_shared_and_persisted_mission_access() {
     )])
     .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    main_assert_eq!(app.mission_access.snapshot() => "Secret;Second");
+    main_assert_eq!(app.config.mission_access.snapshot() => "Secret;Second");
     // Both native mutation sites change `Config.General.MissionAccess` in
     // memory alone and neither calls `Config.Save()`
     // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856). The port
@@ -2337,7 +2337,7 @@ fn scensel_alt_m_updates_shared_and_persisted_mission_access() {
     )])
     .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    main_assert_eq!(app.mission_access.snapshot() => "Second");
+    main_assert_eq!(app.config.mission_access.snapshot() => "Second");
     main_assert_eq!(
         load_configured_mission_access(&paths).expect("read reduced mission access") =>
         "Second",
@@ -2360,7 +2360,7 @@ fn script_earned_mission_access_reaches_the_saved_config() {
     let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(800, 600, &paths);
-    app.mission_access.update_modules("Earned", false);
+    app.config.mission_access.update_modules("Earned", false);
 
     app.persist_mission_access_if_changed();
 
@@ -2382,14 +2382,14 @@ fn earned_mission_access_survives_an_aborted_session() {
     let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(800, 600, &paths);
-    app.mission_access.update_modules("WestGR", false);
+    app.config.mission_access.update_modules("WestGR", false);
     app.persist_mission_access_if_changed();
     // No shutdown flush: this session never reaches one.
     drop(app);
 
     let restarted = new_menu_app_with_paths(800, 600, &paths);
 
-    main_assert!(restarted.mission_access.contains("westgr"));
+    main_assert!(restarted.config.mission_access.contains("westgr"));
     reset_cached_app_paths();
 }
 
@@ -3075,7 +3075,7 @@ fn folder_map_disabled_opens_a_normal_book_without_inspecting_the_marker() {
     let alpha = map_test_scenario(&map_path, "Alpha.c4s", "Alpha");
     let folder = map_test_folder(&map_path, vec![alpha.clone()]);
     let mut app = new_menu_app(640, 480);
-    app.show_folder_maps = false;
+    app.config.show_folder_maps = false;
 
     open_map_test_folder(&mut app, folder.clone());
 
@@ -3164,7 +3164,7 @@ fn folder_map_loads_renders_titles_access_overlays_and_cpp_click_semantics() {
     let beta = map_test_scenario(&map_path, "Beta.c4s", "Beta Mission");
     let folder = map_test_folder(&map_path, vec![alpha.clone(), beta.clone()]);
     let mut app = new_real_menu_app(640, 480);
-    app.mission_access = MissionAccessStore::new("Other; mappass ");
+    app.config.mission_access = MissionAccessStore::new("Other; mappass ");
 
     open_map_test_folder(&mut app, folder);
 
@@ -3272,7 +3272,7 @@ fn folder_map_hides_locked_button_until_access_is_granted() {
     app.apply_scenario_mission_access("MissingPass")
         .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    main_assert_eq!(app.mission_access.snapshot() => "OtherPass;MissingPass");
+    main_assert_eq!(app.config.mission_access.snapshot() => "OtherPass;MissingPass");
     app.enter_scenario_folder("Map.c4f");
     main_assert_eq!(app.menu_state.current_map().expect("map view restored").scenarios.len() => 1, "granting the module creates the map button on rebuild");
     reset_cached_app_paths();

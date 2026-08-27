@@ -989,7 +989,7 @@ fn run() -> Result<()> {
         app.apply_classic_command_line(&classic)?;
         // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
         let render_inactive_mask =
-            load_render_inactive_mask(app.app_paths.as_ref(), app.compat_profile);
+            load_render_inactive_mask(app.app_paths.as_ref(), app.config.compat_profile);
         app.auto_start_sandbox = cli.sandbox;
         app.launch_classic_command_line_join()
             .context("failed to start command-line network join")?;
@@ -2124,7 +2124,7 @@ fn run() -> Result<()> {
             // `persist_mission_access_if_changed`.
             if event_target.exiting() && !app.configuration_reset_requested {
                 if let Some(paths) = app_paths.as_ref() {
-                    for (section, entries) in app.deferred_config.take_by_section() {
+                    for (section, entries) in app.config.deferred.take_by_section() {
                         let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> =
                             entries
                                 .iter()
@@ -2625,7 +2625,6 @@ impl GameApp {
             taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress::new(
                 Box::new(clonk_platform::taskbar_progress::NoTaskbarProgress),
             ),
-            deferred_config: crate::deferred_config::DeferredConfig::default(),
             sky: None,
             material_texture_images: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
@@ -2638,10 +2637,21 @@ impl GameApp {
             default_rank_names,
             loaded_default_rank_names,
             startup_tooltip_resources,
-            runtime_language_charset,
-            persisted_mission_access: mission_access.snapshot(),
-            mission_access,
             process_group_maker,
+            config: ConfigState {
+                deferred: crate::deferred_config::DeferredConfig::default(),
+                // Resolved once the classic command line is parsed.
+                compat_profile: crate::settings::CompatProfile::Normal,
+                language_charset: runtime_language_charset,
+                persisted_mission_access: mission_access.snapshot(),
+                mission_access,
+                show_folder_maps,
+                show_commands_requests,
+                gamepads_enabled,
+                // Native gates the whole subsystem on the startup value.
+                gamepad_input_enabled: gamepads_enabled,
+                gamepad_gui_control: load_gamepad_gui_control(paths),
+            },
             saves: SaveState {
                 // The two language values are computed above; the rest of the
                 // save state starts empty.
@@ -2649,8 +2659,6 @@ impl GameApp {
                 description_language: save_description_language,
                 ..SaveState::default()
             },
-            show_folder_maps,
-            show_commands_requests,
             allow_scripting_in_replays,
             input: InputDispatcher::new(),
             bindings,
@@ -2666,14 +2674,11 @@ impl GameApp {
             retained_gpu_ordered_capture_active: false,
             retained_native_capture_surface: None,
             pending_options_display_requests: VecDeque::new(),
-            gamepads_enabled,
-            gamepad_input_enabled: gamepads_enabled,
             gamepads,
             #[cfg(test)]
             gamepad_poll_count: 0,
             #[cfg(test)]
             sec1_timer_call_count: 0,
-            gamepad_gui_control: load_gamepad_gui_control(paths),
             snapshot,
             focus_id: None,
             focus_snapshot: None,
@@ -2930,7 +2935,6 @@ impl GameApp {
             auto_start_classic_command_line_scenario: false,
             incoming_update: None,
             update_check_requested: false,
-            compat_profile: crate::settings::CompatProfile::Normal,
             update_check: None,
             update_download: None,
             automatic_update_check_allowed: !cfg!(test),
@@ -3075,14 +3079,16 @@ impl GameApp {
             .app_paths
             .as_ref()
             .and_then(|paths| clonk_core::std_config::Config::load(paths.config_file()).ok());
-        self.compat_profile = crate::settings::resolve_compat_profile(
+        self.config.compat_profile = crate::settings::resolve_compat_profile(
             persisted_config.as_ref(),
             classic.compat_profile,
         );
         // Synchronized, so it is resolved once here rather than read from
         // configuration mid-round (clonk-org/clonk-rs#1132).
         self.engine
-            .set_shared_bases(crate::settings::session_shared_bases(self.compat_profile));
+            .set_shared_bases(crate::settings::session_shared_bases(
+                self.config.compat_profile,
+            ));
 
         if let Some(screen) = classic.startup_screen.as_deref() {
             self.apply_classic_startup_screen(screen);
@@ -3546,9 +3552,9 @@ impl GameApp {
 
     fn apply_material_library(&mut self) {
         self.engine
-            .set_mission_access_store(self.mission_access.clone());
+            .set_mission_access_store(self.config.mission_access.clone());
         self.engine
-            .set_show_commands_request_store(self.show_commands_requests.clone());
+            .set_show_commands_request_store(self.config.show_commands_requests.clone());
         self.engine
             .set_control_key_names(configured_control_key_names(&self.bindings));
         self.engine.set_control_host(!matches!(
@@ -3589,8 +3595,8 @@ impl GameApp {
     }
 
     fn apply_material_library_to(&self, engine: &mut Engine) {
-        engine.set_mission_access_store(self.mission_access.clone());
-        engine.set_show_commands_request_store(self.show_commands_requests.clone());
+        engine.set_mission_access_store(self.config.mission_access.clone());
+        engine.set_show_commands_request_store(self.config.show_commands_requests.clone());
         engine.set_control_key_names(configured_control_key_names(&self.bindings));
         engine.set_control_host(!matches!(
             self.network_mode.as_ref(),
@@ -3637,7 +3643,7 @@ impl GameApp {
     /// requested profile is not yet known there. Nothing is rewritten -- the
     /// loaded table keeps every file, so leaving the profile restores them.
     fn global_scripts_for_session(&self) -> Vec<(String, String)> {
-        if self.compat_profile == crate::settings::CompatProfile::Normal {
+        if self.config.compat_profile == crate::settings::CompatProfile::Normal {
             return self.system_scripts.clone();
         }
         let withheld = crate::compat_readiness::reverted_content_scripts();
@@ -3998,7 +4004,7 @@ impl GameApp {
         self.runtime_flash_resources_cache
             .get_or_init(|| {
                 Ok(build_runtime_flash_resources(&RuntimeLanguageTable {
-                    charset: self.runtime_language_charset,
+                    charset: self.config.language_charset,
                     entries: self.startup_tooltip_resources.clone(),
                 }))
             })
@@ -4856,7 +4862,7 @@ impl GameApp {
     fn install_session_game_tick_delay(&mut self) {
         self.engine
             .install_ingame_game_tick_delay_ms(crate::settings::session_game_tick_delay_ms(
-                self.compat_profile,
+                self.config.compat_profile,
             ));
     }
 
@@ -6456,10 +6462,10 @@ impl GameApp {
             .filter(|languages| !languages.is_empty())
             .unwrap_or_else(|| vec!["US".to_string()]);
         self.menu_state.configure_current_folder_map(
-            self.show_folder_maps,
+            self.config.show_folder_maps,
             width,
             height,
-            &self.mission_access,
+            &self.config.mission_access,
             &languages,
         );
     }
@@ -6489,7 +6495,7 @@ impl GameApp {
         self.object_no_dig = object_no_dig.clone();
         self.loaded_default_rank_names = Some(default_rank_resource_names(&table));
         self.startup_tooltip_resources = table.entries.clone();
-        self.runtime_language_charset = table.charset;
+        self.config.language_charset = table.charset;
         self.engine
             .set_needed_material_resource_strings(needed_material_need, needed_material_none);
         clonk_engine::scenario::verbose_loading::set_definition_overload_template(
@@ -6525,7 +6531,8 @@ impl GameApp {
         // concurrent writer cannot change what the label shows — C++ reads its
         // in-memory Config (C4StartupMainDlg.cpp:174-200).
         let pending = self
-            .deferred_config
+            .config
+            .deferred
             .get("General", "Participants")
             .map(str::to_owned);
         let label = participants_label_with_pending(self.app_paths.as_ref(), pending.as_deref());
@@ -8220,7 +8227,7 @@ impl GameApp {
     }
 
     fn apply_show_commands_enable_request(&mut self) {
-        if self.show_commands_requests.take_enable_request() {
+        if self.config.show_commands_requests.take_enable_request() {
             self.display_flags.show_commands = true;
         }
     }
@@ -8275,7 +8282,7 @@ impl GameApp {
         let Some(value) = self.startup_tooltip_resources.get(key) else {
             return fallback.as_bytes().to_vec();
         };
-        match self.runtime_language_charset {
+        match self.config.language_charset {
             RuntimeHelpCharset::Windows1252 => value
                 .chars()
                 .map(runtime_cp1252_byte)
@@ -8845,7 +8852,7 @@ impl GameApp {
                 owner: number,
                 preferred_set: preferred_control_set,
                 prefers_mouse,
-                gamepads_enabled: self.gamepads_enabled,
+                gamepads_enabled: self.config.gamepads_enabled,
                 replay: false,
                 disable_mouse: !self.mouse_control_allowed,
             };
@@ -9111,7 +9118,8 @@ impl GameApp {
         // (:65-118), so a `/msgboard` from the previous round carries into this
         // one; only the file lags until a save surface.
         let message_board_enabled = self
-            .deferred_config
+            .config
+            .deferred
             .get("Graphics", "MsgBoard")
             .and_then(parse_native_config_bool)
             .unwrap_or_else(|| load_message_board_enabled(self.app_paths.as_ref()));

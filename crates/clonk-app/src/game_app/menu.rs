@@ -2936,7 +2936,7 @@ impl GameApp {
                     }
                     // `OnBtnInternet` flips the flag in memory only; the file
                     // is written once at shutdown (C4StartupNetDlg.cpp:840-845).
-                    self.deferred_config.set(
+                    self.config.deferred.set(
                         "Network",
                         "MasterServerSignUp",
                         i32::from(enabled).to_string(),
@@ -2946,7 +2946,8 @@ impl GameApp {
                     self.startup_view_flags.record = record;
                     self.recording_enabled = record && self.recordings_dir.is_some();
                     // `OnBtnRecord` likewise mutates memory only (:847-850).
-                    self.deferred_config
+                    self.config
+                        .deferred
                         .set("General", "Record", i32::from(record).to_string());
                 }
             }
@@ -3556,7 +3557,8 @@ impl GameApp {
     /// reads that in-memory value, so an unflushed toggle outranks the file
     /// (src/C4StartupNetDlg.cpp:710,771-777,838-845,851-866).
     pub(crate) fn masterserver_signup_setting(&self) -> bool {
-        self.deferred_config
+        self.config
+            .deferred
             .get("Network", "MasterServerSignUp")
             .and_then(parse_native_config_bool)
             .unwrap_or_else(|| load_network_startup_settings(self.app_paths.as_ref()).0)
@@ -4089,7 +4091,8 @@ impl GameApp {
                     tracing::warn!(%error, preference = description, "failed to persist warning preference");
                 }
             } else {
-                self.deferred_config
+                self.config
+                    .deferred
                     .set("Startup", key, i32::from(checked).to_string());
             }
         }
@@ -4308,7 +4311,7 @@ impl GameApp {
                 // `ShowMessageModal` by pointer (C4GameLobby.cpp:462), which
                 // writes it in memory; that file contains no `Config.Save()`.
                 if let Some(checked) = checkbox_checked {
-                    self.deferred_config.set(
+                    self.config.deferred.set(
                         "Startup",
                         "HideMsgPlrNoTakeOver",
                         i32::from(checked).to_string(),
@@ -4331,7 +4334,7 @@ impl GameApp {
                 // `Config.Startup.HideMsgStartDedicated` to `ShowMessageModal`
                 // by pointer (C4StartupScenSelDlg.cpp:1697) and never saves.
                 if let Some(checked) = checkbox_checked {
-                    self.deferred_config.set(
+                    self.config.deferred.set(
                         "Startup",
                         "HideMsgStartDedicated",
                         i32::from(checked).to_string(),
