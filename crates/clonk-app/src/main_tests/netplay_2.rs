@@ -5722,9 +5722,12 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
             .network_chart_dialog
             .test_ref()
             .layout(preferred, resources);
+        let caption = layout
+            .caption
+            .expect("the fullscreen chart draws its own caption");
         GuiPoint::new(
-            layout.caption.x.saturating_add(8) as f32,
-            layout.caption.y.saturating_add(layout.caption.h / 2) as f32,
+            caption.x.saturating_add(8) as f32,
+            caption.y.saturating_add(caption.h / 2) as f32,
         )
     };
     app.running_pointer_position = Some(chart_point);
@@ -5922,9 +5925,12 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
         .layout(preferred, resources);
     main_assert_eq!((layout.bounds.x, layout.bounds.y) => (preferred.x + 30, preferred.y + 30));
 
+    let caption_rect = layout
+        .caption
+        .expect("the fullscreen chart draws its own caption");
     let caption = GuiPoint::new(
-        (layout.caption.x + 8) as f32,
-        (layout.caption.y + layout.caption.h / 2) as f32,
+        (caption_rect.x + 8) as f32,
+        (caption_rect.y + caption_rect.h / 2) as f32,
     );
     app.running_pointer_position = Some(caption);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
@@ -5949,9 +5955,12 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
     main_assert!(!app.network_chart_pointer_capture, "chart body clicks are consumed without becoming a drag element");
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Released));
 
+    let close_button = moved_layout
+        .close_button
+        .expect("the fullscreen chart draws its own close icon");
     let close = GuiPoint::new(
-        (moved_layout.close_button.x + moved_layout.close_button.w / 2) as f32,
-        (moved_layout.close_button.y + moved_layout.close_button.h / 2) as f32,
+        (close_button.x + close_button.w / 2) as f32,
+        (close_button.y + close_button.h / 2) as f32,
     );
     app.running_pointer_position = Some(close);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));

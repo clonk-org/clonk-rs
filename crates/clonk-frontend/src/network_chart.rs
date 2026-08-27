@@ -192,8 +192,10 @@ pub struct NetworkChartTabLayout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkChartLayout {
     pub bounds: IntRect,
-    pub caption: IntRect,
-    pub close_button: IntRect,
+    /// The dialog's own title strip, absent where the host window draws one.
+    pub caption: Option<IntRect>,
+    /// The dialog's own close icon, absent for the same reason.
+    pub close_button: Option<IntRect>,
     pub tabular: IntRect,
     pub chart: IntRect,
     pub tabs: Vec<NetworkChartTabLayout>,
@@ -366,8 +368,8 @@ impl NetworkChartDialog {
             .collect();
         NetworkChartLayout {
             bounds,
-            caption,
-            close_button,
+            caption: Some(caption),
+            close_button: Some(close_button),
             tabular,
             chart,
             tabs,
@@ -404,12 +406,12 @@ impl NetworkChartDialog {
         if !contains(layout.bounds, point) {
             return NetworkChartDialogAction::Ignored;
         }
-        if contains(layout.close_button, point) {
+        if contains_widget(layout.close_button, point) {
             self.close_pressed = true;
             self.drag_anchor = None;
             return NetworkChartDialogAction::Captured;
         }
-        if contains(layout.caption, point) {
+        if contains_widget(layout.caption, point) {
             self.drag_anchor = Some((
                 point.x - layout.bounds.x as f32,
                 point.y - layout.bounds.y as f32,
@@ -449,7 +451,7 @@ impl NetworkChartDialog {
         if self.close_pressed {
             self.close_pressed = false;
             self.drag_anchor = None;
-            return if contains(layout.close_button, point) {
+            return if contains_widget(layout.close_button, point) {
                 NetworkChartDialogAction::Close
             } else {
                 NetworkChartDialogAction::Handled
@@ -480,23 +482,29 @@ impl NetworkChartDialog {
         resources.validate()?;
         let layout = self.layout(preferred, resources);
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
-        resources.skin.draw_caption_with_right_indent(
-            surface,
-            layout.caption,
-            &self.caption,
-            &resources.fonts.text,
-            ACTIVE_TAB_COLOR,
-            TextAlign::Left,
-            20,
-            gamma,
-        );
-        draw_icon_phase(
-            surface,
-            resources.icons,
-            CLOSE_ICON_PHASE,
-            layout.close_button,
-            gamma,
-        )?;
+        // A layout without these widgets is one whose host window draws them,
+        // so there is nothing to paint rather than an empty rect to paint into.
+        if let Some(caption) = layout.caption {
+            resources.skin.draw_caption_with_right_indent(
+                surface,
+                caption,
+                &self.caption,
+                &resources.fonts.text,
+                ACTIVE_TAB_COLOR,
+                TextAlign::Left,
+                20,
+                gamma,
+            );
+        }
+        if let Some(close_button) = layout.close_button {
+            draw_icon_phase(
+                surface,
+                resources.icons,
+                CLOSE_ICON_PHASE,
+                close_button,
+                gamma,
+            )?;
+        }
 
         // Classical top Tabular: a 20px caption strip over the sheet client.
         draw_engine_box(
@@ -964,6 +972,11 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
         && point.x < (rect.x + rect.w) as f32
         && point.y >= rect.y as f32
         && point.y < (rect.y + rect.h) as f32
+}
+
+/// A widget the layout does not carry cannot be hit.
+fn contains_widget(rect: Option<IntRect>, point: GuiPoint) -> bool {
+    rect.is_some_and(|rect| contains(rect, point))
 }
 
 #[cfg(test)]
