@@ -457,10 +457,8 @@ pub(crate) fn arrow_object_target_available_by_id(target: u64) -> bool {
 /// while retaining the suspended caller frame. The VM brackets the dynamic
 /// extent with this hook after evaluating its arguments.
 pub(crate) fn global_call_context_hook(enter: bool) {
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.set_global_call_context(enter);
-        }
+    with_host_context_mut((), |context| {
+        context.set_global_call_context(enter);
     });
 }
 
@@ -526,12 +524,10 @@ pub(crate) fn eval_direct_exec_hook(
         strict_level,
         depth,
     );
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.script_object_context = previous_script_object;
-            context.script_definition_context = previous_script_definition;
-            context.definition_context = previous_definition;
-        }
+    with_host_context_mut((), |context| {
+        context.script_object_context = previous_script_object;
+        context.script_definition_context = previous_script_definition;
+        context.definition_context = previous_definition;
     });
     Some(result)
 }
@@ -895,10 +891,8 @@ pub(crate) fn call_scoped_definition_function(
         })
     });
     let result = call_scoped_script_function(script, function, args);
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.definition_context = previous_definition;
-        }
+    with_host_context_mut((), |context| {
+        context.definition_context = previous_definition;
     });
     result
 }
@@ -1008,13 +1002,11 @@ pub(crate) fn call_scoped_global_effect_function(
             script.call_global_with_ref_args(function, args)
         }
         .map(|(value, _)| value);
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.object = context.dormant_scopes.pop().unwrap_or(None);
-            context.script_object_context = previous_script_object;
-            context.script_definition_context = previous_script_definition;
-            context.definition_context = previous_definition;
-        }
+    with_host_context_mut((), |context| {
+        context.object = context.dormant_scopes.pop().unwrap_or(None);
+        context.script_object_context = previous_script_object;
+        context.script_definition_context = previous_script_definition;
+        context.definition_context = previous_definition;
     });
     Some(match call {
         Ok(value) => Ok(value),
@@ -1064,13 +1056,11 @@ fn call_scoped_script_reference(
         &cells,
         Value::Nil,
     );
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.object = context.dormant_scopes.pop().unwrap_or(None);
-            context.script_object_context = previous_script_object;
-            context.script_definition_context = previous_script_definition;
-            context.definition_context = previous_definition;
-        }
+    with_host_context_mut((), |context| {
+        context.object = context.dormant_scopes.pop().unwrap_or(None);
+        context.script_object_context = previous_script_object;
+        context.script_definition_context = previous_script_definition;
+        context.definition_context = previous_definition;
     });
     Some(match call {
         Ok(reference) => Ok(reference),
@@ -1180,13 +1170,11 @@ fn call_scoped_script_function_impl(
         };
         call.map(|(value, _locals)| (value, args.to_vec()))
     };
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.object = context.dormant_scopes.pop().unwrap_or(None);
-            context.script_object_context = previous_script_object;
-            context.script_definition_context = previous_script_definition;
-            context.definition_context = previous_definition;
-        }
+    with_host_context_mut((), |context| {
+        context.object = context.dormant_scopes.pop().unwrap_or(None);
+        context.script_object_context = previous_script_object;
+        context.script_definition_context = previous_script_definition;
+        context.definition_context = previous_definition;
     });
     Some(match call {
         Ok(outcome) => Ok(outcome),
@@ -2778,10 +2766,8 @@ struct NestedCallPrep {
 /// running session's storage (C++ mutates the one live C4Object). The
 /// per-callback host context owns the entry's lifetime.
 pub(crate) fn register_session_local_cells(target: ObjectId, cells: clonk_script::LocalCells) {
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.session_local_cells.insert(target, cells);
-        }
+    with_host_context_mut((), |context| {
+        context.session_local_cells.insert(target, cells);
     });
 }
 
@@ -2879,18 +2865,14 @@ fn call_world_object_reference_with(
     } else {
         script.call_reference_with_cells_and_this(function, args, &cells, this)
     };
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.script_object_context = previous_script_object;
-            context.script_definition_context = previous_script_definition;
-        }
+    with_host_context_mut((), |context| {
+        context.script_object_context = previous_script_object;
+        context.script_definition_context = previous_script_definition;
     });
     let succeeded = call.is_ok();
     if created_session && !succeeded {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.session_local_cells.remove(&target);
-            }
+        with_host_context_mut((), |context| {
+            context.session_local_cells.remove(&target);
         });
     }
     let result = match call {
@@ -2900,21 +2882,19 @@ fn call_world_object_reference_with(
     };
     let stored_locals = cells.snapshot();
     if let Some(origin) = origin {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                let mut stored_locals = stored_locals;
-                for ((object, name), slot) in &context.foreign_local_cells {
-                    if *object != target {
-                        continue;
-                    }
-                    let outer_unchanged = entry_locals.get(name).unwrap_or(&Value::Nil)
-                        == stored_locals.get(name).unwrap_or(&Value::Nil);
-                    if outer_unchanged {
-                        stored_locals.insert(name.clone(), slot.borrow().clone());
-                    }
+        with_host_context_mut((), |context| {
+            let mut stored_locals = stored_locals;
+            for ((object, name), slot) in &context.foreign_local_cells {
+                if *object != target {
+                    continue;
                 }
-                context.finish_nested_call(target, origin, stored_locals);
+                let outer_unchanged = entry_locals.get(name).unwrap_or(&Value::Nil)
+                    == stored_locals.get(name).unwrap_or(&Value::Nil);
+                if outer_unchanged {
+                    stored_locals.insert(name.clone(), slot.borrow().clone());
+                }
             }
+            context.finish_nested_call(target, origin, stored_locals);
         });
     }
     Some(result)
@@ -3209,17 +3189,13 @@ fn call_world_object_function_with_options(
             };
         call.map(|value| (value, unchanged_finals()))
     };
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.script_object_context = previous_script_object;
-            context.script_definition_context = previous_script_definition;
-        }
+    with_host_context_mut((), |context| {
+        context.script_object_context = previous_script_object;
+        context.script_definition_context = previous_script_definition;
     });
     if created_session {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.session_local_cells.remove(&target);
-            }
+        with_host_context_mut((), |context| {
+            context.session_local_cells.remove(&target);
         });
     }
     let (result, stored_locals) = match call {
@@ -3231,29 +3207,27 @@ fn call_world_object_function_with_options(
         Err(other) => (Err(RuntimeError::new(other.to_string())), cells.snapshot()),
     };
     if let Some(origin) = origin {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                // Writes made by DEEPER same-scope calls (e.g. a
-                // synchronous Fx*Start fired from inside this call) sit in
-                // the foreign cells; they win over entries THIS call left
-                // untouched — C++ mutates the one live object, so the
-                // deepest write is simply the latest.
-                let mut stored_locals = stored_locals;
-                for ((object, name), slot) in &context.foreign_local_cells {
-                    if *object != target {
-                        continue;
-                    }
-                    // Unset locals read as nil (C4Value default) — a local
-                    // the outer call never touched may be absent from its
-                    // entry snapshot but nil-present in the VM result.
-                    let outer_unchanged = entry_locals.get(name).unwrap_or(&Value::Nil)
-                        == stored_locals.get(name).unwrap_or(&Value::Nil);
-                    if outer_unchanged {
-                        stored_locals.insert(name.clone(), slot.borrow().clone());
-                    }
+        with_host_context_mut((), |context| {
+            // Writes made by DEEPER same-scope calls (e.g. a
+            // synchronous Fx*Start fired from inside this call) sit in
+            // the foreign cells; they win over entries THIS call left
+            // untouched — C++ mutates the one live object, so the
+            // deepest write is simply the latest.
+            let mut stored_locals = stored_locals;
+            for ((object, name), slot) in &context.foreign_local_cells {
+                if *object != target {
+                    continue;
                 }
-                context.finish_nested_call(target, origin, stored_locals);
+                // Unset locals read as nil (C4Value default) — a local
+                // the outer call never touched may be absent from its
+                // entry snapshot but nil-present in the VM result.
+                let outer_unchanged = entry_locals.get(name).unwrap_or(&Value::Nil)
+                    == stored_locals.get(name).unwrap_or(&Value::Nil);
+                if outer_unchanged {
+                    stored_locals.insert(name.clone(), slot.borrow().clone());
+                }
             }
+            context.finish_nested_call(target, origin, stored_locals);
         });
     } else {
         // Same-scope call (the target IS the in-flight active scope): the
@@ -3261,12 +3235,10 @@ fn call_world_object_function_with_options(
         // through the foreign-cell channel — later nested calls overlay
         // them and the outcome fold persists them (C++ mutates the live
         // object directly).
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                for (name, value) in &stored_locals {
-                    let slot = context.foreign_local_cell(target, name);
-                    *slot.borrow_mut() = value.clone();
-                }
+        with_host_context_mut((), |context| {
+            for (name, value) in &stored_locals {
+                let slot = context.foreign_local_cell(target, name);
+                *slot.borrow_mut() = value.clone();
             }
         });
     }

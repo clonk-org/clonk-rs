@@ -6089,15 +6089,13 @@ pub(crate) fn set_pre_send(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(true));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.world.network_target_fps_requests.borrow_mut().push(
-                crate::NetworkTargetFpsRequest {
-                    target_fps: if target_fps == 0 { 38 } else { target_fps },
-                    client_pattern,
-                },
-            );
-        }
+    with_host_context_mut((), |context| {
+        context.world.network_target_fps_requests.borrow_mut().push(
+            crate::NetworkTargetFpsRequest {
+                target_fps: if target_fps == 0 { 38 } else { target_fps },
+                client_pattern,
+            },
+        );
     });
     Ok(Value::Bool(true))
 }

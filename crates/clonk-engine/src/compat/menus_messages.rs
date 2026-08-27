@@ -184,16 +184,14 @@ pub(crate) fn add_msg_board_cmd(args: &[Value]) -> Result<Value, RuntimeError> {
         _ => return Ok(Value::Bool(false)),
     };
 
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.record_player_command(PlayerCommand::AddMessageBoardCommand {
-                command: crate::InitialNetworkMessageBoardCommand {
-                    name: command,
-                    script,
-                    restriction,
-                },
-            });
-        }
+    with_host_context_mut((), |context| {
+        context.record_player_command(PlayerCommand::AddMessageBoardCommand {
+            command: crate::InitialNetworkMessageBoardCommand {
+                name: command,
+                script,
+                restriction,
+            },
+        });
     });
     Ok(Value::Bool(true))
 }

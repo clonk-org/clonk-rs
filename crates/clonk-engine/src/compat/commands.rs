@@ -1123,10 +1123,8 @@ pub(crate) fn process_preview_dig_reactions(
             velocity: FixedVec2::ZERO,
             rotation_velocity: C4Fixed::ZERO,
         })?;
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.reset_dig_material_content(target, material);
-            }
+        with_host_context_mut((), |context| {
+            context.reset_dig_material_content(target, material);
         });
     }
     Ok(())
@@ -1803,10 +1801,8 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
         container: ObjectId,
         menu_before_value: &crate::ObjectMenuState,
     ) -> Result<i32, Self::Error> {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.set_object_menu(command_object, Some(menu_before_value.clone()));
-            }
+        with_host_context_mut((), |context| {
+            context.set_object_menu(command_object, Some(menu_before_value.clone()));
         });
         let value = get_value(&[
             object_reference_value(object),
@@ -1829,10 +1825,8 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
         object: ObjectId,
         menu_before_call: &crate::ObjectMenuState,
     ) -> Result<bool, Self::Error> {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.set_object_menu(command_object, Some(menu_before_call.clone()));
-            }
+        with_host_context_mut((), |context| {
+            context.set_object_menu(command_object, Some(menu_before_call.clone()));
         });
         let definition_id = HOST_CONTEXT.with(|cell| {
             cell.borrow()
@@ -2903,12 +2897,10 @@ fn preview_dispatch_command_continuation_events(
                 level,
                 transfer_zones_enabled,
             } => {
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        context
-                            .world
-                            .set_pathfinder_settings(level, transfer_zones_enabled);
-                    }
+                with_host_context_mut((), |context| {
+                    context
+                        .world
+                        .set_pathfinder_settings(level, transfer_zones_enabled);
                 });
                 preview_defer_command_event(
                     actor,
@@ -2920,26 +2912,20 @@ fn preview_dispatch_command_continuation_events(
                 Vec::new()
             }
             CommandEvent::SetPathFinderDebug { snapshot } => {
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        *context.world.pathfinder_debug.borrow_mut() = snapshot;
-                    }
+                with_host_context_mut((), |context| {
+                    *context.world.pathfinder_debug.borrow_mut() = snapshot;
                 });
                 Vec::new()
             }
             CommandEvent::NativeCommandSuccess { object_id, command } => {
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        apply_preview_native_command_success(context, object_id, command);
-                    }
+                with_host_context_mut((), |context| {
+                    apply_preview_native_command_success(context, object_id, command);
                 });
                 Vec::new()
             }
             CommandEvent::OpenMenu(request) => {
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        context.pending_menu_requests.push(request);
-                    }
+                with_host_context_mut((), |context| {
+                    context.pending_menu_requests.push(request);
                 });
                 Vec::new()
             }
@@ -4134,10 +4120,8 @@ pub(crate) fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 log_runtime_call_frames("", error.call_frames());
             }
         }
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.clear_finished_command_fronts(target);
-            }
+        with_host_context_mut((), |context| {
+            context.clear_finished_command_fronts(target);
         });
     }
 

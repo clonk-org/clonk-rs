@@ -495,12 +495,10 @@ pub(crate) fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, Ru
     if !staged {
         return Ok(false);
     }
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.preview_live_object_sector(target);
-            context.update_live_solid_mask(target, true);
-            let _ = refresh_live_object_ocf(context, target);
-        }
+    with_host_context_mut((), |context| {
+        context.preview_live_object_sector(target);
+        context.update_live_solid_mask(target, true);
+        let _ = refresh_live_object_ocf(context, target);
     });
 
     if let Some(previous) = previous_container {
@@ -1085,19 +1083,17 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
             spawn.in_liquid = Some(false);
         }
     });
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            // Exit's UpdateFace(true) updates the shape/solid mask before
-            // SetOCF derives the final outside-container flags.
-            context.preview_live_object_sector(target);
-            context.update_live_solid_mask(target, false);
-            if refresh_live_object_ocf(context, target) {
-                // Engine copy-out reconciles the Contents link after the
-                // callback. Preserve Exit's synchronous SetOCF across that
-                // seam; later raw velocity writes do not refresh it.
-                if let Some(scope) = context.object_scope_mut(target) {
-                    scope.persist_final_ocf = true;
-                }
+    with_host_context_mut((), |context| {
+        // Exit's UpdateFace(true) updates the shape/solid mask before
+        // SetOCF derives the final outside-container flags.
+        context.preview_live_object_sector(target);
+        context.update_live_solid_mask(target, false);
+        if refresh_live_object_ocf(context, target) {
+            // Engine copy-out reconciles the Contents link after the
+            // callback. Preserve Exit's synchronous SetOCF across that
+            // seam; later raw velocity writes do not refresh it.
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.persist_final_ocf = true;
             }
         }
     });
@@ -1532,10 +1528,8 @@ pub(crate) fn assign_removal_live(
             }
             continue;
         }
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.unlink_content_for_removal(target, child);
-            }
+        with_host_context_mut((), |context| {
+            context.unlink_content_for_removal(target, child);
         });
         // AssignRemoval's default `fExitContents=false` unlinks and
         // recursively removes contents without Ejection/Departure calls.
@@ -1717,10 +1711,8 @@ fn report_buy_error(
     target: Option<ObjectId>,
 ) -> Result<(), RuntimeError> {
     let _ = player_message(&[Value::Int(player), Value::String(message.into())])?;
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            let _ = context.play_sound("Error", target, 100, false, false, None);
-        }
+    with_host_context_mut((), |context| {
+        let _ = context.play_sound("Error", target, 100, false, false, None);
     });
     Ok(())
 }
@@ -3236,10 +3228,8 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             None => false,
         };
         if !selected {
-            HOST_CONTEXT.with(|cell| {
-                if let Some(context) = cell.borrow_mut().as_mut() {
-                    let _ = context.play_sound("Grab", Some(container), 100, false, false, None);
-                }
+            with_host_context_mut((), |context| {
+                let _ = context.play_sound("Grab", Some(container), 100, false, false, None);
             });
         }
     }
@@ -5199,10 +5189,8 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     // spawn has materialized at its post-growth integer position. SetAction
     // synchronizes fix_x/fix_y immediately in C++; replaying it later changed
     // WMPF's raw y=516 fixed coordinate to the intermediate growth y=512.
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.commit_creation_action(target);
-        }
+    with_host_context_mut((), |context| {
+        context.commit_creation_action(target);
     });
 
     // Initial DoCon(FullCon,true) runs only after Construction. Its straight
@@ -6611,12 +6599,10 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
     // nullptr after its status re-check (C4Object.cpp:1513-1517;
     // C4Game.cpp:1122-1128).
     if final_construction <= 0 {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                context.cancel_pending_spawn(target);
-                context.nested_objects.remove(&target);
-                context.nested_order.retain(|id| *id != target);
-            }
+        with_host_context_mut((), |context| {
+            context.cancel_pending_spawn(target);
+            context.nested_objects.remove(&target);
+            context.nested_order.retain(|id| *id != target);
         });
         return Ok(Value::Nil);
     }
@@ -7313,10 +7299,8 @@ pub(crate) fn create_native_object(
     if !object_has_status(target) {
         return Ok(None);
     }
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.commit_creation_action(target);
-        }
+    with_host_context_mut((), |context| {
+        context.commit_creation_action(target);
     });
 
     // Construction may ChangeDef synchronously. Initial DoCon and the
@@ -7757,13 +7741,11 @@ pub(crate) fn compose_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
                 text
             });
-            HOST_CONTEXT.with(|cell| {
-                if let Some(context) = cell.borrow_mut().as_mut() {
-                    context.register_message(MessageCommand::Add(
-                        MessageSpec::target(text, container)
-                            .with_color(invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR)),
-                    ));
-                }
+            with_host_context_mut((), |context| {
+                context.register_message(MessageCommand::Add(
+                    MessageSpec::target(text, container)
+                        .with_color(invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR)),
+                ));
             });
         }
         return Ok(Value::Nil);
@@ -9373,10 +9355,8 @@ pub(crate) fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
             });
             if removed {
                 clear_player_object_pointers_host(target);
-                HOST_CONTEXT.with(|cell| {
-                    if let Some(context) = cell.borrow_mut().as_mut() {
-                        context.update_live_solid_mask(target, false);
-                    }
+                with_host_context_mut((), |context| {
+                    context.update_live_solid_mask(target, false);
                 });
             }
             return Ok(Value::Bool(removed));

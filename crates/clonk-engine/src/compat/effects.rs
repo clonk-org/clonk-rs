@@ -1117,11 +1117,9 @@ pub(crate) fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             .is_some_and(|effect| effect.name == crate::C4FX_FIRE)
         && !script_shadows_engine_fx("FxFireStop")
     {
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                if let Some(object) = context.object_context_mut() {
-                    object.pending_update.stage_fire_flag(false);
-                }
+        with_host_context_mut((), |context| {
+            if let Some(object) = context.object_context_mut() {
+                object.pending_update.stage_fire_flag(false);
             }
         });
     }
@@ -1946,12 +1944,10 @@ fn native_explosion(
     effect_name: &str,
 ) -> Result<(), RuntimeError> {
     let grade = (level / 10 - 1).clamp(1, 3);
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            // The current C++ oracle's std::format receives the promoted int
-            // value of '0' + grade, hence Blast49..Blast51.
-            let _ = context.play_sound_at(&format!("Blast{}", i32::from(b'0') + grade), position);
-        }
+    with_host_context_mut((), |context| {
+        // The current C++ oracle's std::format receives the promoted int
+        // value of '0' + grade, hence Blast49..Blast51.
+        let _ = context.play_sound_at(&format!("Blast{}", i32::from(b'0') + grade), position);
     });
 
     // Resolve containment once, before any visual-effect callbacks, and keep
@@ -2959,12 +2955,10 @@ pub(crate) fn fx_fire_start(args: &[Value]) -> Result<Value, RuntimeError> {
     let temp = args.get(2).is_some_and(|value| value_as_i32(value) != 0);
     if temp {
         // temp readd: SetOnFire(true), return 1 (C4Effect.cpp:565)
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                if context.ensure_object_scope(target) {
-                    if let Some(scope) = context.object_scope_mut(target) {
-                        scope.pending_update.stage_fire_flag(true);
-                    }
+        with_host_context_mut((), |context| {
+            if context.ensure_object_scope(target) {
+                if let Some(scope) = context.object_scope_mut(target) {
+                    scope.pending_update.stage_fire_flag(true);
                 }
             }
         });
@@ -3082,13 +3076,11 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     // Fire Phase (C4Object.cpp:770)
     let next_phase = (state.phase + 1) % crate::MAX_FIRE_PHASE;
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            if let Some(scope) = context.object_scope_mut(target) {
-                scope
-                    .pending_update
-                    .stage_ignite(state.caused_by, next_phase);
-            }
+    with_host_context_mut((), |context| {
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope
+                .pending_update
+                .stage_ignite(state.caused_by, next_phase);
         }
     });
     // C4Object::ExecFire's Tick5 base arm runs immediately after the phase
@@ -3347,12 +3339,10 @@ pub(crate) fn fx_fire_stop(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target else {
         return Ok(Value::Bool(false));
     };
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            if context.ensure_object_scope(target) {
-                if let Some(scope) = context.object_scope_mut(target) {
-                    scope.pending_update.stage_fire_flag(false);
-                }
+    with_host_context_mut((), |context| {
+        if context.ensure_object_scope(target) {
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.pending_update.stage_fire_flag(false);
             }
         }
     });

@@ -1560,10 +1560,8 @@ pub(crate) fn set_gamma(args: &[Value]) -> Result<Value, RuntimeError> {
     if !(0..crate::GAMMA_RAMP_COUNT as i32).contains(&index) {
         return Ok(Value::Nil);
     }
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.register_landscape_operation(LandscapeOperation::GammaRamp { index, points });
-        }
+    with_host_context_mut((), |context| {
+        context.register_landscape_operation(LandscapeOperation::GammaRamp { index, points });
     });
     Ok(Value::Nil)
 }
@@ -1579,13 +1577,11 @@ pub(crate) fn reset_gamma(args: &[Value]) -> Result<Value, RuntimeError> {
     if !(0..crate::GAMMA_RAMP_COUNT as i32).contains(&index) {
         return Ok(Value::Nil);
     }
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.register_landscape_operation(LandscapeOperation::GammaRamp {
-                index,
-                points: crate::GammaControlState::DEFAULT_RAMP,
-            });
-        }
+    with_host_context_mut((), |context| {
+        context.register_landscape_operation(LandscapeOperation::GammaRamp {
+            index,
+            points: crate::GammaControlState::DEFAULT_RAMP,
+        });
     });
     Ok(Value::Nil)
 }

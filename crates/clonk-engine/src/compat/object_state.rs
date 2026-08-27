@@ -186,14 +186,12 @@ pub(crate) fn assign_death_live(target: ObjectId, forced: bool) -> Result<bool, 
     if call_death {
         call_object_own_fail_safe(target, "Death", &[Value::Int(death_causing_player)]);
     }
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            if let Some(scope) = context.object_scope_mut(target) {
-                scope.commit_raw_alive();
-                scope.persist_final_ocf = true;
-            }
-            let _ = refresh_live_object_ocf(context, target);
+    with_host_context_mut((), |context| {
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.commit_raw_alive();
+            scope.persist_final_ocf = true;
         }
+        let _ = refresh_live_object_ocf(context, target);
     });
     Ok(true)
 }
@@ -362,11 +360,9 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(ObjectScopeContext::controller)
             .unwrap_or(OWNER_NONE)
     });
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            if let Some(scope) = context.object_scope_mut(target) {
-                scope.pending_update.energy_loss_cause = Some(attacker_controller);
-            }
+    with_host_context_mut((), |context| {
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.pending_update.energy_loss_cause = Some(attacker_controller);
         }
     });
     // PSF_CatchBlow after a successful fling (C4ObjectCom.cpp:754,762).
@@ -6800,10 +6796,8 @@ pub(crate) fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
             target_id.or_else(|| context.object_context().map(ObjectScopeContext::id))
         });
         if let Some(target) = target {
-            HOST_CONTEXT.with(|cell| {
-                if let Some(context) = cell.borrow_mut().as_mut() {
-                    let _ = refresh_live_object_ocf(context, target);
-                }
+            with_host_context_mut((), |context| {
+                let _ = refresh_live_object_ocf(context, target);
             });
         }
     }

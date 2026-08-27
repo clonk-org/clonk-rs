@@ -14,13 +14,9 @@ pub(crate) fn music(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     let looped = args.get(1).is_some_and(Value::as_bool);
 
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            match song {
-                Some(name) => context.audio_mut().play_music(name, looped),
-                None => context.audio_mut().stop_music(),
-            }
-        }
+    with_host_context_mut((), |context| match song {
+        Some(name) => context.audio_mut().play_music(name, looped),
+        None => context.audio_mut().stop_music(),
     });
     Ok(Value::Nil)
 }

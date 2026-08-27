@@ -174,11 +174,9 @@ pub(crate) fn set_max_player(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.world.set_max_players(max_players);
-            context.record_player_command(PlayerCommand::SetMaxPlayer { max_players });
-        }
+    with_host_context_mut((), |context| {
+        context.world.set_max_players(max_players);
+        context.record_player_command(PlayerCommand::SetMaxPlayer { max_players });
     });
     Ok(Value::Int(1))
 }
@@ -2810,19 +2808,17 @@ pub(crate) fn set_scoreboard_data(args: &[Value]) -> Result<Value, RuntimeError>
         "data",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow().as_ref() {
-            context
-                .world
-                .scoreboard
-                .borrow_mut()
-                .set_cell(column, row, text, data);
-            context
-                .world
-                .scoreboard_presentations
-                .borrow_mut()
-                .invalidate_layout();
-        }
+    with_host_context((), |context| {
+        context
+            .world
+            .scoreboard
+            .borrow_mut()
+            .set_cell(column, row, text, data);
+        context
+            .world
+            .scoreboard_presentations
+            .borrow_mut()
+            .invalidate_layout();
     });
     Ok(Value::Nil)
 }
@@ -2969,10 +2965,8 @@ pub(crate) fn hide_settlement_score_in_evaluation(args: &[Value]) -> Result<Valu
         "HideSettlementScoreInEvaluation",
         "hide",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.record_player_command(PlayerCommand::HideSettlementScore { hide });
-        }
+    with_host_context_mut((), |context| {
+        context.record_player_command(PlayerCommand::HideSettlementScore { hide });
     });
     Ok(Value::Nil)
 }
@@ -3136,10 +3130,8 @@ pub(crate) fn set_next_mission(args: &[Value]) -> Result<Value, RuntimeError> {
         },
         None => NextMissionCommand::Clear,
     };
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.next_mission_commands.push(command);
-        }
+    with_host_context_mut((), |context| {
+        context.next_mission_commands.push(command);
     });
     Ok(Value::Nil)
 }
@@ -3152,10 +3144,8 @@ pub(crate) fn set_restore_infos(args: &[Value]) -> Result<Value, RuntimeError> {
         "SetRestoreInfos",
         "restore mask",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            context.record_player_command(PlayerCommand::SetRestoreInfos { what });
-        }
+    with_host_context_mut((), |context| {
+        context.record_player_command(PlayerCommand::SetRestoreInfos { what });
     });
     Ok(Value::Nil)
 }
@@ -4639,11 +4629,9 @@ pub(crate) fn update_player_selection_toggle_status_host(player_id: i32) {
         if let Some(cursor) = cursor {
             do_select_host_object(cursor, false);
         }
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                if let Some(player) = context.player_state_mut(player_id) {
-                    player.control.select_flash = 30;
-                }
+        with_host_context_mut((), |context| {
+            if let Some(player) = context.player_state_mut(player_id) {
+                player.control.select_flash = 30;
             }
         });
         adjust_cursor_host(player_id);
