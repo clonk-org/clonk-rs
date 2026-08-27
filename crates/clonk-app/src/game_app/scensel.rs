@@ -205,7 +205,7 @@ impl GameApp {
     }
 
     pub(crate) fn restore_scensel_rename_pointer_focus(&mut self) {
-        let focus = self.scensel_rename_pointer_focus;
+        let focus = self.scensel.rename_pointer_focus;
         if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
             if let Some(focus) = focus {
                 self.restore_scensel_focus(focus);
@@ -438,13 +438,14 @@ impl GameApp {
         let now = Instant::now();
         let double_click = inside
             && self
-                .scensel_search_last_click
+                .scensel
+                .search_last_click
                 .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
         if double_click {
             self.menu_state.search_edit.select_word_at(position);
-            self.scensel_search_last_click = None;
+            self.scensel.search_last_click = None;
         } else {
-            self.scensel_search_last_click = inside.then_some(now);
+            self.scensel.search_last_click = inside.then_some(now);
         }
         true
     }
@@ -660,7 +661,7 @@ impl GameApp {
     }
 
     pub(crate) fn handle_scensel_scrollbar_down(&mut self, point: GuiPoint) -> bool {
-        if self.scenario_selector_discovery.is_some() {
+        if self.scensel.discovery.is_some() {
             return false;
         }
         let Some(spec) = self.scensel_scrollbar_spec_at(point) else {
@@ -697,7 +698,7 @@ impl GameApp {
     }
 
     pub(crate) fn handle_scensel_scrollbar_move(&mut self, point: GuiPoint) -> bool {
-        if self.scenario_selector_discovery.is_some() {
+        if self.scensel.discovery.is_some() {
             self.menu_state.scrollbar_interaction = None;
             return false;
         }
@@ -740,7 +741,7 @@ impl GameApp {
     }
 
     pub(crate) fn handle_scensel_scrollbar_up(&mut self, point: GuiPoint) -> bool {
-        if self.scenario_selector_discovery.is_some() {
+        if self.scensel.discovery.is_some() {
             self.menu_state.scrollbar_interaction = None;
             return false;
         }
@@ -863,7 +864,7 @@ impl GameApp {
 
         let (sender, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.scenario_selector_discovery = Some(ScenarioSelectorDiscoveryState {
+        self.scensel.discovery = Some(ScenarioSelectorDiscoveryState {
             receiver,
             cancel: Arc::clone(&cancel),
             progress_percent: 0,
@@ -912,7 +913,7 @@ impl GameApp {
                 load_startup_alphabetical_sorting(self.app_paths.as_ref()),
             );
         }
-        self.scenario_catalog = build_scenario_catalog(&entries);
+        self.scensel.catalog = build_scenario_catalog(&entries);
         self.handle_menu_input(move |menu| {
             menu.replace_discovered_entries(
                 entries,
@@ -928,20 +929,21 @@ impl GameApp {
         self.refresh_scenario_entry_enabled();
         self.menu_state.sync_definition_checkbox_to_selection();
         self.sync_scenario_game_option_constraint();
-        self.scensel_last_click = None;
-        self.scensel_rename_pointer_focus = None;
+        self.scensel.last_click = None;
+        self.scensel.rename_pointer_focus = None;
         Ok(())
     }
 
     pub(crate) fn cancel_scenario_selector_discovery(&mut self) {
-        if let Some(state) = self.scenario_selector_discovery.take() {
+        if let Some(state) = self.scensel.discovery.take() {
             state.cancel.store(true, AtomicOrdering::Relaxed);
         }
     }
 
     pub(crate) fn scenario_selector_loading_label(&self) -> Option<String> {
         let progress = self
-            .scenario_selector_discovery
+            .scensel
+            .discovery
             .as_ref()
             .map(|state| state.progress_percent)?;
         let progress = progress.to_string();
@@ -957,14 +959,16 @@ impl GameApp {
         let mut finished = None;
         let mut disconnected = false;
         while let Some(event) = self
-            .scenario_selector_discovery
+            .scensel
+            .discovery
             .as_ref()
             .map(|state| state.receiver.try_recv())
         {
             match event {
                 Ok(ScenarioSelectorDiscoveryEvent::Progress(percent)) => {
                     let state = self
-                        .scenario_selector_discovery
+                        .scensel
+                        .discovery
                         .as_mut()
                         .expect("scenario discovery exists while polling");
                     let percent = state.progress_percent.max(percent.min(100));
@@ -986,7 +990,8 @@ impl GameApp {
 
         if let Some(entries) = finished {
             let mut state = self
-                .scenario_selector_discovery
+                .scensel
+                .discovery
                 .take()
                 .expect("finished scenario discovery retains its state");
             state.cancel.store(true, AtomicOrdering::Relaxed);
@@ -1036,14 +1041,14 @@ impl GameApp {
             && (matches!(key, VirtualKeyCode::F5 | VirtualKeyCode::F2)
                 || key == VirtualKeyCode::Delete && !self.menu_state.search_focused()))
             || (c4_modifiers == ModifiersState::ALT && key == VirtualKeyCode::KeyM);
-        if self.scenario_selector_discovery.is_some() {
+        if self.scensel.discovery.is_some() {
             return Ok(blocked_while_loading);
         }
         let book_selection = self.menu_state.current_map().is_none()
             && self.menu_state.selected_scenario().is_some();
         match key {
             VirtualKeyCode::F5 if no_modifiers => {
-                if self.scenario_selector_discovery.is_none() {
+                if self.scensel.discovery.is_none() {
                     let selected = self
                         .menu_state
                         .selected_scenario()
@@ -1191,7 +1196,7 @@ impl GameApp {
         );
         self.pending_definition_selection = Some(PendingDefinitionSelection {
             scenario,
-            selector_mode: self.scenario_selector_mode,
+            selector_mode: self.scensel.mode,
             root,
             custom_definition_root,
         });
@@ -1329,7 +1334,7 @@ impl GameApp {
     }
 
     pub(crate) fn scensel_do_back(&mut self) -> Result<(), EngineError> {
-        if self.scenario_selector_discovery.is_some() {
+        if self.scensel.discovery.is_some() {
             self.close_scenario_browser();
             return Ok(());
         }
@@ -1365,7 +1370,7 @@ impl GameApp {
         let (px, py) = (point.x as i32, point.y as i32);
         let inside =
             |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
-        if self.scenario_selector_discovery.is_some() {
+        if self.scensel.discovery.is_some() {
             let back = layout.back_button;
             if inside(back.x, back.y, back.w, back.h) {
                 if !suppress_click_focus {
@@ -1418,10 +1423,10 @@ impl GameApp {
                 // Double-click on the selected row opens/starts it
                 // (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
                 let now = Instant::now();
-                let is_double = self.scensel_last_click.is_some_and(|(last_index, at)| {
+                let is_double = self.scensel.last_click.is_some_and(|(last_index, at)| {
                     last_index == index && now.duration_since(at) < Duration::from_millis(500)
                 }) && self.menu_state.menu().selected_index() == Some(index);
-                self.scensel_last_click = Some((index, now));
+                self.scensel.last_click = Some((index, now));
                 if is_double {
                     self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
                     self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
@@ -1495,7 +1500,7 @@ impl GameApp {
     /// buttons sit above map pictures and consume the press instead, while a
     /// fullscreen dialog background is not a `MapPic` at all.
     pub(crate) fn handle_scensel_map_pointer_down(&mut self, point: GuiPoint) -> bool {
-        if self.scenario_selector_discovery.is_some() {
+        if self.scensel.discovery.is_some() {
             return true;
         }
         let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
@@ -1831,7 +1836,7 @@ impl GameApp {
         {
             self.open_definition_selector(scenario)
         } else {
-            self.accept_scenario_from_selector(scenario, self.scenario_selector_mode, None)
+            self.accept_scenario_from_selector(scenario, self.scensel.mode, None)
         }
     }
 

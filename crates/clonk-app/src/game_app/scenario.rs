@@ -516,7 +516,7 @@ impl GameApp {
         identifier: &str,
         title: &str,
     ) -> Result<(), EngineError> {
-        if let Some(state) = self.scenario_selector_discovery.as_mut() {
+        if let Some(state) = self.scensel.discovery.as_mut() {
             state.retained_title = Some((identifier.to_string(), title.to_string()));
             return Ok(());
         }
@@ -531,7 +531,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        self.scenario_catalog = build_scenario_catalog(&entries);
+        self.scensel.catalog = build_scenario_catalog(&entries);
         let identifier = identifier.to_string();
         self.handle_menu_input(move |menu| {
             menu.replace_discovered_entries(entries, Some(&identifier), true, false)
@@ -612,7 +612,7 @@ impl GameApp {
             self.set_scensel_dialog_focus(ScenselDialogFocus::List);
             return Ok(());
         }
-        let scenario = self.scenario_catalog.get(&identifier).cloned().or_else(|| {
+        let scenario = self.scensel.catalog.get(&identifier).cloned().or_else(|| {
             self.menu_state
                 .visible_entries()
                 .iter()
@@ -706,7 +706,7 @@ impl GameApp {
 
     pub(crate) fn close_scenario_browser(&mut self) {
         self.menu_state.abort_renaming();
-        self.scensel_rename_pointer_focus = None;
+        self.scensel.rename_pointer_focus = None;
         match self.startup_scenario_back_dialog.take() {
             Some(StartupDialog::MainMenu) => {
                 // `SDID_Back` reuses the retained Main dialog, so the
@@ -751,7 +751,7 @@ impl GameApp {
     }
 
     pub(crate) fn open_scenario_browser_with_mode(&mut self, selector_mode: ScenarioSelectorMode) {
-        let reload = std::mem::replace(&mut self.scenario_selector_reload_on_next_show, true);
+        let reload = std::mem::replace(&mut self.scensel.reload_on_next_show, true);
         self.cancel_scenario_selector_discovery();
         self.menu_state.abort_renaming();
         self.close_context_menu_silently();
@@ -766,7 +766,7 @@ impl GameApp {
         self.game_option_input_pointer_capture = None;
         self.game_option_pointer_capture = false;
         self.game_option_consumed_keys.clear();
-        self.scenario_selector_mode = selector_mode;
+        self.scensel.mode = selector_mode;
         self.startup_scenario_back_dialog = Some(match selector_mode {
             ScenarioSelectorMode::Local => StartupDialog::MainMenu,
             ScenarioSelectorMode::NetworkHost => StartupDialog::NetworkGame,
@@ -832,7 +832,7 @@ impl GameApp {
             // startup dialog (src/C4Application.cpp:373-400,442-451;
             // src/C4Game.cpp:452-477).
             let purpose = if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host)
-                || self.scenario_selector_mode == ScenarioSelectorMode::NetworkHost
+                || self.scensel.mode == ScenarioSelectorMode::NetworkHost
             {
                 StartupNetworkPurpose::StagedHost
             } else {
@@ -901,7 +901,7 @@ impl GameApp {
         let (width, height) = (surface.width(), surface.height());
         let layout =
             clonk_frontend::startup_scensel::scen_sel_layout(width as i32, height as i32, fonts);
-        let title_key = if self.scenario_selector_mode == ScenarioSelectorMode::NetworkHost {
+        let title_key = if self.scensel.mode == ScenarioSelectorMode::NetworkHost {
             "IDS_DLG_NETSTART"
         } else {
             "IDS_DLG_STARTGAME"
@@ -1001,11 +1001,11 @@ impl GameApp {
         // rows whose label needs the CanOpen color. Map activation still
         // reaches the exact start-time validation in `handle_menu_actions`.
         if self.menu_state.current_map().is_some() {
-            self.scenario_entry_enabled.clear();
+            self.scensel.entry_enabled.clear();
             return;
         }
-        let selector_mode = self.scenario_selector_mode;
-        self.scenario_entry_enabled = self
+        let selector_mode = self.scensel.mode;
+        self.scensel.entry_enabled = self
             .menu_state
             .visible_entries()
             .iter()

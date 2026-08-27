@@ -2530,10 +2530,10 @@ impl GameApp {
         }
 
         if let Some(identifier) = start_identifier {
-            if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
+            if let Some(scenario) = self.scensel.catalog.get(&identifier).cloned() {
                 if self.startup_view == StartupView::ScenarioBrowser {
                     if let Some(message) = self
-                        .scenario_selector_open_error(&scenario, self.scenario_selector_mode)
+                        .scenario_selector_open_error(&scenario, self.scensel.mode)
                         .map_err(classic_parity_engine_error)?
                     {
                         let caption = self.runtime_resource_string("IDS_MSG_CANNOTSTARTSCENARIO");
@@ -2548,7 +2548,7 @@ impl GameApp {
                         )?;
                         return Ok(());
                     }
-                    if self.scenario_selector_mode == ScenarioSelectorMode::NetworkHost {
+                    if self.scensel.mode == ScenarioSelectorMode::NetworkHost {
                         match self
                             .network_scenario_open_decision(&scenario)
                             .map_err(classic_parity_engine_error)?

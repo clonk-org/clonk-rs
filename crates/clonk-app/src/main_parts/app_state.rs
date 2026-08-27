@@ -102,6 +102,40 @@ pub(crate) struct SaveState {
     pub(crate) network_recreation_progress: Option<NetworkSavegameRecreationProgress>,
 }
 
+/// The scenario selector: what was discovered, what is shown, and the
+/// gestures in flight over it.
+///
+/// Discovery runs off the UI thread and replaces the whole book at once,
+/// so the catalog, the worker that rebuilds it, the reload latch that
+/// decides whether the next show rediscovers, and the per-row `CanOpen`
+/// cache are one generation moving together — a stale cache against a
+/// fresh catalog is the bug this grouping makes hard to write.
+#[derive(Default)]
+pub(crate) struct ScenarioSelectorState {
+    pub(crate) mode: ScenarioSelectorMode,
+    pub(crate) catalog: HashMap<String, FrontendScenario>,
+    /// Interactive scenario refreshes run outside the UI thread. The old
+    /// menu tree remains live but hidden until this worker supplies the
+    /// replacement vector, making completion one atomic book rebuild.
+    pub(crate) discovery: Option<ScenarioSelectorDiscoveryState>,
+    /// The constructor has already populated the first selector generation.
+    /// Later shows must rediscover disk changes made while that generation was
+    /// hidden, including savegames written by the running round.
+    pub(crate) reload_on_next_show: bool,
+    /// Cached `C4ScenarioListLoader::Entry::CanOpen` result for the current
+    /// selector mode. Rows stay actionable; this controls label color only.
+    pub(crate) entry_enabled: HashMap<String, bool>,
+    /// Last scenario-list row click (index, time) for double-click detection
+    /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
+    pub(crate) last_click: Option<(usize, Instant)>,
+    /// Focus selected by RenameEdit completion during an outside pointer
+    /// press. The same gesture may still activate its target, but C++
+    /// Dialog::SetFocus cancels that target's focus transfer.
+    pub(crate) rename_pointer_focus: Option<ScenselFocusSnapshot>,
+    /// Last search-edit click for C4GUI::Edit's double-click word selection.
+    pub(crate) search_last_click: Option<Instant>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -296,7 +330,6 @@ pub(crate) struct GameApp {
     /// that fresh selector goes to Main instead of inventing a NetDlg.
     pub(crate) startup_scenario_back_dialog: Option<StartupDialog>,
     pub(crate) startup_view_flags: StartupViewFlags,
-    pub(crate) scenario_selector_mode: ScenarioSelectorMode,
     pub(crate) scenario_game_options: GameOptionButtons,
     pub(crate) object_menu: Option<ObjectMenuState>,
     pub(crate) ingame_menu: PlayerIngameMenus,
@@ -334,18 +367,8 @@ pub(crate) struct GameApp {
     /// C4MainMenu.cpp:563-571).
     pub(crate) mouse_control_allowed: bool,
     pub(crate) mode: AppMode,
-    pub(crate) scenario_catalog: HashMap<String, FrontendScenario>,
-    /// Interactive scenario refreshes run outside the UI thread. The old
-    /// menu tree remains live but hidden until this worker supplies the
-    /// replacement vector, making completion one atomic book rebuild.
-    pub(crate) scenario_selector_discovery: Option<ScenarioSelectorDiscoveryState>,
-    /// The constructor has already populated the first selector generation.
-    /// Later shows must rediscover disk changes made while that generation was
-    /// hidden, including savegames written by the running round.
-    pub(crate) scenario_selector_reload_on_next_show: bool,
-    /// Cached `C4ScenarioListLoader::Entry::CanOpen` result for the current
-    /// selector mode. Rows stay actionable; this controls label color only.
-    pub(crate) scenario_entry_enabled: HashMap<String, bool>,
+    /// The scenario selector's own state.
+    pub(crate) scensel: ScenarioSelectorState,
     pub(crate) active_scenario: Option<FrontendScenario>,
     /// Effective definition vector from the active game. C++ backs this up
     /// across Restart/Next Mission and restores it as FixedDefinitions.
@@ -1135,15 +1158,6 @@ pub(crate) struct GameApp {
     pub(crate) game_option_consumed_keys: HashSet<VirtualKeyCode>,
     pub(crate) game_option_pointer_capture: bool,
     pub(crate) menu_backdrop_cache: StartupBackdropCache,
-    /// Last scenario-list row click (index, time) for double-click detection
-    /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
-    pub(crate) scensel_last_click: Option<(usize, Instant)>,
-    /// Focus selected by RenameEdit completion during an outside pointer
-    /// press. The same gesture may still activate its target, but C++
-    /// Dialog::SetFocus cancels that target's focus transfer.
-    pub(crate) scensel_rename_pointer_focus: Option<ScenselFocusSnapshot>,
-    /// Last search-edit click for C4GUI::Edit's double-click word selection.
-    pub(crate) scensel_search_last_click: Option<Instant>,
     /// Last definition-list label click for multi-selection double-click
     /// toggling (C4FileSelDlg::OnSelDblClick).
     pub(crate) definition_selector_last_click: Option<(usize, Instant)>,

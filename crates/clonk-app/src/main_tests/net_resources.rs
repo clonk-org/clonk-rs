@@ -1229,7 +1229,7 @@ fn scensel_rename_pointer_completion_cancels_target_focus_transfer() {
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     let mut app = new_menu_app(800, 600);
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_scenario_browser();
     app.sync_scenario_game_option_bounds();
 
@@ -2061,7 +2061,7 @@ fn installed_scenario_loader_uses_recursive_folder_resource_tier() {
     config.save(paths.config_file()).test_value();
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     let scenario =
-        resolve_next_mission_scenario(&app.scenario_catalog, "Fantasy.c4f/Crystalvalley.c4s")
+        resolve_next_mission_scenario(&app.scensel.catalog, "Fantasy.c4f/Crystalvalley.c4s")
             .test_value();
     let setup = build_scenario_loader(
         &scenario,
@@ -2649,7 +2649,7 @@ fn catalog_host_selection_change_discards_and_rearms_preload_state() {
         scenario.identifier = identifier.to_string();
         scenario.title = title.to_string();
         scenario.path = Some(PathBuf::from(identifier));
-        app.scenario_catalog
+        app.scensel.catalog
             .insert(identifier.to_string(), scenario);
     }
     let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
@@ -4043,7 +4043,7 @@ fn start_real_scenario_loads_from_disk() {
 
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
 
-    let scenario = app.scenario_catalog.get("Alpha.c4s").cloned().test_value();
+    let scenario = app.scensel.catalog.get("Alpha.c4s").cloned().test_value();
     main_assert_eq!(scenario.title => "Alpha Mission");
 
     let frontend_music = app

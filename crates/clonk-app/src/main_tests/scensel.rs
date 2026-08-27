@@ -50,7 +50,7 @@ fn scensel_app(scenarios: &[FrontendScenario]) -> GameApp {
         StartupMenu::new(build_menu_entries(scenarios, false), test_font(), None).test_value();
     let mut app = new_menu_app(800, 600);
     app.menu_state = MenuState::new(menu, scenarios.to_vec());
-    app.scenario_catalog = build_scenario_catalog(scenarios);
+    app.scensel.catalog = build_scenario_catalog(scenarios);
     app.open_scenario_browser();
     app
 }
@@ -124,15 +124,15 @@ fn scenario_selector_openability_cache_only_covers_visible_entries() {
     pack.children = vec![hidden];
 
     let mut app = scensel_app(&[pack]);
-    main_assert!(app.scenario_entry_enabled.contains_key("pack"));
-    main_assert!(!app.scenario_entry_enabled.contains_key("pack/hidden"));
+    main_assert!(app.scensel.entry_enabled.contains_key("pack"));
+    main_assert!(!app.scensel.entry_enabled.contains_key("pack/hidden"));
 
     app.enter_scenario_folder("pack");
-    main_assert_eq!(app.scenario_entry_enabled.get("pack/hidden") => Some(&true));
+    main_assert_eq!(app.scensel.entry_enabled.get("pack/hidden") => Some(&true));
 
     app.scensel_do_back().test_value();
-    main_assert!(app.scenario_entry_enabled.contains_key("pack"));
-    main_assert!(!app.scenario_entry_enabled.contains_key("pack/hidden"));
+    main_assert!(app.scensel.entry_enabled.contains_key("pack"));
+    main_assert!(!app.scensel.entry_enabled.contains_key("pack/hidden"));
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn checked_definition_checkbox_intercepts_start_even_when_local_only_disables_it
     scenario.local_only = Some(true);
     scenario.allow_user_change = Some(true);
     scenario.definition_modules = vec!["Ignored.c4d".to_string()];
-    app.scenario_catalog
+    app.scensel.catalog
         .insert(scenario.identifier.clone(), scenario.clone());
     app.menu_state.definition_checkbox_enabled = false;
     app.menu_state.definition_checkbox_checked = true;
@@ -232,13 +232,13 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_scenario_browser();
 
-    main_assert_eq!(app.scenario_entry_enabled.get("Allowed.c4s") => Some(&true));
-    main_assert_eq!(app.scenario_entry_enabled.get("Locked.c4s") => Some(&false));
-    main_assert_eq!(app.scenario_entry_enabled.get("Native.c4s") => Some(&false));
-    main_assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s") => Some(&false));
+    main_assert_eq!(app.scensel.entry_enabled.get("Allowed.c4s") => Some(&true));
+    main_assert_eq!(app.scensel.entry_enabled.get("Locked.c4s") => Some(&false));
+    main_assert_eq!(app.scensel.entry_enabled.get("Native.c4s") => Some(&false));
+    main_assert_eq!(app.scensel.entry_enabled.get("TooFew.c4s") => Some(&false));
 
     // The dynamic renderer must pass CanOpen to ScenListItem: only the
     // label alpha changes; icons and row activation remain intact.
@@ -250,7 +250,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     draw_scensel_dynamic(
         &mut surface,
         &mut app.menu_state,
-        &app.scenario_entry_enabled,
+        &app.scensel.entry_enabled,
         &assets,
         &button_down,
         &fonts,
@@ -272,7 +272,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
             .map(|color| color.a)
             .max()
             .unwrap_or(0);
-        let enabled = app.scenario_entry_enabled[&entry.identifier];
+        let enabled = app.scensel.entry_enabled[&entry.identifier];
         if enabled {
             main_assert!(max_alpha > 200, "{} row is enabled (max alpha {max_alpha})", entry.title);
         } else {
@@ -280,7 +280,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
         }
     }
 
-    let locked = app.scenario_catalog["Locked.c4s"].clone();
+    let locked = app.scensel.catalog["Locked.c4s"].clone();
     main_assert!(locked.is_playable, "denied rows remain actionable");
     main_assert!(!locked.has_mission_access(&app.mission_access));
     app.enter_scenario_folder("Map.c4f");
@@ -321,8 +321,8 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     // C4StartupScenSelDlg.cpp:1838-1856); the port writes earned access
     // straight out instead (`persist_mission_access_if_changed`).
     main_assert_eq!(load_configured_mission_access(&paths).expect("read saved mission access") => "secret");
-    main_assert_eq!(app.scenario_entry_enabled.get("Locked.c4s") => Some(&true));
-    main_assert_eq!(app.scenario_entry_enabled.get("Native.c4s") => Some(&false));
+    main_assert_eq!(app.scensel.entry_enabled.get("Locked.c4s") => Some(&true));
+    main_assert_eq!(app.scensel.entry_enabled.get("Native.c4s") => Some(&false));
     main_assert!(locked.has_mission_access(&app.mission_access));
     app.enter_scenario_folder("Map.c4f");
     main_assert_eq!(
@@ -343,11 +343,11 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
         .test_value();
     wait_for_scenario_selector_discovery(&mut app);
     main_assert_eq!(app.mission_access.snapshot() => format!("secret;{native_password}"));
-    main_assert_eq!(app.scenario_entry_enabled.get("Native.c4s") => Some(&true));
-    main_assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s") => Some(&false));
+    main_assert_eq!(app.scensel.entry_enabled.get("Native.c4s") => Some(&true));
+    main_assert_eq!(app.scensel.entry_enabled.get("TooFew.c4s") => Some(&false));
     main_assert_eq!(
         app.scenario_selector_open_error(
-            &app.scenario_catalog["Native.c4s"],
+            &app.scensel.catalog["Native.c4s"],
             ScenarioSelectorMode::Local,
         )
         .expect("inspect native-byte access") =>
@@ -537,7 +537,7 @@ fn scensel_touch_uses_live_search_and_classic_back_bounds() {
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_network_game_dialog();
     app.open_network_host_scenario_browser();
     let fonts = app.assets.clonk_fonts.clone().test_value();
@@ -1931,7 +1931,7 @@ fn scensel_rename_abort_paths_do_not_mutate_and_focus_loss_commits() {
     main_assert!(!old_path.exists());
     main_assert!(new_path.exists());
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| (entry.identifier.as_str(), entry.title.as_str())) => Some(("New.c4s", "New")));
-    main_assert!(app.scenario_catalog.contains_key("New.c4s"));
+    main_assert!(app.scensel.catalog.contains_key("New.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2009,7 +2009,7 @@ fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
     main_assert_eq!(app.scenario_selector_loading_label().as_deref() => Some("Loading... (0%)"), "the loading book is observable before the worker can be polled");
     let mut zero_percent_frame = vec![0_u8; 800 * 600 * 4];
     app.test_render(&mut zero_percent_frame);
-    app.scenario_selector_discovery.test_mut().progress_percent = 37;
+    app.scensel.discovery.test_mut().progress_percent = 37;
     let mut progressed_frame = vec![0_u8; 800 * 600 * 4];
     app.test_render(&mut progressed_frame);
     main_assert_ne!(zero_percent_frame => progressed_frame, "the visible loading label must track the percentage state");
@@ -2024,7 +2024,7 @@ fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
         Some("RefreshPack.c4f/Beta.c4s"),
         "the old tree remains intact behind the loading book"
     );
-    main_assert!(!app.scenario_catalog.contains_key("RefreshPack.c4f/Gamma.c4s"), "the discovered tree must not leak in before the atomic completion");
+    main_assert!(!app.scensel.catalog.contains_key("RefreshPack.c4f/Gamma.c4s"), "the discovered tree must not leak in before the atomic completion");
 
     wait_for_scenario_selector_discovery(&mut app);
 
@@ -2044,7 +2044,7 @@ fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("RefreshPack.c4f/Beta.c4s"));
     main_assert_eq!(app.menu_state.search_text() => "efresh mission");
     main_assert_eq!(app.menu_state.applied_search_text => "efresh mission");
-    main_assert!(app.scenario_catalog.contains_key("RefreshPack.c4f/Gamma.c4s"));
+    main_assert!(app.scensel.catalog.contains_key("RefreshPack.c4f/Gamma.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2096,7 +2096,7 @@ fn scensel_f2_renames_unpacked_scenario_rewrites_title_and_refocuses() {
     main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::List);
     main_assert!(!app.menu_state.search_focused());
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| (entry.identifier.as_str(), entry.title.as_str())) => Some(("New Name.c4s", "New Name")));
-    main_assert!(app.scenario_catalog.contains_key("New Name.c4s"));
+    main_assert!(app.scensel.catalog.contains_key("New Name.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2227,7 +2227,7 @@ fn scensel_delete_confirms_exact_subject_deletes_and_selects_next() {
     main_assert!(!paths.scenario_dir().join("B.c4s").exists());
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some(expected_next.as_str()));
     main_assert_eq!(app.menu_state.search_text() => "pending query that excludes Gamma");
-    main_assert!(!app.scenario_catalog.contains_key("B.c4s"));
+    main_assert!(!app.scensel.catalog.contains_key("B.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2301,7 +2301,7 @@ fn scensel_delete_failure_is_nonfatal_and_keeps_row_selected() {
     main_assert_eq!(failure.state.caption() => "Delete");
     main_assert_eq!(failure.state.message() => "Delete failure.");
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("Failure.c4s"));
-    main_assert!(app.scenario_catalog.contains_key("Failure.c4s"));
+    main_assert!(app.scensel.catalog.contains_key("Failure.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2529,7 +2529,7 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
     draw_scensel_dynamic(
         &mut focused,
         &mut app.menu_state,
-        &app.scenario_entry_enabled,
+        &app.scensel.entry_enabled,
         &assets,
         &button_down,
         &fonts,
@@ -2542,7 +2542,7 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
     draw_scensel_dynamic(
         &mut suppressed,
         &mut app.menu_state,
-        &app.scenario_entry_enabled,
+        &app.scensel.entry_enabled,
         &assets,
         &button_down,
         &fonts,
@@ -2915,7 +2915,7 @@ fn open_map_test_folder(app: &mut GameApp, folder: FrontendScenario) {
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_scenario_browser();
     app.handle_menu_input(|_| {
         vec![StartupMenuAction::OpenEntry(scensel_fixture!(
@@ -3054,9 +3054,9 @@ fn folder_map_f5_refresh_preserves_map_and_book_only_shortcuts() {
     let map = app.menu_state.current_map().test_value();
     main_assert!(map.selected_entry().is_none(), "F5 rebuild clears the visible map selection");
     main_assert!(map.scenarios.iter().any(|button| {button.entry.as_ref().is_some_and(|entry| entry.identifier == "Map.c4f/Beta.c4s")}));
-    main_assert!(app.scenario_catalog.contains_key("Map.c4f/Beta.c4s"));
+    main_assert!(app.scensel.catalog.contains_key("Map.c4f/Beta.c4s"));
     main_assert!(
-        app.scenario_entry_enabled.is_empty(),
+        app.scensel.entry_enabled.is_empty(),
         "rediscovering a map sheet must not rebuild the book CanOpen cache"
     );
     reset_cached_app_paths();
@@ -3236,7 +3236,7 @@ fn folder_map_does_not_build_book_openability_cache() {
 
     main_assert!(app.menu_state.current_map().is_some());
     main_assert!(
-        app.scenario_entry_enabled.is_empty(),
+        app.scensel.entry_enabled.is_empty(),
         "map sheets do not render book rows or use their CanOpen cache"
     );
 }

@@ -2724,7 +2724,6 @@ impl GameApp {
                 fair_crew: load_fair_crew_flag(paths),
                 record: load_recording_flag(paths),
             },
-            scenario_selector_mode: ScenarioSelectorMode::Local,
             scenario_game_options,
             object_menu: None,
             ingame_menu: PlayerIngameMenus::default(),
@@ -2740,10 +2739,13 @@ impl GameApp {
             mouse_control: true,
             mouse_control_allowed: true,
             mode: AppMode::Loading,
-            scenario_catalog,
-            scenario_selector_discovery: None,
-            scenario_selector_reload_on_next_show: false,
-            scenario_entry_enabled: HashMap::new(),
+            scensel: ScenarioSelectorState {
+                // The constructor discovers the first generation up front; the
+                // rest of the selector starts empty.
+                catalog: scenario_catalog,
+                mode: ScenarioSelectorMode::Local,
+                ..ScenarioSelectorState::default()
+            },
             active_scenario: None,
             active_definition_load: None,
             active_description_definition_modules: Vec::new(),
@@ -3019,9 +3021,6 @@ impl GameApp {
             game_option_consumed_keys: HashSet::new(),
             game_option_pointer_capture: false,
             menu_backdrop_cache: StartupBackdropCache::default(),
-            scensel_last_click: None,
-            scensel_rename_pointer_focus: None,
-            scensel_search_last_click: None,
             definition_selector_last_click: None,
             plrsel_last_click: None,
             netdlg_last_click: None,
@@ -7625,7 +7624,7 @@ impl GameApp {
                 // C4GameOverDlg preserves restart infos only for Restart;
                 // actual Next Mission clears them as soon as it closes.
                 self.restart_restore_infos = RestartRestoreInfos::default();
-                let Some(scenario) = resolve_next_mission_scenario(&self.scenario_catalog, &path)
+                let Some(scenario) = resolve_next_mission_scenario(&self.scensel.catalog, &path)
                 else {
                     self.status_text = format!("Next scenario is unavailable: {path}");
                     return Ok(());
@@ -8959,7 +8958,8 @@ impl GameApp {
                 tracing::warn!(%error, "failed to start loaded-game recording");
             }
         }
-        self.scenario_catalog
+        self.scensel
+            .catalog
             .insert(frontend.identifier.clone(), frontend.clone());
 
         self.status_text = format!("Loaded {}", scenario_info.title);

@@ -1304,7 +1304,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_scenario_browser();
     app.menu_state.definition_checkbox_checked = true;
 
@@ -4742,7 +4742,7 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         StartupMenu::new(build_menu_entries(&entries, false), test_font(), None).test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.menu_state = MenuState::new(menu, entries.clone());
-    app.scenario_catalog = build_scenario_catalog(&entries);
+    app.scensel.catalog = build_scenario_catalog(&entries);
     app.open_scenario_browser();
     let summary = |entry: &FrontendScenario| saves_fixture!(scenario: entry.identifier.clone(), entry.title.clone(), entry.kind);
     app.process_menu_actions(vec![StartupMenuAction::OpenEntry(summary(savegames))])
@@ -4754,7 +4754,7 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         .test_value();
     let selected = selected.test_value();
     main_assert_eq!(
-        app.scenario_catalog
+        app.scensel.catalog
             .get(&selected)
             .and_then(|entry| entry.path.as_deref()) =>
         Some(saved_scenario.as_path()),
@@ -4789,7 +4789,7 @@ fn scenario_selector_reopen_discovers_savegame_created_during_session() {
 
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     main_assert!(!app
-        .scenario_catalog
+        .scensel.catalog
         .values()
         .any(|entry| entry.path.as_deref() == Some(saved_scenario.as_path())));
     app.open_scenario_browser();
@@ -4818,7 +4818,7 @@ fn scenario_selector_reopen_discovers_savegame_created_during_session() {
     wait_for_scenario_selector_discovery(&mut app);
 
     main_assert!(app
-        .scenario_catalog
+        .scensel.catalog
         .values()
         .any(|entry| entry.path.as_deref() == Some(saved_scenario.as_path())));
     reset_cached_app_paths();
@@ -4937,7 +4937,7 @@ fn game_app_uses_selected_user_root_for_scenario_discovery() {
 
     main_assert_eq!(paths.user_data_dir() => selected_user);
     main_assert_eq!(paths.config_file() => config_file);
-    main_assert_eq!(app.scenario_catalog.get("L016Configured.c4s").map(|scenario| scenario.title.as_str()) => Some("Selected User Scenario"));
+    main_assert_eq!(app.scensel.catalog.get("L016Configured.c4s").map(|scenario| scenario.title.as_str()) => Some("Selected User Scenario"));
 }
 
 #[test]
@@ -5052,7 +5052,7 @@ fn quick_save_persists_across_sessions() {
             let mut app =
                 test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
 
-            let scenario = app.scenario_catalog.get("Alpha.c4s").cloned().test_value();
+            let scenario = app.scensel.catalog.get("Alpha.c4s").cloned().test_value();
             app.start_scenario(scenario).test_value();
             wait_for_running(&mut app);
 

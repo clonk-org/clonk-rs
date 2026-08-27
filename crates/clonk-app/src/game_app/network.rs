@@ -6025,7 +6025,7 @@ impl GameApp {
             self.status_text = "Select a scenario before starting".to_string();
             return Ok(());
         };
-        let scenario = match self.scenario_catalog.get(identifier).cloned() {
+        let scenario = match self.scensel.catalog.get(identifier).cloned() {
             Some(scenario) => scenario,
             None => {
                 self.status_text =
@@ -6052,7 +6052,7 @@ impl GameApp {
             self.status_text = "Select a scenario before starting".to_string();
             return None;
         };
-        match self.scenario_catalog.get(identifier).cloned() {
+        match self.scensel.catalog.get(identifier).cloned() {
             Some(scenario) => Some(scenario),
             None => {
                 self.status_text =
@@ -6235,7 +6235,7 @@ impl GameApp {
             self.status_text = "Select a scenario before starting".to_string();
             return false;
         };
-        if !self.scenario_catalog.contains_key(identifier) {
+        if !self.scensel.catalog.contains_key(identifier) {
             self.status_text = format!("Scenario `{identifier}` is not available in the catalog");
             return false;
         }
@@ -6376,7 +6376,7 @@ impl GameApp {
         self.network = None;
         self.network_mode = None;
         self.network_control_clock = None;
-        self.scenario_selector_mode = ScenarioSelectorMode::Local;
+        self.scensel.mode = ScenarioSelectorMode::Local;
         // Repeat the join itself, so the password, netpuncher brokerage and
         // full route list survive. The teardown above cleared
         // `pending_network_join`, which is also what the wrong-password
@@ -6717,7 +6717,7 @@ impl GameApp {
         self.return_to_menu_retaining_network_session();
         self.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
-        self.scenario_selector_mode = ScenarioSelectorMode::NetworkHost;
+        self.scensel.mode = ScenarioSelectorMode::NetworkHost;
         self.initial_definition_seed = None;
         self.startup_restart_diagnostics.begin_game_init();
 
@@ -6857,7 +6857,7 @@ impl GameApp {
         self.return_to_menu_for_relaunch();
         self.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
-        self.scenario_selector_mode = ScenarioSelectorMode::NetworkHost;
+        self.scensel.mode = ScenarioSelectorMode::NetworkHost;
         self.stage_network_host_scenario(scenario, definition_load)
     }
 
@@ -6892,7 +6892,7 @@ impl GameApp {
             return None;
         }
         let lobby = self.network_lobby.as_ref().filter(|lobby| lobby.is_host)?;
-        self.scenario_catalog.get(lobby.selected_identifier()?)
+        self.scensel.catalog.get(lobby.selected_identifier()?)
     }
 
     pub(crate) fn clear_client_preload_projection(&mut self) {

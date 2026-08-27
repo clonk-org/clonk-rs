@@ -1630,7 +1630,7 @@ impl GameApp {
                     self.assets.as_ref(),
                     &mut self.main_menu_state,
                     &mut self.menu_state,
-                    &self.scenario_entry_enabled,
+                    &self.scensel.entry_enabled,
                     scenario_loading_label.as_deref(),
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
@@ -1643,7 +1643,7 @@ impl GameApp {
                     game_option_input_open,
                     !self.message_dialogs.is_empty() || league_signup_open,
                     &self.scenario_game_options,
-                    self.scenario_selector_mode,
+                    self.scensel.mode,
                     self.startup_options_dialog.as_ref(),
                     self.startup_options_advanced_dialog
                         .as_mut()

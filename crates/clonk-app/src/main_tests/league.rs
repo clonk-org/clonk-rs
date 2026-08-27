@@ -4216,7 +4216,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     restart_host.loader_render_error = Some("test restart blocker".to_string());
     restart_host.hard_abort_running_game().test_value();
     main_assert!(!restart_host.abort_restart_pending);
-    main_assert_eq!(restart_host.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(restart_host.scensel.mode => ScenarioSelectorMode::NetworkHost);
 
     let mut client = new_running_sandbox_app();
     let (_client_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 1);
@@ -5167,7 +5167,7 @@ fn a_refused_host_registration_offers_the_native_ok_or_abort_choice() {
         .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     main_assert!(aborted.network.is_none(), "Abort is the one answer that makes InitHost fail");
-    main_assert_eq!(aborted.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(aborted.scensel.mode => ScenarioSelectorMode::NetworkHost);
 }
 
 #[test]
