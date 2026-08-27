@@ -2428,7 +2428,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
     app.initialize_ingame_mouse_center().test_value();
     let reset_world_pointer = app.ingame_pointer.test_value();
     main_assert!(app.classic_gui_cursor_request().is_some(), "GUI cursor remains independently drawable after the reset");
-    app.runtime_help_visible = true;
+    app.dialogs.help_visible = true;
     app.close_ingame_menu_for_player(app.local_owner);
     main_assert!(app.running_gui_mouse_owned, "Dialog::Close leaves ownership for C4GraphicsSystem::Execute");
     app.reconcile_running_mouse_after_last_gui_close(false)
@@ -2438,7 +2438,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
     main_assert!(app.ingame_pointer.is_some(), "the independently reinitialized world pointer remains active");
     main_assert_eq!(app.ingame_pointer => Some(reset_world_pointer));
 
-    app.runtime_help_visible = false;
+    app.dialogs.help_visible = false;
     app.open_ingame_menu().test_value();
     app.test_cursor(PhysicalPosition::new(
         f64::from(menu_point.x),
@@ -2532,14 +2532,14 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             .bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::KeyC);
         runtime_app.test_modifiers(modifiers);
-        runtime_app.menu_title_drag = Some(MenuTitleDrag::Ingame {
+        runtime_app.dialogs.menu_title_drag = Some(MenuTitleDrag::Ingame {
             player: runtime_app.local_owner,
             start_pointer: GuiPoint::new(20.0, 20.0),
             start_location: (40, 50),
         });
         runtime_app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
         main_assert!(runtime_app.chat.external_dialog_visible);
-        main_assert!(runtime_app.menu_title_drag.is_none(), "activating C4ChatDlg releases an obscured menu-title drag");
+        main_assert!(runtime_app.dialogs.menu_title_drag.is_none(), "activating C4ChatDlg releases an obscured menu-title drag");
         runtime_app.test_cursor(PhysicalPosition::new(300.0, 200.0));
         runtime_app.test_left_button(ElementState::Released);
         main_assert!(runtime_app.chat.external_dialog_visible);
@@ -2699,8 +2699,8 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     main_assert_eq!(app.startup.about_dialog.as_ref().expect("About dialog").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
     main_assert!(app.sound.ui_log.is_empty());
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Check for Updates");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Check for Updates");
     main_assert!(app.sound.ui_log.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
@@ -2911,7 +2911,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     let rename = app.startup.crew_rename.test_ref();
     main_assert!(rename.edit.is_focused());
     main_assert_eq!(rename.edit.selected_text() => Some("Taken"));
-    let collision = app.message_dialogs.last().test_value();
+    let collision = app.dialogs.messages.last().test_value();
     main_assert_eq!(collision.state.caption() => "Rename failure.");
     main_assert_eq!(collision.state.message() => "A Clonk with the file name \"Taken.c4i\" exists already.");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
@@ -2990,7 +2990,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
             .expect("read stale core after simulated rewrite failure")
             .contains("Name=Blurred crew name exceeds thir")
     );
-    let rewrite_failure = app.message_dialogs.last().test_value();
+    let rewrite_failure = app.dialogs.messages.last().test_value();
     main_assert_eq!(rewrite_failure.state.caption() => "");
     main_assert_eq!(rewrite_failure.state.message() => "File modification failure.");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
@@ -3051,7 +3051,7 @@ fn player_properties_context_closes_and_opens_the_editor() {
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
     ));
     main_assert!(app.status_text.is_empty());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.player_models.len() => before_models);
     main_assert_eq!(app.startup.player_files.len() => before_files);
 }
@@ -3376,7 +3376,7 @@ fn real_mars_upper_board_keeps_the_product_logo() {
 #[test]
 fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
     let check = |mut app: GameApp, label: &str| {
-        app.scoreboard_initial_reconcile_pending = true;
+        app.dialogs.scoreboard_initial_reconcile_pending = true;
         let before = runtime_global_ui_snapshot(&app);
         remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
         let mut frame = vec![0x84; 320 * 200 * 4];
@@ -3484,7 +3484,7 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
     check(object, "app-owned object menu");
 
     let mut scoreboard = new_running_sandbox_app();
-    scoreboard.scoreboard_dialog = Some(scoreboard.scoreboard_request());
+    scoreboard.dialogs.scoreboard = Some(scoreboard.scoreboard_request());
     check(scoreboard, "visible scoreboard");
 
     for style in 0..=3 {
@@ -3552,7 +3552,7 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
     main_assert_eq!(app.snapshot.game_time => snapshot_game_time);
     main_assert_eq!(second_accumulator => Duration::from_millis(125));
     main_assert!(app.context_menu.is_none());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -3578,7 +3578,7 @@ fn ingame_menu_abort_routes_to_the_same_confirmation() {
         CommandKind::Press,
     )
     .test_value();
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
     main_assert!(app.ingame_menu.is_none(), "C4Menu::Enter closes the nonpermanent main menu before Abort");
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(app.status_text.is_empty());
@@ -3895,13 +3895,13 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.startup.view => StartupView::About);
-    let wait = app.message_dialogs.last().test_value();
+    let wait = app.dialogs.messages.last().test_value();
     main_assert_eq!(wait.state.caption() => "Check for Updates");
     main_assert_eq!(wait.state.message() => "Checking for updates...");
     main_assert!(app.update_check.is_some());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.update_check.is_none());
     main_assert_eq!(app.startup.view => StartupView::About);
 
@@ -4234,7 +4234,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 1 })
     ));
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(app.context_menu_pointer_capture => Some(ContextMenuPointerButton::Left));
     app.test_left_button(ElementState::Released);
@@ -4250,11 +4250,11 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     ));
     app.test_left_button(ElementState::Pressed);
     main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Delete");
-    main_assert_eq!(app.message_dialogs[0].state.message() => "Do you really want to delete player Bob?");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Delete");
+    main_assert_eq!(app.dialogs.messages[0].state.message() => "Do you really want to delete player Bob?");
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.context_menu_pointer_capture => None);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
@@ -4269,7 +4269,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         gamepad_button_event(slot, LegacyGamepadButton::new(0), ElementState::Pressed),
     ]);
     main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
     app.test_gamepad_events([
@@ -4315,13 +4315,13 @@ fn message_dialog_stack_closes_only_the_top_entry() {
         )
         .test_value();
     }
-    main_assert_eq!(app.message_dialogs.len() => 2);
-    main_assert_eq!(app.message_dialogs[1].state.caption() => "Second");
+    main_assert_eq!(app.dialogs.messages.len() => 2);
+    main_assert_eq!(app.dialogs.messages[1].state.caption() => "Second");
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "First");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "First");
 }
 
 #[test]
@@ -4339,7 +4339,7 @@ fn message_dialog_focus_loss_cancels_held_input_and_stale_release_guards() {
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.handle_focus_lost().test_value();
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(app.message_dialogs.len() => 1, "a release missing its pre-focus-loss press must not activate");
+    main_assert_eq!(app.dialogs.messages.len() => 1, "a release missing its pre-focus-loss press must not activate");
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(app.message_dialog_consumed_keys.contains(&VirtualKeyCode::Escape));
@@ -4376,7 +4376,7 @@ fn gamepad_clear_cancels_pressed_modal_state_while_dialog_stays_open() {
 
     app.process_sourced_gamepad_event_batch([source(31, GamepadEvent::Clear { slot })], true)
         .test_value();
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
 
     app.process_sourced_gamepad_event_batch(
         [
@@ -4392,7 +4392,7 @@ fn gamepad_clear_cancels_pressed_modal_state_while_dialog_stays_open() {
         true,
     )
     .test_value();
-    main_assert_eq!(app.message_dialogs.len() => 1, "Clear cancels the pressed state before the fresh release cluster");
+    main_assert_eq!(app.dialogs.messages.len() => 1, "Clear cancels the pressed state before the fresh release cluster");
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
@@ -4477,7 +4477,7 @@ fn message_dialog_malformed_specific_assets_fail_before_modal_mutation() {
             if detail.contains("C4GUI::MessageDialog")
                 && detail.contains("GUIIcons.png")
     ));
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 #[test]

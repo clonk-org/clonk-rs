@@ -292,7 +292,7 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     main_assert!(app.active_scenario.is_none());
     main_assert!(app.active_definition_load.is_none());
     main_assert!(app.active_global_gui_failures.is_empty());
-    main_assert!(app.runtime_client_list.is_none());
+    main_assert!(app.dialogs.client_list.is_none());
     assert_startup_error_log(&app, "controlled local load failure");
     main_assert_eq!(app.startup_restart_diagnostics => StartupRestartDiagnostics::default());
 
@@ -301,7 +301,7 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     main_assert!(frame.iter().any(|byte| *byte != 0x4c));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert_eq!(app.startup.scenario_back_dialog => None);
@@ -352,14 +352,14 @@ fn disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
 
     app.poll_startup_network_connection().test_value();
 
-    let info = app.runtime_client_list.test_ref();
+    let info = app.dialogs.client_list.test_ref();
     main_assert!(info.is_static_info_only());
     main_assert_eq!(info.info_lines() => ["network worker disconnected before reporting readiness"]);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let bottom_close = app
-        .runtime_client_list
+        .dialogs.client_list
         .as_ref()
         .and_then(|dialog| dialog.info_layout(preferred, line_height))
         .and_then(|layout| layout.bottom_close_button)
@@ -370,7 +370,7 @@ fn disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.runtime_client_list.is_none());
+    main_assert!(app.dialogs.client_list.is_none());
     main_assert_eq!(app.startup_restart_diagnostics => StartupRestartDiagnostics::default());
 }
 
@@ -397,9 +397,9 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
-    let info = app.runtime_client_list.test_ref();
+    let info = app.dialogs.client_list.test_ref();
     main_assert!(info.is_info_only());
     main_assert!(info.info_is_open());
     main_assert_eq!(info.info_client_id() => None);
@@ -410,7 +410,7 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
     let (preferred, _) = app.runtime_client_list_input_geometry().test_value();
     let fonts = app.assets.clonk_fonts.clone().test_value();
     main_assert_eq!(
-        app.runtime_client_list
+        app.dialogs.client_list
             .as_ref()
             .expect("Error Log info")
             .visible_info_lines(preferred, &fonts.text)
@@ -419,7 +419,7 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
         Some("retained-log-00")
     );
     main_assert!(app
-        .runtime_client_list
+        .dialogs.client_list
         .as_ref()
         .expect("Error Log info")
         .info_scroll_metrics(preferred, &fonts.text)
@@ -430,7 +430,7 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
 
     app.test_key(VirtualKeyCode::End, ElementState::Pressed);
     main_assert!(app
-        .runtime_client_list
+        .dialogs.client_list
         .as_ref()
         .expect("scrolled Error Log info")
         .visible_info_lines(preferred, &fonts.text)
@@ -438,7 +438,7 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
         .is_some_and(|line| line.ends_with("TAIL")));
     app.test_key(VirtualKeyCode::End, ElementState::Released);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(app.runtime_client_list.is_none());
+    main_assert!(app.dialogs.client_list.is_none());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
@@ -460,14 +460,14 @@ fn empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
-    main_assert!(app.runtime_client_list.is_none());
+    main_assert!(app.dialogs.client_list.is_none());
     assert_startup_error_log(&app, "(no error)");
     let mut frame = vec![0x4c; 800 * 600 * 4];
     app.test_render(&mut frame);
     main_assert!(frame.iter().any(|byte| *byte != 0x4c));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.startup_restart_diagnostics => StartupRestartDiagnostics::default());
 }
@@ -586,9 +586,9 @@ fn host_round_restart_returns_to_network_lobby_staging() {
     // dialog and reports its fatal error in the Error Log instead of leaving a
     // status overlay behind (src/C4Application.cpp:373-405,438-450).
     main_assert!(app.status_text.is_empty());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Error Log");
-    main_assert!(app.message_dialogs[0].state.message().starts_with("Cannot host"));
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Error Log");
+    main_assert!(app.dialogs.messages[0].state.message().starts_with("Cannot host"));
 }
 
 #[test]
@@ -1940,7 +1940,7 @@ fn queued_playlist_restart_uses_its_command_time_filter() {
 #[test]
 fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
     let check = |mut app: GameApp, label: &str| {
-        app.scoreboard_initial_reconcile_pending = true;
+        app.dialogs.scoreboard_initial_reconcile_pending = true;
         let before = runtime_global_ui_snapshot(&app);
         remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
         let mut frame = vec![0x73; 320 * 200 * 4];
@@ -1994,7 +1994,7 @@ fn abort_action_opens_confirmation_with_control_host_restart() {
     app.start_sandbox_scenario(FrontendScenario::fallback())
         .test_value();
     app.apply_ingame_menu_action(MenuAction::Abort).test_value();
-    let dialog = app.message_dialogs.last().test_value();
+    let dialog = app.dialogs.messages.last().test_value();
     main_assert_eq!(dialog.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_RESTART_NO);
     main_assert_eq!(dialog.state.size() => clonk_frontend::message_dialog::MessageDialogSize::Fixed(400));
     main_assert_eq!(dialog.state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Yes));
@@ -2208,7 +2208,7 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
             // LAN probe failure in a modal, and the modal's Sec1 timer freeze
             // holds the queued masterserver result until it is dismissed.
             if app
-                .message_dialogs
+                .dialogs.messages
                 .last()
                 .is_some_and(|dialog| dialog.state.caption() == "Search Error")
             {
@@ -2289,7 +2289,7 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games() => expected_games);
     main_assert_eq!(app.status_text => "Retained status");
     main_assert_eq!(app.netdlg_last_click => Some((0, now)));
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     {
         let audio = app.test_audio_ref();
         main_assert!(audio.loaded_sounds.keys().any(|key| key.to_ascii_lowercase().contains("error.wav")), "the rejected refresh must request only the Error GUI sound");
@@ -2418,7 +2418,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
     app.ingame_menu.clear();
 
     app.test_key(VirtualKeyCode::KeyB, ElementState::Pressed);
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
 
     let mut context_priority = new_scoreboard_test_app(
         r#"global func Initialize()
@@ -2444,7 +2444,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         .test_value();
     context_priority.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(context_priority.context_menu.is_none());
-    main_assert!(context_priority.scoreboard_dialog.is_none());
+    main_assert!(context_priority.dialogs.scoreboard.is_none());
     context_priority
         .open_context_menu_at(
             vec![ContextMenuEntry::<AppContextMenuCommand>::new(
@@ -2454,7 +2454,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         )
         .test_value();
     context_priority.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(context_priority.scoreboard_dialog.is_none());
+    main_assert!(context_priority.dialogs.scoreboard.is_none());
     context_priority.close_context_menu_silently();
     context_priority
         .open_context_menu_at(
@@ -2463,7 +2463,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         )
         .test_value();
     context_priority.test_key(VirtualKeyCode::KeyR, ElementState::Pressed);
-    main_assert!(context_priority.scoreboard_dialog.is_none());
+    main_assert!(context_priority.dialogs.scoreboard.is_none());
 
     let mut gamepad_priority = new_running_sandbox_app();
     gamepad_priority.runtime_key_config_cache = OnceLock::new();
@@ -2884,7 +2884,7 @@ fn game_over_missing_resources_fail_typed_before_touching_output_frame() {
     let hud = Arc::make_mut(&mut assets.hud_graphics);
     hud.player = None;
     hud.score = None;
-    app.scoreboard_initial_reconcile_pending = true;
+    app.dialogs.scoreboard_initial_reconcile_pending = true;
     let before = runtime_global_ui_snapshot(&app);
     let mut frame = vec![0x5a; 320 * 200 * 4];
     let sentinel = frame.clone();
@@ -3349,7 +3349,7 @@ fn current_scoreboard_test_layout(
     app: &mut GameApp,
 ) -> clonk_frontend::scoreboard::ScoreboardLayout {
     app.materialize_scoreboard_presentation().test_value();
-    app.scoreboard_runtime
+    app.dialogs.scoreboard_runtime
         .presentation
         .test_ref()
         .layout()
@@ -3433,19 +3433,19 @@ fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
     let mut hidden = vec![0_u8; 320 * 200 * 4];
     eligible.test_render(&mut hidden);
     toggle_scoreboard(&mut eligible, ModifiersState::empty());
-    main_assert_eq!(eligible.scoreboard_dialog => Some(eligible.scoreboard_request()));
+    main_assert_eq!(eligible.dialogs.scoreboard => Some(eligible.scoreboard_request()));
     let mut frame = vec![0_u8; 320 * 200 * 4];
     eligible.test_render(&mut frame);
     let layout = current_scoreboard_test_layout(&mut eligible);
     main_assert!(frames_differ_in_rect(&hidden, &frame, 320, layout.bounds,));
 
     toggle_scoreboard(&mut eligible, ModifiersState::empty());
-    main_assert!(eligible.scoreboard_dialog.is_none());
+    main_assert!(eligible.dialogs.scoreboard.is_none());
 
     // Logo is not represented by C4KeyCodeEx and therefore remains an
     // exact bare-Tab ScoreboardToggle.
     toggle_scoreboard(&mut eligible, ModifiersState::SUPER);
-    main_assert_eq!(eligible.scoreboard_dialog => Some(eligible.scoreboard_request()));
+    main_assert_eq!(eligible.dialogs.scoreboard => Some(eligible.scoreboard_request()));
 }
 
 #[test]
@@ -3469,7 +3469,7 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
         f64::from(close.y + close.h / 2),
     );
     app.test_cursor(point);
-    main_assert!(app.scoreboard_runtime.close_hovered);
+    main_assert!(app.dialogs.scoreboard_runtime.close_hovered);
     app.test_render(&mut frame);
     let hovered = app.graphics.surface().pixels().to_vec();
     main_assert!(frames_differ_in_rect(&baseline, &hovered, 320, close));
@@ -3479,18 +3479,18 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     app.test_render(&mut frame);
     let down = app.graphics.surface().pixels().to_vec();
     main_assert!(frames_differ_in_rect(&hovered, &down, 320, close));
-    main_assert!(app.scoreboard_close_pointer_capture);
-    main_assert!(app.scoreboard_dialog.is_some());
+    main_assert!(app.dialogs.scoreboard_close_pointer_capture);
+    main_assert!(app.dialogs.scoreboard.is_some());
 
     let outside = PhysicalPosition::new(0.0, 199.0);
     let sounds_before_leave = app.sound.ui_log.len();
     app.test_cursor(outside);
     main_assert_eq!(&app.sound.ui_log[sounds_before_leave..] => &["ArrowHit".to_string()]);
-    main_assert!(app.scoreboard_close_pointer_capture);
+    main_assert!(app.dialogs.scoreboard_close_pointer_capture);
     main_assert!(app.ingame_pointer.is_none());
     app.test_left_button(ElementState::Released);
-    main_assert!(app.scoreboard_dialog.is_some());
-    main_assert!(!app.scoreboard_close_pointer_capture);
+    main_assert!(app.dialogs.scoreboard.is_some());
+    main_assert!(!app.dialogs.scoreboard_close_pointer_capture);
 
     app.test_cursor(point);
     app.test_left_button(ElementState::Pressed);
@@ -3501,8 +3501,8 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     let sounds_before_click = app.sound.ui_log.len();
     app.test_left_button(ElementState::Released);
     main_assert_eq!(&app.sound.ui_log[sounds_before_click..] => &["Click".to_string()]);
-    main_assert!(app.scoreboard_dialog.is_none());
-    main_assert!(!app.scoreboard_close_pointer_capture);
+    main_assert!(app.dialogs.scoreboard.is_none());
+    main_assert!(!app.dialogs.scoreboard_close_pointer_capture);
 }
 
 #[test]
@@ -3569,7 +3569,7 @@ fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
     );
     app.test_cursor(start);
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.scoreboard_runtime.title_drag.is_some());
+    main_assert!(app.dialogs.scoreboard_runtime.title_drag.is_some());
 
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -3593,8 +3593,8 @@ fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
     main_assert!(app.ingame_pointer.is_none());
 
     app.remove_message_dialog_at(0).test_value();
-    main_assert!(app.scoreboard_runtime.title_drag.is_none());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.scoreboard_runtime.title_drag.is_none());
+    main_assert!(app.dialogs.messages.is_empty());
     let after_close = current_scoreboard_test_layout(&mut app);
     app.test_cursor(PhysicalPosition::new(
         moved_pointer.x + 31.0,
@@ -3620,7 +3620,7 @@ fn scoreboard_pointer_before_draw_cannot_stamp_new_revision_onto_old_matrix() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let initial = current_scoreboard_test_layout(&mut app);
-    let initial_revision = app.scoreboard_runtime.layout_revision;
+    let initial_revision = app.dialogs.scoreboard_runtime.layout_revision;
     let point = GuiPoint::new(
         (initial.bounds.x + initial.bounds.w / 2) as f32,
         (initial.bounds.y + initial.bounds.h / 2) as f32,
@@ -3631,9 +3631,9 @@ fn scoreboard_pointer_before_draw_cannot_stamp_new_revision_onto_old_matrix() {
         .test_value();
     main_assert!(app.scoreboard_pointer_target(point).expect("pointer route").is_some());
     main_assert_eq!(app.snapshot.hud.scoreboard.row_count() => 2);
-    main_assert_eq!(app.scoreboard_runtime.layout_revision => initial_revision);
+    main_assert_eq!(app.dialogs.scoreboard_runtime.layout_revision => initial_revision);
     main_assert_eq!(
-        app.scoreboard_runtime
+        app.dialogs.scoreboard_runtime
             .presentation
             .as_ref()
             .expect("retained presentation")
@@ -3643,7 +3643,7 @@ fn scoreboard_pointer_before_draw_cannot_stamp_new_revision_onto_old_matrix() {
     );
 
     app.test_render(&mut frame);
-    main_assert_eq!(app.scoreboard_runtime.layout_revision => app.engine.scoreboard_layout_revision(),);
+    main_assert_eq!(app.dialogs.scoreboard_runtime.layout_revision => app.engine.scoreboard_layout_revision(),);
     main_assert_ne!(current_scoreboard_test_layout(&mut app) => initial);
 }
 
@@ -3658,7 +3658,7 @@ fn scoreboard_show_then_grow_keeps_constructor_hit_bounds_until_first_draw() {
                    }"#,
     );
     call_scoreboard_function_and_update(&mut app, "ShowThenGrow");
-    let request_revision = app.scoreboard_dialog.test_ref().layout_revision;
+    let request_revision = app.dialogs.scoreboard.test_ref().layout_revision;
     main_assert!(request_revision < app.engine.scoreboard_layout_revision());
 
     let constructor = current_scoreboard_test_layout(&mut app);
@@ -3672,7 +3672,7 @@ fn scoreboard_show_then_grow_keeps_constructor_hit_bounds_until_first_draw() {
             .is_none(),
         "the late column is outside the synchronous constructor bounds",
     );
-    main_assert_eq!(app.scoreboard_runtime.layout_revision => request_revision);
+    main_assert_eq!(app.dialogs.scoreboard_runtime.layout_revision => request_revision);
     main_assert_eq!(current_scoreboard_test_layout(&mut app) => constructor);
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -3694,7 +3694,7 @@ fn synchronous_scoreboard_show_joins_pointer_routing_before_update_or_draw() {
     app.engine
         .call_scenario_script_function("ShowNow", Vec::new())
         .test_value();
-    main_assert!(app.scoreboard_dialog.is_none());
+    main_assert!(app.dialogs.scoreboard.is_none());
 
     let point = GuiPoint::new(299.0, 50.0);
     app.test_cursor(PhysicalPosition::new(
@@ -3702,7 +3702,7 @@ fn synchronous_scoreboard_show_joins_pointer_routing_before_update_or_draw() {
         f64::from(point.y),
     ));
 
-    main_assert!(app.scoreboard_dialog.is_some());
+    main_assert!(app.dialogs.scoreboard.is_some());
     main_assert!(app.scoreboard_pointer_target_cached(point).is_some());
     main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Scoreboard),);
     main_assert!(app.ingame_pointer.is_none());
@@ -3725,13 +3725,13 @@ fn scoreboard_resize_releases_title_drag_without_replacing_cached_geometry() {
     );
     app.test_cursor(start);
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.scoreboard_runtime.title_drag.is_some());
+    main_assert!(app.dialogs.scoreboard_runtime.title_drag.is_some());
 
     app.resize(360, 220).test_value();
-    main_assert!(app.scoreboard_runtime.title_drag.is_none());
-    main_assert!(app.scoreboard_runtime.pointer.is_none());
-    main_assert!(!app.scoreboard_runtime.close_hovered);
-    main_assert!(!app.scoreboard_close_pointer_capture);
+    main_assert!(app.dialogs.scoreboard_runtime.title_drag.is_none());
+    main_assert!(app.dialogs.scoreboard_runtime.pointer.is_none());
+    main_assert!(!app.dialogs.scoreboard_runtime.close_hovered);
+    main_assert!(!app.dialogs.scoreboard_close_pointer_capture);
     let cached = current_scoreboard_test_layout(&mut app);
     main_assert_eq!(cached => before);
 
@@ -3763,7 +3763,7 @@ fn scoreboard_touch_capture_is_released_when_a_new_message_owns_end_or_cancel() 
         (close_button.y + close_button.h / 2) as f32,
     );
     close.test_touch(TouchPhase::Started, close_point);
-    main_assert!(close.scoreboard_close_pointer_capture);
+    main_assert!(close.dialogs.scoreboard_close_pointer_capture);
     close
         .push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
@@ -3773,8 +3773,8 @@ fn scoreboard_touch_capture_is_released_when_a_new_message_owns_end_or_cancel() 
         (message.bounds.y + message.bounds.h / 2) as f32,
     );
     close.test_touch(TouchPhase::Ended, message_point);
-    main_assert!(close.scoreboard_dialog.is_some());
-    main_assert!(!close.scoreboard_close_pointer_capture);
+    main_assert!(close.dialogs.scoreboard.is_some());
+    main_assert!(!close.dialogs.scoreboard_close_pointer_capture);
 
     let mut drag = new_scoreboard_test_app(board);
     toggle_scoreboard(&mut drag, ModifiersState::empty());
@@ -3785,12 +3785,12 @@ fn scoreboard_touch_capture_is_released_when_a_new_message_owns_end_or_cancel() 
         (caption.y + caption.h / 2) as f32,
     );
     drag.test_touch(TouchPhase::Started, title_point);
-    main_assert!(drag.scoreboard_runtime.title_drag.is_some());
+    main_assert!(drag.dialogs.scoreboard_runtime.title_drag.is_some());
     drag.push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
     drag.test_touch(TouchPhase::Cancelled, title_point);
-    main_assert!(drag.scoreboard_runtime.title_drag.is_none());
-    main_assert!(!drag.scoreboard_close_pointer_capture);
+    main_assert!(drag.dialogs.scoreboard_runtime.title_drag.is_none());
+    main_assert!(!drag.dialogs.scoreboard_close_pointer_capture);
     let after_cancel = current_scoreboard_test_layout(&mut drag);
     drag.test_cursor(PhysicalPosition::new(
         f64::from(title_point.x + 30.0),
@@ -3844,16 +3844,16 @@ fn scoreboard_bounds_consume_secondary_middle_wheel_and_touch_input() {
     );
     let touch_moved = GuiPoint::new(touch_title.x + 12.0, touch_title.y + 9.0);
     app.test_touch(TouchPhase::Started, touch_title);
-    main_assert!(app.scoreboard_runtime.title_drag.is_some());
+    main_assert!(app.dialogs.scoreboard_runtime.title_drag.is_some());
     app.test_touch(TouchPhase::Moved, touch_moved);
     let after_touch_move = current_scoreboard_test_layout(&mut app);
     main_assert_eq!(after_touch_move.bounds.x => before_touch.bounds.x + 12);
     main_assert_eq!(after_touch_move.bounds.y => before_touch.bounds.y + 9);
     app.test_touch(TouchPhase::Ended, touch_moved);
-    main_assert!(app.scoreboard_runtime.title_drag.is_none());
+    main_assert!(app.dialogs.scoreboard_runtime.title_drag.is_none());
     main_assert_eq!(current_scoreboard_test_layout(&mut app) => after_touch_move);
     main_assert!(commands.take_submitted_local().is_empty());
-    main_assert!(app.scoreboard_dialog.is_some());
+    main_assert!(app.dialogs.scoreboard.is_some());
 }
 
 #[test]
@@ -3871,7 +3871,7 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
     overlap.test_render(&mut frame);
     let bounds = current_scoreboard_test_layout(&mut overlap).bounds;
     overlap
-        .scoreboard_runtime
+        .dialogs.scoreboard_runtime
         .presentation
         .test_mut()
         .layout_mut()
@@ -3905,7 +3905,7 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
     ));
     overlap.test_left_button(ElementState::Pressed);
     main_assert!(overlap.context_menu.is_some());
-    main_assert!(!overlap.scoreboard_close_pointer_capture);
+    main_assert!(!overlap.dialogs.scoreboard_close_pointer_capture);
     main_assert!(matches!(overlap.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
     overlap.test_left_button(ElementState::Released);
 
@@ -3948,13 +3948,13 @@ fn scoreboard_wheel_does_not_scroll_an_overlapped_lower_f4_dialog() {
 
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let f4_layout = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height);
     let scoreboard = current_scoreboard_test_layout(&mut app);
     let dx = f4_layout.list.x + 8 - scoreboard.client.x;
     let dy = f4_layout.list.y + 8 - scoreboard.client.y;
-    app.scoreboard_runtime
+    app.dialogs.scoreboard_runtime
         .presentation
         .test_mut()
         .layout_mut()
@@ -3971,12 +3971,12 @@ fn scoreboard_wheel_does_not_scroll_an_overlapped_lower_f4_dialog() {
         f64::from(point.y),
     ));
     let before = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .scroll_row(preferred, line_height);
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     let after = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .scroll_row(preferred, line_height);
     main_assert_eq!(after => before, "wheel cannot fall through to lower F4");
@@ -4022,14 +4022,14 @@ fn shared_message_dialog_allows_exposed_scoreboard_close_click() {
         f64::from(point.y),
     ));
     main_assert!(matches!(app.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
-    main_assert!(app.scoreboard_runtime.close_hovered);
+    main_assert!(app.dialogs.scoreboard_runtime.close_hovered);
     app.test_render(&mut frame);
     let hovered = app.graphics.surface().pixels().to_vec();
     main_assert!(frames_differ_in_rect(&baseline, &hovered, 1024, close));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert!(app.scoreboard_dialog.is_none());
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert!(app.dialogs.scoreboard.is_none());
 }
 
 #[test]
@@ -4089,7 +4089,7 @@ fn scoreboard_uses_shared_cpp_show_and_left_activation_stack_order() {
         )
         .test_value();
     main_assert!(!messages.scoreboard_is_above_all_messages());
-    main_assert!(matches!(messages.running_dialog_stack.last(), Some(RunningDialogStackEntry::Message(_))));
+    main_assert!(matches!(messages.dialogs.stack.last(), Some(RunningDialogStackEntry::Message(_))));
 }
 
 #[test]
@@ -4126,7 +4126,7 @@ fn scoreboard_close_restores_the_chat_exposed_beneath_its_activation() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.scoreboard_dialog.is_none());
+    main_assert!(app.dialogs.scoreboard.is_none());
     main_assert!(app.running_chat_active());
     main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Chat),);
 }
@@ -4165,7 +4165,7 @@ fn activated_chat_under_list_top_scoreboard_does_not_gain_keyboard_focus() {
     app.test_left_button(ElementState::Released);
     main_assert!(app.running_chat_active());
     main_assert!(!app.running_chat_keyboard_active());
-    main_assert_eq!(app.running_dialog_stack.last() => Some(&RunningDialogStackEntry::Scoreboard),);
+    main_assert_eq!(app.dialogs.stack.last() => Some(&RunningDialogStackEntry::Scoreboard),);
 
     app.test_text_input('x');
     main_assert_eq!(app.running_chat_text() => Some(""));
@@ -4196,7 +4196,7 @@ fn ordinary_message_behind_scoreboard_does_not_suppress_gamepad_gameplay() {
     )
     .test_value();
     app.activate_running_dialog(RunningDialogStackEntry::Scoreboard);
-    main_assert_eq!(app.running_dialog_stack.last() => Some(&RunningDialogStackEntry::Scoreboard));
+    main_assert_eq!(app.dialogs.stack.last() => Some(&RunningDialogStackEntry::Scoreboard));
     main_assert!(!app.message_dialog_owns_gamepad_input());
 
     app.test_gamepad_events([
@@ -4205,7 +4205,7 @@ fn ordinary_message_behind_scoreboard_does_not_suppress_gamepad_gameplay() {
     ]);
 
     main_assert_ne!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_RIGHT) => 0,);
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
 }
 
 #[test]
@@ -4225,7 +4225,7 @@ fn scoreboard_release_clears_an_occluded_f4_button_capture() {
 
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let close = app
-        .runtime_client_list
+        .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height)
         .close_button
@@ -4235,10 +4235,10 @@ fn scoreboard_release_clears_an_occluded_f4_button_capture() {
         f64::from(close.y + close.h / 2),
     ));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.runtime_client_list.as_ref().expect("F4 remains open").has_pointer_capture());
+    main_assert!(app.dialogs.client_list.as_ref().expect("F4 remains open").has_pointer_capture());
 
     let scoreboard = current_scoreboard_test_layout(&mut app);
-    app.scoreboard_runtime
+    app.dialogs.scoreboard_runtime
         .presentation
         .test_mut()
         .layout_mut()
@@ -4250,9 +4250,9 @@ fn scoreboard_release_clears_an_occluded_f4_button_capture() {
     );
     app.test_cursor(release);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.runtime_client_list.is_some());
-    main_assert!(!app.runtime_client_list.as_ref().expect("F4 remains open").has_pointer_capture());
-    main_assert!(app.scoreboard_dialog.is_some());
+    main_assert!(app.dialogs.client_list.is_some());
+    main_assert!(!app.dialogs.client_list.as_ref().expect("F4 remains open").has_pointer_capture());
+    main_assert!(app.dialogs.scoreboard.is_some());
 }
 
 #[test]
@@ -4275,9 +4275,9 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         main_assert!(app.ingame_menu.is_none());
-        main_assert!(app.message_dialogs.is_empty());
+        main_assert!(app.dialogs.messages.is_empty());
         main_assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
-        main_assert!(app.scoreboard_dialog.is_none());
+        main_assert!(app.dialogs.scoreboard.is_none());
     }
 
     app.bindings
@@ -4407,13 +4407,13 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
         .test_value();
     message.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     message.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert_eq!(message.message_dialogs.len() => 1);
-    main_assert!(message.scoreboard_dialog.is_some());
-    main_assert_eq!(message.message_dialogs[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Ok),);
+    main_assert_eq!(message.dialogs.messages.len() => 1);
+    main_assert!(message.dialogs.scoreboard.is_some());
+    main_assert_eq!(message.dialogs.messages[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Ok),);
     message.test_modifiers(ModifiersState::SHIFT);
     message.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     message.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert_eq!(message.message_dialogs[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Ok),);
+    main_assert_eq!(message.dialogs.messages[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Ok),);
     main_assert!(message.message_dialog_consumed_keys.is_empty());
 
     let mut game_over = new_classic_scoreboard_test_app(BOARD);
@@ -4421,7 +4421,7 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
     game_over.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     game_over.test_key(VirtualKeyCode::Tab, ElementState::Released);
     main_assert_eq!(game_over.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Close));
-    main_assert!(game_over.scoreboard_dialog.is_none());
+    main_assert!(game_over.dialogs.scoreboard.is_none());
 
     let mut context = new_scoreboard_test_app(BOARD);
     context
@@ -4434,7 +4434,7 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
         .test_value();
     toggle_scoreboard(&mut context, ModifiersState::empty());
     main_assert!(context.context_menu.is_some());
-    main_assert!(context.scoreboard_dialog.is_some());
+    main_assert!(context.dialogs.scoreboard.is_some());
 
     let mut rebound_context = new_scoreboard_test_app(BOARD);
     rebound_context
@@ -4475,13 +4475,13 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
     main_assert!(object.open_object_menu().expect("open object menu"));
     toggle_scoreboard(&mut object, ModifiersState::empty());
     main_assert!(object.object_menu.is_some());
-    main_assert!(object.scoreboard_dialog.is_some());
+    main_assert!(object.dialogs.scoreboard.is_some());
 
     let mut player = new_scoreboard_test_app(BOARD);
     player.open_ingame_menu().test_value();
     toggle_scoreboard(&mut player, ModifiersState::empty());
     main_assert!(player.ingame_menu.is_some());
-    main_assert!(player.scoreboard_dialog.is_some());
+    main_assert!(player.dialogs.scoreboard.is_some());
 }
 
 fn call_scoreboard_function_and_update(app: &mut GameApp, function: &str) {
@@ -4508,22 +4508,22 @@ fn synchronous_scoreboard_callback_is_applied_before_render_and_tab_without_a_ti
         .engine
         .call_scenario_script_function("ShowNow", Vec::new())
         .test_value();
-    main_assert!(render_app.scoreboard_dialog.is_none());
+    main_assert!(render_app.dialogs.scoreboard.is_none());
     let mut frame = vec![0x5a; 320 * 200 * 4];
     let sentinel = frame.clone();
     render_app.test_render(&mut frame);
     main_assert_ne!(frame => sentinel);
-    main_assert!(render_app.scoreboard_dialog.is_some());
+    main_assert!(render_app.dialogs.scoreboard.is_some());
 
     let mut tab_app = new_scoreboard_test_app(CALLBACK_BOARD);
     tab_app
         .engine
         .call_scenario_script_function("ShowNow", Vec::new())
         .test_value();
-    main_assert!(tab_app.scoreboard_dialog.is_none());
+    main_assert!(tab_app.dialogs.scoreboard.is_none());
     tab_app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     tab_app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert!(tab_app.scoreboard_dialog.is_none());
+    main_assert!(tab_app.dialogs.scoreboard.is_none());
     main_assert_eq!(tab_app.snapshot.hud.scoreboard.show_count() => 1);
     tab_app.test_render(&mut frame);
 }
@@ -4543,7 +4543,7 @@ fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
     call_scoreboard_function_and_update(&mut positive, "ShowNow");
     positive.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     positive.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert!(positive.scoreboard_dialog.is_none());
+    main_assert!(positive.dialogs.scoreboard.is_none());
     let saved_positive = positive.engine.capture_state();
     main_assert_eq!(saved_positive.scoreboard.show_count() => 1);
 
@@ -4556,23 +4556,23 @@ fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
     positive.test_render(&mut frame);
     main_assert_ne!(frame => sentinel);
     main_assert_ne!(positive.graphics.surface().pixels() => before_surface.as_slice());
-    main_assert!(positive.scoreboard_dialog.is_some());
+    main_assert!(positive.dialogs.scoreboard.is_some());
     main_assert_eq!(positive.engine.scoreboard_snapshot() => saved_positive.scoreboard);
 
     let mut zero = new_scoreboard_test_app(RESTORE_BOARD);
     let user_open_request = zero.scoreboard_request();
     main_assert!(zero.snapshot.hud.scoreboard.can_be_shown());
     main_assert!(!user_open_request.should_be_shown());
-    zero.scoreboard_dialog = Some(user_open_request);
+    zero.dialogs.scoreboard = Some(user_open_request);
     let saved_zero = zero.engine.capture_state();
     main_assert_eq!(saved_zero.scoreboard.show_count() => 0);
 
     zero.engine.restore_state(&saved_zero).test_value();
     zero.snapshot = zero.engine.snapshot();
     zero.arm_initial_scoreboard_reconcile();
-    main_assert!(zero.scoreboard_dialog.is_none());
+    main_assert!(zero.dialogs.scoreboard.is_none());
     zero.test_render(&mut frame);
-    main_assert!(zero.scoreboard_dialog.is_none());
+    main_assert!(zero.dialogs.scoreboard.is_none());
     main_assert_eq!(zero.engine.scoreboard_snapshot() => saved_zero.scoreboard);
 }
 
@@ -4595,7 +4595,7 @@ fn console_scoreboard_owns_a_child_window_only_while_its_dialog_is_open() {
     // asks for a child one however the dialog was opened.
     let mut fullscreen = new_scoreboard_test_app(script);
     call_scoreboard_function_and_update(&mut fullscreen, "ShowBoard");
-    main_assert!(fullscreen.scoreboard_dialog.is_some());
+    main_assert!(fullscreen.dialogs.scoreboard.is_some());
     main_assert!(!fullscreen.console_scoreboard_window_open());
 
     let mut console = new_scoreboard_test_app(script);
@@ -4603,7 +4603,7 @@ fn console_scoreboard_owns_a_child_window_only_while_its_dialog_is_open() {
     main_assert!(!console.console_scoreboard_window_open());
 
     call_scoreboard_function_and_update(&mut console, "ShowBoard");
-    main_assert!(console.scoreboard_dialog.is_some());
+    main_assert!(console.dialogs.scoreboard.is_some());
     main_assert!(console.console_scoreboard_window_open());
 
     // A second script show is another ordered request, not a second window:
@@ -4706,7 +4706,7 @@ fn script_scoreboard_lifecycle_uses_ordered_requests_not_final_refcount() {
     );
     call_scoreboard_function_and_update(&mut empty_then_cell, "EmptyThenCell");
     main_assert!(empty_then_cell.snapshot.hud.scoreboard.should_be_shown());
-    main_assert!(empty_then_cell.scoreboard_dialog.is_none(), "SetCell cannot retroactively open an earlier empty request");
+    main_assert!(empty_then_cell.dialogs.scoreboard.is_none(), "SetCell cannot retroactively open an earlier empty request");
     let mut ordinary = vec![0_u8; 320 * 200 * 4];
     empty_then_cell.test_render(&mut ordinary);
 
@@ -4720,7 +4720,7 @@ fn script_scoreboard_lifecycle_uses_ordered_requests_not_final_refcount() {
     );
     call_scoreboard_function_and_update(&mut open_then_close, "OpenThenClose");
     main_assert_eq!(open_then_close.snapshot.hud.scoreboard.show_count() => 0);
-    main_assert!(open_then_close.scoreboard_dialog.is_none());
+    main_assert!(open_then_close.dialogs.scoreboard.is_none());
     open_then_close.test_render(&mut ordinary);
 }
 
@@ -4735,7 +4735,7 @@ fn later_data_update_collapses_request_time_allocated_empty_title_margin() {
                    }"#,
     );
     call_scoreboard_function_and_update(&mut app, "ShowEmptyThenInvalidate");
-    let request = app.scoreboard_dialog.test_ref();
+    let request = app.dialogs.scoreboard.test_ref();
     main_assert!(!request.title_widget_present);
     main_assert!(request.layout_revision < app.engine.scoreboard_layout_revision());
 
@@ -4764,7 +4764,7 @@ fn visible_script_scoreboard_preflights_live_data_and_user_tab_can_close_it() {
                    }"#,
     );
     call_scoreboard_function_and_update(&mut app, "ShowThenGrow");
-    main_assert!(app.scoreboard_dialog.is_some());
+    main_assert!(app.dialogs.scoreboard.is_some());
     main_assert_eq!((app.snapshot.hud.scoreboard.row_count(), app.snapshot.hud.scoreboard.column_count(),) => (2, 2));
 
     let before_ui = runtime_global_ui_snapshot(&app);
@@ -4781,7 +4781,7 @@ fn visible_script_scoreboard_preflights_live_data_and_user_tab_can_close_it() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert!(app.scoreboard_dialog.is_none());
+    main_assert!(app.dialogs.scoreboard.is_none());
     app.test_render(&mut frame);
 }
 
@@ -4808,7 +4808,7 @@ fn an_unresolved_scoreboard_font_image_still_draws_the_rest_of_the_board() {
     let render = |source: String| {
         let mut app = new_scoreboard_test_app(&source);
         call_scoreboard_function_and_update(&mut app, "Show");
-        main_assert!(app.scoreboard_dialog.is_some());
+        main_assert!(app.dialogs.scoreboard.is_some());
         let mut frame = vec![0x71; 320 * 200 * 4];
         app.render(&mut frame)
             .expect("an unresolved FontRegular image does not fail the frame");
@@ -4849,7 +4849,7 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
     app.open_ingame_menu().test_value();
     call_scoreboard_function_and_update(&mut app, "ShowAndEnd");
     main_assert!(app.game_over_dialog.is_some());
-    main_assert!(app.scoreboard_dialog.is_none());
+    main_assert!(app.dialogs.scoreboard.is_none());
     main_assert!(app.ingame_menu.is_none());
     main_assert_eq!(
         app.engine
@@ -4870,11 +4870,11 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
     app.handle_game_over_action(GameOverAction::Continue)
         .test_value();
     main_assert!(app.game_over_dialog.is_none());
-    main_assert!(app.scoreboard_dialog.is_none());
+    main_assert!(app.dialogs.scoreboard.is_none());
     app.test_render(&mut frame);
 
     call_scoreboard_function_and_update(&mut app, "Recheck");
-    main_assert!(app.scoreboard_dialog.is_some());
+    main_assert!(app.dialogs.scoreboard.is_some());
     app.test_render(&mut frame);
 
     let mut object_menu = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
@@ -5176,7 +5176,7 @@ fn game_over_gui_stack_requires_enabled_primary_gamepad_source() {
         .test_value();
 
         assert_no_global_ui_change(before, &app);
-        main_assert_eq!(app.message_dialogs.len() => 1);
+        main_assert_eq!(app.dialogs.messages.len() => 1);
     }
 }
 
@@ -5198,7 +5198,7 @@ fn closed_exclusive_message_alias_cluster_yields_later_direction_to_game_over() 
         game_over_fixture!(action: GamepadSlot::new(0), GamepadActionType::Cancel, ElementState::Pressed),
         game_over_fixture!(direction: GamepadSlot::new(0), ControlButton::Left, ElementState::Pressed),
     ]);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Button(2)));
 }
 
@@ -5547,7 +5547,7 @@ fn exclusive_message_dialog_raw_gamepad_clusters_precede_game_over() {
         game_over_fixture!(action: GamepadSlot::new(0), GamepadActionType::Select, ElementState::Released),
         game_over_fixture!(button: GamepadSlot::new(0), LegacyGamepadButton::new(0), ElementState::Released),
     ]);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     open_message(&mut app, "High");
     app.test_gamepad_events([
@@ -5559,7 +5559,7 @@ fn exclusive_message_dialog_raw_gamepad_clusters_precede_game_over() {
         game_over_fixture!(button: GamepadSlot::new(0), LegacyGamepadButton::new(1), ElementState::Released),
     ]);
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.mode => AppMode::Running);
     main_assert_eq!(
         app.game_over_dialog
@@ -5879,9 +5879,9 @@ fn older_runtime_f4_dialog_renders_inactive_below_new_game_over_dialog() {
     main_assert!(app.runtime_client_list_draw_active());
 
     app.handle_game_over().test_value();
-    main_assert!(app.runtime_client_list.is_some());
+    main_assert!(app.dialogs.client_list.is_some());
     main_assert!(app.game_over_dialog.is_some());
-    main_assert!(!app.runtime_client_list_above_game_over);
+    main_assert!(!app.dialogs.client_list_above_game_over);
     main_assert!(!app.runtime_client_list_mouse_active());
     main_assert!(!app.runtime_client_list_keyboard_active());
     main_assert!(!app.runtime_client_list_draw_active());
@@ -5893,9 +5893,9 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
     let (_events, mut game_over_commands) = install_running_network_stub(&mut game_over, 0, 40, 4);
     route_primary_gamepad_to_local_owner(&mut game_over);
     game_over.test_key(VirtualKeyCode::F4, ElementState::Pressed);
-    main_assert!(game_over.runtime_client_list.is_some());
+    main_assert!(game_over.dialogs.client_list.is_some());
     main_assert!(game_over.game_over_dialog.is_some());
-    main_assert!(game_over.runtime_client_list_above_game_over);
+    main_assert!(game_over.dialogs.client_list_above_game_over);
     game_over.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     game_over.test_key(VirtualKeyCode::Tab, ElementState::Released);
     game_over.test_modifiers(ModifiersState::ALT);
@@ -5912,9 +5912,9 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
     main_assert_eq!(submitted.len() => 1);
     main_assert!(matches!(submitted[0].1, ControlEvent::Press(ControlButton::Right)));
     main_assert!(game_over.running_chat_text().is_none());
-    main_assert!(game_over.runtime_client_list.is_some());
+    main_assert!(game_over.dialogs.client_list.is_some());
     game_over.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(game_over.runtime_client_list.is_none());
+    main_assert!(game_over.dialogs.client_list.is_none());
     main_assert!(game_over.game_over_dialog.is_some());
 
     let mut message = new_running_sandbox_app();
@@ -5930,14 +5930,14 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
         )
         .test_value();
     message.test_key(VirtualKeyCode::F4, ElementState::Pressed);
-    main_assert!(message.runtime_client_list.is_some());
-    main_assert_eq!(message.message_dialogs.len() => 1);
+    main_assert!(message.dialogs.client_list.is_some());
+    main_assert_eq!(message.dialogs.messages.len() => 1);
 
     let mut ingame = new_running_sandbox_app();
     configure_runtime_network_role(&mut ingame, RuntimeNetworkRole::Host);
     ingame.open_ingame_menu().test_value();
     ingame.test_key(VirtualKeyCode::F4, ElementState::Pressed);
-    main_assert!(ingame.runtime_client_list.is_some());
+    main_assert!(ingame.dialogs.client_list.is_some());
     main_assert!(ingame.ingame_menu.is_some());
 }
 
@@ -5978,7 +5978,7 @@ fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
         .test_value();
     message.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     main_assert_ne!(message.offline_halt_count => 0);
-    main_assert_eq!(message.message_dialogs.len() => 1);
+    main_assert_eq!(message.dialogs.messages.len() => 1);
 
     let mut ingame = new_running_sandbox_app();
     ingame.open_ingame_menu().test_value();
@@ -6015,8 +6015,8 @@ fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
             app.test_key(key, ElementState::Pressed);
             main_assert!(app.game_over_dialog.is_some());
             main_assert!(app.running_chat_text().is_none());
-            main_assert!(!app.runtime_help_visible);
-            main_assert!(app.runtime_client_list.is_none());
+            main_assert!(!app.dialogs.help_visible);
+            main_assert!(app.dialogs.client_list.is_none());
         }
     }
 }
@@ -6034,7 +6034,7 @@ fn abort_confirmation_declines_confirms_and_restarts() {
         clonk_frontend::message_dialog::MessageDialogResult::No,
     );
     main_assert!(declined.ingame_menu.is_none());
-    main_assert!(declined.message_dialogs.is_empty());
+    main_assert!(declined.dialogs.messages.is_empty());
     main_assert!(matches!(declined.mode, AppMode::Running));
     main_assert_eq!(declined.active_scenario.as_ref().map(|active| active.identifier.as_str()) => Some(declined_scenario.as_str()));
     main_assert_eq!(declined.engine.frame() => declined_frame);
@@ -6062,7 +6062,7 @@ fn abort_confirmation_declines_confirms_and_restarts() {
     main_assert_eq!(restarted.active_scenario.as_ref().map(|active| active.identifier.as_str()) => Some(scenario.as_str()));
     main_assert_eq!(restarted.engine.frame() => 0);
     main_assert!(restarted.ingame_menu.is_none());
-    main_assert!(restarted.message_dialogs.is_empty());
+    main_assert!(restarted.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -6070,7 +6070,7 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
     let mut client = new_running_sandbox_app();
     client.engine.set_control_host(false);
     client.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    let client_dialog = client.message_dialogs.last().test_value();
+    let client_dialog = client.dialogs.messages.last().test_value();
     main_assert_eq!(client_dialog.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO);
     main_assert_eq!(client_dialog.state.size() => clonk_frontend::message_dialog::MessageDialogSize::Small);
 
@@ -6079,7 +6079,7 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
     set_test_scenario_head_flags(&mut film_client, 0, 2);
     let (_film_events, _film_commands) = install_running_network_stub(&mut film_client, 7, 0, 1);
     film_client.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    let film_dialog = film_client.message_dialogs.last().test_value();
+    let film_dialog = film_client.dialogs.messages.last().test_value();
     main_assert_eq!(film_dialog.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_RESTART_NO);
     main_assert_eq!(film_dialog.state.size() => clonk_frontend::message_dialog::MessageDialogSize::Fixed(400));
     film_client.loader_render_error = Some("test restart blocker".to_string());
@@ -6095,7 +6095,7 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
         .apply_ingame_menu_action(MenuAction::Abort)
         .test_value();
     main_assert!(game_over.game_over_dialog.is_some());
-    main_assert!(game_over.message_dialogs.is_empty());
+    main_assert!(game_over.dialogs.messages.is_empty());
     main_assert!(matches!(game_over.mode, AppMode::Running));
 }
 
@@ -6118,7 +6118,7 @@ fn modified_escape_does_not_match_the_abort_binding() {
     }
     app.test_modifiers(ModifiersState::SUPER);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
     app.test_modifiers(ModifiersState::empty());
 }
 

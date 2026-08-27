@@ -594,9 +594,9 @@ fn already_failed_client_start_resource_never_opens_a_stale_progress_wait() {
 
     main_assert!(app.network.is_none());
     main_assert!(app.blocking_resource_wait.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Error Log");
-    main_assert_eq!(app.message_dialogs[0].state.message() => "Unable to retrieve Object Definition: Objects.c4d.");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Error Log");
+    main_assert_eq!(app.dialogs.messages[0].state.message() => "Unable to retrieve Object Definition: Objects.c4d.");
 }
 
 #[test]
@@ -759,8 +759,8 @@ fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
         )]
     })
     .test_value();
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL);
 
     // Keep activate_prepared_network_host from spawning or binding while
     // the OK continuation still executes the complete synchronous staging
@@ -775,7 +775,7 @@ fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.definition_selector.is_none());
     let staged = some(&app.staged_network_host_scenario);
     main_assert_eq!(staged.frontend.identifier => scenario.identifier);
@@ -1590,7 +1590,7 @@ fn aborting_live_internet_signup_keeps_the_prior_off_state() {
         !app.network_game_start_guard_passes(),
         "a host cannot launch while a Start or compensating End is unresolved"
     );
-    let wait = app.message_dialogs.last().test_value();
+    let wait = app.dialogs.messages.last().test_value();
     main_assert!(matches!(
         wait.continuation,
         MessageDialogContinuation::LiveMasterserverSignup
@@ -1690,7 +1690,7 @@ fn committed_start_apply_failure_tears_down_when_cleanup_cannot_start() {
 
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| dialog
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| dialog
         .state
         .message()
         .contains("could not begin compensating Internet signup cleanup")));
@@ -1751,7 +1751,7 @@ fn failed_live_end_tears_the_host_down() {
 
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.message_dialogs.last().is_some_and(|dialog| dialog
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| dialog
         .state
         .message()
         .contains("Unable to confirm cleanup of the live Internet registration")));
@@ -2377,14 +2377,14 @@ fn reached_network_start_wait_uses_host_roster_and_client_abort_dialog() {
         .network_start_wait
         .as_ref()
         .is_some_and(|wait| wait.visible && wait.expected_status == status));
-    main_assert!(host.message_dialogs.is_empty());
+    main_assert!(host.dialogs.messages.is_empty());
 
     let mut client = new_menu_app(640, 480);
     client.mode = AppMode::Loading;
     client.network_mode = Some(NetworkMode::Client(client_network_settings()));
     client.show_reached_network_start_wait().test_value();
     main_assert!(client.network_start_wait.is_none());
-    let [dialog] = client.message_dialogs.as_slice() else {
+    let [dialog] = client.dialogs.messages.as_slice() else {
         panic!("client should have exactly one start-wait dialog");
     };
     main_assert!(matches!(
@@ -3359,7 +3359,7 @@ fn lobby_resource_save_dialogs_cover_overwrite_decline_accept_success_and_failur
 
     app.request_lobby_resource_save(core.id, false).test_value();
     main_assert_eq!(fs::read(&target).unwrap() => b"first");
-    let success = app.message_dialogs.last().test_value();
+    let success = app.dialogs.messages.last().test_value();
     main_assert_eq!(success.state.caption() => "Resource saved");
     main_assert_eq!(success.state.icon() => MessageDialogIcon::Standard(13));
     main_assert!(success.state.message().ends_with("Downloaded.c4s"));
@@ -3369,7 +3369,7 @@ fn lobby_resource_save_dialogs_cover_overwrite_decline_accept_success_and_failur
     fs::write(&source, b"replacement").test_value();
     fs::write(&target, b"keep").test_value();
     app.request_lobby_resource_save(core.id, false).test_value();
-    let confirmation = app.message_dialogs.last().test_value();
+    let confirmation = app.dialogs.messages.last().test_value();
     main_assert_eq!(confirmation.state.caption() => "Save resource");
     main_assert_eq!(confirmation.state.buttons() => MessageDialogButtons::YES_NO);
     main_assert_eq!(confirmation.state.icon() => MessageDialogIcon::CONFIRM);
@@ -3380,20 +3380,20 @@ fn lobby_resource_save_dialogs_cover_overwrite_decline_accept_success_and_failur
     app.finish_message_dialog(MessageDialogResult::No)
         .test_value();
     main_assert_eq!(fs::read(&target).unwrap() => b"keep");
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     app.request_lobby_resource_save(core.id, false).test_value();
     app.finish_message_dialog(MessageDialogResult::Yes)
         .test_value();
     main_assert_eq!(fs::read(&target).unwrap() => b"replacement");
-    main_assert_eq!(app.message_dialogs.last().unwrap().state.caption() => "Resource saved");
+    main_assert_eq!(app.dialogs.messages.last().unwrap().state.caption() => "Resource saved");
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
 
     fs::remove_file(&source).test_value();
     fs::remove_file(&target).test_value();
     app.request_lobby_resource_save(core.id, false).test_value();
-    let failure = app.message_dialogs.last().test_value();
+    let failure = app.dialogs.messages.last().test_value();
     main_assert_eq!(failure.state.caption() => "Error copying file");
     main_assert_eq!(failure.state.message() => "Error copying file");
     main_assert_eq!(failure.state.icon() => MessageDialogIcon::ERROR);
@@ -4689,7 +4689,7 @@ fn client_info_dialog_shows_unknown_id_and_host_unacknowledged_marker() {
             .expect("a stale client id still opens the native dialog"),
         "C++ never refuses to construct C4Network2ClientDlg"
     );
-    let info = some(&app.runtime_client_list);
+    let info = some(&app.dialogs.client_list);
     main_assert_eq!(info.info_client_id() => Some(42));
     main_assert_eq!(info.info_lines() => ["Unknown client ID #42.".to_string()]);
 
@@ -4698,7 +4698,7 @@ fn client_info_dialog_shows_unknown_id_and_host_unacknowledged_marker() {
     main_assert!(app
         .open_classic_lobby_client_info(0)
         .expect("known client id opens"));
-    let info = some(&app.runtime_client_list);
+    let info = some(&app.dialogs.client_list);
     main_assert_eq!(info.info_client_id() => Some(0));
     main_assert!(
         info.info_lines()
@@ -4721,7 +4721,7 @@ fn client_info_dialog_shows_unknown_id_and_host_unacknowledged_marker() {
         .open_classic_lobby_client_info(0)
         .expect("host opens its own client information"));
     main_assert!(host
-        .runtime_client_list
+        .dialogs.client_list
         .as_ref()
         .expect("host info dialog")
         .info_lines()
@@ -4741,7 +4741,7 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
     main_assert!(app
         .open_classic_lobby_client_info(0)
         .expect("open client information"));
-    let info = some(&app.runtime_client_list);
+    let info = some(&app.dialogs.client_list);
     main_assert!(info.is_info_only());
     main_assert_eq!(info.info_client_id() => Some(0));
 
@@ -4755,21 +4755,21 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
         .test_value();
     app.handle_other_mouse_button(ElementState::Released)
         .test_value();
-    main_assert!(app.runtime_client_list.is_some());
+    main_assert!(app.dialogs.client_list.is_some());
     main_assert!(app_lobby(&app).chat_edit.text.is_empty());
     app.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.runtime_client_list.is_some());
+    main_assert!(app.dialogs.client_list.is_some());
     main_assert!(app.context_menu.is_none());
 
     tap_test_key(&mut app, VirtualKeyCode::Enter);
-    main_assert!(app.runtime_client_list.is_some());
+    main_assert!(app.dialogs.client_list.is_some());
     main_assert!(commands.take_submitted_client_updates().is_empty());
     main_assert!(commands.take_submitted_client_removes().is_empty());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.runtime_client_list.is_none());
+    main_assert!(app.dialogs.client_list.is_none());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_some());
@@ -4793,7 +4793,7 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
             state: ElementState::Pressed,
         },
     ]);
-    main_assert!(app.runtime_client_list.is_none());
+    main_assert!(app.dialogs.client_list.is_none());
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_some());
 }
@@ -5702,7 +5702,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
     main_assert!(app.control_player_infos.client_info_ids(8).is_empty());
     main_assert!(app.network_control_running);
     main_assert_eq!(app.scenario_game_options.context() => GameOptionContext::LocalSelector);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     reset_cached_app_paths();
 }
@@ -6419,7 +6419,7 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
         let lobby_visible =
-            client.joined_network_lobby_active() && client.message_dialogs.is_empty();
+            client.joined_network_lobby_active() && client.dialogs.messages.is_empty();
         let scenario_identity = client
             .pending_network_join_data
             .as_ref()
@@ -6841,7 +6841,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         .as_ref()
         .is_some_and(|wait| wait.visible));
     main_assert!(
-        app.message_dialogs.is_empty(),
+        app.dialogs.messages.is_empty(),
         "the host uses its roster wait instead of the client message dialog"
     );
     send_network_event(&events, NetworkEvent::StatusRequested(expected_go));
@@ -8124,7 +8124,7 @@ fn a_timed_out_ready_check_dismisses_its_notification() {
         app.sec1_timer().test_value();
     }
 
-    main_assert!(app.message_dialogs.is_empty(), "the countdown closed it");
+    main_assert!(app.dialogs.messages.is_empty(), "the countdown closed it");
     main_assert_eq!(
         app.take_dismissed_desktop_notification() => Some(shown),
         "and the toast went with the dialog",
@@ -8190,7 +8190,7 @@ fn client_ready_check_request_replies_not_ready_while_resources_load() {
     main_assert!(lobby.participants[&0].ready);
     main_assert!(!lobby.participants[&7].ready);
     main_assert!(!lobby.participants[&9].ready);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     assert_ready_checks(&mut commands, 7, clonk_network::ReadyCheckData::NotReady);
 }
 
@@ -8215,8 +8215,8 @@ fn complete_client_ready_check_opens_one_exact_fifteen_second_prompt() {
 
     app.test_network_events();
 
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let prompt = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let prompt = &app.dialogs.messages[0].state;
     main_assert_eq!(prompt.caption() => "Are you ready?");
     main_assert_eq!(prompt.message() => "The host wants to know whether you're ready.|15 seconds remaining.");
     main_assert_eq!(prompt.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO);
@@ -8236,7 +8236,7 @@ fn complete_client_ready_check_opens_one_exact_fifteen_second_prompt() {
         .test_value();
     app.test_network_events();
 
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert!(app_lobby(&app).participants[&9].ready);
     main_assert!(commands.take_submitted_ready_checks().is_empty());
 }
@@ -8258,7 +8258,7 @@ fn accepting_ready_check_sets_local_ready_and_submits_cpp_ready_reply() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app_lobby(&app).local_ready());
     assert_ready_checks(&mut commands, 7, clonk_network::ReadyCheckData::Ready);
 }
@@ -8278,7 +8278,7 @@ fn declining_ready_check_keeps_local_unready_and_submits_cpp_reply() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(!app_lobby(&app).local_ready());
     assert_ready_checks(&mut commands, 7, clonk_network::ReadyCheckData::NotReady);
 }
@@ -8303,7 +8303,7 @@ fn ready_check_notification_actions_submit_the_answer_and_close_the_prompt() {
         );
         send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
         app.test_network_events();
-        main_assert!(!app.message_dialogs.is_empty());
+        main_assert!(!app.dialogs.messages.is_empty());
 
         let continuation = app.lobby_ready_check_continuation.clone().test_value();
         main_assert!(continuation.activate(
@@ -8312,7 +8312,7 @@ fn ready_check_notification_actions_submit_the_answer_and_close_the_prompt() {
         ));
         app.poll_lobby_ready_check_notification().test_value();
 
-        main_assert!(app.message_dialogs.is_empty());
+        main_assert!(app.dialogs.messages.is_empty());
         main_assert_eq!(
             app_lobby(&app).local_ready() => matches!(action, NotificationAction::Yes)
         );
@@ -8352,7 +8352,7 @@ fn a_ready_check_notification_body_click_raises_without_answering() {
     );
     send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
     app.test_network_events();
-    main_assert!(!app.message_dialogs.is_empty(), "the prompt is up");
+    main_assert!(!app.dialogs.messages.is_empty(), "the prompt is up");
 
     let continuation = app.lobby_ready_check_continuation.clone().test_value();
     main_assert!(
@@ -8366,7 +8366,7 @@ fn a_ready_check_notification_body_click_raises_without_answering() {
         "the continuation outlives a body click"
     );
     main_assert!(
-        !app.message_dialogs.is_empty(),
+        !app.dialogs.messages.is_empty(),
         "and so does the dialog it raised"
     );
     main_assert!(app.pending_window_attention, "the window was asked for");
@@ -8412,7 +8412,7 @@ fn a_ready_check_timeout_and_a_notification_answer_cannot_both_submit() {
     }
     app.poll_lobby_ready_check_notification().test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     assert_ready_checks(&mut commands, 7, clonk_network::ReadyCheckData::Ready);
 }
 
@@ -8435,7 +8435,7 @@ fn lobby_teardown_closes_the_ready_check_notification_and_makes_it_inert() {
     let continuation = app.lobby_ready_check_continuation.clone().test_value();
 
     app.close_lobby_child_dialogs_silently();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.lobby_ready_check_continuation.is_none());
     main_assert!(continuation.resolved());
 
@@ -8466,7 +8466,7 @@ fn ready_check_prompt_sends_no_reply_after_lobby_ends() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(commands.take_submitted_ready_checks().is_empty());
 }
 
@@ -8524,7 +8524,7 @@ fn go_status_request_deletes_client_lobby_and_suppresses_stale_ready_reply() {
         "native pLobby is deleted as soon as GS_Go is installed"
     );
     main_assert!(
-        app.message_dialogs.is_empty(),
+        app.dialogs.messages.is_empty(),
         "DoLobby closes lobby-owned dialogs while entering the loader"
     );
     main_assert!(
@@ -8553,14 +8553,14 @@ fn ready_check_prompt_counts_down_and_times_out_not_ready_at_fifteen_seconds() {
 
     for remaining in (1..LOBBY_READY_CHECK_PROMPT_SECONDS).rev() {
         app.sec1_timer().test_value();
-        main_assert_eq!(app.message_dialogs.len() => 1);
-        main_assert_eq!(app.message_dialogs[0].state.message() => lobby_ready_check_message(remaining));
+        main_assert_eq!(app.dialogs.messages.len() => 1);
+        main_assert_eq!(app.dialogs.messages[0].state.message() => lobby_ready_check_message(remaining));
     }
     main_assert!(commands.take_submitted_ready_checks().is_empty());
 
     app.sec1_timer().test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(!app_lobby(&app).local_ready());
     assert_ready_checks(&mut commands, 7, clonk_network::ReadyCheckData::NotReady);
 }

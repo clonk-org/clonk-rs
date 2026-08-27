@@ -433,7 +433,7 @@ impl GameApp {
             "Enter chat messages here and send them with enter.",
         );
         self.suspend_ingame_pointer_for_gui();
-        self.network_chart_elevated = false;
+        self.dialogs.chart_elevated = false;
         self.message_dialog_active_index = None;
         self.chat.running = Some(RunningChatState {
             history_index: -1,
@@ -469,7 +469,7 @@ impl GameApp {
                 .with_placement(InputDialogPlacement::BottomThird)
         };
         self.suspend_ingame_pointer_for_gui();
-        self.network_chart_elevated = false;
+        self.dialogs.chart_elevated = false;
         self.message_dialog_active_index = None;
         self.chat.running = Some(RunningChatState {
             history_index: -1,
@@ -514,7 +514,8 @@ impl GameApp {
             || self.chat.external_dialog_visible
             || self.context_menu.is_some()
             || self
-                .runtime_client_list
+                .dialogs
+                .client_list
                 .as_ref()
                 .is_some_and(|dialog| dialog.is_info_only())
         {
@@ -643,13 +644,13 @@ impl GameApp {
         {
             self.game_option_input_dialog = None;
         }
-        if self.message_dialogs.is_empty() {
-            self.network_chart_elevated = false;
+        if self.dialogs.messages.is_empty() {
+            self.dialogs.chart_elevated = false;
         }
         self.close_context_menu_silently();
         self.game_option_input_last_click = None;
         if was_active {
-            self.message_dialog_active_index = if self.network_chart_elevated {
+            self.message_dialog_active_index = if self.dialogs.chart_elevated {
                 None
             } else {
                 match self.running_active_dialog {
@@ -1139,7 +1140,7 @@ impl GameApp {
         Self::guard_gui_overlay_result("C4ChatDlg", resource_check)?;
         if self.mode == AppMode::Running {
             self.cancel_ingame_mouse_gestures();
-            self.menu_title_drag = None;
+            self.dialogs.menu_title_drag = None;
             self.ingame_menu_close_pointer_capture = None;
             self.script_menu_close_pointer_capture = None;
         }
@@ -1303,7 +1304,7 @@ impl GameApp {
             .as_ref()
             .context("C4ChatDlg controller is unavailable")?;
         let draw_focus = self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
-            && self.message_dialogs.is_empty()
+            && self.dialogs.messages.is_empty()
             && self.context_menu.is_none();
         clonk_frontend::startup_netdlg::NetDlgScreen::render_standalone_chat_dialog(
             self.graphics.surface_mut(),
@@ -1322,7 +1323,7 @@ impl GameApp {
     ) -> Result<bool> {
         if !self.chat.external_dialog_visible
             || !self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.context_menu.is_some()
         {
             return Ok(false);

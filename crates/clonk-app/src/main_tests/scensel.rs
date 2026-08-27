@@ -300,10 +300,10 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     .test_value();
     main_assert!(app.loading_state.is_none());
     main_assert!(app.definition_selector.is_none());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Start nicht möglich.");
-    main_assert_eq!(app.message_dialogs[0].state.message() => "Noch kein Zugang zu dieser Mission.");
-    main_assert_eq!(app.message_dialogs[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Start nicht möglich.");
+    main_assert_eq!(app.dialogs.messages[0].state.message() => "Noch kein Zugang zu dieser Mission.");
+    main_assert_eq!(app.dialogs.messages[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
 
@@ -365,7 +365,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
         ))]
     })
     .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.definition_selector.is_some(), "the same catalog entry proceeds to the start flow after grant");
     reset_cached_app_paths();
 }
@@ -1654,7 +1654,7 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     app.menu_state.search_edit.anchor = 0;
     app.menu_state.search_edit.caret = 0;
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.menu_state.search_text() => "alpha beta");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
@@ -2081,7 +2081,7 @@ fn scensel_f2_renames_unpacked_scenario_rewrites_title_and_refocuses() {
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
     main_assert_eq!(app.menu_state.rename_edit.as_ref().map(|rename| rename.edit.text()) => Some(""));
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     for character in "New Name".chars() {
         app.test_text_input(character);
     }
@@ -2176,8 +2176,8 @@ fn scensel_rename_collision_is_modal_and_keeps_editor_and_storage() {
     let rename = app.menu_state.rename_edit.test_ref();
     main_assert!(rename.edit.is_focused());
     main_assert_eq!(rename.edit.selected_text() => Some("Taken"));
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Rename failure");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Rename failure");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     let rename = app.menu_state.rename_edit.test_ref();
@@ -2220,7 +2220,7 @@ fn scensel_delete_confirms_exact_subject_deletes_and_selects_next() {
     app.menu_state
         .set_search_text("pending query that excludes Gamma");
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    main_assert_eq!(app.message_dialogs.last().expect("delete confirmation").state.message() => "Delete Scenario Beta?");
+    main_assert_eq!(app.dialogs.messages.last().expect("delete confirmation").state.message() => "Delete Scenario Beta?");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
     wait_for_scenario_selector_discovery(&mut app);
@@ -2257,7 +2257,7 @@ fn scensel_delete_uses_original_group_warning() {
         .test_value();
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
     main_assert_eq!(
-        app.message_dialogs
+        app.dialogs.messages
             .last()
             .expect("original warning")
             .state
@@ -2297,7 +2297,7 @@ fn scensel_delete_failure_is_nonfatal_and_keeps_row_selected() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
 
-    let failure = app.message_dialogs.last().test_value();
+    let failure = app.dialogs.messages.last().test_value();
     main_assert_eq!(failure.state.caption() => "Delete");
     main_assert_eq!(failure.state.message() => "Delete failure.");
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("Failure.c4s"));
@@ -3034,7 +3034,7 @@ fn folder_map_f5_refresh_preserves_map_and_book_only_shortcuts() {
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     main_assert!(app.menu_state.rename_edit.is_none());
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
     main_assert!(app.game_option_input_dialog.is_none());

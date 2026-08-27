@@ -2962,7 +2962,25 @@ impl GameApp {
             last_application_left_press: None,
             ingame_menu_close_pointer_capture: None,
             script_menu_close_pointer_capture: None,
-            menu_title_drag: None,
+            dialogs: RuntimeDialogState {
+                menu_title_drag: None,
+                help_visible: false,
+                help_text_cache: runtime_help_text_cache,
+                client_list: None,
+                client_list_consumed_keys: HashSet::new(),
+                client_list_above_game_over: false,
+                default_order: Vec::new(),
+                scoreboard: None,
+                scoreboard_initial_reconcile_pending: false,
+                scoreboard_close_pointer_capture: false,
+                scoreboard_runtime: ScoreboardDialogRuntime::default(),
+                stack: Vec::new(),
+                messages: Vec::new(),
+                chart: None,
+                chart_consumed_keys: HashSet::new(),
+                chart_pointer_capture: false,
+                chart_elevated: false,
+            },
             ingame_mouse_help_caption: None,
             mouse_state: None,
             ingame_right_mouse_state: None,
@@ -2978,8 +2996,6 @@ impl GameApp {
             game_over_dialog: None,
             game_over_handled: false,
             pending_league_end: None,
-            runtime_help_visible: false,
-            runtime_help_text_cache,
             runtime_key_config_cache: OnceLock::new(),
             runtime_flash_resources_cache,
             runtime_flash_message: None,
@@ -2987,18 +3003,8 @@ impl GameApp {
             physical_viewports: Vec::new(),
             next_physical_viewport_identity: 1,
             physical_viewports_authoritative: false,
-            runtime_client_list: None,
-            runtime_client_list_consumed_keys: HashSet::new(),
-            runtime_client_list_above_game_over: false,
-            runtime_default_dialog_order: Vec::new(),
-            scoreboard_dialog: None,
-            scoreboard_initial_reconcile_pending: false,
-            scoreboard_close_pointer_capture: false,
-            scoreboard_runtime: ScoreboardDialogRuntime::default(),
-            running_dialog_stack: Vec::new(),
             running_active_dialog: None,
             next_running_message_stack_id: 1,
-            message_dialogs: Vec::new(),
             league_signup_dialog: None,
             cancelled_league_signup_continuation: None,
             message_dialog_active_index: None,
@@ -3034,10 +3040,6 @@ impl GameApp {
             netdlg_last_click: None,
             netdlg_join_edit_last_click: None,
             message_board: ClassicMessageBoardState::default(),
-            network_chart_dialog: None,
-            network_chart_consumed_keys: HashSet::new(),
-            network_chart_pointer_capture: false,
-            network_chart_elevated: false,
             message_input_history: VecDeque::new(),
             show_startup_hint: false,
             // Launch policy is resolved in `run` before this constructor and
@@ -3151,18 +3153,18 @@ impl GameApp {
             // Keep C4Viewport/C4GUI z-order authoritative whenever a layer
             // that C++ draws after game messages is visible.
             && self.ingame_selection_frame().is_none()
-            && !self.runtime_help_visible
+            && !self.dialogs.help_visible
             && !self.runtime_halt_active()
             && self
                 .runtime_flash_message
                 .as_ref()
                 .is_none_or(|message| message.remaining_draws == 0)
-            && self.runtime_client_list.is_none()
-            && self.network_chart_dialog.is_none()
-            && self.scoreboard_dialog.is_none()
+            && self.dialogs.client_list.is_none()
+            && self.dialogs.chart.is_none()
+            && self.dialogs.scoreboard.is_none()
             && self.game_over_dialog.is_none()
             && self.game_option_input_dialog.is_none()
-            && self.message_dialogs.is_empty()
+            && self.dialogs.messages.is_empty()
             && self.context_menu.is_none()
             && self
                 .native_startup_fonts
@@ -3172,7 +3174,7 @@ impl GameApp {
 
     fn can_present_ordered_native_text(&self, scale: f32) -> bool {
         let ordered_loading_overlay = self.loader_presentation_active()
-            && (!self.message_dialogs.is_empty()
+            && (!self.dialogs.messages.is_empty()
                 || self
                     .network_start_wait
                     .as_ref()
@@ -3427,7 +3429,7 @@ impl GameApp {
         self.script_menu_close_pointer_capture = None;
         self.scoreboard_pointer_left();
         self.cancel_network_chart_pointer_capture();
-        self.menu_title_drag = None;
+        self.dialogs.menu_title_drag = None;
         for menu in self.ingame_menu.by_player.values_mut() {
             menu.reset_location();
         }
@@ -3535,7 +3537,7 @@ impl GameApp {
                 controller.cancel_interaction();
             }
         }
-        if let Some(dialog) = self.runtime_client_list.as_mut() {
+        if let Some(dialog) = self.dialogs.client_list.as_mut() {
             dialog.pointer_left();
         }
         if self.chat.external_dialog_visible {
@@ -3970,7 +3972,8 @@ impl GameApp {
     }
 
     fn runtime_help_columns(&self) -> Result<&RuntimeHelpColumns> {
-        self.runtime_help_text_cache
+        self.dialogs
+            .help_text_cache
             .get_or_init(|| {
                 // `GetKeyboardInputName` reads the live registration, so the
                 // displayed chord follows a KeyConfig override
@@ -4079,7 +4082,7 @@ impl GameApp {
     }
 
     fn preflight_visible_runtime_help(&self) -> Result<Option<RuntimeHelpColumns>> {
-        if !self.runtime_help_visible {
+        if !self.dialogs.help_visible {
             return Ok(None);
         }
         self.runtime_help_resources()
@@ -4141,10 +4144,10 @@ impl GameApp {
     /// request-time matrix. SetCell may already have invalidated it, but C++
     /// retains these bounds for input until Draw performs the lazy Update.
     fn materialize_scoreboard_presentation(&mut self) -> Result<()> {
-        if self.scoreboard_runtime.presentation.is_some() {
+        if self.dialogs.scoreboard_runtime.presentation.is_some() {
             return Ok(());
         }
-        let Some(request) = self.scoreboard_dialog.clone() else {
+        let Some(request) = self.dialogs.scoreboard.clone() else {
             return Ok(());
         };
         let font_images = resolve_scoreboard_font_images(
@@ -4158,15 +4161,19 @@ impl GameApp {
             self.graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
         );
-        let preferred = self.scoreboard_runtime.preferred.unwrap_or(live_preferred);
-        self.scoreboard_runtime.presentation = Some(
+        let preferred = self
+            .dialogs
+            .scoreboard_runtime
+            .preferred
+            .unwrap_or(live_preferred);
+        self.dialogs.scoreboard_runtime.presentation = Some(
             clonk_frontend::scoreboard::ScoreboardPresentationState::new(
                 preferred,
                 &request.scoreboard,
                 &resources,
             )?,
         );
-        self.scoreboard_runtime.layout_revision = request.layout_revision;
+        self.dialogs.scoreboard_runtime.layout_revision = request.layout_revision;
         Ok(())
     }
 
@@ -4176,7 +4183,7 @@ impl GameApp {
     fn preflight_visible_scoreboard_unchecked(
         &mut self,
     ) -> Result<Option<HashMap<String, ImageData>>> {
-        if self.scoreboard_dialog.is_none() {
+        if self.dialogs.scoreboard.is_none() {
             return Ok(None);
         }
         self.materialize_scoreboard_presentation()?;
@@ -4189,27 +4196,29 @@ impl GameApp {
         let resources = assets.scoreboard_resources(&font_images)?;
         let scoreboard = self.snapshot.hud.scoreboard.clone();
         let layout_revision = self.engine.scoreboard_layout_revision();
-        if self.scoreboard_runtime.layout_revision != layout_revision {
+        if self.dialogs.scoreboard_runtime.layout_revision != layout_revision {
             let preferred = scoreboard_preferred_rect(
                 self.graphics
                     .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
             );
-            self.scoreboard_runtime.preferred = Some(preferred);
-            self.scoreboard_runtime
+            self.dialogs.scoreboard_runtime.preferred = Some(preferred);
+            self.dialogs
+                .scoreboard_runtime
                 .presentation
                 .as_mut()
                 .expect("constructor presentation was materialized")
                 .update(preferred, &scoreboard, &resources)?;
-            self.scoreboard_runtime.layout_revision = layout_revision;
+            self.dialogs.scoreboard_runtime.layout_revision = layout_revision;
         }
         if self
+            .dialogs
             .scoreboard_runtime
             .presentation
             .as_ref()
             .is_none_or(|presentation| presentation.layout().close_button.is_none())
         {
-            self.scoreboard_close_pointer_capture = false;
-            self.scoreboard_runtime.close_hovered = false;
+            self.dialogs.scoreboard_close_pointer_capture = false;
+            self.dialogs.scoreboard_runtime.close_hovered = false;
         }
         Ok(Some(font_images))
     }
@@ -4227,6 +4236,7 @@ impl GameApp {
         match self.scoreboard_pointer_target_cached(point)? {
             ScoreboardPointerTarget::Close => Some(StartupTooltip::resource("IDS_MNU_CLOSE")),
             ScoreboardPointerTarget::Title => self
+                .dialogs
                 .scoreboard_runtime
                 .presentation
                 .as_ref()
@@ -4238,29 +4248,34 @@ impl GameApp {
 
     fn scoreboard_is_above_all_messages(&self) -> bool {
         let scoreboard = self
-            .running_dialog_stack
+            .dialogs
+            .stack
             .iter()
             .rposition(|entry| *entry == RunningDialogStackEntry::Scoreboard);
         let top_message = self
-            .running_dialog_stack
+            .dialogs
+            .stack
             .iter()
             .rposition(|entry| matches!(entry, RunningDialogStackEntry::Message(_)));
         matches!((scoreboard, top_message), (Some(scoreboard), Some(message)) if scoreboard > message)
     }
 
     fn running_message_index(&self, stack_id: u64) -> Option<usize> {
-        self.message_dialogs
+        self.dialogs
+            .messages
             .iter()
             .position(|dialog| dialog.running_stack_id == stack_id)
     }
 
     fn running_shared_entry_is_in_tail(&self, entry: RunningDialogStackEntry) -> bool {
         let split = self
-            .running_dialog_stack
+            .dialogs
+            .stack
             .iter()
             .position(|candidate| candidate.z_order() > 0)
-            .unwrap_or(self.running_dialog_stack.len());
-        self.running_dialog_stack
+            .unwrap_or(self.dialogs.stack.len());
+        self.dialogs
+            .stack
             .iter()
             .rposition(|candidate| *candidate == entry)
             .is_some_and(|position| position >= split)
@@ -4279,14 +4294,16 @@ impl GameApp {
         self.engine.begin_scoreboard_presentation_capture();
         self.snapshot.hud.scoreboard_presentations.clear();
         self.close_scoreboard_dialog();
-        self.scoreboard_initial_reconcile_pending = true;
+        self.dialogs.scoreboard_initial_reconcile_pending = true;
     }
 
     fn reconcile_initial_scoreboard(&mut self) {
-        if !matches!(self.mode, AppMode::Running) || !self.scoreboard_initial_reconcile_pending {
+        if !matches!(self.mode, AppMode::Running)
+            || !self.dialogs.scoreboard_initial_reconcile_pending
+        {
             return;
         }
-        self.scoreboard_initial_reconcile_pending = false;
+        self.dialogs.scoreboard_initial_reconcile_pending = false;
         let request = self.scoreboard_request();
         if request.should_be_shown() && !self.scoreboard_opening_blocked_by_game_over() {
             self.open_scoreboard_dialog(request);
@@ -4299,12 +4316,12 @@ impl GameApp {
         let requests = std::mem::take(&mut self.snapshot.hud.scoreboard_presentations);
         for request in requests {
             if request.should_be_shown() {
-                if self.scoreboard_dialog.is_none()
+                if self.dialogs.scoreboard.is_none()
                     && !self.scoreboard_opening_blocked_by_game_over()
                 {
                     self.open_scoreboard_dialog(request);
                 }
-            } else if self.scoreboard_dialog.is_some() {
+            } else if self.dialogs.scoreboard.is_some() {
                 self.close_scoreboard_dialog();
             }
         }
@@ -4316,7 +4333,7 @@ impl GameApp {
     /// (C4KeyboardInput.h:343-353; C4GuiMenu.cpp:302-325).
     fn scoreboard_tab_has_higher_priority_route(&self) -> bool {
         self.context_menu.is_none()
-            && ((self.runtime_gui_has_keyboard_focus() && !self.network_chart_elevated)
+            && ((self.runtime_gui_has_keyboard_focus() && !self.dialogs.chart_elevated)
                 || self.runtime_top_default_dialog_is_exclusive())
     }
 
@@ -4326,7 +4343,7 @@ impl GameApp {
         self.primary_pointer_left_down = false;
         self.ingame_menu_close_pointer_capture = None;
         self.script_menu_close_pointer_capture = None;
-        self.menu_title_drag = None;
+        self.dialogs.menu_title_drag = None;
         // No native backend clears player controls on focus loss: Win32
         // deactivation only minimizes a fullscreen window
         // (C4FullScreen.cpp:139-145), X11 FocusOut/Unmap only clears
@@ -4337,7 +4354,7 @@ impl GameApp {
         // not discarded as a repeat.
         self.close_context_menu_silently();
         self.context_menu_pointer_capture = None;
-        for dialog in &mut self.message_dialogs {
+        for dialog in &mut self.dialogs.messages {
             dialog.state.cancel_interaction();
         }
         self.message_dialog_pointer_capture_index = None;
@@ -4353,8 +4370,8 @@ impl GameApp {
         self.scenario_game_options.cancel_interaction();
         self.cancel_classic_lobby_interaction();
         self.message_dialog_consumed_keys.clear();
-        self.network_chart_consumed_keys.clear();
-        self.runtime_client_list_consumed_keys.clear();
+        self.dialogs.chart_consumed_keys.clear();
+        self.dialogs.client_list_consumed_keys.clear();
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
         self.league_signup_consumed_keys.clear();
@@ -5544,16 +5561,16 @@ impl GameApp {
 
     fn running_classic_gui_is_active(&self, external_menu_shown: bool) -> bool {
         external_menu_shown
-            || !self.running_dialog_stack.is_empty()
+            || !self.dialogs.stack.is_empty()
             || !self.runtime_default_dialog_order_snapshot().is_empty()
             || self.context_menu.is_some()
             || self.definition_selector.is_some()
             || self.game_option_input_dialog.is_some()
             || self.league_signup_dialog.is_some()
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
-            || self.network_chart_dialog.is_some()
-            || self.runtime_client_list.is_some()
+            || self.dialogs.chart.is_some()
+            || self.dialogs.client_list.is_some()
             || self.chat.external_dialog_visible
             || self.startup.options_advanced_dialog.is_some()
             || self.startup.player_properties_dialog.is_some()
@@ -5611,13 +5628,13 @@ impl GameApp {
         if self.mode != AppMode::Running
             || !self.window_active
             || !routing_still_active
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
             || self.context_menu.is_some()
             || self.game_option_input_dialog.is_some()
             || self.game_over_dialog.is_some()
-            || self.network_chart_pointer_capture
+            || self.dialogs.chart_pointer_capture
         {
             return Ok(None);
         }
@@ -5675,7 +5692,7 @@ impl GameApp {
             return Ok(None);
         };
         let gui_target = !construction_drag_active
-            && (self.scoreboard_close_pointer_capture
+            && (self.dialogs.scoreboard_close_pointer_capture
                 || self.scoreboard_pointer_target(gui_point)?.is_some()
                 || self.ingame_menu_pointer_target(gui_point).is_some()
                 || (self.ensure_script_menu_presentation_for_owner(viewport.owner)
@@ -6044,11 +6061,11 @@ impl GameApp {
     }
 
     fn update_scoreboard_title_drag(&mut self, point: GuiPoint) -> bool {
-        let Some(drag) = self.scoreboard_runtime.title_drag else {
+        let Some(drag) = self.dialogs.scoreboard_runtime.title_drag else {
             return false;
         };
-        let Some(presentation) = self.scoreboard_runtime.presentation.as_mut() else {
-            self.scoreboard_runtime.title_drag = None;
+        let Some(presentation) = self.dialogs.scoreboard_runtime.presentation.as_mut() else {
+            self.dialogs.scoreboard_runtime.title_drag = None;
             return false;
         };
         let target_x = drag
@@ -6528,7 +6545,7 @@ impl GameApp {
 
         // Dropping the cache is enough; the accessor rebuilds it against the
         // new table and the live KeyConfig.
-        self.runtime_help_text_cache = OnceLock::new();
+        self.dialogs.help_text_cache = OnceLock::new();
         self.runtime_flash_resources_cache = OnceLock::new();
         let _ = self
             .runtime_flash_resources_cache
@@ -8120,7 +8137,7 @@ impl GameApp {
                 "C4GUI context menu",
             )?;
         }
-        if !self.message_dialogs.is_empty() {
+        if !self.dialogs.messages.is_empty() {
             check(
                 self.assets
                     .message_dialog_resources()
@@ -8129,7 +8146,7 @@ impl GameApp {
                 "C4GUI::MessageDialog",
             )?;
         }
-        if let Some(dialog) = self.runtime_client_list.as_ref() {
+        if let Some(dialog) = self.dialogs.client_list.as_ref() {
             if dialog.is_static_info_only() {
                 check(
                     self.assets
@@ -8148,7 +8165,7 @@ impl GameApp {
                 )?;
             }
         }
-        if self.network_chart_dialog.is_some() {
+        if self.dialogs.chart.is_some() {
             check(
                 self.assets
                     .network_chart_resources()
@@ -9085,24 +9102,24 @@ impl GameApp {
         self.game_over_handled = false;
         self.pending_league_end = None;
         self.clear_pending_league_player_auth();
-        self.runtime_help_visible = false;
+        self.dialogs.help_visible = false;
         self.runtime_flash_message = None;
-        self.runtime_client_list = None;
-        self.running_dialog_stack.clear();
+        self.dialogs.client_list = None;
+        self.dialogs.stack.clear();
         self.running_active_dialog = None;
-        self.runtime_client_list_consumed_keys.clear();
+        self.dialogs.client_list_consumed_keys.clear();
         self.runtime_key_config_cache = OnceLock::new();
         let _ = self.runtime_key_config_cache.set(
             load_runtime_global_key_config(self.app_paths.as_ref())
                 .map_err(|error| format!("{error:#}")),
         );
-        self.scoreboard_dialog = None;
-        self.scoreboard_initial_reconcile_pending = false;
-        self.scoreboard_close_pointer_capture = false;
-        self.scoreboard_runtime = ScoreboardDialogRuntime::default();
-        self.network_chart_dialog = None;
-        self.network_chart_consumed_keys.clear();
-        self.network_chart_pointer_capture = false;
+        self.dialogs.scoreboard = None;
+        self.dialogs.scoreboard_initial_reconcile_pending = false;
+        self.dialogs.scoreboard_close_pointer_capture = false;
+        self.dialogs.scoreboard_runtime = ScoreboardDialogRuntime::default();
+        self.dialogs.chart = None;
+        self.dialogs.chart_consumed_keys.clear();
+        self.dialogs.chart_pointer_capture = false;
         self.reset_runtime_default_dialog_order();
         self.running_gui_mouse_owned = false;
         self.running_world_mouse_owned = true;

@@ -2279,11 +2279,11 @@ fn running_modal_key_up_does_not_swallow_the_next_airbike_steering_press() {
     // holds keyboard focus, then dismiss it.
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert!(!app.message_dialogs.is_empty(), "Escape opens a modal over the running game");
+    main_assert!(!app.dialogs.messages.is_empty(), "Escape opens a modal over the running game");
     app.test_key(VirtualKeyCode::KeyZ, ElementState::Released);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert!(app.message_dialogs.is_empty(), "the abort dialog is dismissed again");
+    main_assert!(app.dialogs.messages.is_empty(), "the abort dialog is dismissed again");
 
     // Double-tap Left. Both presses have to arrive for `C4Player::InCom` to
     // raise the second to `COM_Left | COM_Double` (C4Player.cpp:1532-1533) and

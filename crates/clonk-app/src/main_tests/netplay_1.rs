@@ -1928,7 +1928,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     main_assert!(app.staged_network_host_scenario.is_none());
     main_assert!(app.startup_network_connection.is_none());
     main_assert!(app.network.is_none());
-    let dialog = &app.message_dialogs[0].state;
+    let dialog = &app.dialogs.messages[0].state;
     main_assert_eq!(dialog.caption() => "Cannot start scenario.");
     main_assert_eq!(dialog.message() => "Cannot play back records while in network mode.");
     main_assert_eq!(dialog.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK);
@@ -2032,7 +2032,7 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     };
 
     app.handle_menu_input(|_| start()).test_value();
-    let dialog = &app.message_dialogs[0].state;
+    let dialog = &app.dialogs.messages[0].state;
     main_assert_eq!(dialog.caption() => "Start Game");
     main_assert_eq!(
         dialog.message() =>
@@ -2045,7 +2045,7 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
         .focused_button()
         .is_some_and(|button| button == clonk_frontend::message_dialog::MessageDialogButton::Ok));
 
-    app.message_dialogs[0].state.handle_hotkey('D');
+    app.dialogs.messages[0].state.handle_hotkey('D');
     app.persist_top_message_dialog_checkbox_changes();
     // ShowMessageModal's by-pointer flag stays memory-only (C4ChatDlg.cpp:624).
     app.flush_deferred_config();
@@ -2056,7 +2056,7 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.handle_menu_input(|_| start()).test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.definition_selector.is_some());
     main_assert_eq!(app.pending_definition_selection.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
     main_assert!(app.startup_network_connection.is_none());
@@ -2234,9 +2234,9 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     app.test_render(&mut frame);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(app.definition_selector.is_some());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Error");
-    main_assert_eq!(app.message_dialogs[0].state.message() => "Please select a file first!");
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Error");
+    main_assert_eq!(app.dialogs.messages[0].state.message() => "Please select a file first!");
     app.test_render(&mut frame);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
@@ -2256,7 +2256,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         n1_gamepad_button(GuiButtonClass::Low, ElementState::Pressed),
         n1_gamepad_button(GuiButtonClass::Low, ElementState::Released),
     ]);
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     app.test_gamepad_events([
@@ -3049,7 +3049,7 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
 
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
     main_assert!(app.host_lobby_countdown.is_none());
-    let warning = app.message_dialogs.last().test_value();
+    let warning = app.dialogs.messages.last().test_value();
     main_assert_eq!(warning.state.caption() => "Player assignment");
     main_assert_eq!(warning.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Standard(12));
     main_assert!(matches!(
@@ -3060,7 +3060,7 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
     ));
     main_assert_eq!(warning.state.checkbox_checked() => Some(false));
 
-    app.message_dialogs
+    app.dialogs.messages
         .last_mut()
         .test_value()
         .state
@@ -3077,7 +3077,7 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
 
     app.process_classic_lobby_actions(n1_lobby_start_request(true))
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(commands.take_submitted_lobby_countdowns() => vec![clonk_network::LobbyCountdownPacket::new(5)]);
     main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown::new()));
 }
@@ -3125,7 +3125,7 @@ fn classic_host_savegame_warning_ignores_an_assigned_restore_player() {
             if header.kind == LobbyRosterHeader::UnassignedSavegamePlayers)));
     app.process_classic_lobby_actions(n1_lobby_start_request(true))
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(commands.take_submitted_lobby_countdowns() => vec![clonk_network::LobbyCountdownPacket::new(5)]);
 }
 
@@ -3147,7 +3147,7 @@ fn classic_host_regular_scenario_never_warns_about_restore_rows() {
     app.process_classic_lobby_actions(n1_lobby_start_request(true))
         .test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(commands.take_submitted_lobby_countdowns() => vec![clonk_network::LobbyCountdownPacket::new(5)]);
 }
 
@@ -3511,7 +3511,7 @@ fn client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
         main_assert!(app.network.is_none());
         main_assert!(app.network_mode.is_none());
         main_assert!(app.network_start_wait.is_none());
-        main_assert!(app.message_dialogs.is_empty());
+        main_assert!(app.dialogs.messages.is_empty());
     }
 }
 
@@ -4449,7 +4449,7 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
     );
     main_assert!(!app.startup.player_models[overflow_index].activated);
     main_assert_eq!(app.selected_player_file.as_ref().map(|player| player.name.as_str()) => Some("Alpha"));
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     let (actions, scroll_before) = {
@@ -4476,8 +4476,8 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
     main_assert_eq!(dialog.list_scroll_offset() => scroll_before);
     main_assert_eq!(Config::load(paths.config_file()).expect("reload bounded participants").get_in(Some("General"), "Participants") => Some("A"));
     main_assert!(app.status_text.is_empty());
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    let error = &app.message_dialogs[0].state;
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    let error = &app.dialogs.messages[0].state;
     main_assert_eq!(error.caption() => "Error");
     main_assert_eq!(error.message() => "Player \"Overflow\" has been deactivated: Too many activated players or path too long!");
     main_assert_eq!(error.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK);
@@ -5658,7 +5658,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
     let (upper_layout, title_point) = {
         let resources = app.assets.message_dialog_resources().test_value();
         let layout =
-            app.message_dialogs
+            app.dialogs.messages
                 .last()
                 .test_value()
                 .state
@@ -5673,7 +5673,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
     app.startup_tooltip = ClassicTooltipTracker::new_at(tooltip_started);
     app.startup_tooltip
         .note_pointer_move_at(title_point, tooltip_started);
-    app.message_dialogs
+    app.dialogs.messages
         .last_mut()
         .test_value()
         .state

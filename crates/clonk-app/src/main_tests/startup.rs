@@ -386,7 +386,7 @@ fn about_chrome_uses_runtime_resource_strings() {
     // The relocated mnemonic activates, and the old English one does not.
     app.keyboard_modifiers = ModifiersState::ALT;
     app.test_key(VirtualKeyCode::KeyU, ElementState::Pressed);
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     app.test_key(VirtualKeyCode::KeyL, ElementState::Pressed);
@@ -504,7 +504,7 @@ fn startup_options_visible_labels_follow_runtime_resources() {
         ),
     ])
     .test_value();
-    let capture = app.message_dialogs.last().test_value();
+    let capture = app.dialogs.messages.last().test_value();
     main_assert_eq!(capture.state.message() => "Taste fuer \"Graben\" auf Tastaturblock 3 druecken.");
     main_assert_eq!(capture.state.caption() => "Taste zuweisen");
 
@@ -521,11 +521,11 @@ fn startup_options_visible_labels_follow_runtime_resources() {
             .insert(key.to_string(), value.to_string());
     }
     app.begin_options_scale_test(100, 150).test_value();
-    let confirm = app.message_dialogs.last().test_value();
+    let confirm = app.dialogs.messages.last().test_value();
     main_assert_eq!(confirm.state.caption() => "Aufloesung wechseln");
     main_assert_eq!(confirm.state.message() => "Neue Aufloesung. Gefaellt sie?|Wird in 12 Sekunden zurueckgesetzt...");
     app.tick_options_scale_test_prompt();
-    main_assert_eq!(app.message_dialogs.last().expect("confirmation").state.message() => "Neue Aufloesung. Gefaellt sie?|Wird in 11 Sekunden zurueckgesetzt...");
+    main_assert_eq!(app.dialogs.messages.last().expect("confirmation").state.message() => "Neue Aufloesung. Gefaellt sie?|Wird in 11 Sekunden zurueckgesetzt...");
 
     // Layout measures the resolved text, so a longer label widens its column.
     let fonts = app.assets.clonk_fonts.as_deref().test_value();
@@ -696,7 +696,7 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
 
     app.request_startup_irc_connection(cancelled.clone())
         .test_value();
-    let warning = app.message_dialogs.last_mut().test_value();
+    let warning = app.dialogs.messages.last_mut().test_value();
     main_assert_eq!(warning.state.caption() => "Chat - Disclaimer");
     main_assert!(warning.state.message().contains("irc.cancelled.test"));
     main_assert_eq!(warning.state.buttons() => MessageDialogButtons::OK_CANCEL);
@@ -926,7 +926,7 @@ fn missing_startup_models_precede_status_and_leave_pixels_untouched() {
 
 /// The message dialog a finished check left behind.
 fn update_result_dialog(app: &GameApp) -> &PendingMessageDialog {
-    app.message_dialogs.last().test_value()
+    app.dialogs.messages.last().test_value()
 }
 
 #[test]
@@ -965,7 +965,7 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     declined
         .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
-    main_assert!(declined.message_dialogs.is_empty());
+    main_assert!(declined.dialogs.messages.is_empty());
 
     // Accepting starts the cancellable component download. The test build
     // parks its network worker, so this pins the hand-off without touching
@@ -988,7 +988,7 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     main_assert!(app.update_download.is_none());
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -1061,7 +1061,7 @@ fn only_a_manual_check_reports_that_there_is_no_update() {
     automatic
         .check_for_updates_with(true, &transport)
         .test_value();
-    main_assert!(automatic.message_dialogs.is_empty());
+    main_assert!(automatic.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -1153,7 +1153,7 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
     app.check_for_updates_at(true, 1000 + 60 * 60 * 24 - 1)
         .test_value();
     main_assert!(app.update_check.is_none(), "an automatic check is daily");
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     app.check_for_updates_at(false, 1000 + 60 * 60 * 24 - 1)
         .test_value();
@@ -1201,7 +1201,7 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
     main_assert_eq!(app.startup.view => StartupView::About);
     main_assert!(app.startup.about_dialog.is_some());
     main_assert!(app.update_check.is_some(), "the check must be in flight");
-    let wait = app.message_dialogs.last().test_value();
+    let wait = app.dialogs.messages.last().test_value();
     main_assert_eq!(wait.state.caption() => "Check for Updates");
     main_assert_eq!(wait.state.message() => "Checking for updates...");
     main_assert_eq!(wait.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Extended(14));
@@ -1210,7 +1210,7 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.update_check.is_none(), "closing the wait dialog abandons the check");
     main_assert_eq!(app.startup.view => StartupView::About);
 
@@ -1222,13 +1222,13 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
             app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         }
         app.test_key(key, ElementState::Pressed);
-        main_assert!(app.message_dialogs.is_empty());
+        main_assert!(app.dialogs.messages.is_empty());
         app.test_key(key, ElementState::Released);
-        main_assert_eq!(app.message_dialogs.len() => 1);
+        main_assert_eq!(app.dialogs.messages.len() => 1);
         main_assert_eq!(app.startup.view => StartupView::About);
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
             .test_value();
-        main_assert!(app.message_dialogs.is_empty());
+        main_assert!(app.dialogs.messages.is_empty());
         main_assert_eq!(app.startup.view => StartupView::About);
     }
 }
@@ -1257,7 +1257,7 @@ fn about_shift_tab_reverses_buttons_and_license_tabs() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
 
@@ -1371,7 +1371,7 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     main_assert_eq!(controller.dialog_title() => "Crew: Ada");
     main_assert_eq!(controller.selected_index() => Some(0));
     main_assert_eq!(app.startup.crew_models.iter().map(|crew| crew.name.as_str()).collect::<Vec<_>>() => ["High", "Low"]);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 
     let selected_crew_file = app.startup.crew_files[0].file_name.clone();
     app.process_player_dialog_actions(vec![
@@ -1434,10 +1434,10 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     let controller = app.startup.player_dialog.test_ref();
     main_assert!(!controller.is_crew_mode());
     main_assert_eq!(controller.selected_index() => Some(0));
-    main_assert_eq!(app.message_dialogs.len() => 1);
-    main_assert_eq!(app.message_dialogs[0].state.caption() => "Crew: Ada");
-    main_assert_eq!(app.message_dialogs[0].state.message() => "Ada does not have a crew yet!");
-    main_assert_eq!(app.message_dialogs[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::PLAYER);
+    main_assert_eq!(app.dialogs.messages.len() => 1);
+    main_assert_eq!(app.dialogs.messages[0].state.caption() => "Crew: Ada");
+    main_assert_eq!(app.dialogs.messages[0].state.message() => "Ada does not have a crew yet!");
+    main_assert_eq!(app.dialogs.messages[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::PLAYER);
 }
 
 #[test]
@@ -1688,7 +1688,7 @@ fn assert_player_properties_validation_modal(
         MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
     };
 
-    let modal = app.message_dialogs.last().test_value();
+    let modal = app.dialogs.messages.last().test_value();
     main_assert_eq!(modal.state.message() => expected_message);
     main_assert_eq!(modal.state.caption() => "");
     main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
@@ -1721,7 +1721,7 @@ fn startup_player_properties_empty_name_shows_modal_message_dialog() {
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     let form = app.startup.player_properties_dialog.as_ref().test_value();
     main_assert_eq!(form.controller.player() => &expected_player);
     main_assert_eq!(form.controller.comment() => expected_comment);
@@ -1751,7 +1751,7 @@ fn startup_player_properties_duplicate_name_shows_modal_message_dialog() {
     main_assert!(app.startup.player_files.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     let form = app.startup.player_properties_dialog.as_ref().test_value();
     main_assert_eq!(form.controller.player() => &expected_player);
     main_assert_eq!(form.controller.comment() => expected_comment);
@@ -1795,7 +1795,7 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(Config::load(paths.config_file()).expect("reload reconciled config").get_in(Some("General"), "Participants") => Some(""));
 
-    let modal = app.message_dialogs.last().test_value();
+    let modal = app.dialogs.messages.last().test_value();
     main_assert_eq!(modal.state.caption() => "Error");
     main_assert!(!modal.state.message().is_empty());
     main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
@@ -1805,7 +1805,7 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
 
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => None);
 }
 
@@ -1835,7 +1835,7 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
     main_assert!(app.startup.player_files.is_empty());
     main_assert!(app.status_text.is_empty());
 
-    let modal = app.message_dialogs.last().test_value();
+    let modal = app.dialogs.messages.last().test_value();
     main_assert_eq!(modal.state.caption() => "Error");
     main_assert!(!modal.state.message().is_empty());
     main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
@@ -1845,7 +1845,7 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
 
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
 }
 
 #[test]
@@ -1919,7 +1919,7 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
         app.test_key(key, ElementState::Pressed);
         app.test_key(key, ElementState::Released);
     }
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     app.keyboard_modifiers = ModifiersState::SUPER;
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
@@ -3143,7 +3143,7 @@ fn missing_explicit_definition_during_scenario_start_returns_to_startup() {
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert!(
-        app.message_dialogs
+        app.dialogs.messages
             .iter()
             .any(|dialog| dialog.state.message().contains("Missing.c4d")),
         "the missing definition is presented through startup diagnostics"
@@ -3189,7 +3189,7 @@ fn missing_explicit_definition_under_definition_path_returns_to_startup() {
     main_assert!(!app.take_exit_request());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(
-        app.message_dialogs
+        app.dialogs.messages
             .iter()
             .any(|dialog| dialog.state.message().contains("Missing.c4d")),
         "the missing rooted definition is presented through startup diagnostics"
@@ -4430,7 +4430,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         )
         .test_value();
     exercise(&mut nested, "modal above retained Options Sound sheet");
-    main_assert_eq!(nested.message_dialogs.len() => 1);
+    main_assert_eq!(nested.dialogs.messages.len() => 1);
 
     let mut context = new_running_sandbox_app();
     context.return_to_menu();
@@ -4813,7 +4813,7 @@ fn classic_startup_argument_selects_initial_cpp_view() {
     let remembered = app.startup.view;
     app.apply_classic_startup_screen("nonsense");
     main_assert_eq!(app.startup.view => remembered);
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.dialogs.messages.is_empty());
     app.apply_classic_startup_screen("");
     main_assert_eq!(app.startup.view => remembered);
 }

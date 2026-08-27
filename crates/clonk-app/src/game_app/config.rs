@@ -450,7 +450,8 @@ impl GameApp {
     ) -> Result<bool, EngineError> {
         use clonk_frontend::startup_options_controls::ControlDevice;
         let target = self
-            .message_dialogs
+            .dialogs
+            .messages
             .last()
             .and_then(|pending| match pending.continuation {
                 MessageDialogContinuation::OptionsControlCapture(target)
@@ -648,7 +649,7 @@ impl GameApp {
     fn open_options_language_combo(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::Options
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
         {
@@ -676,7 +677,7 @@ impl GameApp {
     fn open_options_font_face_combo(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::Options
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
         {
@@ -704,7 +705,7 @@ impl GameApp {
     fn open_options_font_size_combo(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::Options
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
         {
@@ -733,7 +734,7 @@ impl GameApp {
         use clonk_frontend::startup_options_graphics::GraphicsDisplayMode;
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::Options
-            || !self.message_dialogs.is_empty()
+            || !self.dialogs.messages.is_empty()
             || self.context_menu.is_some()
         {
             return Ok(false);
@@ -769,7 +770,7 @@ impl GameApp {
         if self.mode != AppMode::Running || self.context_menu.is_some() {
             return Ok(false);
         }
-        let Some(choices) = self.runtime_client_list.as_ref().and_then(|dialog| {
+        let Some(choices) = self.dialogs.client_list.as_ref().and_then(|dialog| {
             (!dialog.is_info_only()).then(|| {
                 dialog
                     .option_rows()
@@ -805,7 +806,7 @@ impl GameApp {
         option: LobbyOptionKind,
         value: i32,
     ) -> Result<(), EngineError> {
-        let valid_choice = self.runtime_client_list.as_ref().is_some_and(|dialog| {
+        let valid_choice = self.dialogs.client_list.as_ref().is_some_and(|dialog| {
             dialog.option_rows().iter().any(|row| {
                 row.kind == option
                     && row.editable
@@ -1673,7 +1674,7 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        let capturing = self.message_dialogs.last().is_some_and(|pending| {
+        let capturing = self.dialogs.messages.last().is_some_and(|pending| {
             matches!(
                 pending.continuation,
                 MessageDialogContinuation::OptionsVoicePushToTalkCapture
@@ -2101,7 +2102,7 @@ impl GameApp {
     }
 
     pub(crate) fn tick_options_scale_test_prompt(&mut self) -> bool {
-        let Some(prompt_index) = self.message_dialogs.iter().position(|dialog| {
+        let Some(prompt_index) = self.dialogs.messages.iter().position(|dialog| {
             matches!(
                 dialog.continuation,
                 MessageDialogContinuation::OptionsScaleTest { .. }
@@ -2117,7 +2118,8 @@ impl GameApp {
              restored in %u seconds...",
         );
         let expires = self
-            .message_dialogs
+            .dialogs
+            .messages
             .get_mut(prompt_index)
             .is_some_and(|dialog| {
                 let MessageDialogContinuation::OptionsScaleTest {
@@ -2139,7 +2141,7 @@ impl GameApp {
                 false
             });
         if expires {
-            if prompt_index + 1 == self.message_dialogs.len() {
+            if prompt_index + 1 == self.dialogs.messages.len() {
                 if let Err(error) = self.finish_message_dialog(
                     clonk_frontend::message_dialog::MessageDialogResult::Dismissed,
                 ) {
@@ -2773,8 +2775,8 @@ impl GameApp {
 
     pub(crate) fn game_option_input_activity(&self) -> (bool, bool) {
         let keyboard_active = self.context_menu.is_none()
-            && !self.network_chart_elevated
-            && (self.running_chat_active() || self.message_dialogs.is_empty());
+            && !self.dialogs.chart_elevated
+            && (self.running_chat_active() || self.dialogs.messages.is_empty());
         let mouse_active = self.context_menu.is_none()
             && (matches!(self.mode, AppMode::Running) || keyboard_active);
         (keyboard_active, mouse_active)
