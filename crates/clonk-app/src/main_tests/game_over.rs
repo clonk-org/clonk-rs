@@ -2380,7 +2380,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
     let shifted =
         app.runtime_control_candidates_for_keyboard(VirtualKeyCode::KeyT, ElementState::Pressed);
     main_assert!(shifted.is_empty(), "the custom chord requires Shift");
-    app.keyboard_modifiers = ModifiersState::SHIFT;
+    app.live_input.modifiers = ModifiersState::SHIFT;
     main_assert_eq!(
         app.runtime_control_candidates_for_keyboard(VirtualKeyCode::KeyT, ElementState::Pressed,) =>
         vec![KeyboardBindings::control_candidate_for_set(
@@ -2390,7 +2390,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         )
         .expect("first keyboard callback")]
     );
-    app.keyboard_modifiers = ModifiersState::empty();
+    app.live_input.modifiers = ModifiersState::empty();
     main_assert_eq!(
         app.runtime_control_candidates_for_gamepad_button(0, 0, ElementState::Pressed,) =>
         vec![KeyboardBindings::control_candidate_for_set(
@@ -2845,7 +2845,7 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     main_assert!(app.runtime_client_list_owns_game_over());
-    app.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
+    app.live_input.running_pointer = Some(GuiPoint::new(0.0, 0.0));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     main_assert_eq!(app.game_over_dialog.as_ref().expect("evaluation dialog").custom_evaluation_scroll() => 60);
 }
@@ -3487,7 +3487,7 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     app.test_cursor(outside);
     main_assert_eq!(&app.sound.ui_log[sounds_before_leave..] => &["ArrowHit".to_string()]);
     main_assert!(app.dialogs.scoreboard_close_pointer_capture);
-    main_assert!(app.ingame_pointer.is_none());
+    main_assert!(app.live_input.ingame_pointer.is_none());
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.scoreboard.is_some());
     main_assert!(!app.dialogs.scoreboard_close_pointer_capture);
@@ -3590,7 +3590,7 @@ fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
     main_assert_eq!(moved.bounds.x => before.bounds.x - 24);
     main_assert_eq!(moved.bounds.y => before.bounds.y + 17);
     main_assert!(matches!(app.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
-    main_assert!(app.ingame_pointer.is_none());
+    main_assert!(app.live_input.ingame_pointer.is_none());
 
     app.remove_message_dialog_at(0).test_value();
     main_assert!(app.dialogs.scoreboard_runtime.title_drag.is_none());
@@ -3705,7 +3705,7 @@ fn synchronous_scoreboard_show_joins_pointer_routing_before_update_or_draw() {
     main_assert!(app.dialogs.scoreboard.is_some());
     main_assert!(app.scoreboard_pointer_target_cached(point).is_some());
     main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Scoreboard),);
-    main_assert!(app.ingame_pointer.is_none());
+    main_assert!(app.live_input.ingame_pointer.is_none());
 }
 
 #[test]
@@ -3818,22 +3818,22 @@ fn scoreboard_bounds_consume_secondary_middle_wheel_and_touch_input() {
         f64::from(point.x),
         f64::from(point.y),
     ));
-    app.ingame_mouse_init_centered = false;
+    app.live_input.ingame_mouse_init_centered = false;
 
     app.test_right_button(ElementState::Pressed);
     app.test_right_button(ElementState::Released);
-    main_assert!(!app.ingame_mouse_init_centered);
+    main_assert!(!app.live_input.ingame_mouse_init_centered);
     main_assert!(commands.take_submitted_local().is_empty());
 
     app.handle_other_mouse_button(ElementState::Pressed)
         .test_value();
     app.handle_other_mouse_button(ElementState::Released)
         .test_value();
-    main_assert!(!app.ingame_mouse_init_centered);
+    main_assert!(!app.live_input.ingame_mouse_init_centered);
     main_assert!(commands.take_submitted_local().is_empty());
 
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert!(!app.ingame_mouse_init_centered);
+    main_assert!(!app.live_input.ingame_mouse_init_centered);
     main_assert!(commands.take_submitted_local().is_empty());
 
     let before_touch = current_scoreboard_test_layout(&mut app);
@@ -3924,10 +3924,10 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
     );
     main_assert!(!outside.context_menu.as_ref().expect("context menu").captures_point(body));
     outside.test_cursor(PhysicalPosition::new(f64::from(body.x), f64::from(body.y)));
-    outside.ingame_mouse_init_centered = false;
+    outside.live_input.ingame_mouse_init_centered = false;
     outside.test_right_button(ElementState::Pressed);
     main_assert!(outside.context_menu.is_none());
-    main_assert!(!outside.ingame_mouse_init_centered);
+    main_assert!(!outside.live_input.ingame_mouse_init_centered);
 }
 
 #[test]
@@ -4276,7 +4276,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         main_assert!(app.ingame_menu.is_none());
         main_assert!(app.dialogs.messages.is_empty());
-        main_assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+        main_assert!(!app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
         main_assert!(app.dialogs.scoreboard.is_none());
     }
 
@@ -4288,7 +4288,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         .control_style = true;
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    main_assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+    main_assert!(app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
     main_assert_ne!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0,);
     app.open_context_menu_at(
         vec![ContextMenuEntry::<AppContextMenuCommand>::new(
@@ -4299,7 +4299,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     .test_value();
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+    main_assert!(!app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
     main_assert_ne!(
         app.engine
             .player(app.local_owner)
@@ -4330,7 +4330,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     exclusive_release.handle_game_over().test_value();
     exclusive_release.test_key(VirtualKeyCode::Tab, ElementState::Released);
     exclusive_release.dismiss_game_over_dialog();
-    main_assert!(!exclusive_release.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+    main_assert!(!exclusive_release.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
     main_assert_ne!(
         exclusive_release
             .engine
@@ -4364,7 +4364,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     // `C4Game::DoKeyboardInput` records the raw physical edge before the
     // exclusive dialog can claim it (C4Game.cpp:2143-2155), which is what
     // makes the bare repeat below a repeat rather than a fresh press.
-    main_assert!(dialog_press.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+    main_assert!(dialog_press.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
     dialog_press.dismiss_game_over_dialog();
     dialog_press.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     main_assert_eq!(
@@ -4380,7 +4380,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     );
     dialog_press.test_key(VirtualKeyCode::Tab, ElementState::Released);
     main_assert!(!dialog_press.scoreboard_tab_raw_pressed);
-    main_assert!(!dialog_press.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+    main_assert!(!dialog_press.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
 }
 
 #[test]

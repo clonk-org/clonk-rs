@@ -2666,17 +2666,34 @@ impl GameApp {
             bindings,
             gamepad_bindings,
             local_controls: LocalControlRegistry::default(),
-            pressed_engine_keys: HashSet::new(),
+            live_input: InputState {
+                pressed_engine_keys: HashSet::new(),
+                modifiers: ModifiersState::empty(),
+                gamepads,
+                window_pointer: None,
+                pointer_inside_window: false,
+                running_pointer: None,
+                gui_mouse_owned: false,
+                world_mouse_owned: true,
+                primary_left_down: false,
+                last_left_press: None,
+                ingame_gui_pointer: None,
+                ingame_pointer: None,
+                ingame_mouse_help: false,
+                ingame_mouse_init_centered: false,
+                ingame_viewport_mouse: None,
+                ingame_edge_scroll: None,
+                ingame_mouse_caption: IngameMouseCaptionState::default(),
+                ingame_mouse_target: None,
+            },
             engine_key_repeated: false,
             key_event_suppresses_text: false,
             scoreboard_tab_raw_pressed: false,
-            keyboard_modifiers: ModifiersState::empty(),
             pending_screenshots: VecDeque::new(),
             retained_gpu_presentation_active: false,
             retained_gpu_ordered_capture_active: false,
             retained_native_capture_surface: None,
             pending_options_display_requests: VecDeque::new(),
-            gamepads,
             #[cfg(test)]
             gamepad_poll_count: 0,
             #[cfg(test)]
@@ -2942,24 +2959,9 @@ impl GameApp {
             update_check: None,
             update_download: None,
             automatic_update_check_allowed: !cfg!(test),
-            ingame_gui_pointer: None,
-            ingame_pointer: None,
-            ingame_mouse_help: false,
-            ingame_mouse_init_centered: false,
-            ingame_viewport_mouse: None,
-            ingame_edge_scroll: None,
             free_view_scroll_momentum: FreeViewScrollMomentum::default(),
-            ingame_mouse_caption: IngameMouseCaptionState::default(),
-            ingame_mouse_target: None,
-            window_mouse_position: None,
-            pointer_inside_window: false,
-            running_gui_mouse_owned: false,
             // C4MouseControl::Default starts with fMouseOwned set even while
             // the control itself is inactive outside a running game.
-            running_world_mouse_owned: true,
-            running_pointer_position: None,
-            primary_pointer_left_down: false,
-            last_application_left_press: None,
             ingame_menu_close_pointer_capture: None,
             script_menu_close_pointer_capture: None,
             dialogs: RuntimeDialogState {
@@ -3424,7 +3426,7 @@ impl GameApp {
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
         self.game_option_pointer_capture = false;
-        self.running_pointer_position = None;
+        self.live_input.running_pointer = None;
         self.ingame_menu_close_pointer_capture = None;
         self.script_menu_close_pointer_capture = None;
         self.scoreboard_pointer_left();
@@ -3885,7 +3887,7 @@ impl GameApp {
 
     fn handle_modifiers_changed(&mut self, modifiers: ModifiersState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
-        self.keyboard_modifiers = modifiers;
+        self.live_input.modifiers = modifiers;
         Ok(())
     }
 
@@ -4340,7 +4342,7 @@ impl GameApp {
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
         self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
-        self.primary_pointer_left_down = false;
+        self.live_input.primary_left_down = false;
         self.ingame_menu_close_pointer_capture = None;
         self.script_menu_close_pointer_capture = None;
         self.dialogs.menu_title_drag = None;
@@ -4383,10 +4385,10 @@ impl GameApp {
         self.game_option_consumed_keys.clear();
         self.game_option_pointer_capture = false;
         self.chat.paste_consumed_keys.clear();
-        self.pressed_engine_keys.clear();
+        self.live_input.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
-        self.keyboard_modifiers = ModifiersState::empty();
-        self.running_pointer_position = None;
+        self.live_input.modifiers = ModifiersState::empty();
+        self.live_input.running_pointer = None;
         if let Some(rename) = self.startup.crew_rename.as_mut() {
             rename.edit.cancel_pointer_selection();
             rename.last_click = None;
@@ -4420,7 +4422,7 @@ impl GameApp {
 
     fn handle_focus_gained(&mut self) -> Result<(), EngineError> {
         self.window_active = true;
-        let Some(point) = self.window_mouse_position else {
+        let Some(point) = self.live_input.window_pointer else {
             return Ok(());
         };
         // Focus loss clears C4MouseControl/C4GUI hover ownership but retains
@@ -4870,8 +4872,8 @@ impl GameApp {
         self.arm_terminal_loader_frame_presentation();
         self.loading_state = None;
         self.pending_client_start_status = None;
-        self.running_gui_mouse_owned = false;
-        self.running_world_mouse_owned = true;
+        self.live_input.gui_mouse_owned = false;
+        self.live_input.world_mouse_owned = true;
         self.install_session_game_tick_delay();
         self.mode = AppMode::Running;
         Ok(true)
@@ -5587,14 +5589,14 @@ impl GameApp {
     /// The return value reports an engine mutation that needs a fresh app
     /// snapshot; observer cameras are presentation-owned and return false.
     fn apply_ingame_edge_scroll(&mut self) -> Result<bool, EngineError> {
-        if self.ingame_edge_scroll.is_none() {
+        if self.live_input.ingame_edge_scroll.is_none() {
             return Ok(false);
         }
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
-            self.ingame_edge_scroll = None;
+            self.live_input.ingame_edge_scroll = None;
             return Ok(false);
         };
-        self.ingame_edge_scroll = Some(scroll);
+        self.live_input.ingame_edge_scroll = Some(scroll);
         self.perform_ingame_edge_scroll(scroll, viewport)
     }
 
@@ -5604,20 +5606,20 @@ impl GameApp {
     /// effect without a new platform motion event.
     fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<bool, EngineError> {
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
-            self.ingame_edge_scroll = None;
+            self.live_input.ingame_edge_scroll = None;
             return Ok(false);
         };
-        self.ingame_edge_scroll = Some(scroll);
+        self.live_input.ingame_edge_scroll = Some(scroll);
         self.perform_ingame_edge_scroll(scroll, viewport)
     }
 
     fn reevaluate_ingame_edge_scroll(
         &mut self,
     ) -> Result<Option<(ActiveViewportEdgeScroll, ActiveViewportProjection)>, EngineError> {
-        let Some(retained) = self.ingame_viewport_mouse else {
+        let Some(retained) = self.live_input.ingame_viewport_mouse else {
             return Ok(None);
         };
-        let Some(gui_point) = self.ingame_gui_pointer else {
+        let Some(gui_point) = self.live_input.ingame_gui_pointer else {
             return Ok(None);
         };
         let routing_still_active = if retained.observer {
@@ -5683,7 +5685,7 @@ impl GameApp {
         if let Some(state) = self.ingame_right_mouse_state.as_mut() {
             state.update_with_fog(pointer, fog_blocked);
         }
-        self.ingame_pointer = Some(pointer);
+        self.live_input.ingame_pointer = Some(pointer);
         self.update_ingame_drag_selection_kinds();
         self.refresh_ingame_mouse_help_region_caption(pointer);
         let Some(edge) =
@@ -5730,7 +5732,7 @@ impl GameApp {
                     .graphics
                     .scroll_observer_viewport(scroll.viewport_index, delta)
                 {
-                    self.ingame_edge_scroll = None;
+                    self.live_input.ingame_edge_scroll = None;
                     break;
                 }
             }
@@ -5975,7 +5977,7 @@ impl GameApp {
         if self.ingame_pointer_fog_blocked(pointer) {
             return Some((IngameMouseCursorKind::Nothing, None));
         }
-        let control_down = self.keyboard_modifiers.control_key();
+        let control_down = self.live_input.modifiers.control_key();
         let target = control_down
             .then(|| {
                 self.graphics.object_at_point_with_ocf(
@@ -5987,7 +5989,7 @@ impl GameApp {
             })
             .flatten();
         if control_down {
-            self.ingame_mouse_target = target;
+            self.live_input.ingame_mouse_target = target;
         }
         let Some(target) = target else {
             let kind = match source {
@@ -6049,7 +6051,7 @@ impl GameApp {
     }
 
     fn advance_ingame_time_on_target(&mut self, kind: IngameMouseCursorKind) -> bool {
-        let state = &mut self.ingame_mouse_caption;
+        let state = &mut self.live_input.ingame_mouse_caption;
         if state.cursor == kind {
             state.time_on_target = state.time_on_target.saturating_add(1);
             state.time_on_target >= INGAME_MOUSE_CAPTION_DELAY && state.keep_caption == 0
@@ -6168,7 +6170,7 @@ impl GameApp {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(motion.last);
-        let shift_append = self.keyboard_modifiers.shift_key();
+        let shift_append = self.live_input.modifiers.shift_key();
         let mut add_mode = 1;
         for _ in 0..selected {
             self.submit_or_execute_player_command(PlayerCommandControlData {
@@ -6204,7 +6206,7 @@ impl GameApp {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(motion.last);
-        let shift_append = self.keyboard_modifiers.shift_key();
+        let shift_append = self.live_input.modifiers.shift_key();
         let mut add_mode = 1;
         for object in selected {
             let (command, x, y, target, target2) = match cursor {
@@ -6292,7 +6294,7 @@ impl GameApp {
             return self.finish_ingame_noop_drag(drag.motion, selected.len());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
-        let put_cursor = self.ingame_mouse_caption.cursor == IngameMouseCursorKind::Put;
+        let put_cursor = self.live_input.ingame_mouse_caption.cursor == IngameMouseCursorKind::Put;
         let put_target = put_cursor
             .then(|| self.retained_ingame_mouse_target())
             .flatten();
@@ -6307,7 +6309,7 @@ impl GameApp {
         }
         self.show_startup_hint = false;
         let mut add_mode = 1;
-        let shift_append = self.keyboard_modifiers.shift_key();
+        let shift_append = self.live_input.modifiers.shift_key();
         for object in selected {
             let (command, x, y, target, target2) = if put_cursor {
                 (
@@ -6356,12 +6358,13 @@ impl GameApp {
             return self.finish_ingame_noop_drag(drag.motion, selected.len());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
-        let put_target = (self.ingame_mouse_caption.cursor == IngameMouseCursorKind::VehiclePut)
+        let put_target = (self.live_input.ingame_mouse_caption.cursor
+            == IngameMouseCursorKind::VehiclePut)
             .then(|| self.retained_ingame_mouse_target())
             .flatten();
         self.show_startup_hint = false;
         let mut add_mode = 1;
-        let shift_append = self.keyboard_modifiers.shift_key();
+        let shift_append = self.live_input.modifiers.shift_key();
         for vehicle in selected {
             self.submit_or_execute_player_command(PlayerCommandControlData {
                 player: self.local_owner,
@@ -6397,7 +6400,7 @@ impl GameApp {
             }
             return match button {
                 clonk_frontend::hud::ViewportButton::Help => {
-                    self.ingame_mouse_help = true;
+                    self.live_input.ingame_mouse_help = true;
                     Ok(())
                 }
                 clonk_frontend::hud::ViewportButton::PlayerMenu => {
@@ -8528,15 +8531,15 @@ impl GameApp {
         self.engine.set_control_rate(parameter_bootstrap.2);
         self.apply_material_library();
         self.input = InputDispatcher::new();
-        self.pressed_engine_keys.clear();
+        self.live_input.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
-        self.ingame_gui_pointer = None;
-        self.ingame_pointer = None;
-        self.ingame_mouse_init_centered = false;
-        self.ingame_viewport_mouse = None;
-        self.ingame_edge_scroll = None;
-        self.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.ingame_mouse_target = None;
+        self.live_input.ingame_gui_pointer = None;
+        self.live_input.ingame_pointer = None;
+        self.live_input.ingame_mouse_init_centered = false;
+        self.live_input.ingame_viewport_mouse = None;
+        self.live_input.ingame_edge_scroll = None;
+        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.live_input.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -9010,10 +9013,10 @@ impl GameApp {
                     .loading_state
                     .as_ref()
                     .is_some_and(|loading| loading.prepared_go.is_some());
-        self.ingame_mouse_help = false;
+        self.live_input.ingame_mouse_help = false;
         self.ingame_mouse_help_caption = None;
-        self.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.ingame_mouse_target = None;
+        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.live_input.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -9121,8 +9124,8 @@ impl GameApp {
         self.dialogs.chart_consumed_keys.clear();
         self.dialogs.chart_pointer_capture = false;
         self.reset_runtime_default_dialog_order();
-        self.running_gui_mouse_owned = false;
-        self.running_world_mouse_owned = true;
+        self.live_input.gui_mouse_owned = false;
+        self.live_input.world_mouse_owned = true;
         self.mode = AppMode::Running;
         self.reconcile_network_stats_series();
         // Startup hint + join log line for the HUD. Game.Time is owned by the

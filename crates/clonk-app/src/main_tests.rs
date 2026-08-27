@@ -880,7 +880,7 @@ impl PreparedRealInstalledScenario {
             .unwrap_or_else(|error| panic!("activate real {scenario_key}: {error}"));
         // Physical-route scenario tests start after the native event loop has
         // already delivered C4MouseControl's one-time centered move.
-        app.ingame_mouse_init_centered = true;
+        app.live_input.ingame_mouse_init_centered = true;
 
         RealTutorialApp {
             app,
@@ -2800,7 +2800,7 @@ fn new_running_sandbox_app_with_definitions_and_assets(
     // Most running-input tests begin after native's one-time centered
     // C4MouseControl move. Tests for that initialization explicitly clear
     // this latch before sending their first platform event.
-    app.ingame_mouse_init_centered = true;
+    app.live_input.ingame_mouse_init_centered = true;
     // The lightweight fallback spawns its crew outside CreateInfoObject,
     // which normally installs C4FOW_Def_View_RangeX during player join.
     // Keep this ubiquitous fixture at the same native mouse/FoW invariant.
@@ -4216,7 +4216,7 @@ fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
         .test_value();
     assert_eq!(app.local_controls.mouse_owner(), None);
     app.mouse_control = false;
-    app.ingame_mouse_init_centered = true;
+    app.live_input.ingame_mouse_init_centered = true;
     let controls_before = app.local_controls.assignments().collect::<Vec<_>>();
     let viewports_before = app.graphics.active_viewport_projections();
     let player_file = tempdir();
@@ -4256,7 +4256,7 @@ fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
     );
     assert_eq!(app.graphics.active_viewport_projections(), viewports_before);
     assert!(
-        app.ingame_mouse_init_centered,
+        app.live_input.ingame_mouse_init_centered,
         "a rejected player never reaches C4Player::InitControl"
     );
     assert!(message_board_logical_entries(&app).ends_with(&[
@@ -4597,7 +4597,7 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
         scoreboard: app.snapshot.hud.scoreboard.clone(),
         scoreboard_initial_reconcile_pending: app.dialogs.scoreboard_initial_reconcile_pending,
         scoreboard_close_pointer_capture: app.dialogs.scoreboard_close_pointer_capture,
-        pressed_engine_keys: app.pressed_engine_keys.clone(),
+        pressed_engine_keys: app.live_input.pressed_engine_keys.clone(),
         message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
     }
 }

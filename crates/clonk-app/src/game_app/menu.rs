@@ -40,7 +40,7 @@ impl GameApp {
         let config =
             clonk_frontend::league_signup::LeagueSignupConfig::new(player_name, server_name, mode)
                 .with_preferences(account_preference, password_preference);
-        let pointer_position = self.running_pointer_position;
+        let pointer_position = self.live_input.running_pointer;
         self.close_context_menu_silently();
         self.cancel_underlying_interaction();
         self.league_signup_consumed_keys.clear();
@@ -2040,6 +2040,7 @@ impl GameApp {
         // cursor follows the viewport's current ViewX/ViewY instead of
         // retaining the world coordinate from the last platform event.
         let retained_viewport = self
+            .live_input
             .ingame_viewport_mouse
             .filter(|retained| !retained.observer && retained.owner == owner);
         let pointer = match retained_viewport {
@@ -2058,9 +2059,12 @@ impl GameApp {
                     self.graphics
                         .viewport_output_point_for_index(viewport.index, screen)
                 }),
-            None => self.ingame_pointer.filter(|pointer| pointer.owner == owner),
+            None => self
+                .live_input
+                .ingame_pointer
+                .filter(|pointer| pointer.owner == owner),
         };
-        self.ingame_pointer = pointer;
+        self.live_input.ingame_pointer = pointer;
         let site_valid = pointer.is_some_and(|pointer| {
             let site = ingame_pointer_world_pixel(pointer);
             self.ingame_viewport_region(owner, pointer.screen).is_none()
@@ -2112,7 +2116,7 @@ impl GameApp {
                     target: 0,
                     target2: 0,
                     data: definition_c4id,
-                    add_mode: 1 | if self.keyboard_modifiers.shift_key() {
+                    add_mode: 1 | if self.live_input.modifiers.shift_key() {
                         4
                     } else {
                         0
@@ -2191,7 +2195,8 @@ impl GameApp {
                 }
                 RuntimeDefaultDialog::GameOver => {
                     let hit = self
-                        .running_pointer_position
+                        .live_input
+                        .running_pointer
                         .is_some_and(|point| self.game_over_pointer_route_hit(point))
                         || self
                             .game_over_dialog
@@ -4030,7 +4035,7 @@ impl GameApp {
             self.cancel_underlying_interaction();
         }
         if !chat_above && !chart_stays_above && self.mode != AppMode::Running {
-            self.pressed_engine_keys.clear();
+            self.live_input.pressed_engine_keys.clear();
         }
         let running_stack_id = self.next_running_message_stack_id;
         self.next_running_message_stack_id = self.next_running_message_stack_id.wrapping_add(1);
@@ -4895,7 +4900,7 @@ impl GameApp {
         self.league_signup_consumed_keys.clear();
         self.league_signup_pointer_capture = false;
         self.league_signup_pointer_position = None;
-        self.primary_pointer_left_down = false;
+        self.live_input.primary_left_down = false;
         self.message_dialog_consumed_keys.clear();
         self.definition_selector = None;
         self.pending_definition_selection = None;
@@ -4910,7 +4915,7 @@ impl GameApp {
         self.pending_league_end = None;
         self.pending_league_player_auth = None;
         self.dialogs.help_visible = false;
-        self.ingame_mouse_help = false;
+        self.live_input.ingame_mouse_help = false;
         self.ingame_mouse_help_caption = None;
         self.runtime_flash_message = None;
         self.film_view_player = None;
@@ -4946,17 +4951,17 @@ impl GameApp {
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         self.apply_material_library();
         self.input = InputDispatcher::new();
-        self.pressed_engine_keys.clear();
+        self.live_input.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
-        self.ingame_gui_pointer = None;
-        self.ingame_pointer = None;
-        self.ingame_mouse_help = false;
-        self.ingame_mouse_init_centered = false;
-        self.ingame_viewport_mouse = None;
-        self.ingame_edge_scroll = None;
-        self.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.ingame_mouse_target = None;
-        self.running_pointer_position = None;
+        self.live_input.ingame_gui_pointer = None;
+        self.live_input.ingame_pointer = None;
+        self.live_input.ingame_mouse_help = false;
+        self.live_input.ingame_mouse_init_centered = false;
+        self.live_input.ingame_viewport_mouse = None;
+        self.live_input.ingame_edge_scroll = None;
+        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.live_input.ingame_mouse_target = None;
+        self.live_input.running_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;

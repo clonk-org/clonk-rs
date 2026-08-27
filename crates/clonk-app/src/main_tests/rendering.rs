@@ -1995,16 +1995,16 @@ fn running_render_draws_resolved_world_cursor() {
         f64::from(point.x),
         f64::from(point.y),
     ));
-    let retained = app.window_mouse_position;
+    let retained = app.live_input.window_pointer;
     app.window_active = false;
     app.handle_focus_lost().test_value();
-    main_assert!(app.ingame_pointer.is_none());
+    main_assert!(app.live_input.ingame_pointer.is_none());
     app.handle_focus_gained().test_value();
-    main_assert_eq!(app.window_mouse_position => retained);
-    app.ingame_mouse_caption.cursor = IngameMouseCursorKind::Grab;
-    app.ingame_mouse_caption.caption = None;
-    app.running_gui_mouse_owned = false;
-    let pointer = app.ingame_pointer.test_value();
+    main_assert_eq!(app.live_input.window_pointer => retained);
+    app.live_input.ingame_mouse_caption.cursor = IngameMouseCursorKind::Grab;
+    app.live_input.ingame_mouse_caption.caption = None;
+    app.live_input.gui_mouse_owned = false;
+    let pointer = app.live_input.ingame_pointer.test_value();
 
     app.test_render(&mut frame);
     let origin_x = (pointer.screen.x as i32 - 2) as u32;
@@ -2012,9 +2012,9 @@ fn running_render_draws_resolved_world_cursor() {
     main_assert_eq!(app.graphics.surface().get_pixel(origin_x, origin_y) => Some(Color::opaque(3, 43, 200)));
 
     app.chat.external_dialog_visible = true;
-    app.running_world_mouse_owned = true;
+    app.live_input.world_mouse_owned = true;
     app.pointer_left().test_value();
-    main_assert!(app.ingame_pointer.is_some(), "fixture exercises the dialog-owned pointer-left early return");
+    main_assert!(app.live_input.ingame_pointer.is_some(), "fixture exercises the dialog-owned pointer-left early return");
     app.chat.external_dialog_visible = false;
     app.test_render(&mut frame);
     main_assert_ne!(
@@ -2052,10 +2052,10 @@ fn passive_observer_renders_region_cursor() {
         f64::from(point.x),
         f64::from(point.y),
     ));
-    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
+    main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
 
     app.test_render(&mut frame);
-    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
+    main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
     main_assert!(app.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == [1, 40, 200, 255]), "passive Region cell must reach the composed frame");
 }
 
@@ -2083,13 +2083,13 @@ fn running_render_draws_throw_point_and_shift_add_marker() {
         f64::from(point.x),
         f64::from(point.y),
     ));
-    let pointer = app.ingame_pointer.test_value();
+    let pointer = app.live_input.ingame_pointer.test_value();
     let pointer_world = ingame_pointer_world_pixel(pointer);
     let landing = Vector2::new(pointer_world.x.saturating_add(24), pointer_world.y);
-    app.ingame_mouse_caption.cursor = IngameMouseCursorKind::ThrowRight(landing);
-    app.ingame_mouse_caption.caption = None;
-    app.keyboard_modifiers = ModifiersState::SHIFT;
-    app.running_gui_mouse_owned = false;
+    app.live_input.ingame_mouse_caption.cursor = IngameMouseCursorKind::ThrowRight(landing);
+    app.live_input.ingame_mouse_caption.caption = None;
+    app.live_input.modifiers = ModifiersState::SHIFT;
+    app.live_input.gui_mouse_owned = false;
 
     app.test_render(&mut frame);
     for (phase, color) in [
@@ -2404,7 +2404,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
         message.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
-    message.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
+    message.live_input.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     remove_global_gui_sheet(&mut message, "GUISpinBoxArrow.png");
     let before = runtime_global_ui_snapshot(&message);
     let error = message
@@ -2425,7 +2425,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
     game_over.dialogs.scoreboard_initial_reconcile_pending = true;
-    game_over.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
+    game_over.live_input.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     remove_global_gui_sheet(&mut game_over, "GUISpinBoxArrow.png");
     let before = runtime_global_ui_snapshot(&game_over);
     let error = game_over
@@ -3614,7 +3614,7 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
         f64::from(physical_point.x),
         f64::from(physical_point.y),
     ));
-    main_assert_eq!(app.ingame_pointer => Some(expected_pointer), "C4MouseControl projects through its assigned player's viewport");
+    main_assert_eq!(app.live_input.ingame_pointer => Some(expected_pointer), "C4MouseControl projects through its assigned player's viewport");
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
 
@@ -3677,7 +3677,7 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     let (before, _) = view_state(&app);
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
-    let left_edge = app.ingame_edge_scroll.test_value().edge;
+    let left_edge = app.live_input.ingame_edge_scroll.test_value().edge;
     main_assert_eq!(left_edge.delta => Vector2::new(-10, 0));
     main_assert_eq!(left_edge.cursor => clonk_frontend::MouseCursorPhase::Left);
     main_assert_eq!(view_state(&app) => (Vector2::new(before.x - 10, before.y), clonk_engine::PLAYER_VIEW_MODE_SCROLLING,));
@@ -3710,7 +3710,7 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
         f64::from(interior.x),
         f64::from(interior.y),
     ));
-    main_assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.live_input.ingame_edge_scroll.is_none());
     let stopped = view_state(&app).0;
     for _ in 0..6 {
         app.test_update();
@@ -3742,21 +3742,21 @@ fn continuous_edge_execute_reprojects_world_pointer_before_scrolling_again() {
         f64::from(right.x),
         f64::from(right.y),
     ));
-    let stale = app.ingame_pointer.test_value();
+    let stale = app.live_input.ingame_pointer.test_value();
     let after_move = app.engine.player(owner).test_value().viewports()[0].center;
 
     app.test_render(&mut frame);
-    let scroll = app.ingame_edge_scroll.test_value();
+    let scroll = app.live_input.ingame_edge_scroll.test_value();
     let expected = app
         .graphics
         .viewport_output_point_for_index(scroll.viewport_index, scroll.screen)
         .test_value();
     main_assert_ne!(expected.world => stale.world, "the rendered camera movement must change the fixed screen point's world coordinate");
-    main_assert_eq!(app.ingame_pointer => Some(stale), "rendering alone does not synthesize C4MouseControl::Move");
+    main_assert_eq!(app.live_input.ingame_pointer => Some(stale), "rendering alone does not synthesize C4MouseControl::Move");
 
     app.test_update();
 
-    main_assert_eq!(app.ingame_pointer => Some(expected));
+    main_assert_eq!(app.live_input.ingame_pointer => Some(expected));
     main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(after_move.x + 10, after_move.y));
 }
 
@@ -3772,7 +3772,7 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
     );
 
     app.test_cursor(left);
-    main_assert!(app.ingame_edge_scroll.is_some());
+    main_assert!(app.live_input.ingame_edge_scroll.is_some());
     app.open_context_menu_at(
         vec![ContextMenuEntry::<AppContextMenuCommand>::new(
             "Remain open",
@@ -3780,7 +3780,7 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
         GuiPoint::new(20.0, 20.0),
     )
     .test_value();
-    main_assert!(app.ingame_edge_scroll.is_some(), "opening the popup alone does not synthesize a pointer move");
+    main_assert!(app.live_input.ingame_edge_scroll.is_some(), "opening the popup alone does not synthesize a pointer move");
     let row = app.context_menu.test_ref().layout().panels[0].rows[0].rect;
     let stopped = app.engine.player(owner).test_value().viewports()[0].center;
 
@@ -3789,14 +3789,14 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
         f64::from(row.y + 1),
     ));
     main_assert!(app.context_menu.is_some());
-    main_assert!(app.ingame_pointer.is_none());
-    main_assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.live_input.ingame_pointer.is_none());
+    main_assert!(app.live_input.ingame_edge_scroll.is_none());
 
     for _ in 0..6 {
         app.test_update();
     }
     main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => stopped, "neither continuous Execute nor Tick5 may revive a GUI-consumed edge move");
-    main_assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.live_input.ingame_edge_scroll.is_none());
 }
 
 #[test]
@@ -3812,8 +3812,8 @@ fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclampi
     );
 
     app.test_cursor(right);
-    main_assert_eq!(app.ingame_viewport_mouse.expect("C4MouseControl VpX/VpY retained").position.x => original.width as i32 - 1);
-    main_assert_eq!(app.ingame_edge_scroll.expect("original right edge remains armed").edge.delta => Vector2::new(10, 0));
+    main_assert_eq!(app.live_input.ingame_viewport_mouse.expect("C4MouseControl VpX/VpY retained").position.x => original.width as i32 - 1);
+    main_assert_eq!(app.live_input.ingame_edge_scroll.expect("original right edge remains armed").edge.delta => Vector2::new(10, 0));
     let stopped = app.engine.player(owner).test_value().viewports()[0].center;
 
     app.resize(480, 200).test_value();
@@ -3821,9 +3821,9 @@ fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclampi
     app.test_render(&mut wider_frame);
     let wider = app.graphics.viewport_rect(owner).test_value();
     main_assert!(wider.width > original.width);
-    main_assert_eq!(app.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => original.width as i32 - 1);
+    main_assert_eq!(app.live_input.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => original.width as i32 - 1);
     main_assert!(original.width as i32 - 1 < wider.width as i32 - 1, "the retained right edge is now an interior viewport coordinate");
-    main_assert!(app.ingame_edge_scroll.is_some(), "native Scrolling stays armed until the next Execute reevaluates VpX");
+    main_assert!(app.live_input.ingame_edge_scroll.is_some(), "native Scrolling stays armed until the next Execute reevaluates VpX");
 
     app.test_update();
     main_assert_eq!(
@@ -3831,7 +3831,7 @@ fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclampi
         stopped,
         "Execute must test retained VpX against the new width, not clamp it back to the edge"
     );
-    main_assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.live_input.ingame_edge_scroll.is_none());
 }
 
 #[test]
@@ -3858,12 +3858,12 @@ fn height_only_resize_retains_right_edge_continuous_pan() {
     let taller = app.graphics.viewport_rect(owner).test_value();
     main_assert_eq!(taller.width => original.width);
     main_assert!(taller.height > original.height);
-    main_assert_eq!(app.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => taller.width as i32 - 1);
+    main_assert_eq!(app.live_input.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => taller.width as i32 - 1);
 
     app.test_update();
 
     main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(after_move.x + 10, after_move.y));
-    let scroll = app.ingame_edge_scroll.test_value();
+    let scroll = app.live_input.ingame_edge_scroll.test_value();
     main_assert_eq!(scroll.edge.delta => Vector2::new(10, 0));
     main_assert_eq!(scroll.edge.cursor => clonk_frontend::MouseCursorPhase::Right);
 }
@@ -3910,12 +3910,12 @@ fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
     );
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
-    main_assert!(app.ingame_edge_scroll.is_some());
+    main_assert!(app.live_input.ingame_edge_scroll.is_some());
     app.test_cursor(PhysicalPosition::new(
         f64::from(corner.x),
         f64::from(corner.y),
     ));
-    main_assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.live_input.ingame_edge_scroll.is_none());
     let before_tick5 = app.engine.player(owner).test_value().viewports()[0].center;
 
     app.display_flags.show_commands = false;
@@ -3923,7 +3923,7 @@ fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
     app.test_update();
     main_assert_eq!(app.engine.frame() % 5 => 0);
     main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(before_tick5.x + 10, before_tick5.y + 10));
-    let resumed = app.ingame_edge_scroll.test_value();
+    let resumed = app.live_input.ingame_edge_scroll.test_value();
     main_assert_eq!(resumed.edge.delta => Vector2::new(10, 10));
     main_assert_eq!(resumed.edge.cursor => clonk_frontend::MouseCursorPhase::DownRight);
 }
@@ -3945,7 +3945,7 @@ fn mouse_viewport_corner_pans_both_axes_and_uses_diagonal_cursor() {
     ));
 
     main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(before.x - 10, before.y - 10));
-    let corner_edge = app.ingame_edge_scroll.test_value().edge;
+    let corner_edge = app.live_input.ingame_edge_scroll.test_value().edge;
     main_assert_eq!(corner_edge.delta => Vector2::new(-10, -10));
     main_assert_eq!(corner_edge.cursor => clonk_frontend::MouseCursorPhase::UpLeft);
 }
@@ -4019,7 +4019,7 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
     let after_move = app.graphics.active_viewport_projections()[0];
     main_assert_eq!(after_move.content_origin_x => before.content_origin_x - 10.0);
     main_assert_eq!(after_move.content_origin_y => before.content_origin_y);
-    main_assert_eq!(app.ingame_edge_scroll.expect("passive edge state remains live").edge.cursor => clonk_frontend::MouseCursorPhase::Left);
+    main_assert_eq!(app.live_input.ingame_edge_scroll.expect("passive edge state remains live").edge.cursor => clonk_frontend::MouseCursorPhase::Left);
     main_assert_eq!(
         app.engine
             .player(app.local_owner)

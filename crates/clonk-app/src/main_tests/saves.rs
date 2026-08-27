@@ -2058,13 +2058,13 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
     ];
 
     // Ctrl+F9 is Fullscreen-only, so it queues nothing in GUI scope.
-    app.keyboard_modifiers = ModifiersState::CONTROL;
+    app.live_input.modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F9, ElementState::Released);
     main_assert!(app.pending_screenshots.is_empty());
 
     // Bare F9 queues the presented-frame capture on every startup view.
-    app.keyboard_modifiers = ModifiersState::empty();
+    app.live_input.modifiers = ModifiersState::empty();
     for view in [
         StartupView::MainMenu,
         StartupView::ScenarioBrowser,
@@ -2231,7 +2231,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
         .set_ramp(0, [0x102030, 0x405060, 0x708090]);
 
     app.start_running_chat(RunningChatMode::All);
-    app.keyboard_modifiers = ModifiersState::CONTROL;
+    app.live_input.modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     main_assert_eq!(app.pending_screenshots.front().map(|request| request.kind) => Some(ScreenshotKind::FullLandscape));
     main_assert_eq!(app.pending_screenshots.front().map(|request| &request.gamma) => Some(&installed_gamma), "queued capture retains the ramp installed at keydown");
@@ -2260,7 +2260,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     main_assert_eq!(app.mode => AppMode::Running, "screenshots do not end the game");
 
     app.close_running_chat().test_value();
-    app.keyboard_modifiers = ModifiersState::empty();
+    app.live_input.modifiers = ModifiersState::empty();
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     main_assert_eq!(
@@ -2296,7 +2296,7 @@ fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
         (ModifiersState::empty(), ScreenshotKind::PresentedFrame),
         (ModifiersState::CONTROL, ScreenshotKind::FullLandscape),
     ] {
-        app.keyboard_modifiers = modifiers;
+        app.live_input.modifiers = modifiers;
         app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
         let outcome = app.save_next_screenshot(None, 4, 2, 1.0).test_value();
         main_assert_eq!(outcome.kind => kind);
@@ -3545,7 +3545,7 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
 
     let after_move = app.graphics.active_viewport_projections()[0];
     main_assert_eq!(after_move.target_x => before.target_x - 10);
-    main_assert!(app.ingame_edge_scroll.expect("classified observer edge remains live").observer);
+    main_assert!(app.live_input.ingame_edge_scroll.expect("classified observer edge remains live").observer);
     main_assert_eq!(
         app.engine.player(owner).unwrap().viewports() =>
         player_viewports.as_slice(),
@@ -3565,7 +3565,7 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
 
     let after_tick = app.graphics.active_viewport_projections()[0];
     main_assert_eq!(after_tick.target_x => retargeted.target_x - 10);
-    let scroll = app.ingame_edge_scroll.test_value();
+    let scroll = app.live_input.ingame_edge_scroll.test_value();
     main_assert!(scroll.observer);
     main_assert_eq!(scroll.owner => OWNER_NONE);
     main_assert_eq!(app.engine.player(owner).unwrap().viewports() => player_viewports.as_slice());
@@ -3827,7 +3827,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         viewport.x as f32 + viewport.width as f32 / 2.0,
         viewport.y as f32 + viewport.height as f32 / 2.0,
     );
-    app.ingame_pointer = app.graphics.viewport_point_at(pointer);
+    app.live_input.ingame_pointer = app.graphics.viewport_point_at(pointer);
     app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
         text: "Hidden mouse caption".to_string(),
         keep_moves: 1,
@@ -3882,10 +3882,10 @@ fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     main_assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Released, true,));
     main_assert_eq!(app.film_view_player => Some(second), "C4KeyCB has no key-up callback");
 
-    app.keyboard_modifiers = ModifiersState::SHIFT;
+    app.live_input.modifiers = ModifiersState::SHIFT;
     main_assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
     main_assert_eq!(app.film_view_player => Some(second));
-    app.keyboard_modifiers = ModifiersState::empty();
+    app.live_input.modifiers = ModifiersState::empty();
 
     app.dialogs.scoreboard = Some(app.scoreboard_request());
     main_assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));

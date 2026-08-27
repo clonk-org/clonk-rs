@@ -3688,8 +3688,8 @@ impl GameApp {
     ) {
         use clonk_engine::developer_selection::SelectionWriter;
 
-        let control = self.keyboard_modifiers.control_key();
-        let shift = self.keyboard_modifiers.shift_key();
+        let control = self.live_input.modifiers.control_key();
+        let shift = self.live_input.modifiers.shift_key();
         if !control && !shift {
             self.developer_object_list_anchor = Some(object);
             self.developer_selection
@@ -4722,7 +4722,7 @@ impl GameApp {
         &mut self,
         modifiers: winit::keyboard::ModifiersState,
     ) {
-        self.keyboard_modifiers = modifiers;
+        self.live_input.modifiers = modifiers;
         if self.developer_console_edit_mode != ConsoleEditMode::Draw {
             return;
         }
@@ -6231,9 +6231,9 @@ impl GameApp {
         // legible over both (src/C4Viewport.cpp:836-870;
         // src/C4MouseControl.cpp:317-430,1093-1113).
         let running_world_cursor_drawable = viewport_overlays_visible
-            && self.running_world_mouse_owned
+            && self.live_input.world_mouse_owned
             && self.window_active
-            && self.pointer_inside_window;
+            && self.live_input.pointer_inside_window;
         let construction_cursor = running_world_cursor_drawable
             .then(|| {
                 self.construction_menu_drag
@@ -6299,7 +6299,8 @@ impl GameApp {
                 }
                 _ => false,
             };
-        if construction_cursor_drawn && self.mouse_control && self.keyboard_modifiers.shift_key() {
+        if construction_cursor_drawn && self.mouse_control && self.live_input.modifiers.shift_key()
+        {
             if let (Some((_, _, pointer, _)), Some(primary_offset), Some(viewport_clip)) = (
                 construction_cursor,
                 construction_primary_offset,
@@ -6339,10 +6340,10 @@ impl GameApp {
             && !selection_frame_drawn
             && running_world_cursor_drawable
         {
-            if let Some(pointer) = self.ingame_pointer.filter(|pointer| {
+            if let Some(pointer) = self.live_input.ingame_pointer.filter(|pointer| {
                 self.window_active && self.ingame_mouse_controls_owner(pointer.owner)
             }) {
-                let viewport = self.ingame_viewport_mouse.and_then(|retained| {
+                let viewport = self.live_input.ingame_viewport_mouse.and_then(|retained| {
                     self.graphics
                         .active_viewport_projections()
                         .into_iter()
@@ -6352,8 +6353,8 @@ impl GameApp {
                     let (cursor_kind, screen) = if self.ingame_help_cursor_active() {
                         (IngameMouseCursorKind::Help, pointer.screen)
                     } else if self.ingame_edge_cursor_active() {
-                        self.ingame_edge_scroll.map_or(
-                            (self.ingame_mouse_caption.cursor, pointer.screen),
+                        self.live_input.ingame_edge_scroll.map_or(
+                            (self.live_input.ingame_mouse_caption.cursor, pointer.screen),
                             |scroll| {
                                 (
                                     IngameMouseCursorKind::Scrolling(scroll.edge.cursor),
@@ -6362,7 +6363,7 @@ impl GameApp {
                             },
                         )
                     } else {
-                        (self.ingame_mouse_caption.cursor, pointer.screen)
+                        (self.live_input.ingame_mouse_caption.cursor, pointer.screen)
                     };
                     let phase = cursor_kind.phase();
                     let cursor_drawn = self.graphics.draw_mouse_cursor_clipped(
@@ -6382,7 +6383,7 @@ impl GameApp {
                             );
                         }
                         if self.mouse_control
-                            && self.keyboard_modifiers.shift_key()
+                            && self.live_input.modifiers.shift_key()
                             && cursor_kind.allows_add_marker()
                         {
                             if let Some(primary_offset) =
@@ -6404,7 +6405,7 @@ impl GameApp {
             .then(|| {
                 self.ingame_mouse_help_caption
                     .as_ref()
-                    .zip(self.ingame_pointer)
+                    .zip(self.live_input.ingame_pointer)
                     .and_then(|(caption, pointer)| {
                         self.graphics
                             .viewport_rect(pointer.owner)
@@ -6428,7 +6429,8 @@ impl GameApp {
             );
         } else if let Some((caption, viewport)) = running_world_cursor_drawable
             .then(|| {
-                self.ingame_mouse_caption
+                self.live_input
+                    .ingame_mouse_caption
                     .caption
                     .clone()
                     .and_then(|caption| {

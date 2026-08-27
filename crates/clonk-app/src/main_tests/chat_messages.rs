@@ -1453,10 +1453,10 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     main_assert_eq!(app.running_chat_text() => Some("Sender"));
     let sound_enabled = app.test_audio_ref().options.sound_enabled;
-    app.keyboard_modifiers = ModifiersState::CONTROL;
+    app.live_input.modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert_eq!(app.sound.context.as_ref().expect("sandbox audio context").borrow().options.sound_enabled => sound_enabled);
-    app.keyboard_modifiers = ModifiersState::empty();
+    app.live_input.modifiers = ModifiersState::empty();
 }
 
 #[test]
@@ -1509,7 +1509,7 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
         chart.x.saturating_add(chart.w / 2) as f32,
         chart.y.saturating_add(chart.h / 2) as f32,
     );
-    app.running_pointer_position = Some(chart_point);
+    app.live_input.running_pointer = Some(chart_point);
     app.handle_mouse_button_classified(ElementState::Pressed, false)
         .test_value();
     main_assert!(app.network_chart_is_active_dialog());
@@ -1677,8 +1677,8 @@ fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() 
 fn running_chat_close_forgets_releases_swallowed_by_the_modal() {
     let mut app = new_running_sandbox_app();
     app.start_running_chat(RunningChatMode::All);
-    app.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
-    app.pressed_engine_keys.insert(VirtualKeyCode::Tab);
+    app.live_input.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
+    app.live_input.pressed_engine_keys.insert(VirtualKeyCode::Tab);
     app.scoreboard_tab_raw_pressed = true;
 
     app.test_key(VirtualKeyCode::KeyA, ElementState::Released);
@@ -1688,15 +1688,15 @@ fn running_chat_close_forgets_releases_swallowed_by_the_modal() {
     // the chat modal swallows still drops the physical latch. Only
     // `scoreboard_tab_raw_pressed`, which has no oracle counterpart and is
     // maintained inside the scoreboard route, survives to the close below.
-    main_assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
+    main_assert!(!app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
     main_assert!(app.scoreboard_tab_raw_pressed);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.pressed_engine_keys.is_empty());
+    main_assert!(app.live_input.pressed_engine_keys.is_empty());
     main_assert!(!app.scoreboard_tab_raw_pressed);
 
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
-    main_assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
+    main_assert!(app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
 }
 
 #[test]
@@ -1846,7 +1846,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     cursor_exit.test_cursor(checkbox_point);
     main_assert!(cursor_exit.dialogs.messages[0].state.has_pointer_hover());
     cursor_exit.pointer_left().test_value();
-    main_assert!(cursor_exit.running_pointer_position.is_none());
+    main_assert!(cursor_exit.live_input.running_pointer.is_none());
     main_assert!(!cursor_exit.dialogs.messages[0].state.has_pointer_hover());
     cursor_exit.test_left_button(ElementState::Released);
     main_assert_eq!(cursor_exit.dialogs.messages[0].state.checkbox_checked() => Some(false));

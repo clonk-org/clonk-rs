@@ -3570,7 +3570,7 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
     app.test_key(VirtualKeyCode::Digit3, ElementState::Pressed);
     runtime_assert_eq!(
         selected_options_control_set(&app, ControlDevice::Gamepad) => 2;
-        app.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
+        app.live_input.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
     );
 
     for key in [VirtualKeyCode::Digit4, VirtualKeyCode::Digit0] {
@@ -3578,7 +3578,7 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
     }
     runtime_assert_eq!(
         selected_options_control_set(&app, ControlDevice::Gamepad) => 2;
-        app.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
+        app.live_input.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
     );
 }
 
@@ -5976,12 +5976,12 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     };
 
     // Plain click replaces.
-    app.keyboard_modifiers = ModifiersState::empty();
+    app.live_input.modifiers = ModifiersState::empty();
     click(&mut app, 3);
     runtime_assert_eq!(app.developer_selection.objects() => &[rows[3].id]);
 
     // Ctrl-click adds — and the writeback is in path order, not click order.
-    app.keyboard_modifiers = ModifiersState::CONTROL;
+    app.live_input.modifiers = ModifiersState::CONTROL;
     click(&mut app, 1);
     runtime_assert_eq!(
         app.developer_selection.objects() => &[rows[1].id, rows[3].id],
@@ -5995,7 +5995,7 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     // Shift-click covers the anchor through the clicked row, replacing. The
     // anchor is row 3: a Ctrl-click *sets* it, so an extension afterwards
     // starts from the row that was Ctrl-clicked and not from the first one.
-    app.keyboard_modifiers = ModifiersState::SHIFT;
+    app.live_input.modifiers = ModifiersState::SHIFT;
     click(&mut app, 4);
     runtime_assert_eq!(
         app.developer_selection.objects() => &[rows[3].id, rows[4].id]
@@ -6008,14 +6008,14 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     );
 
     // Ctrl+Shift adds the range to what is already selected.
-    app.keyboard_modifiers = ModifiersState::empty();
+    app.live_input.modifiers = ModifiersState::empty();
     click(&mut app, 4);
-    app.keyboard_modifiers = ModifiersState::CONTROL;
+    app.live_input.modifiers = ModifiersState::CONTROL;
     click(&mut app, 0);
     runtime_assert_eq!(
         app.developer_selection.objects() => &[rows[0].id, rows[4].id]
     );
-    app.keyboard_modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    app.live_input.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
     click(&mut app, 2);
     runtime_assert_eq!(
         app.developer_selection.objects() =>
@@ -6036,7 +6036,7 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
 
     // Empty space clears, as `gtk_tree_selection_get_selected_rows` returning
     // nothing does.
-    app.keyboard_modifiers = ModifiersState::empty();
+    app.live_input.modifiers = ModifiersState::empty();
     app.developer_object_list_click((10, extent.1 as i32 - 4), extent);
     runtime_assert!(app.developer_selection.objects().is_empty());
     let _ = SelectionWriter::ObjectTree;
@@ -7436,7 +7436,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     modified_first.test_modifiers(ModifiersState::ALT);
     modified_first.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     runtime_assert!(modified_first
-        .pressed_engine_keys
+        .live_input.pressed_engine_keys
         .contains(&VirtualKeyCode::F3));
     modified_first.test_modifiers(ModifiersState::empty());
     modified_first.test_key(VirtualKeyCode::F3, ElementState::Pressed);
@@ -7474,7 +7474,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     changed_on_release.test_modifiers(ModifiersState::CONTROL);
     changed_on_release.test_key(VirtualKeyCode::F3, ElementState::Released);
     runtime_assert!(!changed_on_release
-        .pressed_engine_keys
+        .live_input.pressed_engine_keys
         .contains(&VirtualKeyCode::F3));
     changed_on_release
         .engine
@@ -7489,7 +7489,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     let sound_before = focus.test_audio_ref().options.sound_enabled;
     focus.test_modifiers(ModifiersState::CONTROL);
     focus.handle_focus_lost().test_value();
-    assert!(focus.keyboard_modifiers.is_empty());
+    assert!(focus.live_input.modifiers.is_empty());
     focus.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     runtime_assert_eq!(focus.test_audio_ref().options.sound_enabled => sound_before);
     assert!(focus.runtime_flash_message.is_some());
@@ -8454,7 +8454,7 @@ fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
         app.test_key(key, ElementState::Pressed);
         runtime_assert_eq!(app.engine.player(primary).expect("primary local player").control.pressed_coms & left_mask => 0);
         runtime_assert_ne!(app.engine.player(secondary).expect("secondary local player").control.pressed_coms & left_mask => 0);
-        assert!(app.pressed_engine_keys.contains(&key));
+        assert!(app.live_input.pressed_engine_keys.contains(&key));
         assert!(!app.dialogs.help_visible);
         assert!(app.runtime_flash_message.is_none());
 
@@ -8464,7 +8464,7 @@ fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
             "{key:?} release must use the matching secondary owner's auto-stop style",
         );
         runtime_assert_eq!(app.engine.player(primary).expect("primary local player").control.pressed_coms & left_mask => 0);
-        assert!(!app.pressed_engine_keys.contains(&key));
+        assert!(!app.live_input.pressed_engine_keys.contains(&key));
         assert!(!app.dialogs.help_visible);
         assert!(app.runtime_flash_message.is_none());
     }
@@ -8491,7 +8491,7 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
             .control_style = true;
         app.test_modifiers(modifiers);
         let pressed_coms = app.engine.test_player(app.local_owner).control.pressed_coms;
-        let pressed_engine_keys = app.pressed_engine_keys.clone();
+        let pressed_engine_keys = app.live_input.pressed_engine_keys.clone();
         assert!(app.show_startup_hint);
 
         for state in [ElementState::Pressed, ElementState::Released] {
@@ -8507,7 +8507,7 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
                     expected_raw_keys.remove(&VirtualKeyCode::F1);
                 }
             }
-            runtime_assert_eq!(app.pressed_engine_keys => expected_raw_keys, "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}");
+            runtime_assert_eq!(app.live_input.pressed_engine_keys => expected_raw_keys, "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}");
             runtime_assert!(
                 app.show_startup_hint,
                 "modifiers {modifiers:?}, state {state:?}"

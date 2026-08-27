@@ -665,7 +665,7 @@ impl GameApp {
         state: ElementState,
         film_replay: bool,
     ) -> bool {
-        let c4_modifiers = self.keyboard_modifiers
+        let c4_modifiers = self.live_input.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if !film_replay
             || !self.runtime_keyboard_binding_matches(

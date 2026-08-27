@@ -302,6 +302,69 @@ pub(crate) struct RuntimeDialogState {
     pub(crate) menu_title_drag: Option<MenuTitleDrag>,
 }
 
+/// Live keyboard and pointer state: what the platform last told us, and
+/// what `C4MouseControl` made of it.
+///
+/// The two halves are one chain. A platform move updates the window
+/// position, which the running pointer follows, which resolves against a
+/// viewport into the retained mouse — and ownership (`fMouseOwned` for the
+/// GUI versus the world) decides which of those the next click reaches.
+/// The click-synthesis latch lives here too because winit reports no OS
+/// click count, so the port has to derive one from the same timeline.
+pub(crate) struct InputState {
+    /// Engine-routed physical keys currently held by the window input
+    /// backend. Winit's repeated `Pressed` events must carry C++'s
+    /// `fRepeated` semantics into `LocalControlKey` rather than looking like
+    /// deliberate double presses.
+    pub(crate) pressed_engine_keys: HashSet<VirtualKeyCode>,
+    pub(crate) modifiers: ModifiersState,
+    pub(crate) gamepads: GamepadManager,
+    /// Last mouse-only logical position. Touch input intentionally does not
+    /// materialize C4GUI's themed mouse pointer.
+    pub(crate) window_pointer: Option<GuiPoint>,
+    /// Platform client-area membership is independent of focus: focus loss
+    /// restores the OS cursor without forgetting where a stationary pointer
+    /// will be when focus returns.
+    pub(crate) pointer_inside_window: bool,
+    pub(crate) running_pointer: Option<GuiPoint>,
+    /// Exact C4GUI::CMouse ownership for the most recent running mouse move.
+    pub(crate) gui_mouse_owned: bool,
+    /// Exact C4MouseControl::fMouseOwned state. This is deliberately separate
+    /// from GUI ownership: MouseControl::Init resets this bit to true without
+    /// clearing C4GUI's bit, so both cursors can transiently be active.
+    pub(crate) world_mouse_owned: bool,
+    /// Physical primary-button state (`CMouse::LDown`), independent of any
+    /// control that installed itself as `pDragElement`.
+    pub(crate) primary_left_down: bool,
+    /// SDL/X11 classify the second application-wide left press as LeftDouble
+    /// before GUI hit-testing, regardless of which control saw the first.
+    pub(crate) last_left_press: Option<Instant>,
+    /// Raw window position used by C4GUI-style viewport/menu hit-testing.
+    /// Gameplay keeps a separate pointer because C4MouseControl clamps raw
+    /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
+    pub(crate) ingame_gui_pointer: Option<GuiPoint>,
+    pub(crate) ingame_pointer: Option<ViewportPointer>,
+    /// `C4MouseControl::Help`, activated locally by the viewport Help button.
+    /// This is deliberately independent from the F1 `ShowHelp` overlay.
+    pub(crate) ingame_mouse_help: bool,
+    /// `C4MouseControl::InitCentered`: the first viewport move after `Init`
+    /// is evaluated at the viewport center, regardless of the platform point.
+    pub(crate) ingame_mouse_init_centered: bool,
+    /// C4MouseControl::VpX/VpY and its physical viewport identity. These are
+    /// retained even away from an edge so the native Tick5 synthetic Move
+    /// can reevaluate regions and layout changes without a new OS event.
+    pub(crate) ingame_viewport_mouse: Option<RetainedViewportMouse>,
+    /// Retained C4MouseControl::Scrolling direction. Move applies it once;
+    /// every subsequently executed game tick applies it again until the
+    /// pointer leaves the exact clamped viewport border.
+    pub(crate) ingame_edge_scroll: Option<ActiveViewportEdgeScroll>,
+    /// Presentation-only C4MouseControl caption timing and placement.
+    pub(crate) ingame_mouse_caption: IngameMouseCaptionState,
+    /// `C4MouseControl::TargetObject`, retained by the last Move/Tick5 refill.
+    /// Button events consume this identity without repeating hit-testing.
+    pub(crate) ingame_mouse_target: Option<ObjectId>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -353,11 +416,6 @@ pub(crate) struct GameApp {
     pub(crate) bindings: KeyboardBindings,
     pub(crate) gamepad_bindings: GamepadBindings,
     pub(crate) local_controls: LocalControlRegistry,
-    /// Engine-routed physical keys currently held by the window input
-    /// backend. Winit's repeated `Pressed` events must carry C++'s
-    /// `fRepeated` semantics into `LocalControlKey` rather than looking like
-    /// deliberate double presses.
-    pub(crate) pressed_engine_keys: HashSet<VirtualKeyCode>,
     /// `fRepeated` for the physical key event currently being routed.
     ///
     /// `C4Game::DoKeyboardInput` derives it from `PressedKeys` as its very
@@ -373,7 +431,6 @@ pub(crate) struct GameApp {
     /// Raw Tab state is tracked before modifier/dialog scope lookup because a
     /// held key can cross into or out of a PRIO_PlrControl binding.
     pub(crate) scoreboard_tab_raw_pressed: bool,
-    pub(crate) keyboard_modifiers: ModifiersState,
     pub(crate) pending_screenshots: VecDeque<ScreenshotRequest>,
     pub(crate) retained_gpu_presentation_active: bool,
     /// While scale-native text is captured, split the retained command stream
@@ -382,7 +439,6 @@ pub(crate) struct GameApp {
     /// Reused command-only target for scale-native physical text layers.
     pub(crate) retained_native_capture_surface: Option<Surface>,
     pub(crate) pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
-    pub(crate) gamepads: GamepadManager,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
@@ -1033,54 +1089,13 @@ pub(crate) struct GameApp {
     /// case. A test covering the boot path sets it explicitly. The manual
     /// command-line check is not gated by it.
     pub(crate) automatic_update_check_allowed: bool,
-    /// Raw window position used by C4GUI-style viewport/menu hit-testing.
-    /// Gameplay keeps a separate pointer because C4MouseControl clamps raw
-    /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
-    pub(crate) ingame_gui_pointer: Option<GuiPoint>,
-    pub(crate) ingame_pointer: Option<ViewportPointer>,
-    /// `C4MouseControl::Help`, activated locally by the viewport Help button.
-    /// This is deliberately independent from the F1 `ShowHelp` overlay.
-    pub(crate) ingame_mouse_help: bool,
-    /// `C4MouseControl::InitCentered`: the first viewport move after `Init`
-    /// is evaluated at the viewport center, regardless of the platform point.
-    pub(crate) ingame_mouse_init_centered: bool,
-    /// C4MouseControl::VpX/VpY and its physical viewport identity. These are
-    /// retained even away from an edge so the native Tick5 synthetic Move
-    /// can reevaluate regions and layout changes without a new OS event.
-    pub(crate) ingame_viewport_mouse: Option<RetainedViewportMouse>,
-    /// Retained C4MouseControl::Scrolling direction. Move applies it once;
-    /// every subsequently executed game tick applies it again until the
-    /// pointer leaves the exact clamped viewport border.
-    pub(crate) ingame_edge_scroll: Option<ActiveViewportEdgeScroll>,
+    /// Live keyboard and pointer state. Distinct from `input`, which is
+    /// the binding dispatcher: this is what the devices last reported.
+    pub(crate) live_input: InputState,
     /// C4GraphicsSystem::FreeScroll's process-presentation velocity and
     /// MostRecentScrolling clock. Repeated bare arrows carry the complete
     /// prior vector for 100ms without mutating deterministic player state.
     pub(crate) free_view_scroll_momentum: FreeViewScrollMomentum,
-    /// Presentation-only C4MouseControl caption timing and placement.
-    pub(crate) ingame_mouse_caption: IngameMouseCaptionState,
-    /// `C4MouseControl::TargetObject`, retained by the last Move/Tick5 refill.
-    /// Button events consume this identity without repeating hit-testing.
-    pub(crate) ingame_mouse_target: Option<ObjectId>,
-    /// Last mouse-only logical position. Touch input intentionally does not
-    /// materialize C4GUI's themed mouse pointer.
-    pub(crate) window_mouse_position: Option<GuiPoint>,
-    /// Platform client-area membership is independent of focus: focus loss
-    /// restores the OS cursor without forgetting where a stationary pointer
-    /// will be when focus returns.
-    pub(crate) pointer_inside_window: bool,
-    /// Exact C4GUI::CMouse ownership for the most recent running mouse move.
-    pub(crate) running_gui_mouse_owned: bool,
-    /// Exact C4MouseControl::fMouseOwned state. This is deliberately separate
-    /// from GUI ownership: MouseControl::Init resets this bit to true without
-    /// clearing C4GUI's bit, so both cursors can transiently be active.
-    pub(crate) running_world_mouse_owned: bool,
-    pub(crate) running_pointer_position: Option<GuiPoint>,
-    /// Physical primary-button state (`CMouse::LDown`), independent of any
-    /// control that installed itself as `pDragElement`.
-    pub(crate) primary_pointer_left_down: bool,
-    /// SDL/X11 classify the second application-wide left press as LeftDouble
-    /// before GUI hit-testing, regardless of which control saw the first.
-    pub(crate) last_application_left_press: Option<Instant>,
     /// Player menu whose title close button retained the current left-down.
     /// C4GUI::Button invokes only when that same button receives left-up.
     pub(crate) ingame_menu_close_pointer_capture: Option<i32>,

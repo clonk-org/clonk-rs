@@ -18,7 +18,7 @@ impl GameApp {
         {
             return Ok(false);
         }
-        let modifiers = self.keyboard_modifiers
+        let modifiers = self.live_input.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if key == VirtualKeyCode::Escape && modifiers.is_empty() {
             if state == ElementState::Pressed {
@@ -80,7 +80,7 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(false);
         }
-        let c4_modifiers = self.keyboard_modifiers
+        let c4_modifiers = self.live_input.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if !self.runtime_keyboard_binding_matches(
             "ToggleChat",
@@ -447,7 +447,7 @@ impl GameApp {
         });
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = self.running_pointer_position;
+        self.game_option_input_pointer_position = self.live_input.running_pointer;
         self.game_option_input_last_click = None;
     }
 
@@ -483,7 +483,7 @@ impl GameApp {
         });
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = self.running_pointer_position;
+        self.game_option_input_pointer_position = self.live_input.running_pointer;
         self.game_option_input_last_click = None;
     }
 
@@ -663,7 +663,7 @@ impl GameApp {
         }
         // Releases swallowed by the modal cannot clear the raw repeat/Tab
         // trackers. Forget them with the synchronized gameplay controls.
-        self.pressed_engine_keys.clear();
+        self.live_input.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
         self.clear_local_controls()?;
         Ok(())
@@ -820,7 +820,7 @@ impl GameApp {
         &self,
         key: VirtualKeyCode,
     ) -> Option<RunningChatMode> {
-        let modifiers = self.keyboard_modifiers
+        let modifiers = self.live_input.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         [
             (
@@ -850,7 +850,7 @@ impl GameApp {
         let Some(controller) = self.running_chat_controller() else {
             return false;
         };
-        let modifiers = self.keyboard_modifiers
+        let modifiers = self.live_input.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if modifiers.contains(ModifiersState::ALT) {
             return false;
@@ -954,7 +954,7 @@ impl GameApp {
         if !self.running_shared_gui_has_keyboard_focus() {
             return Ok(false);
         }
-        if self.keyboard_modifiers.alt_key() {
+        if self.live_input.modifiers.alt_key() {
             return Ok(false);
         }
         if state == ElementState::Released {
@@ -975,8 +975,8 @@ impl GameApp {
                     self.assets.clonk_fonts.clone(),
                 ) {
                     let modifiers = InputDialogKeyModifiers {
-                        shift: self.keyboard_modifiers.shift_key(),
-                        control: self.keyboard_modifiers.control_key(),
+                        shift: self.live_input.modifiers.shift_key(),
+                        control: self.live_input.modifiers.control_key(),
                     };
                     if let Some(controller) = self.running_chat_controller_mut() {
                         controller.handle_edit_key_down(
@@ -1003,8 +1003,8 @@ impl GameApp {
                     self.assets.clonk_fonts.clone(),
                 ) {
                     let modifiers = InputDialogKeyModifiers {
-                        shift: self.keyboard_modifiers.shift_key(),
-                        control: self.keyboard_modifiers.control_key(),
+                        shift: self.live_input.modifiers.shift_key(),
+                        control: self.live_input.modifiers.control_key(),
                     };
                     if let Some(controller) = self.running_chat_controller_mut() {
                         controller.handle_edit_key_down(operation, modifiers, &layout, &fonts.text);
@@ -1080,7 +1080,7 @@ impl GameApp {
         }
         let release_captured = button_state == ElementState::Released
             && std::mem::take(&mut self.chat.external_pointer_capture);
-        let Some(point) = self.running_pointer_position else {
+        let Some(point) = self.live_input.running_pointer else {
             return Ok(release_captured);
         };
         if !release_captured && !self.external_irc_dialog_contains_point(point) {

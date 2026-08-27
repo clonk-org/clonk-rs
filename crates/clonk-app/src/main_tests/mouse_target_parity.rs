@@ -154,7 +154,7 @@ fn mouse_target_app(row: &MouseTargetEventGolden) -> GameApp {
     )
     .test_value();
     wait_for_running(&mut app);
-    app.ingame_mouse_init_centered = true;
+    app.live_input.ingame_mouse_init_centered = true;
     if let Some(cursor) = app.engine.crew_cursor(row.player) {
         let mut update = ObjectUpdate::new();
         update.plr_view_range = Some(500);
@@ -459,9 +459,9 @@ fn mouse_target_acquire(
         other => panic!("mouse-target golden uses unsupported acquire mode {other}"),
     };
     main_assert_eq!(mouse_target_oracle_id(ids, acquired) => row.cached_target_before, "{} cached target", row.case);
-    app.ingame_mouse_target = acquired;
-    app.ingame_mouse_caption.cursor = mouse_target_cursor_kind(row.cursor_mode);
-    app.ingame_pointer = Some(pointer);
+    app.live_input.ingame_mouse_target = acquired;
+    app.live_input.ingame_mouse_caption.cursor = mouse_target_cursor_kind(row.cursor_mode);
+    app.live_input.ingame_pointer = Some(pointer);
     app.ingame_dragged_objects = row
         .selection_before
         .iter()

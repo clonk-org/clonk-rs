@@ -191,7 +191,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         Some(mage),
         "C++ front-to-back object picking selects the topmost MCLK",
     );
-    let pointer = app.ingame_pointer.test_value();
+    let pointer = app.live_input.ingame_pointer.test_value();
     let projection = app
         .graphics
         .active_viewport_projections()
@@ -723,7 +723,7 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
         f64::from(bag_point.x),
         f64::from(bag_point.y),
     ));
-    main_assert_eq!(app.ingame_mouse_target => Some(bag));
+    main_assert_eq!(app.live_input.ingame_mouse_target => Some(bag));
     app.test_right_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(
         f64::from(hut_point.x),
@@ -737,8 +737,8 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
         f64::from(hut_point.y),
     ));
     main_assert!(app.ingame_right_mouse_state.is_some_and(|state| state.motion.world_drag_started));
-    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Put);
-    main_assert_eq!(app.ingame_mouse_target => Some(hut));
+    main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::Put);
+    main_assert_eq!(app.live_input.ingame_mouse_target => Some(hut));
     app.test_right_button(ElementState::Released);
     app.test_modifiers(ModifiersState::empty());
 
@@ -839,7 +839,7 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
         f64::from(bag_point.x),
         f64::from(bag_point.y),
     ));
-    let click_world = ingame_pointer_world_pixel(app.ingame_pointer.test_value());
+    let click_world = ingame_pointer_world_pixel(app.live_input.ingame_pointer.test_value());
     main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, bag_point) => Some(blocker), "the unfiltered foreground pick sees the newer blocker",);
     main_assert_eq!(app.ingame_primary_mouse_target(owner, bag_point) => Some(bag), "the primary mouse OCF pick skips that blocker and resolves the carryable",);
 
