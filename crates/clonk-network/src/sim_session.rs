@@ -25,12 +25,14 @@
 //! "everyone waits for the slowest" failure lockstep is famous for.
 
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use crate::control::{ControlCoordinator, ControlPacket};
 use crate::control_latency::ControlLatencyEstimator;
 use crate::sim::{Link, LinkConditions, SimRng, CONTROL_PERIOD, STEP};
 use crate::udp::RELIABLE_UDP_RECHECK_INTERVAL;
+use crate::udp_runtime::{ReliableUdpEndpointCore, ReliableUdpEvent};
 use crate::{ClientId, Tick};
 
 /// C++ `C4Application` runs the in-game tick at 28 ms; ControlRate 2 makes one
@@ -228,6 +230,11 @@ pub struct SessionConfig {
     /// ordered reliable stream with control, so one that has to be repaired
     /// withholds every control aggregate sequenced behind it.
     pub resource_fragment_bytes: u32,
+    /// Carry host-to-peer control through real `ReliableUdpEndpointCore`
+    /// instances rather than the modelled reliable stream. Off by default: the
+    /// modelled path is cheaper and every existing profile is calibrated
+    /// against it, so this is opted into per profile.
+    pub real_endpoints: bool,
 }
 
 impl SessionConfig {
@@ -263,6 +270,7 @@ impl Default for SessionConfig {
             // resources-already-present model it was written against.
             resource_bytes: 0,
             resource_fragment_bytes: 0,
+            real_endpoints: false,
         }
     }
 }
@@ -325,6 +333,25 @@ pub struct SessionReport {
     /// What sharing the ordered stream with a resource transfer cost, when one
     /// was modelled.
     pub resource_stream: ResourceStreamReport,
+    /// What the real endpoints did, when the session drove them.
+    pub endpoint_stream: EndpointStreamReport,
+}
+
+/// The real transport's own counters, so a profile can prove it exercised the
+/// shipped send, repair and delivery paths rather than the modelled stand-in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EndpointStreamReport {
+    /// Whether real endpoints carried control at all.
+    pub modelled: bool,
+    /// Datagrams the endpoints produced for first-attempt sends.
+    pub datagrams_sent: usize,
+    /// Datagrams the link dropped, which the endpoints must repair themselves.
+    pub datagrams_lost: usize,
+    /// Datagrams a retransmission timer produced -- the endpoint's own repair
+    /// path, not the harness's fixed recheck interval.
+    pub retransmissions: usize,
+    /// Control payloads the client endpoint delivered, in order.
+    pub packets_delivered: usize,
 }
 
 /// The resource transfer's contribution, reported apart from the link's
@@ -527,6 +554,165 @@ impl Peer {
     }
 }
 
+/// One peer's real ReliableUDP endpoints, driven on the same virtual clock as
+/// the rest of the harness.
+///
+/// The modelled path treats a control aggregate as an opaque 16 bytes whose
+/// tick is carried beside it, and repairs it with a fixed recheck interval.
+/// That is a *model* of a reliable stream. This drives the shipped
+/// `ReliableUdpEndpointCore` instead, so fragmentation, acknowledgement,
+/// retransmission timing and ordered delivery are the real ones, and the tick
+/// has to survive as bytes in the payload like any other packet.
+struct EndpointPair {
+    host: ReliableUdpEndpointCore,
+    client: ReliableUdpEndpointCore,
+    host_addr: SocketAddr,
+    client_addr: SocketAddr,
+    /// Datagrams on the wire: (arrival, toward_host, payload).
+    in_flight: Vec<(Duration, bool, Vec<u8>)>,
+}
+
+impl EndpointPair {
+    fn new(index: usize, now: Duration) -> Self {
+        let port = 40_000 + (index as u16) * 2;
+        let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
+        let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port + 1);
+        Self {
+            host: ReliableUdpEndpointCore::new_at(now),
+            client: ReliableUdpEndpointCore::new_at(now),
+            host_addr,
+            client_addr,
+            in_flight: Vec::new(),
+        }
+    }
+
+    /// Complete the handshake on a clean link, so connection setup is not part
+    /// of any sample. This mirrors what the transport simulator does before it
+    /// starts measuring (`sim::run_control_delivery_in_direction`).
+    fn handshake(&mut self, now: Duration) {
+        let mut pending: Vec<(bool, Vec<u8>)> = self
+            .host
+            .connect_at(self.client_addr, now)
+            .datagrams
+            .into_iter()
+            .map(|datagram| (false, datagram.payload))
+            .collect();
+        for _ in 0..64 {
+            let batch = std::mem::take(&mut pending);
+            if batch.is_empty() {
+                break;
+            }
+            for (toward_host, payload) in batch {
+                let step = if toward_host {
+                    self.host.receive_at(self.client_addr, &payload, now)
+                } else {
+                    self.client.receive_at(self.host_addr, &payload, now)
+                };
+                for datagram in step.datagrams {
+                    pending.push((!toward_host, datagram.payload));
+                }
+            }
+        }
+    }
+
+    /// Send one control payload from the host toward this peer, putting every
+    /// datagram the endpoint produced onto the link.
+    fn send_to_client(
+        &mut self,
+        now: Duration,
+        payload: &[u8],
+        link: &mut Link,
+        host_uplink: &mut SharedUplink,
+        stats: &mut EndpointStreamReport,
+    ) {
+        let Ok(step) = self.host.send_packet(self.client_addr, payload) else {
+            return;
+        };
+        for datagram in step.datagrams {
+            stats.datagrams_sent += 1;
+            let released = host_uplink.release_at(now, datagram.payload.len());
+            self.admit(released, false, datagram.payload, link, stats);
+        }
+    }
+
+    fn admit(
+        &mut self,
+        at: Duration,
+        toward_host: bool,
+        payload: Vec<u8>,
+        link: &mut Link,
+        stats: &mut EndpointStreamReport,
+    ) {
+        match link.enqueue(at, toward_host, payload.clone()) {
+            Some(arrival) => self.in_flight.push((arrival, toward_host, payload)),
+            None => stats.datagrams_lost += 1,
+        }
+    }
+
+    /// Deliver everything that has landed and run both endpoints' timers, which
+    /// is where retransmission actually comes from. Returns the payloads the
+    /// client endpoint delivered in order.
+    fn pump(
+        &mut self,
+        now: Duration,
+        link: &mut Link,
+        host_uplink: &mut SharedUplink,
+        stats: &mut EndpointStreamReport,
+    ) -> Vec<Vec<u8>> {
+        let mut delivered = Vec::new();
+        let landed: Vec<(Duration, bool, Vec<u8>)> = self
+            .in_flight
+            .iter()
+            .filter(|(at, _, _)| *at <= now)
+            .cloned()
+            .collect();
+        self.in_flight.retain(|(at, _, _)| *at > now);
+        for (_, toward_host, payload) in landed {
+            let step = if toward_host {
+                self.host.receive_at(self.client_addr, &payload, now)
+            } else {
+                self.client.receive_at(self.host_addr, &payload, now)
+            };
+            for event in step.events {
+                if let ReliableUdpEvent::Packet { payload, .. } = event {
+                    if !toward_host {
+                        stats.packets_delivered += 1;
+                        delivered.push(payload);
+                    }
+                }
+            }
+            for datagram in step.datagrams {
+                // An acknowledgement travels the other way; a repair travels
+                // the same way as what it repairs.
+                let at = if toward_host {
+                    host_uplink.release_at(now, datagram.payload.len())
+                } else {
+                    now
+                };
+                self.admit(at, !toward_host, datagram.payload, link, stats);
+            }
+        }
+
+        for toward_host in [true, false] {
+            let step = if toward_host {
+                self.host.timer_at(now)
+            } else {
+                self.client.timer_at(now)
+            };
+            for datagram in step.datagrams {
+                stats.retransmissions += 1;
+                let at = if toward_host {
+                    host_uplink.release_at(now, datagram.payload.len())
+                } else {
+                    now
+                };
+                self.admit(at, !toward_host, datagram.payload, link, stats);
+            }
+        }
+        delivered
+    }
+}
+
 /// Runs one lockstep session and reports what each participant experienced.
 pub fn run_session(config: &SessionConfig) -> SessionReport {
     let mut rng = SimRng::new(config.seed);
@@ -536,6 +722,23 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
     let mut resource_stream = ResourceStreamReport {
         modelled: config.resource_bytes > 0 && fragment_bytes > 0,
         ..ResourceStreamReport::default()
+    };
+    let mut endpoint_stream = EndpointStreamReport {
+        modelled: config.real_endpoints,
+        ..EndpointStreamReport::default()
+    };
+    // One endpoint pair per peer, handshaken before the first tick so that
+    // connection setup is never part of a measured sample.
+    let mut endpoints: Vec<EndpointPair> = if config.real_endpoints {
+        (0..config.clients.len())
+            .map(|index| {
+                let mut pair = EndpointPair::new(index, Duration::ZERO);
+                pair.handshake(Duration::ZERO);
+                pair
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
     let mut peers: Vec<Peer> = config
         .clients
@@ -774,6 +977,19 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
                         &mut resource_stream,
                     );
                 }
+                if let Some(pair) = endpoints.get_mut(peer.id as usize) {
+                    // The tick has to survive as bytes: a real endpoint carries
+                    // a payload, not a payload plus an out-of-band label.
+                    let payload = tick.to_le_bytes().to_vec();
+                    pair.send_to_client(
+                        now,
+                        &payload,
+                        &mut peer.link,
+                        &mut host_uplink,
+                        &mut endpoint_stream,
+                    );
+                    continue;
+                }
                 let payload = vec![0u8; 16];
                 let released = host_uplink.release_at(now, payload.len());
                 match peer.link.enqueue(released, false, payload) {
@@ -787,6 +1003,17 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
 
         // --- clients receive and execute -------------------------------------
         for peer in &mut peers {
+            if let Some(pair) = endpoints.get_mut(peer.id as usize) {
+                // Real endpoints decide what has been delivered: acknowledgement,
+                // repair and ordering are theirs, not the harness's.
+                for payload in
+                    pair.pump(now, &mut peer.link, &mut host_uplink, &mut endpoint_stream)
+                {
+                    if let Ok(bytes) = <[u8; 4]>::try_from(payload.as_slice()) {
+                        peer.downlink.push((now, Tick::from_le_bytes(bytes)));
+                    }
+                }
+            }
             let landed: Vec<Tick> = peer
                 .downlink
                 .iter()
@@ -898,6 +1125,7 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
         unpublished_ticks: ticks.saturating_sub(published.len()),
         host_uplink: host_uplink.report,
         resource_stream,
+        endpoint_stream,
     }
 }
 
@@ -1339,6 +1567,85 @@ mod control_rate_tests {
             "withholding controls has to cost healthy players time: \
              {blocked_with:?} vs {blocked_without:?}"
         );
+    }
+
+    #[test]
+    fn a_session_can_run_its_control_through_real_reliable_udp_endpoints() {
+        // The modelled reliable stream is a stand-in: an opaque payload whose
+        // tick travels beside it, repaired on a fixed interval. Driving the
+        // shipped `ReliableUdpEndpointCore` instead means fragmentation,
+        // acknowledgement, retransmission timing and ordered delivery are the
+        // real ones, and the tick has to survive as bytes like any packet.
+        let lossy = ClientProfile {
+            conditions: LinkConditions {
+                rtt_ms: 60,
+                jitter_ms: 5,
+                loss_permille: 80,
+                ..LinkConditions::perfect()
+            },
+            cpu: CpuProfile::reference(),
+        };
+        let config = SessionConfig {
+            clients: vec![lossy; 3],
+            ticks: 150,
+            seed: 0x1231_0001,
+            real_endpoints: true,
+            ..SessionConfig::default()
+        };
+
+        let report = run_session(&config);
+        assert!(report.endpoint_stream.modelled);
+        assert!(
+            report.endpoint_stream.datagrams_sent > 0,
+            "the host has to send through the endpoints"
+        );
+        assert!(
+            report.endpoint_stream.packets_delivered > 0,
+            "the client endpoint has to deliver control payloads"
+        );
+        assert!(
+            report.endpoint_stream.datagrams_lost > 0,
+            "this link has to lose datagrams for repair to be exercised"
+        );
+        assert!(
+            report.endpoint_stream.retransmissions > 0,
+            "a lost datagram has to be repaired by the endpoint's own timer, \
+             not by the harness"
+        );
+        for client in &report.clients {
+            assert!(
+                client.executed > 0,
+                "every participant has to make progress on real endpoints"
+            );
+        }
+
+        // Same seed, same answer: the endpoints run on the same virtual clock
+        // as everything else here, so the whole session stays reproducible.
+        let again = run_session(&config);
+        assert_eq!(
+            report.endpoint_stream, again.endpoint_stream,
+            "real endpoints must not cost the harness its determinism"
+        );
+        for (left, right) in report.clients.iter().zip(again.clients.iter()) {
+            assert_eq!(left.executed, right.executed);
+            assert_eq!(left.blocked_ticks, right.blocked_ticks);
+        }
+    }
+
+    #[test]
+    fn the_modelled_stream_stays_the_default() {
+        // Every calibrated profile is written against the modelled path, so
+        // opting in has to be explicit and the default has to stay untouched.
+        let report = run_session(&SessionConfig {
+            clients: vec![ClientProfile::healthy(); 3],
+            ticks: 80,
+            seed: 0x1231_0002,
+            ..SessionConfig::default()
+        });
+
+        assert!(!report.endpoint_stream.modelled);
+        assert_eq!(report.endpoint_stream.datagrams_sent, 0);
+        assert_eq!(report.endpoint_stream.packets_delivered, 0);
     }
 
     #[test]
