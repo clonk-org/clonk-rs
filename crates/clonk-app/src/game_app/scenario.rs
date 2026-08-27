@@ -2262,15 +2262,15 @@ impl GameApp {
         if offline_savegame.is_none() {
             self.install_local_controls(LocalControlRegistry::default());
         }
-        self.pressed_engine_keys.clear();
+        self.live_input.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
-        self.ingame_gui_pointer = None;
-        self.ingame_pointer = None;
-        self.ingame_mouse_init_centered = false;
-        self.ingame_viewport_mouse = None;
-        self.ingame_edge_scroll = None;
-        self.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.ingame_mouse_target = None;
+        self.live_input.ingame_gui_pointer = None;
+        self.live_input.ingame_pointer = None;
+        self.live_input.ingame_mouse_init_centered = false;
+        self.live_input.ingame_viewport_mouse = None;
+        self.live_input.ingame_edge_scroll = None;
+        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.live_input.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -2698,15 +2698,15 @@ impl GameApp {
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.install_local_controls(LocalControlRegistry::default());
-        self.pressed_engine_keys.clear();
+        self.live_input.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
-        self.ingame_gui_pointer = None;
-        self.ingame_pointer = None;
-        self.ingame_mouse_init_centered = false;
-        self.ingame_viewport_mouse = None;
-        self.ingame_edge_scroll = None;
-        self.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.ingame_mouse_target = None;
+        self.live_input.ingame_gui_pointer = None;
+        self.live_input.ingame_pointer = None;
+        self.live_input.ingame_mouse_init_centered = false;
+        self.live_input.ingame_viewport_mouse = None;
+        self.live_input.ingame_edge_scroll = None;
+        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.live_input.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;

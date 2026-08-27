@@ -157,21 +157,21 @@ fn help_suppresses_open_ingame_menu_and_right_up_exits() {
         .test_value();
     let mut commands = install_mouse_network_capture(&mut app);
 
-    app.ingame_mouse_help = true;
+    app.live_input.ingame_mouse_help = true;
     physical_left_click_with_modifiers(
         &mut app,
         close,
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    main_assert!(app.ingame_mouse_help);
+    main_assert!(app.live_input.ingame_mouse_help);
     main_assert!(app.ingame_menu_belongs_to(owner), "Help suppresses already-open player-menu controls");
     main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()));
 
     app.test_right_button(ElementState::Pressed);
-    main_assert!(app.ingame_mouse_help);
+    main_assert!(app.live_input.ingame_mouse_help);
     app.test_right_button(ElementState::Released);
-    main_assert!(!app.ingame_mouse_help);
+    main_assert!(!app.live_input.ingame_mouse_help);
     main_assert!(app.ingame_menu_belongs_to(owner));
     main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "Help menu interception queues no controls");
 }
@@ -186,7 +186,7 @@ fn help_right_up_exits_without_context_or_crew_cycle() {
     let mut commands = install_mouse_network_capture(&mut app);
 
     for release in [point, empty] {
-        app.ingame_mouse_help = true;
+        app.live_input.ingame_mouse_help = true;
         physical_left_click_with_modifiers(
             &mut app,
             point,
@@ -199,9 +199,9 @@ fn help_right_up_exits_without_context_or_crew_cycle() {
             f64::from(release.y),
         ));
         app.test_right_button(ElementState::Pressed);
-        main_assert!(app.ingame_mouse_help, "right-down retains Help");
+        main_assert!(app.live_input.ingame_mouse_help, "right-down retains Help");
         app.test_right_button(ElementState::Released);
-        main_assert!(!app.ingame_mouse_help, "right-up exits Help");
+        main_assert!(!app.live_input.ingame_mouse_help, "right-up exits Help");
         main_assert_eq!(app.engine.crew_cursor(owner) => cursor);
         main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "Help right-up queues neither Context nor player selection");
         main_assert_eq!(
@@ -238,10 +238,10 @@ fn viewport_buttons_dispatch_help_and_player_menu_locally() {
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    main_assert!(app.ingame_mouse_help);
+    main_assert!(app.live_input.ingame_mouse_help);
     main_assert_eq!(network_commands.take_submitted_player_inputs() => (Vec::new(), Vec::new(), Vec::new()), "COM_Help remains process-local");
 
-    app.ingame_mouse_help = false;
+    app.live_input.ingame_mouse_help = false;
     main_assert!(!app.ingame_menu_belongs_to(owner));
     physical_left_click_with_modifiers(
         &mut app,
@@ -312,16 +312,16 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     let help = center(help_rect);
     app.test_cursor(PhysicalPosition::new(f64::from(help.x), f64::from(help.y)));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(!app.ingame_mouse_help, "passive buttons wait for LeftUp");
+    main_assert!(!app.live_input.ingame_mouse_help, "passive buttons wait for LeftUp");
     app.test_left_button(ElementState::Released);
-    main_assert!(app.ingame_mouse_help);
+    main_assert!(app.live_input.ingame_mouse_help);
     main_assert!(app.ingame_help_cursor_active(), "ownerless Help uses the native Help cursor too");
     main_assert!(app.ingame_menu.is_none());
 
     app.test_right_button(ElementState::Pressed);
-    main_assert!(app.ingame_mouse_help, "right-down retains passive Help");
+    main_assert!(app.live_input.ingame_mouse_help, "right-down retains passive Help");
     app.test_right_button(ElementState::Released);
-    main_assert!(!app.ingame_mouse_help, "right-up exits passive Help");
+    main_assert!(!app.live_input.ingame_mouse_help, "right-up exits passive Help");
 
     app.ingame_last_left_down = None;
     let menu = center(menu_rect);
@@ -2418,25 +2418,25 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         f64::from(menu_point.x),
         f64::from(menu_point.y),
     ));
-    main_assert!(app.running_gui_mouse_owned);
-    main_assert!(!app.running_world_mouse_owned);
-    main_assert!(app.ingame_pointer.is_none());
+    main_assert!(app.live_input.gui_mouse_owned);
+    main_assert!(!app.live_input.world_mouse_owned);
+    main_assert!(app.live_input.ingame_pointer.is_none());
 
     app.reset_ingame_mouse_control();
-    main_assert!(app.running_gui_mouse_owned, "C4MouseControl reset must not deactivate C4GUI::CMouse");
-    main_assert!(app.running_world_mouse_owned, "C4MouseControl::Default independently restores fMouseOwned");
+    main_assert!(app.live_input.gui_mouse_owned, "C4MouseControl reset must not deactivate C4GUI::CMouse");
+    main_assert!(app.live_input.world_mouse_owned, "C4MouseControl::Default independently restores fMouseOwned");
     app.initialize_ingame_mouse_center().test_value();
-    let reset_world_pointer = app.ingame_pointer.test_value();
+    let reset_world_pointer = app.live_input.ingame_pointer.test_value();
     main_assert!(app.classic_gui_cursor_request().is_some(), "GUI cursor remains independently drawable after the reset");
     app.dialogs.help_visible = true;
     app.close_ingame_menu_for_player(app.local_owner);
-    main_assert!(app.running_gui_mouse_owned, "Dialog::Close leaves ownership for C4GraphicsSystem::Execute");
+    main_assert!(app.live_input.gui_mouse_owned, "Dialog::Close leaves ownership for C4GraphicsSystem::Execute");
     app.reconcile_running_mouse_after_last_gui_close(false)
         .test_value();
-    main_assert!(!app.running_gui_mouse_owned);
-    main_assert!(app.running_world_mouse_owned);
-    main_assert!(app.ingame_pointer.is_some(), "the independently reinitialized world pointer remains active");
-    main_assert_eq!(app.ingame_pointer => Some(reset_world_pointer));
+    main_assert!(!app.live_input.gui_mouse_owned);
+    main_assert!(app.live_input.world_mouse_owned);
+    main_assert!(app.live_input.ingame_pointer.is_some(), "the independently reinitialized world pointer remains active");
+    main_assert_eq!(app.live_input.ingame_pointer => Some(reset_world_pointer));
 
     app.dialogs.help_visible = false;
     app.open_ingame_menu().test_value();
@@ -2444,11 +2444,11 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         f64::from(menu_point.x),
         f64::from(menu_point.y),
     ));
-    main_assert!(!app.running_world_mouse_owned);
+    main_assert!(!app.live_input.world_mouse_owned);
     set_test_scenario_head_flags(&mut app, 1, 1);
     app.test_render(&mut frame);
-    main_assert!(app.running_gui_mouse_owned, "a shown C4Menu remains a C4GUI owner when viewport pixels are suppressed");
-    main_assert!(!app.running_world_mouse_owned);
+    main_assert!(app.live_input.gui_mouse_owned, "a shown C4Menu remains a C4GUI owner when viewport pixels are suppressed");
+    main_assert!(!app.live_input.world_mouse_owned);
 
     let non_cursor_menu_object = app
         .engine
@@ -2461,8 +2461,8 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
     main_assert_ne!(app.engine.crew_cursor(app.local_owner) => Some(non_cursor_menu_object));
     app.close_ingame_menu_for_player(app.local_owner);
     app.test_render(&mut frame);
-    main_assert!(app.running_gui_mouse_owned);
-    main_assert!(!app.running_world_mouse_owned);
+    main_assert!(app.live_input.gui_mouse_owned);
+    main_assert!(!app.live_input.world_mouse_owned);
 
     app.engine
         .apply_object_update(
@@ -2474,9 +2474,9 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         )
         .test_value();
     app.test_render(&mut frame);
-    main_assert!(!app.running_gui_mouse_owned);
-    main_assert!(app.running_world_mouse_owned);
-    main_assert!(app.ingame_pointer.is_some());
+    main_assert!(!app.live_input.gui_mouse_owned);
+    main_assert!(app.live_input.world_mouse_owned);
+    main_assert!(app.live_input.ingame_pointer.is_some());
 }
 
 #[test]
@@ -3509,7 +3509,7 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
 fn global_gui_guard_is_first_at_every_external_ui_ingress() {
     let mut app = new_classic_menu_app(320, 200);
     remove_global_gui_sheet(&mut app, "GUISpinBoxArrow.png");
-    let modifiers = app.keyboard_modifiers;
+    let modifiers = app.live_input.modifiers;
     let dimensions = {
         let surface = app.graphics.surface();
         (surface.width(), surface.height())
@@ -3545,7 +3545,7 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
         .resize(640, 480)
         .expect_err("resize must fail at global guard");
     main_assert!(matches!(resize.downcast_ref::<ClassicParityBoundary>(), Some(ClassicParityBoundary::GlobalGuiBootstrapResources { .. })));
-    main_assert_eq!(app.keyboard_modifiers => modifiers);
+    main_assert_eq!(app.live_input.modifiers => modifiers);
     let surface = app.graphics.surface();
     main_assert_eq!((surface.width(), surface.height()) => dimensions);
     main_assert_eq!(app.engine.game_time() => engine_game_time);

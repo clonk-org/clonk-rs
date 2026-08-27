@@ -2181,19 +2181,19 @@ fn handle_developer_console_window_event(
                 let point = GuiPoint::new(x as f32, y as f32);
                 app.developer_console_pointer = point;
                 app.developer_console.handle_pointer_move(point);
-                app.pointer_inside_window = true;
+                app.live_input.pointer_inside_window = true;
             }
             window.request_redraw();
         }
         WindowEvent::CursorEntered { .. } => {
-            app.pointer_inside_window = true;
+            app.live_input.pointer_inside_window = true;
             window.request_redraw();
         }
         WindowEvent::CursorLeft { .. } => {
             if message_dialog_active {
                 app.pointer_left()?;
             } else {
-                app.pointer_inside_window = false;
+                app.live_input.pointer_inside_window = false;
             }
             window.request_redraw();
         }
@@ -2241,19 +2241,20 @@ fn handle_developer_console_window_event(
             if message_dialog_active {
                 app.handle_modifiers_changed(modifiers.state())?;
             } else {
-                app.keyboard_modifiers = modifiers.state();
+                app.live_input.modifiers = modifiers.state();
             }
         }
         WindowEvent::KeyboardInput { event, .. } => {
             let state = event.state;
-            if let Some(key) = legacy_virtual_key_from_event(&event, app.keyboard_modifiers) {
+            if let Some(key) = legacy_virtual_key_from_event(&event, app.live_input.modifiers) {
                 if message_dialog_active {
                     app.handle_key(key, state)?;
                     window.request_redraw();
                 } else {
                     let pressed = state == ElementState::Pressed;
-                    let alt_only = app.keyboard_modifiers == ModifiersState::ALT
-                        || app.keyboard_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+                    let alt_only = app.live_input.modifiers == ModifiersState::ALT
+                        || app.live_input.modifiers
+                            == (ModifiersState::ALT | ModifiersState::SHIFT);
                     if pressed
                         && alt_only
                         && developer_console_menu_mnemonic(key).is_some_and(|mnemonic| {
@@ -2271,7 +2272,7 @@ fn handle_developer_console_window_event(
             // `KeyEvent::text` replaces `ReceivedCharacter` for ordinary
             // keyboard input. Do not also route `logical_key`: that would
             // duplicate composed and dead-key text on several platforms.
-            if state == ElementState::Pressed && text_input_allowed(app.keyboard_modifiers) {
+            if state == ElementState::Pressed && text_input_allowed(app.live_input.modifiers) {
                 if let Some(text) = event.text.as_deref() {
                     if handle_developer_console_text(app, text, message_dialog_active)? {
                         window.request_redraw();
@@ -2280,7 +2281,7 @@ fn handle_developer_console_window_event(
             }
         }
         WindowEvent::Ime(winit::event::Ime::Commit(text))
-            if text_input_allowed(app.keyboard_modifiers) =>
+            if text_input_allowed(app.live_input.modifiers) =>
         {
             if handle_developer_console_text(app, &text, message_dialog_active)? {
                 window.request_redraw();
@@ -2301,7 +2302,7 @@ fn handle_developer_console_window_event(
                     app.handle_focus_lost()?;
                 }
             } else if !focused {
-                app.keyboard_modifiers = ModifiersState::empty();
+                app.live_input.modifiers = ModifiersState::empty();
             }
             window.request_redraw();
         }
@@ -2352,7 +2353,7 @@ pub(crate) fn handle_window_event(
                 .context("failed to process cursor movement")?;
         }
         WindowEvent::CursorEntered { .. } => {
-            app.pointer_inside_window = true;
+            app.live_input.pointer_inside_window = true;
             window.request_redraw();
         }
         WindowEvent::CursorLeft { .. } => {
@@ -2396,7 +2397,7 @@ pub(crate) fn handle_window_event(
         }
         WindowEvent::KeyboardInput { event, .. } => {
             let mut key_consumed = false;
-            if let Some(keycode) = legacy_virtual_key_from_event(&event, app.keyboard_modifiers) {
+            if let Some(keycode) = legacy_virtual_key_from_event(&event, app.live_input.modifiers) {
                 // F11 is an ordinary physical key in C++: `C4KeyboardInput`
                 // maps its name (C4KeyboardInput.cpp:185-197) and
                 // `C4Game::InitKeyboard` registers no fullscreen action for it
@@ -2406,8 +2407,11 @@ pub(crate) fn handle_window_event(
                     .context("failed to process key input")?;
                 key_consumed = app.key_event_suppresses_text;
             }
-            if game_shell_key_event_text_allowed(event.state, app.keyboard_modifiers, key_consumed)
-            {
+            if game_shell_key_event_text_allowed(
+                event.state,
+                app.live_input.modifiers,
+                key_consumed,
+            ) {
                 if let Some(text) = event.text.as_deref() {
                     handle_app_text(app, text).context("failed to process text input")?;
                 }

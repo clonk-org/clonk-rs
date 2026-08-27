@@ -123,7 +123,7 @@ fn non_left_runtime_dialog_hits_swallow_without_raising() {
     main_assert!(!app.network_chart_contains_point(game_over_only));
     main_assert!(!app.game_over_pointer_route_hit(outside));
     let order = app.runtime_default_dialog_order_snapshot();
-    app.running_pointer_position = Some(game_over_only);
+    app.live_input.running_pointer = Some(game_over_only);
 
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
     app.test_right_button(ElementState::Pressed);
@@ -191,7 +191,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     focus_loss.handle_focus_lost().test_value();
     main_assert!(!focus_loss.dialogs.messages[0].state.has_pointer_capture());
     main_assert_eq!(focus_loss.message_dialog_pointer_capture_index => None);
-    main_assert!(!focus_loss.primary_pointer_left_down);
+    main_assert!(!focus_loss.live_input.primary_left_down);
     focus_loss.test_left_button(ElementState::Released);
     main_assert_eq!(focus_loss.dialogs.messages.len() => 1);
 
@@ -303,12 +303,12 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     label_drag.test_cursor(label_point);
     label_drag.test_left_button(ElementState::Pressed);
     main_assert_eq!(label_drag.game_option_input_pointer_capture => None);
-    main_assert!(label_drag.primary_pointer_left_down);
+    main_assert!(label_drag.live_input.primary_left_down);
     label_drag.test_cursor(lower_point);
     main_assert!(!label_drag.running_chat_active());
     main_assert_eq!(label_drag.active_message_dialog_index() => Some(0));
     label_drag.test_left_button(ElementState::Released);
-    main_assert!(!label_drag.primary_pointer_left_down);
+    main_assert!(!label_drag.live_input.primary_left_down);
 
     let mut touch_lower = boxed_running_sandbox_app();
     touch_lower.start_running_chat(RunningChatMode::All);
@@ -556,7 +556,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     vote_pointer
         .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
-    vote_pointer.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
+    vote_pointer.live_input.running_pointer = Some(GuiPoint::new(0.0, 0.0));
     main_assert!(!vote_pointer.handle_message_dialog_pointer_move(GuiPoint::new(0.0, 0.0)));
     main_assert!(!vote_pointer.handle_message_dialog_pointer_button(ElementState::Pressed).expect("outside vote hit-test falls through to shared Screen scanning"));
     main_assert!(!vote_pointer.handle_message_dialog_pointer_button(ElementState::Released).expect("outside vote release falls through to shared Screen scanning"));
@@ -841,7 +841,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_modifiers(ModifiersState::empty());
     main_assert_eq!(app.message_board_line() => board_before, "the message board remains a fading log instead of echoing edit text");
 
-    app.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
+    app.live_input.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     app.engine
         .test_player_mut(app.local_owner)
         .control
@@ -859,7 +859,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     )
     .test_value();
     main_assert!(app.context_menu.is_some());
-    main_assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
+    main_assert!(app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
     main_assert_ne!(app.engine.player(app.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
@@ -1407,7 +1407,7 @@ fn construction_menu_drag_reprojects_stationary_pointer_after_camera_motion() {
         }) => ingame_pointer_world_pixel(*pointer),
         state => panic!("active drag pointer missing: {state:?}"),
     };
-    let retained = app.ingame_viewport_mouse.test_value();
+    let retained = app.live_input.ingame_viewport_mouse.test_value();
     main_assert!(matches!(
         app.construction_menu_drag.as_ref(),
         Some(ConstructionMenuDrag::Active {
@@ -2614,7 +2614,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
         main_assert!(rebound_app.runtime_flash_message.is_none(), "page {page:?}");
         main_assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
         rebound_app.test_key(VirtualKeyCode::F3, ElementState::Released);
-        main_assert!(!rebound_app.pressed_engine_keys.contains(&VirtualKeyCode::F3));
+        main_assert!(!rebound_app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F3));
         main_assert_eq!(rebound_app.engine.player(rebound_app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 
         sound_app
@@ -2673,7 +2673,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
             main_assert!(rebound.runtime_flash_message.is_none());
             main_assert!(rebound.engine.cursor_object_menu(rebound.local_owner).is_some());
             rebound.test_key(VirtualKeyCode::F3, ElementState::Released);
-            main_assert!(!rebound.pressed_engine_keys.contains(&VirtualKeyCode::F3));
+            main_assert!(!rebound.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F3));
             main_assert_eq!(rebound.engine.player(rebound.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 
             install_menu(&mut sound);
@@ -2872,7 +2872,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         main_assert!(!rebound_app.dialogs.help_visible, "page {page:?}");
         main_assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
         rebound_app.test_key(VirtualKeyCode::F1, ElementState::Released);
-        main_assert!(!rebound_app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
+        main_assert!(!rebound_app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F1));
         main_assert_eq!(rebound_app.engine.player(rebound_app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     }
     main_assert!(covered_pages.into_iter().all(|covered| covered));
@@ -3075,7 +3075,7 @@ fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
             main_assert!(!rebound.dialogs.help_visible);
             main_assert!(rebound.engine.cursor_object_menu(rebound.local_owner).is_some());
             rebound.test_key(VirtualKeyCode::F1, ElementState::Released);
-            main_assert!(!rebound.pressed_engine_keys.contains(&VirtualKeyCode::F1));
+            main_assert!(!rebound.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F1));
             main_assert_eq!(rebound.engine.player(rebound.local_owner).expect("local rebound player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
         }
     }

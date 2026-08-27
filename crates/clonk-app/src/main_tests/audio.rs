@@ -403,19 +403,19 @@ fn focus_loss_clears_controls_repeat_tracking_and_pointer_state() {
         }]);
     app.join_local_player().test_value();
     app.mode = AppMode::Running;
-    app.ingame_pointer = Some(ViewportPointer {
+    app.live_input.ingame_pointer = Some(ViewportPointer {
         owner: app.local_owner,
         world: FloatVector2::new(10.0, 20.0),
         screen: GuiPoint::new(30.0, 40.0),
     });
 
     AppVirtualKeyboard::new(&mut app).press(VirtualKeyCode::KeyX);
-    main_assert!(!app.pressed_engine_keys.is_empty());
+    main_assert!(!app.live_input.pressed_engine_keys.is_empty());
     main_assert_ne!(app.engine.snapshot().players.into_iter().find(|player| player.id == app.local_owner).expect("local player").control.pressed_coms => 0);
 
     app.handle_focus_lost().test_value();
 
-    main_assert!(app.pressed_engine_keys.is_empty());
+    main_assert!(app.live_input.pressed_engine_keys.is_empty());
     main_assert_ne!(
         app.engine
             .snapshot()
@@ -429,7 +429,7 @@ fn focus_loss_clears_controls_repeat_tracking_and_pointer_state() {
         "no native backend clears player controls on focus loss \
              (C4FullScreen.cpp:139-145,310-315,432-447)"
     );
-    main_assert_eq!(app.ingame_pointer => None, "focus loss retains the old pointer_left lifecycle cleanup");
+    main_assert_eq!(app.live_input.ingame_pointer => None, "focus loss retains the old pointer_left lifecycle cleanup");
 }
 
 #[test]

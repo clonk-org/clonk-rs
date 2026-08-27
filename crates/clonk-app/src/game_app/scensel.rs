@@ -1034,7 +1034,7 @@ impl GameApp {
         // edit, and Alt+M outranks the Comment option mnemonic.  C4KeyCodeEx
         // compares the complete modifier mask, so modified F2/F5/Delete and
         // Ctrl+Alt+M are different keys.
-        let c4_modifiers = self.keyboard_modifiers
+        let c4_modifiers = self.live_input.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let no_modifiers = c4_modifiers.is_empty();
         let blocked_while_loading = (no_modifiers
@@ -1741,8 +1741,8 @@ impl GameApp {
                 self.definition_selector_consumed_keys.remove(&key);
             }
         }
-        let backwards = self.keyboard_modifiers.shift_key();
-        let alt = self.keyboard_modifiers.alt_key();
+        let backwards = self.live_input.modifiers.shift_key();
+        let alt = self.live_input.modifiers.alt_key();
         let layout = self.definition_selector_layout();
         let actions = self
             .definition_selector

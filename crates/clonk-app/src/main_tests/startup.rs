@@ -384,7 +384,7 @@ fn about_chrome_uses_runtime_resource_strings() {
     main_assert_eq!(app.about_tooltip_target_at(at_anchor) => Some(StartupTooltip::text("&Programminfo")));
 
     // The relocated mnemonic activates, and the old English one does not.
-    app.keyboard_modifiers = ModifiersState::ALT;
+    app.live_input.modifiers = ModifiersState::ALT;
     app.test_key(VirtualKeyCode::KeyU, ElementState::Pressed);
     main_assert_eq!(app.dialogs.messages.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
@@ -1949,11 +1949,11 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
         ModifiersState::CONTROL,
         ModifiersState::SHIFT,
     ] {
-        app.keyboard_modifiers = modifiers;
+        app.live_input.modifiers = modifiers;
         app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
         app.test_key(VirtualKeyCode::F5, ElementState::Released);
     }
-    app.keyboard_modifiers = ModifiersState::SUPER;
+    app.live_input.modifiers = ModifiersState::SUPER;
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F5, ElementState::Released);
 
@@ -1982,13 +1982,13 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
         (ModifiersState::CONTROL, VirtualKeyCode::F2),
         (ModifiersState::SHIFT, VirtualKeyCode::Delete),
     ] {
-        app.keyboard_modifiers = modifiers;
+        app.live_input.modifiers = modifiers;
         app.test_key(key, ElementState::Pressed);
         app.test_key(key, ElementState::Released);
     }
     main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
-    app.keyboard_modifiers = ModifiersState::SUPER;
+    app.live_input.modifiers = ModifiersState::SUPER;
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     main_assert!(matches!(
         app.startup.player_properties_dialog
@@ -4930,7 +4930,7 @@ fn startup_f6_launches_editor_when_available() {
     // A modified F6 is not the classic binding and must not reach it.
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.show_main_menu();
-    app.keyboard_modifiers = ModifiersState::CONTROL;
+    app.live_input.modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     main_assert!(app.pending_editor_launch.is_none());
     main_assert!(!app.exit_requested);

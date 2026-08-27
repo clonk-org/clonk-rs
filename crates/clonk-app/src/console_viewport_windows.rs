@@ -262,7 +262,7 @@ pub(crate) fn handle_console_viewport_event(
             event: WindowEvent::KeyboardInput { event: input, .. },
             ..
         } => {
-            let legacy = crate::legacy_virtual_key_from_event(input, app.keyboard_modifiers);
+            let legacy = crate::legacy_virtual_key_from_event(input, app.live_input.modifiers);
             match viewport_key_route(
                 legacy,
                 input.state,
@@ -329,7 +329,7 @@ pub(crate) fn handle_console_viewport_event(
             // process-global state that `DoKeyboardInput` reads for whichever
             // window delivered the key (`C4Viewport.cpp:89`), so a detached
             // window's modifiers have to reach the dispatcher's too.
-            app.keyboard_modifiers = modifiers.state();
+            app.live_input.modifiers = modifiers.state();
         }
         // `C4Viewport`'s pointer handlers convert the coordinates carried by
         // each message through this viewport's own ViewX/ViewY and scale
@@ -359,7 +359,7 @@ pub(crate) fn handle_console_viewport_event(
                 windows.request_redraw(key);
                 return;
             }
-            let modifiers = app.keyboard_modifiers;
+            let modifiers = app.live_input.modifiers;
             app.console_viewport_motion(
                 identity,
                 local,
@@ -435,7 +435,7 @@ pub(crate) fn handle_console_viewport_event(
             app.console_viewport_context_menu_grab = None;
             // `LeftButtonDown(fControl)` and `Move`'s Shift arm read the
             // live modifier state (`C4EditCursor.cpp:143,206`).
-            let modifiers = app.keyboard_modifiers;
+            let modifiers = app.live_input.modifiers;
             app.console_viewport_press(
                 identity,
                 local,
@@ -492,7 +492,7 @@ pub(crate) fn handle_console_viewport_event(
                 windows.request_redraw(key);
                 return;
             }
-            let modifiers = app.keyboard_modifiers;
+            let modifiers = app.live_input.modifiers;
             app.console_viewport_right_press(identity, local, 1.0, modifiers.control_key());
         }
         Event::WindowEvent {

@@ -994,7 +994,7 @@ impl GameApp {
                 let moving_drag_before_move = self.ingame_moving_drag_active();
                 let selection_drag_before_move = self.ingame_selection_drag_active();
                 let mut repeated_mouse_move = false;
-                let player_view_scrolled = if self.ingame_edge_scroll.is_some() {
+                let player_view_scrolled = if self.live_input.ingame_edge_scroll.is_some() {
                     repeated_mouse_move = true;
                     self.advance_ingame_mouse_caption_lifetime();
                     self.apply_ingame_edge_scroll()?
@@ -1015,7 +1015,7 @@ impl GameApp {
                     self.snapshot.audio = audio;
                 }
                 if repeated_mouse_move {
-                    if let Some(pointer) = self.ingame_pointer {
+                    if let Some(pointer) = self.live_input.ingame_pointer {
                         self.advance_ingame_mouse_caption(
                             pointer,
                             moving_drag_before_move,

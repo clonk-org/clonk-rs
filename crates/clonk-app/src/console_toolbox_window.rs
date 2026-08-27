@@ -227,7 +227,7 @@ pub(crate) fn handle_developer_object_list_event(
             event: WindowEvent::ModifiersChanged(modifiers),
             ..
         } => {
-            app.keyboard_modifiers = modifiers.state();
+            app.live_input.modifiers = modifiers.state();
         }
         // The tree view has focus while its window does, so GTK's own key
         // handling applies: the cursor walks the visible rows, Left/Right work
@@ -251,7 +251,7 @@ pub(crate) fn handle_developer_object_list_event(
                 return;
             };
             let height = list.surface_extent().1;
-            let modifiers = app.keyboard_modifiers;
+            let modifiers = app.live_input.modifiers;
             let legacy = crate::legacy_virtual_key_from_event(input, modifiers);
             let claimed = match object_list_navigation_key(legacy) {
                 Some(navigation) => app.navigate_developer_object_list(
@@ -527,7 +527,7 @@ pub(crate) fn handle_console_scoreboard_event(
             ..
         } => {
             if let Some(legacy) =
-                crate::legacy_virtual_key_from_event(key_event, app.keyboard_modifiers)
+                crate::legacy_virtual_key_from_event(key_event, app.live_input.modifiers)
             {
                 if let Err(error) = app.handle_key(legacy, key_event.state) {
                     tracing::error!(%error, "console scoreboard key dispatch failed");
@@ -734,7 +734,7 @@ pub(crate) fn handle_console_network_chart_event(
             ..
         } => {
             if let Some(legacy) =
-                crate::legacy_virtual_key_from_event(key_event, app.keyboard_modifiers)
+                crate::legacy_virtual_key_from_event(key_event, app.live_input.modifiers)
             {
                 if let Err(error) = app.handle_key(legacy, key_event.state) {
                     tracing::error!(%error, "console network chart key dispatch failed");
@@ -1039,27 +1039,30 @@ pub(crate) fn handle_developer_toolbox_event(
             {
                 return;
             }
-            let claimed = match crate::legacy_virtual_key_from_event(input, app.keyboard_modifiers)
-            {
-                Some(crate::VirtualKeyCode::Enter) | Some(crate::VirtualKeyCode::NumpadEnter) => {
-                    match app.submit_developer_property_script() {
-                        Ok(submitted) => submitted,
-                        Err(error) => {
-                            tracing::error!(%error, "property script submission failed");
-                            true
+            let claimed =
+                match crate::legacy_virtual_key_from_event(input, app.live_input.modifiers) {
+                    Some(crate::VirtualKeyCode::Enter)
+                    | Some(crate::VirtualKeyCode::NumpadEnter) => {
+                        match app.submit_developer_property_script() {
+                            Ok(submitted) => submitted,
+                            Err(error) => {
+                                tracing::error!(%error, "property script submission failed");
+                                true
+                            }
                         }
                     }
-                }
-                Some(crate::VirtualKeyCode::Backspace) => app.backspace_developer_property_script(),
-                // Everything else is text if it produced any: winit resolves
-                // the layout, so this needs no keycode table of its own.
-                _ => input
-                    .text
-                    .as_ref()
-                    .map(|text| text.as_str())
-                    .filter(|text| !text.chars().any(char::is_control))
-                    .is_some_and(|text| app.type_developer_property_script(text)),
-            };
+                    Some(crate::VirtualKeyCode::Backspace) => {
+                        app.backspace_developer_property_script()
+                    }
+                    // Everything else is text if it produced any: winit resolves
+                    // the layout, so this needs no keycode table of its own.
+                    _ => input
+                        .text
+                        .as_ref()
+                        .map(|text| text.as_str())
+                        .filter(|text| !text.chars().any(char::is_control))
+                        .is_some_and(|text| app.type_developer_property_script(text)),
+                };
             if claimed {
                 windows.request_redraw(key);
             }
