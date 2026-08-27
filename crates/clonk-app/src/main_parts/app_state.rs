@@ -1025,6 +1025,14 @@ pub(crate) struct GameApp {
     /// A release whose components are being downloaded and verified after the
     /// user accepted the update prompt.
     pub(crate) update_download: Option<PendingUpdateDownload>,
+    /// The reusable `C4DownloadDlg` controller that owns this transfer's
+    /// progress, its cancel semantics and its terminal error text.
+    ///
+    /// `C4UpdateDlg::DoUpdate` downloads through `C4DownloadDlg::DownloadFile`
+    /// rather than presenting its own transfer UI (`C4UpdateDlg.cpp:165`), so
+    /// the wrapper — not this module — composes `IDS_PRC_DOWNLOADERROR` and
+    /// appends `IDS_MSG_UPDATENOTAVAILABLE` to a 404.
+    pub(crate) update_download_dialog: Option<clonk_frontend::download_dialog::DownloadDialogState>,
     /// Whether showing the main menu may start the *automatic* check
     /// (`C4StartupMainDlg.cpp:270-275`).
     ///

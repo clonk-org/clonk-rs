@@ -974,7 +974,11 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
         .test_value();
     let download = update_result_dialog(&app);
     main_assert_eq!(download.state.message() => "Downloading update 99.0.0...");
-    main_assert_eq!(download.state.caption() => "Check for Updates");
+    // The transfer runs through `C4DownloadDlg`, whose constructor captions it
+    // `IDS_CTL_DL_TITLE` with the download type — `IDS_TYPE_UPDATE` here —
+    // rather than reusing the update-check caption (C4DownloadDlg.cpp:29;
+    // C4UpdateDlg.cpp:165).
+    main_assert_eq!(download.state.caption() => "Downloading Update");
     main_assert_eq!(download.state.progress() => Some(0));
     main_assert_eq!(download.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::CANCEL);
     main_assert!(app.update_download.is_some());
@@ -988,6 +992,16 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     main_assert!(app.update_download.is_none());
+    // `C4DownloadDlg`'s UserClose does not simply dismiss: it fails the
+    // transfer with `IDS_ERR_USERCANCEL` and shows the same terminal modal a
+    // transport failure gets (C4DownloadDlg.cpp:128-131,167-196).
+    let aborted = update_result_dialog(&app);
+    main_assert_eq!(
+        aborted.state.message() => "Error downloading the file 99.0.0.|User abort."
+    );
+    main_assert_eq!(aborted.state.caption() => "Downloading Update");
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+        .test_value();
     main_assert!(app.dialogs.messages.is_empty());
 }
 
@@ -1036,6 +1050,59 @@ fn an_unknown_update_length_suppresses_the_download_bar() {
     // the layout has stopped reserving space for it.
     app.update_update_download_progress(update_download_progress_percent(60, 100));
     main_assert_eq!(update_result_dialog(&app).state.progress() => None);
+}
+
+/// `C4DownloadDlg::DownloadFile` composes `IDS_PRC_DOWNLOADERROR` from the file
+/// and the error, and appends `IDS_MSG_UPDATENOTAVAILABLE` when the composed
+/// text mentions a 404 (C4DownloadDlg.cpp:181-190). Routing the update through
+/// the wrapper is what gives the update flow that composition, instead of the
+/// generic "Update failed: …" it used to show.
+#[test]
+fn a_failed_update_transfer_uses_the_download_error_composition() {
+    use crate::update_check::test_support::{manifest_for, FakeTransport, OFFERED_VERSION};
+    use crate::update_download::UpdateDownloadEvent;
+
+    let start = |detail: &str| {
+        let user_data = tempdir();
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths);
+        let transport = FakeTransport::serving(&manifest_for(
+            OFFERED_VERSION,
+            clonk_core::version::ENGINE_VERSION,
+        ));
+        app.check_for_updates_with(false, &transport).test_value();
+        app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
+            .test_value();
+        // Drive the real terminal path: a worker that has already failed.
+        app.update_download = Some(crate::update_download::PendingUpdateDownload::with_events(
+            vec![UpdateDownloadEvent::Failed {
+                detail: detail.to_string(),
+            }],
+        ));
+        app.poll_update_download().test_value();
+        (user_data, app)
+    };
+
+    let (_transport_dir, transport_failure) = start("connection reset");
+    main_assert_eq!(
+        update_result_dialog(&transport_failure).state.message() =>
+        format!("Error downloading the file {OFFERED_VERSION}.|connection reset."),
+        "the wrapper names the file and the error"
+    );
+    main_assert_eq!(
+        update_result_dialog(&transport_failure).state.caption() => "Downloading Update"
+    );
+
+    let (_not_found_dir, not_found) = start("HTTP status 404");
+    main_assert_eq!(
+        update_result_dialog(&not_found).state.message() =>
+        format!(
+            "Error downloading the file {OFFERED_VERSION}.|HTTP status 404.|\
+             The update is possibly not yet available for this operating system."
+        ),
+        "a 404 appends IDS_MSG_UPDATENOTAVAILABLE"
+    );
 }
 
 #[test]

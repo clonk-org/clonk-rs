@@ -112,6 +112,21 @@ impl PendingUpdateDownload {
     pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
+
+    /// A transfer whose worker has already produced `events`, so a test can
+    /// drive the real terminal path in `poll_update_download` instead of a
+    /// stand-in for it.
+    #[cfg(test)]
+    pub(crate) fn with_events(events: Vec<UpdateDownloadEvent>) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for event in events {
+            sender.send(event).expect("the receiver is still alive");
+        }
+        Self {
+            receiver,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl Drop for PendingUpdateDownload {

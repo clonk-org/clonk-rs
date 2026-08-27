@@ -348,18 +348,43 @@ impl GameApp {
             self.runtime_resource_text("IDS_MSG_DOWNLOADINGUPDATE", "Downloading update %s..."),
             &[&version],
         );
-        self.push_message_dialog(
-            clonk_frontend::message_dialog::MessageDialogState::new(
-                message,
-                caption,
-                clonk_frontend::message_dialog::MessageDialogButtons::CANCEL,
-                UPDATE_ICON,
-                clonk_frontend::message_dialog::MessageDialogSize::Regular,
-                false,
-            )
-            .with_progress(0),
-            MessageDialogContinuation::UpdateDownloadWait,
+        // `C4UpdateDlg::DoUpdate` hands the transfer to
+        // `C4DownloadDlg::DownloadFile` with the update type as the download
+        // title and `IDS_MSG_UPDATENOTAVAILABLE` as the not-found extension
+        // (`C4UpdateDlg.cpp:165`). The wrapper owns the progress, the cancel
+        // semantics and the terminal error text from here on; this module only
+        // presents what it decides.
+        let download_caption = format_resource_string(
+            self.runtime_resource_text("IDS_CTL_DL_TITLE", "Downloading %s"),
+            &[&self.runtime_resource_text("IDS_TYPE_UPDATE", "Update")],
+        );
+        let controller = clonk_frontend::download_dialog::DownloadDialogState::new_localized(
+            message,
+            download_caption,
+            self.runtime_resource_text("IDS_BTN_CANCEL", "Cancel"),
+            self.runtime_resource_text("IDS_ERR_USERCANCEL", "User abort"),
         )
+        .with_error_format(
+            self.runtime_resource_text(
+                "IDS_PRC_DOWNLOADERROR",
+                "Error downloading the file %s.|%s.",
+            ),
+            // C++ names `GetFilename(szURL)` — its update is one group file
+            // (`C4DownloadDlg.cpp:182`; `C4UpdateDlg.cpp:161-163`). The port
+            // fetches a release as several components, so there is no single
+            // URL to name and the release itself identifies the transfer.
+            version.clone(),
+        )
+        .with_not_found_message(self.runtime_resource_text(
+            "IDS_MSG_UPDATENOTAVAILABLE",
+            "The update is possibly not yet available for this operating system.",
+        ));
+        let transfer = controller
+            .transfer_dialog()
+            .cloned()
+            .expect("a fresh download controller owns its transfer dialog");
+        self.update_download_dialog = Some(controller);
+        self.push_message_dialog(transfer, MessageDialogContinuation::UpdateDownloadWait)
     }
 
     /// Applies download progress and launches the detached applier once every
@@ -393,9 +418,17 @@ impl GameApp {
             (progress, terminal)
         };
         if let Some((downloaded, total)) = progress {
-            self.update_update_download_progress(update_download_progress_percent(
-                downloaded, total,
-            ));
+            // The wrapper decides the percentage, including the unknown-length
+            // case where it hides the bar rather than inventing one
+            // (`C4DownloadDlg::OnProgress`).
+            let percent = match self.update_download_dialog.as_mut() {
+                Some(controller) => {
+                    controller.on_byte_progress(downloaded, total);
+                    controller.progress()
+                }
+                None => update_download_progress_percent(downloaded, total),
+            };
+            self.update_update_download_progress(percent);
         }
         let Some(terminal) = terminal else {
             return Ok(());
@@ -404,6 +437,9 @@ impl GameApp {
         self.close_update_download_dialog();
         match terminal {
             UpdateDownloadEvent::Prepared { update } => {
+                // A completed transfer leaves no wrapper state behind; only the
+                // failure arms below still need it.
+                self.update_download_dialog = None;
                 let launched = self
                     .app_paths
                     .as_ref()
@@ -425,15 +461,38 @@ impl GameApp {
             }
             UpdateDownloadEvent::Failed { detail } => {
                 tracing::warn!(%detail, "the update download failed");
-                let message = format!(
-                    "{}: {detail}",
-                    self.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.")
-                );
-                self.show_update_notice(message, self.update_check_caption())?;
+                // The wrapper composes the message: `IDS_PRC_DOWNLOADERROR`
+                // naming the file and the error, plus
+                // `IDS_MSG_UPDATENOTAVAILABLE` when the composed text mentions
+                // a 404 (`C4DownloadDlg.cpp:181-190`). C++ then returns
+                // success from `DoUpdate` "because error message has already
+                // been shown" (`C4UpdateDlg.cpp:166-167`).
+                if let Some(error) = self.take_update_download_error(&detail) {
+                    self.push_message_dialog(error, MessageDialogContinuation::None)?;
+                } else {
+                    let message = format!(
+                        "{}: {detail}",
+                        self.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.")
+                    );
+                    self.show_update_notice(message, self.update_check_caption())?;
+                }
             }
             UpdateDownloadEvent::Progress { .. } => {}
         }
         Ok(())
+    }
+
+    /// Fails the hosted controller with `detail` and takes the terminal modal
+    /// it composed, if a transfer is still being tracked.
+    fn take_update_download_error(
+        &mut self,
+        detail: &str,
+    ) -> Option<clonk_frontend::message_dialog::MessageDialogState> {
+        let controller = self.update_download_dialog.as_mut()?;
+        controller.fail_with_error(detail);
+        let error = controller.take_error_dialog();
+        self.update_download_dialog = None;
+        error
     }
 
     pub(crate) fn update_update_download_progress(&mut self, percent: Option<u8>) {
@@ -462,9 +521,38 @@ impl GameApp {
         self.remove_message_dialog_at(index);
     }
 
+    /// Cancel or title-close on the transfer dialog.
+    ///
+    /// `C4DownloadDlg`'s `UserClose` does not merely dismiss: it fails the
+    /// transfer with `IDS_ERR_USERCANCEL` and shows the same terminal modal a
+    /// transport failure gets (`C4DownloadDlg.cpp:128-131,167-196`). The abort
+    /// the wrapper asks for is what stops the transfer thread.
     pub(crate) fn abort_update_download(&mut self) {
+        let aborted = self
+            .update_download_dialog
+            .as_mut()
+            .and_then(|controller| {
+                controller.handle_transfer_dialog_result(
+                    clonk_frontend::message_dialog::MessageDialogResult::Cancel,
+                )
+            })
+            .is_some();
         if let Some(pending) = self.update_download.take() {
             pending.cancel();
+        }
+        if !aborted {
+            self.update_download_dialog = None;
+            return;
+        }
+        let error = self
+            .update_download_dialog
+            .as_mut()
+            .and_then(clonk_frontend::download_dialog::DownloadDialogState::take_error_dialog);
+        self.update_download_dialog = None;
+        if let Some(error) = error {
+            if let Err(error) = self.push_message_dialog(error, MessageDialogContinuation::None) {
+                tracing::warn!(%error, "the update user-abort modal could not be shown");
+            }
         }
     }
 
