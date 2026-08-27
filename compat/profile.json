@@ -155,7 +155,7 @@
       ]
     },
     "presentation": {
-      "statement": "Painter order, coordinates, sampling, blending, gamma placement, and resource state equal the oracle; GPU sampling is verified by readback against the software renderer with the documented one-byte cross-driver tolerance (docs/RENDERING_PARITY.md). Every opt-in presentation divergence is forced off and every first-run configuration default equals the C++ default.",
+      "statement": "Painter order, coordinates, sampling, blending, gamma placement, and resource state equal the oracle; GPU sampling is verified by readback against the software renderer with the documented one-byte cross-driver tolerance (docs/RENDERING_PARITY.md). Every opt-in presentation divergence is forced off and every first-run configuration default equals the C++ default. Whole-screen equality is promised as pixels only where every pixel is oracle-authored; a screen that renders the port's own branding or its super-resolved startup art is promised the same layout - the same controls at the same rects with the same captions, wrapping and ordering - and not the same pixels, because different source art cannot meet a pixel term at any resolution. compat/presentation_captures.json records which screens are on which term and the port-authored asset classes that put them there (clonk-org/clonk-rs#1298).",
       "evidence": [
         {
           "kind": "document",
@@ -173,7 +173,7 @@
           "kind": "issue",
           "value": "clonk-org/clonk-rs#587",
           "status": "pending",
-          "note": "C++/Rust presentation capture diffs for the profile; compat/presentation_captures.json enumerates the screens, the shared capture geometry, the comparison tolerances and the approved masks."
+          "note": "C++/Rust presentation capture diffs for the profile; compat/presentation_captures.json enumerates the screens, the shared capture geometry, the comparison terms and the approved masks. Six startup screens were captured and measured on 2026-08-26 and are now on the layout term rather than the pixel term (clonk-org/clonk-rs#1298); they stay pending until a layout comparison is run, and the remaining seven still need capture pairs."
         },
         {
           "kind": "issue",
