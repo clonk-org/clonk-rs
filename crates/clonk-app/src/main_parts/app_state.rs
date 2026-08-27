@@ -444,6 +444,15 @@ pub(crate) struct GameApp {
     /// selection change rather than on every frame — otherwise scrolling away
     /// from the selection would be impossible.
     pub(crate) developer_object_list_scroll: crate::developer_object_list_view::ObjectListScroll,
+    /// The object list's keyboard cursor.
+    ///
+    /// `GtkTreeView` keeps a cursor separate from the selection: Ctrl+arrows
+    /// move it without selecting, and Ctrl+Space then selects what it is on.
+    /// A cursor whose row is no longer drawn is not a position, so navigation
+    /// starts over from the top rather than guessing.
+    pub(crate) developer_object_list_cursor: Option<clonk_engine::ObjectId>,
+    /// Where a Shift-extended range is anchored.
+    pub(crate) developer_object_list_anchor: Option<clonk_engine::ObjectId>,
     /// Which containers the user has opened in the object tree
     /// (`C4ObjectListDlg.cpp:726-787`).
     pub(crate) developer_object_tree_expansion:

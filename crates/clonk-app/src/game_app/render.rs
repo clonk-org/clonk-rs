@@ -3511,6 +3511,102 @@ impl GameApp {
         self.developer_object_list_rows().len()
     }
 
+    /// One navigation key over the object list.
+    ///
+    /// Returns whether the list claimed it. `GtkTreeView` keeps the cursor
+    /// apart from the selection: a plain arrow moves both, Ctrl moves only the
+    /// cursor, and Shift extends a range from the anchor
+    /// (`gtk_tree_selection_set_mode(GTK_SELECTION_MULTIPLE)`,
+    /// `C4ObjectListDlg.cpp:777-779`).
+    pub(crate) fn navigate_developer_object_list(
+        &mut self,
+        key: crate::developer_object_list_view::ObjectListKey,
+        control: bool,
+        shift: bool,
+        height: u32,
+    ) -> bool {
+        use crate::developer_object_list_view::{
+            object_list_navigate, ObjectListNavigation, ObjectListScroll,
+        };
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let rows = self.developer_object_list_rows();
+        let page = ObjectListScroll::capacity(height);
+        let Some(navigation) =
+            object_list_navigate(&rows, self.developer_object_list_cursor, key, page)
+        else {
+            return false;
+        };
+        match navigation {
+            ObjectListNavigation::Expand(object) | ObjectListNavigation::Collapse(object) => {
+                self.developer_object_tree_expansion.toggle(object);
+            }
+            ObjectListNavigation::MoveCursor(object) => {
+                self.developer_object_list_cursor = Some(object);
+                // The cursor is what the view scrolls to follow.
+                let moved = rows.iter().position(|row| row.id == object);
+                if let Some(row) = moved {
+                    self.developer_object_list_scroll
+                        .reveal(row, rows.len(), height);
+                    self.developer_object_list_revealed = Some(object);
+                }
+                if control {
+                    // Ctrl moves the cursor alone.
+                    return true;
+                }
+                if shift {
+                    self.extend_developer_object_list_selection(&rows, object);
+                } else {
+                    self.developer_object_list_anchor = Some(object);
+                    self.developer_selection
+                        .replace(SelectionWriter::ObjectTree, object);
+                }
+            }
+        }
+        true
+    }
+
+    /// Select every visible row between the anchor and the cursor.
+    fn extend_developer_object_list_selection(
+        &mut self,
+        rows: &[crate::developer_object_list_view::ObjectListRow],
+        cursor: clonk_engine::ObjectId,
+    ) {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let anchor = self.developer_object_list_anchor.unwrap_or(cursor);
+        let index_of = |id| rows.iter().position(|row| row.id == id);
+        let (Some(from), Some(to)) = (index_of(anchor), index_of(cursor)) else {
+            self.developer_selection
+                .replace(SelectionWriter::ObjectTree, cursor);
+            return;
+        };
+        let (low, high) = if from <= to { (from, to) } else { (to, from) };
+        self.developer_selection.clear(SelectionWriter::ObjectTree);
+        for row in &rows[low..=high] {
+            self.developer_selection
+                .toggle(SelectionWriter::ObjectTree, row.id);
+        }
+    }
+
+    /// Ctrl+Space: select or deselect whatever the cursor is on, leaving the
+    /// rest of the selection alone.
+    pub(crate) fn toggle_developer_object_list_cursor_selection(&mut self) -> bool {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let Some(cursor) = self.developer_object_list_cursor else {
+            return false;
+        };
+        let rows = self.developer_object_list_rows();
+        if !rows.iter().any(|row| row.id == cursor) {
+            return false;
+        }
+        self.developer_object_list_anchor = Some(cursor);
+        self.developer_selection
+            .toggle(SelectionWriter::ObjectTree, cursor);
+        true
+    }
+
     /// One wheel notch over the object list.
     ///
     /// The tree lives in an automatic scrolled window
@@ -3603,6 +3699,10 @@ impl GameApp {
             point,
         ) {
             Some(ObjectListClick::Select(object)) => {
+                // A click sets the cursor as well: GTK's `set_cursor` is what
+                // a button press on a row performs.
+                self.developer_object_list_cursor = Some(object);
+                self.developer_object_list_anchor = Some(object);
                 self.developer_selection
                     .replace(SelectionWriter::ObjectTree, object);
             }

@@ -215,6 +215,48 @@ pub(crate) fn handle_developer_object_list_event(
                 list.surface.last_pointer = (position.x as i32, position.y as i32);
             }
         }
+        // The tree view has focus while its window does, so GTK's own key
+        // handling applies: the cursor walks the visible rows, Left/Right work
+        // the disclosure, and Ctrl/Shift separate the cursor from the
+        // selection (`C4ObjectListDlg.cpp:726-787`).
+        Event::WindowEvent {
+            event:
+                WindowEvent::KeyboardInput {
+                    event: input @ winit::event::KeyEvent { state, .. },
+                    ..
+                },
+            ..
+        } => {
+            if *state != winit::event::ElementState::Pressed {
+                return;
+            }
+            let Some(list) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_object_list_mut)
+            else {
+                return;
+            };
+            let height = list.surface_extent().1;
+            let modifiers = app.keyboard_modifiers;
+            let legacy = crate::legacy_virtual_key_from_event(input, modifiers);
+            let claimed = match object_list_navigation_key(legacy) {
+                Some(navigation) => app.navigate_developer_object_list(
+                    navigation,
+                    modifiers.control_key(),
+                    modifiers.shift_key(),
+                    height,
+                ),
+                // Ctrl+Space is GTK's "select what the cursor is on" without
+                // disturbing the rest of a multiple selection.
+                None if modifiers.control_key() && legacy == Some(crate::VirtualKeyCode::Space) => {
+                    app.toggle_developer_object_list_cursor_selection()
+                }
+                None => false,
+            };
+            if claimed {
+                windows.request_redraw(key);
+            }
+        }
         // The tree sits in an automatic scrolled window
         // (`C4ObjectListDlg.cpp:747-780`), so the wheel moves the view and
         // leaves the selection alone.
@@ -818,5 +860,28 @@ fn clipboard_text() -> Option<String> {
             tracing::warn!(%error, "failed to paste into the component editor");
             None
         }
+    }
+}
+
+/// Which navigation the list understands a key as.
+///
+/// Only the keys `GtkTreeView` binds itself: everything else is left for the
+/// window's other owners rather than swallowed here.
+fn object_list_navigation_key(
+    key: Option<crate::VirtualKeyCode>,
+) -> Option<crate::developer_object_list_view::ObjectListKey> {
+    use crate::developer_object_list_view::ObjectListKey;
+    use crate::VirtualKeyCode;
+
+    match key? {
+        VirtualKeyCode::ArrowUp => Some(ObjectListKey::Up),
+        VirtualKeyCode::ArrowDown => Some(ObjectListKey::Down),
+        VirtualKeyCode::ArrowLeft => Some(ObjectListKey::Left),
+        VirtualKeyCode::ArrowRight => Some(ObjectListKey::Right),
+        VirtualKeyCode::Home => Some(ObjectListKey::Home),
+        VirtualKeyCode::End => Some(ObjectListKey::End),
+        VirtualKeyCode::PageUp => Some(ObjectListKey::PageUp),
+        VirtualKeyCode::PageDown => Some(ObjectListKey::PageDown),
+        _ => None,
     }
 }
