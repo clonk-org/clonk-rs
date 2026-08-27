@@ -444,6 +444,27 @@ pub(crate) fn handle_console_viewport_event(
                 modifiers.shift_key(),
             );
         }
+        // The middle button exists only in the editor arm, and only as a
+        // release: `WM_MBUTTONUP -> Console.EditCursor.MiddleButtonUp()`
+        // (`C4Viewport.cpp:190`). There is no `WM_MBUTTONDOWN` case on either
+        // side, so the press is deliberately dropped.
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Released,
+                    button: winit::event::MouseButton::Middle,
+                    ..
+                },
+            ..
+        } => {
+            let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) else {
+                return;
+            };
+            let (identity, local) = (viewport.identity, viewport.last_pointer);
+            if app.console_viewport_middle_release(identity, local, 1.0) {
+                windows.request_redraw(key);
+            }
+        }
         // `C4EditCursor::RightButtonDown` settles the selection and
         // `RightButtonUp` opens the menu over it (`C4EditCursor.cpp:244-274,
         // 332-340`) — two messages, so a drag between them cannot change what
