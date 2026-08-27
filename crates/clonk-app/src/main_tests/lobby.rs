@@ -8330,14 +8330,19 @@ fn ready_check_notification_actions_submit_the_answer_and_close_the_prompt() {
     }
 }
 
-/// Clicking the toast body is not an answer. C++ disagrees with itself across
-/// platforms — libnotify's `default` action reaches `Activated()` and closes
-/// the dialog *true*, while a WinRT body click arrives as `OnAction("")` and
-/// closes it *false* (src/C4ToastLibNotify.cpp:45,107-128;
-/// src/C4ToastWinRT.cpp:110-143). The port refuses to pick one: a default
-/// activation resolves the prompt without broadcasting either answer.
+/// Clicking the toast body asks for the window and leaves the question open.
+///
+/// C++ disagrees with itself across platforms — libnotify's `default` action
+/// reaches `Activated()` and closes the dialog *true*, while a WinRT body
+/// click still carries `IToastActivatedEventArgs` and so takes `OnAction("")`,
+/// closing it *false* (src/C4ToastLibNotify.cpp:45,107-128;
+/// src/C4ToastWinRT.cpp:110-143; src/C4Network2.cpp:185-193). The same gesture
+/// therefore broadcasts Ready on one platform and NotReady on the other, so
+/// there is no single behaviour to mirror and the port picks neither: it takes
+/// "the user came back to the game" literally, raises the window, and leaves
+/// the prompt answerable.
 #[test]
-fn a_ready_check_notification_body_click_answers_neither_way() {
+fn a_ready_check_notification_body_click_raises_without_answering() {
     use crate::ready_check_notification::NotificationActivation;
 
     let (mut app, event_tx, mut commands) = networked_client_lobby_with_commands(
@@ -8347,15 +8352,36 @@ fn a_ready_check_notification_body_click_answers_neither_way() {
     );
     send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
     app.test_network_events();
+    main_assert!(!app.message_dialogs.is_empty(), "the prompt is up");
 
     let continuation = app.lobby_ready_check_continuation.clone().test_value();
     main_assert!(
-        continuation.activate(NotificationActivation::Default, app.lobby_ready_check_sink.as_ref())
+        !continuation.activate(NotificationActivation::Default, app.lobby_ready_check_sink.as_ref()),
+        "a body click resolves nothing"
     );
     app.poll_lobby_ready_check_notification().test_value();
 
-    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(
+        app.lobby_ready_check_continuation.is_some(),
+        "the continuation outlives a body click"
+    );
+    main_assert!(
+        !app.message_dialogs.is_empty(),
+        "and so does the dialog it raised"
+    );
+    main_assert!(app.pending_window_attention, "the window was asked for");
     main_assert!(commands.take_submitted_ready_checks().is_empty());
+
+    // The dialog it raised is still the answer path.
+    app.complete_lobby_ready_check_response(true).test_value();
+    main_assert_eq!(
+        commands
+            .take_submitted_ready_checks()
+            .into_iter()
+            .map(|packet| packet.data)
+            .collect::<Vec<_>>() =>
+        vec![clonk_network::ReadyCheckData::Ready]
+    );
 }
 
 /// The countdown and the toast race every second. `TimedDialog::OnSec1Timer`

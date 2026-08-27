@@ -607,6 +607,13 @@ pub(crate) struct GameApp {
     pub(crate) pending_local_lobby_countdown_echoes: VecDeque<clonk_network::LobbyCountdownPacket>,
     pub(crate) lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
     pub(crate) ready_check_toasts_enabled: bool,
+    /// A pending "bring this window forward", drained by the runner.
+    ///
+    /// Distinct from the control channel's attention request, which is C++'s
+    /// `FlashWindow` (`StdApp.h:283-288`) and only asks to be noticed. This
+    /// one answers a click that already said "come back to the game", so it
+    /// focuses instead of blinking.
+    pub(crate) pending_window_attention: bool,
     pub(crate) pending_desktop_notifications:
         VecDeque<(DesktopNotificationId, DesktopNotification)>,
     /// Notifications the application has taken back, drained beside the
