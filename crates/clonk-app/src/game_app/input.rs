@@ -3277,7 +3277,7 @@ impl GameApp {
         Ok(true)
     }
 
-    fn runtime_custom_gamepad_button_action(
+    pub(crate) fn runtime_custom_gamepad_button_action(
         &self,
         slot: u8,
         button: u8,
@@ -3334,6 +3334,12 @@ impl GameApp {
             if matches(name) {
                 return Some(action);
             }
+        }
+        // Registered immediately after `ToggleShowHelp` and before the message
+        // board (C4Game.cpp:3379), and the only one of these six with a
+        // shipped default.
+        if matches("NetClientListDlgToggle") {
+            return Some(RuntimeCustomGamepadAction::ClientList);
         }
         // The message board yields to an exclusive default dialog exactly as
         // the keyboard route does.
@@ -3421,6 +3427,33 @@ impl GameApp {
         }
         if matches("ChartToggle") {
             return Some(RuntimeCustomGamepadAction::Chart);
+        }
+        // The rest of the "no default keys assigned" block, in its own
+        // registration order (C4Game.cpp:3442-3447). `NetObsNextPlayer` is
+        // KEYSCOPE_FreeView, so it needs the same ownerless-primary-viewport
+        // scope the scroll keys above take — but it registers *after*
+        // `ChartToggle`, which is why it is offered here rather than beside
+        // them.
+        if !self.engine.film_replay()
+            && self.primary_physical_viewport_is_no_owner()
+            && self.viewport_cycle_scope_available()
+            && matches("NetObsNextPlayer")
+        {
+            return Some(RuntimeCustomGamepadAction::ObserverNextPlayer);
+        }
+        for (name, delta) in [("CtrlRateDown", -1), ("CtrlRateUp", 1)] {
+            if matches(name) {
+                return Some(RuntimeCustomGamepadAction::ControlRate { delta });
+            }
+        }
+        if matches("NetAllowJoinToggle") {
+            return Some(RuntimeCustomGamepadAction::AllowJoinToggle);
+        }
+        // `ChartToggle` registers first and is offered above, so a code bound
+        // to both has already been claimed by the time this is reached — the
+        // same precedence the keyboard route spells out explicitly.
+        if matches("NetStatsToggle") {
+            return Some(RuntimeCustomGamepadAction::NetStatsToggle);
         }
         // `StatsToggle` registers after every C++ action and yields its chord
         // to all of them, so it is offered last and only when neither of the
@@ -3583,6 +3616,30 @@ impl GameApp {
             }
             RuntimeCustomGamepadAction::StatsToggle => {
                 self.display_flags.show_stats = !self.display_flags.show_stats;
+            }
+            RuntimeCustomGamepadAction::ClientList => self.toggle_runtime_client_list()?,
+            RuntimeCustomGamepadAction::ObserverNextPlayer => {
+                // `ViewportNextPlayer` reports a valid physical dispatch as
+                // handled even when an empty or single-player list leaves the
+                // viewport's owner intact.
+                self.cycle_primary_viewport_player(false);
+            }
+            // `KeyAdjustControlRate` reaches `AdjustControlRate`, which only
+            // emits its relative CID_Set from the control host
+            // (`src/C4GameControl.cpp:548-552`). A non-host still consumes
+            // the code and changes nothing.
+            RuntimeCustomGamepadAction::ControlRate { delta } => {
+                if self.engine.is_control_host() {
+                    self.submit_or_execute_running_control_set(0, delta)?;
+                }
+            }
+            RuntimeCustomGamepadAction::AllowJoinToggle => {
+                self.toggle_runtime_join_admission();
+            }
+            RuntimeCustomGamepadAction::NetStatsToggle => {
+                let mut flags = self.graphics.debug_draw_flags();
+                flags.show_net_status = !flags.show_net_status;
+                self.graphics.set_debug_draw_flags(flags);
             }
             RuntimeCustomGamepadAction::Chart => self.toggle_network_chart(),
             RuntimeCustomGamepadAction::SpeedUp => self.step_runtime_speed(true)?,

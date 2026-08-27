@@ -8536,6 +8536,99 @@ fn runtime_pause_gamepad_button_override_toggles_once_per_press() {
     runtime_assert!(!app.runtime_halt_active(), "a second press unpauses");
 }
 
+// The network globals are registered with gamepad-capable `C4CustomKey`s like
+// every other action (src/C4Game.cpp:3379,3442-3448), and `LoadCustomConfig`
+// replaces any of their codes with whatever `[Keys]` holds
+// (src/C4Game.cpp:3481-3482). Five of the six ship default-unbound, which is
+// exactly why a configured code is the only way they are ever reachable.
+#[test]
+fn network_global_gamepad_overrides_reach_their_callbacks() {
+    let bound = |name: &str| {
+        let source = format!("[Keys]\n{name}=\\x0042000a\n");
+        let mut app = new_running_sandbox_app();
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(source.as_bytes()).test_value()))
+            .test_value();
+        app
+    };
+    let press = |app: &mut GameApp| {
+        app.handle_gamepad_button(
+            GamepadSlot::new(0),
+            LegacyGamepadButton::new(0),
+            ElementState::Pressed,
+        )
+        .test_value();
+    };
+
+    // `C4GraphicsSystem::ToggleShowNetStatus` has no DebugMode guard and
+    // flashes nothing (src/C4GraphicsSystem.cpp:811-815).
+    let mut stats = bound("NetStatsToggle");
+    runtime_assert!(!stats.graphics.debug_draw_flags().show_net_status);
+    press(&mut stats);
+    runtime_assert!(
+        stats.graphics.debug_draw_flags().show_net_status,
+        "the rebound button reaches ToggleShowNetStatus"
+    );
+
+    // `C4Network2::ToggleClientListDlg` (src/C4Game.cpp:3379) — the one of
+    // the six with a shipped default, and the only one whose dialog needs a
+    // live network role to open at all.
+    let mut clients = bound("NetClientListDlgToggle");
+    let (_events, _commands) = install_running_network_stub(&mut clients, 0, 40, 4);
+    clients
+        .control_clients
+        .replace_snapshot([message_client(0, b"Host")]);
+    runtime_assert!(clients.runtime_client_list.is_none());
+    press(&mut clients);
+    runtime_assert!(
+        clients.runtime_client_list.is_some(),
+        "the rebound button opens the client list"
+    );
+    press(&mut clients);
+    runtime_assert!(
+        clients.runtime_client_list.is_none(),
+        "and the same button closes it, as a toggle"
+    );
+
+    // `C4GameControl::KeyAdjustControlRate` only emits its relative CID_Set
+    // from the control host (src/C4GameControl.cpp:548-552).
+    for (name, delta) in [("CtrlRateUp", 1), ("CtrlRateDown", -1)] {
+        let mut rate = new_classic_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut rate, 0, 40, 4);
+        rate.runtime_key_config_cache = OnceLock::new();
+        rate.runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                format!("[Keys]\n{name}=\\x0042000a\n").as_bytes(),
+            )
+            .test_value()))
+            .test_value();
+        press(&mut rate);
+        let decided = commands.take_submitted_decided_controls();
+        runtime_assert_eq!(
+            decided
+                .iter()
+                .map(|(_, control, _)| {
+                    clonk_network::LegacyControlSet::from_control_packet(control).test_value()
+                })
+                .collect::<Vec<_>>() =>
+            [n2_fixture!(control_set: 0, delta, 0)],
+            "{name} submits its registered relative adjustment",
+        );
+    }
+
+    // `C4Network2::ToggleAllowJoin` consumes the code whether or not this
+    // process is the host, and changes nothing when it is not
+    // (src/C4Network2.cpp:799-804).
+    let mut guest = bound("NetAllowJoinToggle");
+    let before = guest.runtime_network_join_allowed;
+    press(&mut guest);
+    runtime_assert_eq!(
+        guest.runtime_network_join_allowed => before,
+        "a non-host toggles no admission gate",
+    );
+}
+
 // `Joy%d` spellings resolve to a direction rather than a button
 // (src/C4KeyboardInput.cpp's `sscanf` branch), so a direction override has to
 // dispatch on the same terms as a button one.
@@ -8806,6 +8899,71 @@ fn runtime_gamepad_stats_toggle_yields_its_code_to_the_actions_it_shadows() {
     );
 }
 
+
+// `NetObsNextPlayer` is KEYSCOPE_FreeView (src/C4Game.cpp:3443), so it needs
+// an ownerless primary viewport exactly as the scroll keys do — even though it
+// registers after `ChartToggle` rather than beside them, which is why a code
+// bound to both a scroll and this one goes to the scroll.
+#[test]
+fn observer_next_player_gamepad_override_keeps_its_free_view_scope() {
+    let bound = || {
+        let mut app = new_running_sandbox_app();
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nNetObsNextPlayer=\\x0042000a\n",
+            )
+            .test_value()))
+            .test_value();
+        app
+    };
+
+    let owned = bound();
+    runtime_assert!(
+        !owned.primary_physical_viewport_is_no_owner(),
+        "the sandbox player owns the primary viewport"
+    );
+    runtime_assert_eq!(
+        owned.runtime_custom_gamepad_button_action(0, 0) => None,
+        "an owned viewport is outside KEYSCOPE_FreeView",
+    );
+
+    let mut observing = bound();
+    observing.clear_physical_viewport_states();
+    let observer = observing.ownerless_physical_viewport_state();
+    observing.physical_viewports.push(observer);
+    observing.physical_viewports_authoritative = true;
+    runtime_assert!(observing.primary_physical_viewport_is_no_owner());
+    runtime_assert_eq!(
+        observing.runtime_custom_gamepad_button_action(0, 0) =>
+        Some(RuntimeCustomGamepadAction::ObserverNextPlayer)
+    );
+}
+
+// Five of the six network globals register with `KEY_Default`
+// (src/C4Game.cpp:3443-3447), which binds nothing at all. An unconfigured
+// gamepad button must therefore reach none of them.
+#[test]
+fn unbound_network_globals_claim_no_gamepad_code() {
+    let mut app = new_running_sandbox_app();
+    for button in 0..4 {
+        runtime_assert_eq!(
+            app.runtime_custom_gamepad_button_action(0, button) => None,
+            "button {button} is bound to nothing",
+        );
+    }
+    let before = runtime_global_ui_snapshot(&app);
+    for button in 0..4 {
+        app.handle_gamepad_button(
+            GamepadSlot::new(0),
+            LegacyGamepadButton::new(button),
+            ElementState::Pressed,
+        )
+        .test_value();
+    }
+    runtime_assert_eq!(runtime_global_ui_snapshot(&app) => before);
+    runtime_assert!(!app.graphics.debug_draw_flags().show_net_status);
+}
 
 // `FilmNextPlayer` is KEYSCOPE_FilmView and the free-view scrolls are
 // KEYSCOPE_FreeView (src/C4Game.cpp:3415, 3423-3426), so a bound gamepad code
