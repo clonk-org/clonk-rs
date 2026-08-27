@@ -260,6 +260,123 @@ impl RecoverablePacketLog {
 mod tests {
     use super::*;
 
+    /// One divergent client taken through the whole recovery path, with two
+    /// healthy peers alongside it that must come out untouched.
+    ///
+    /// The individual pieces are covered by the unit tests around this one.
+    /// What this pins is that they *compose*: a client that falls behind is
+    /// resynced from the retained backlog, its closed route yields exactly one
+    /// post-mortem carrying only what the receiver had not seen, recovery
+    /// consumes the retained connection, and cleanup drops that client's state
+    /// alone.
+    #[test]
+    fn one_divergent_client_resyncs_and_post_mortems_without_touching_its_peers() {
+        use crate::resync::{ControlBacklog, ResyncScheduler};
+        use crate::{ControlPacket, MissingRange};
+        use std::time::{Duration, Instant};
+
+        const DIVERGENT: ClientId = 2;
+        const HEALTHY: [ClientId; 2] = [1, 3];
+
+        fn control(client: ClientId, tick: crate::Tick) -> ControlPacket {
+            ControlPacket::builder(client, tick)
+                .timestamp_ms(100)
+                .payload(vec![client as u8, tick as u8, 0xff])
+        }
+
+        // --- checkpoints: every peer's control is retained ------------------
+        let mut backlog = ControlBacklog::new(64);
+        for tick in 0..6 {
+            for client in [HEALTHY[0], DIVERGENT, HEALTHY[1]] {
+                backlog.record_packet(&control(client, tick));
+            }
+        }
+
+        // --- resync initiation ----------------------------------------------
+        // Only the divergent client reports a gap, so only it is asked for.
+        let mut scheduler = ResyncScheduler::new(Duration::from_millis(500));
+        let now = Instant::now();
+        let requests = scheduler.schedule(&[MissingRange::new(DIVERGENT, 3, 5)], now);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].client_id, DIVERGENT);
+        assert_eq!(requests[0].from_tick, 3);
+
+        // A repeat inside the cooldown is not a second request: C++ paces
+        // retries rather than answering every missing report.
+        assert!(scheduler
+            .schedule(&[MissingRange::new(DIVERGENT, 3, 5)], now)
+            .is_empty());
+
+        // --- resync application ----------------------------------------------
+        // The host replays from the requested tick until the first gap, and the
+        // replay carries every client's control for those ticks -- the
+        // divergent peer needs its neighbours' input to catch up, not just its
+        // own.
+        let replay = backlog.fulfill_request(3);
+        assert_eq!(replay.len(), 9, "ticks 3..=5 for three clients");
+        assert!(replay.iter().any(|packet| packet.client_id() == DIVERGENT));
+        for client in HEALTHY {
+            assert!(
+                replay.iter().any(|packet| packet.client_id() == client),
+                "a resync replays the whole tick, not one client's slice"
+            );
+        }
+
+        // --- post-mortem exchange --------------------------------------------
+        // The divergent route dies. C4Network2IOConnection::CreatePostMortem
+        // stamps the *remote* connection id and the outbound counter, adds every
+        // logged packet, and sets fPostMortemSent so a connection yields at most
+        // one (src/C4Network2IO.cpp:1390-1407).
+        let mut log = RecoverablePacketLog::default();
+        for byte in [0xaa_u8, 0xbb, 0xcc] {
+            log.record_outbound(vec![crate::PACKET_LOG_START, byte]);
+        }
+        let post_mortem = log
+            .create_post_mortem(77)
+            .expect("a closed route with a log yields a post-mortem");
+        assert_eq!(post_mortem.connection_id, 77);
+        assert_eq!(post_mortem.packet_counter, 3);
+        assert_eq!(post_mortem.packets.len(), 3);
+        assert!(
+            log.create_post_mortem(77).is_none(),
+            "fPostMortemSent makes this once per connection"
+        );
+
+        // --- recovery outcome -------------------------------------------------
+        // The receiver had taken the first packet, so recovery replays only the
+        // two it had not seen.
+        let mut router = ClosedConnectionRouter::default();
+        router.retain_at(77, DIVERGENT, 1, 0);
+        let replayed = router
+            .recover_at(&post_mortem, 0)
+            .expect("a retained connection recovers");
+        assert_eq!(replayed.client_id, DIVERGENT);
+        assert_eq!(replayed.connection_id, 77);
+        assert_eq!(replayed.packets.len(), 2);
+
+        // --- cleanup ----------------------------------------------------------
+        // Recovery consumes the retained connection, so a duplicate post-mortem
+        // is not replayed a second time.
+        assert!(router.recover_at(&post_mortem, 0).is_none());
+
+        // Dropping the divergent client clears its state and no one else's.
+        backlog.remove_client(DIVERGENT);
+        scheduler.remove_client(DIVERGENT);
+        for tick in 0..6 {
+            assert!(!backlog.contains_packet(DIVERGENT, tick));
+            for client in HEALTHY {
+                assert!(
+                    backlog.contains_packet(client, tick),
+                    "a healthy peer keeps its backlog when a neighbour is dropped"
+                );
+            }
+        }
+        // With its scheduling state gone, the same gap is a fresh request
+        // rather than one suppressed by the cooldown it no longer has.
+        let after_cleanup = scheduler.schedule(&[MissingRange::new(DIVERGENT, 3, 5)], now);
+        assert_eq!(after_cleanup.len(), 1);
+    }
+
     #[test]
     fn packet_log_numbers_only_cpp_recoverable_packet_ids() {
         // C4Network2IOConnection::Send logs and numbers packets starting at
