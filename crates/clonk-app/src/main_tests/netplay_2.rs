@@ -1601,7 +1601,7 @@ fn network_create_selects_a_scenario_before_binding_a_host() {
     .test_value();
 
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert!(app.startup_network_connection.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_game_advertiser.is_none());

@@ -1816,7 +1816,7 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
 
     let render_row_alphas = |app: &mut GameApp| {
         let assets = app.assets.scensel_assets().test_value();
@@ -1827,7 +1827,7 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
         draw_scensel_dynamic(
             &mut surface,
             &mut app.menu_state,
-            &app.scenario_entry_enabled,
+            &app.scensel.entry_enabled,
             &assets,
             &button_down,
             &fonts,
@@ -1864,7 +1864,7 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
         ("TooMany.c4s", false),
         ("TooFew.c4s", true),
     ] {
-        main_assert_eq!(app.scenario_entry_enabled.get(identifier) => Some(&enabled), "network CanOpen state for {identifier}");
+        main_assert_eq!(app.scensel.entry_enabled.get(identifier) => Some(&enabled), "network CanOpen state for {identifier}");
     }
     let network_alpha = render_row_alphas(&mut app);
     for identifier in ["Replay.c4s", "TooMany.c4s"] {
@@ -1880,9 +1880,9 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
     );
 
     app.open_scenario_browser();
-    main_assert_eq!(app.scenario_entry_enabled.get("Replay.c4s") => Some(&true), "local replay bypasses regular player-count checks");
-    main_assert_eq!(app.scenario_entry_enabled.get("TooMany.c4s") => Some(&false));
-    main_assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s") => Some(&false), "the same too-few row is fatal in the local selector");
+    main_assert_eq!(app.scensel.entry_enabled.get("Replay.c4s") => Some(&true), "local replay bypasses regular player-count checks");
+    main_assert_eq!(app.scensel.entry_enabled.get("TooMany.c4s") => Some(&false));
+    main_assert_eq!(app.scensel.entry_enabled.get("TooFew.c4s") => Some(&false), "the same too-few row is fatal in the local selector");
     let local_alpha = render_row_alphas(&mut app);
     main_assert!(
         local_alpha["TooFew.c4s"] > 0 && local_alpha["TooFew.c4s"] < 200,
@@ -1907,7 +1907,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_network_host_scenario_browser();
     app.menu_state.definition_checkbox_checked = true;
 
@@ -1923,7 +1923,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     .test_value();
 
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert!(app.definition_selector.is_none());
     main_assert!(app.staged_network_host_scenario.is_none());
     main_assert!(app.startup_network_connection.is_none());
@@ -2018,7 +2018,7 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_network_host_scenario_browser();
     app.menu_state.definition_checkbox_checked = true;
     let start = || {
@@ -2442,7 +2442,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     let mut app = new_menu_app(800, 600);
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_network_game_dialog();
     app.startup_network_dialog
         .test_mut()
@@ -2453,7 +2453,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     ])
     .test_value();
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.scenario_game_options.context() => GameOptionContext::NetworkHostSelector);
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
@@ -2472,7 +2472,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     app.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))
         .test_value();
     main_assert_eq!(app.menu_state.stack.iter().map(|layer| layer.title.as_str()).collect::<Vec<_>>() => vec!["Scenarios", "Outer Folder", "Inner Target Folder"]);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
 
     app.scensel_do_back().test_value();
     main_assert_eq!(app.menu_state.stack.len() => 2);
@@ -2490,7 +2490,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
     .test_value();
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
 
     app.scensel_do_back().test_value();
@@ -2512,7 +2512,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
         clonk_frontend::definition_sel::DefinitionSelAction::Accepted(Vec::new()),
     ])
     .test_value();
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
     main_assert!(app.startup_network_connection.is_none());
     main_assert!(app.network.is_none());
@@ -2676,7 +2676,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     main_assert!(!app.startup_network_transition_active());
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost));
     main_assert_eq!(app.startup_scenario_back_dialog => None);
     assert_startup_error_log(
@@ -2730,7 +2730,7 @@ fn unstaged_host_connection_returns_to_host_selector_with_error_log() {
     ));
     app.poll_startup_network_connection().test_value();
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_ne!(app.startup_view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_none());
     main_assert!(app.network.is_none(), "headless listener must be dropped");
@@ -2773,7 +2773,7 @@ fn failed_host_staging_returns_to_host_selector_with_error_log() {
     // terminating (src/C4Application.cpp:373-405,438-450; src/C4Startup.cpp:274-307).
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost));
     main_assert!(app.staged_network_host_scenario.is_none());
     main_assert!(app.startup_network_connection.is_none());
@@ -4021,7 +4021,7 @@ fn scale_native_scensel_rows_retain_clipped_book_text() {
     draw_scensel_dynamic(
         &mut surface,
         &mut app.menu_state,
-        &app.scenario_entry_enabled,
+        &app.scensel.entry_enabled,
         &assets,
         &button_down,
         &fonts,

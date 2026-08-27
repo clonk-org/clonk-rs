@@ -2111,7 +2111,7 @@ fn new_menu_app_with_paths(width: u32, height: u32, paths: &AppPaths) -> GameApp
 
 fn wait_for_scenario_selector_discovery(app: &mut GameApp) {
     let deadline = Instant::now() + Duration::from_secs(30);
-    while app.scenario_selector_discovery.is_some() {
+    while app.scensel.discovery.is_some() {
         app.poll_scenario_selector_discovery().test_value();
         assert!(
             Instant::now() < deadline,
@@ -2577,7 +2577,7 @@ fn running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     let mut app = new_real_menu_app(640, 480);
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_scenario_browser_with_mode(selector_mode);
     app.enter_scenario_folder("folder_missions");
     assert_eq!(app.menu_state.stack.len(), 2);
@@ -2606,7 +2606,7 @@ fn running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
 fn assert_l038_browser_return(app: &GameApp, selector_mode: ScenarioSelectorMode) {
     assert!(matches!(app.mode, AppMode::Menu));
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-    assert_eq!(app.scenario_selector_mode, selector_mode);
+    assert_eq!(app.scensel.mode, selector_mode);
     assert_eq!(
         app.last_startup_dialog,
         StartupDialog::ScenarioBrowser(selector_mode)

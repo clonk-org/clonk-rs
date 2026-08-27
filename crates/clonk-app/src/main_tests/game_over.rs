@@ -281,7 +281,7 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::Local);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::Local));
     main_assert_eq!(app.startup_scenario_back_dialog => None);
     main_assert!(app.loading_state.is_none());
@@ -303,7 +303,7 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::Local);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert_eq!(app.startup_scenario_back_dialog => None);
     reset_cached_app_paths();
 }
@@ -459,7 +459,7 @@ fn empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert!(app.runtime_client_list.is_none());
     assert_startup_error_log(&app, "(no error)");
     let mut frame = vec![0x4c; 800 * 600 * 4];
@@ -578,7 +578,7 @@ fn host_round_restart_returns_to_network_lobby_staging() {
 
     app.restart_current_scenario().test_value();
 
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::NetworkHost, "a hosted round must rebuild its lobby instead of launching locally");
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost, "a hosted round must rebuild its lobby instead of launching locally");
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.restart_restore_infos.what => RESTART_RESTORE_PLAYER_TEAMS, "the lobby handoff retains the raw SetRestoreInfos mask");
     // The pathless sandbox fixture reaches host staging and fails there. A
@@ -6088,7 +6088,7 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
     );
     main_assert!(!film_client.abort_restart_pending);
-    main_assert_eq!(film_client.scenario_selector_mode => ScenarioSelectorMode::NetworkHost, "C++ preserves NetworkActive for a Film2 client's NextMission");
+    main_assert_eq!(film_client.scensel.mode => ScenarioSelectorMode::NetworkHost, "C++ preserves NetworkActive for a Film2 client's NextMission");
 
     let mut game_over = new_game_over_keyboard_app();
     game_over
@@ -6249,7 +6249,7 @@ fn next_mission_action_launches_the_catalog_target() {
     target.identifier = "Tutorial.c4f/Tutorial02.c4s".to_string();
     target.title = "The First Hut".to_string();
     target.path = Some(target_path);
-    app.scenario_catalog
+    app.scensel.catalog
         .insert(target.identifier.clone(), target.clone());
     app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
         modules: vec![carried_definition.to_string_lossy().into_owned()],

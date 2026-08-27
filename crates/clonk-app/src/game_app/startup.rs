@@ -4797,9 +4797,7 @@ impl GameApp {
     pub(crate) fn visible_startup_dialog(&self) -> Option<StartupDialog> {
         match self.startup_view {
             StartupView::MainMenu => Some(StartupDialog::MainMenu),
-            StartupView::ScenarioBrowser => {
-                Some(StartupDialog::ScenarioBrowser(self.scenario_selector_mode))
-            }
+            StartupView::ScenarioBrowser => Some(StartupDialog::ScenarioBrowser(self.scensel.mode)),
             StartupView::NetworkGame => Some(StartupDialog::NetworkGame),
             StartupView::Options => Some(StartupDialog::Options),
             StartupView::About => Some(StartupDialog::About),
@@ -4817,7 +4815,7 @@ impl GameApp {
             self.assets.as_ref(),
             &mut self.main_menu_state,
             &mut self.menu_state,
-            &self.scenario_entry_enabled,
+            &self.scensel.entry_enabled,
             scenario_loading_label.as_deref(),
             self.startup_network_dialog.as_ref(),
             self.startup_player_dialog.as_ref(),
@@ -4830,7 +4828,7 @@ impl GameApp {
             true,
             true,
             &self.scenario_game_options,
-            self.scenario_selector_mode,
+            self.scensel.mode,
             self.startup_options_dialog.as_ref(),
             None,
             false,
@@ -5136,7 +5134,7 @@ impl GameApp {
         }
         self.startup_scenario_back_dialog = None;
         self.replace_startup_dialog(StartupView::MainMenu, StartupDialog::MainMenu);
-        self.scenario_selector_mode = ScenarioSelectorMode::Local;
+        self.scensel.mode = ScenarioSelectorMode::Local;
         self.main_menu_state.pointer_left();
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.pointer_left();

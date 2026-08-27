@@ -3141,7 +3141,7 @@ fn missing_explicit_definition_during_scenario_start_returns_to_startup() {
     main_assert!(!app.take_exit_request());
     main_assert!(app.loader_screen.is_some());
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert_eq!(app.scenario_selector_mode => ScenarioSelectorMode::Local);
+    main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert!(
         app.message_dialogs
             .iter()
@@ -3512,7 +3512,7 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     .test_value();
     wait_for_menu(&mut app);
     let scenario =
-        resolve_next_mission_scenario(&app.scenario_catalog, "Tutorial.c4f/Tutorial01.c4s")
+        resolve_next_mission_scenario(&app.scensel.catalog, "Tutorial.c4f/Tutorial01.c4s")
             .test_value();
     main_assert!(scenario.path.as_ref().expect("scenario path").join("Scenario.txt").is_file());
 
@@ -4776,7 +4776,7 @@ fn classic_startup_argument_selects_initial_cpp_view() {
     let view = |screen: &str| {
         let mut app = new_real_classic_menu_app(640, 480);
         app.apply_classic_startup_screen(screen);
-        (app.startup_view, app.scenario_selector_mode)
+        (app.startup_view, app.scensel.mode)
     };
 
     main_assert_eq!(view("main").0 => StartupView::MainMenu);

@@ -235,7 +235,7 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_view == StartupView::ScenarioBrowser {
-            if self.scenario_selector_discovery.is_some() {
+            if self.scensel.discovery.is_some() {
                 return Ok(());
             }
             self.handle_menu_input(|menu| menu.select_list_character(character))?;
@@ -770,7 +770,7 @@ impl GameApp {
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
         }
-        if self.scenario_selector_discovery.is_some() {
+        if self.scensel.discovery.is_some() {
             return Ok(());
         }
         let Some(point) = self.menu_state.pointer_position() else {
@@ -4495,7 +4495,7 @@ impl GameApp {
                     if self.handle_scenario_selector_override_key(key, state)? {
                         return Ok(());
                     }
-                    let discovery_loading = self.scenario_selector_discovery.is_some();
+                    let discovery_loading = self.scensel.discovery.is_some();
                     let discovery_modifiers = self.keyboard_modifiers
                         & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
                     if discovery_loading && !self.menu_state.search_focused() {
@@ -6647,7 +6647,7 @@ impl GameApp {
                 // and cancels that original transfer in Dialog::SetFocus.
                 return Ok(());
             }
-            if self.scenario_selector_discovery.is_some() {
+            if self.scensel.discovery.is_some() {
                 return Ok(());
             }
             let direction = match button {
@@ -6908,7 +6908,7 @@ impl GameApp {
         }
         if self.mode == AppMode::Menu
             && self.startup_view == StartupView::ScenarioBrowser
-            && self.scenario_selector_discovery.is_some()
+            && self.scensel.discovery.is_some()
             && action == GamepadActionType::Select
         {
             return Ok(());
@@ -7546,7 +7546,7 @@ impl GameApp {
                         self.menu_state.set_pointer_position(Some(point));
                         let actions = self.scenario_game_options.handle_pointer_move(point);
                         self.finish_game_option_input(actions)?;
-                        if self.scenario_selector_discovery.is_some() {
+                        if self.scensel.discovery.is_some() {
                             let _ = self.handle_scensel_search_pointer_move(point);
                             return Ok(());
                         }
@@ -11214,7 +11214,7 @@ impl GameApp {
                     }
                     StartupView::ScenarioBrowser => {
                         if button_state == ElementState::Pressed {
-                            self.scensel_rename_pointer_focus = None;
+                            self.scensel.rename_pointer_focus = None;
                         }
                         if button_state == ElementState::Released
                             && self.game_option_pointer_capture
@@ -11222,7 +11222,7 @@ impl GameApp {
                         {
                             self.game_option_pointer_capture = false;
                             self.scenario_game_options.cancel_interaction();
-                            self.scensel_rename_pointer_focus = None;
+                            self.scensel.rename_pointer_focus = None;
                             return Ok(());
                         }
                         if let Some(point) = self.menu_state.pointer_position() {
@@ -11236,7 +11236,7 @@ impl GameApp {
                                         if self.menu_state.rename_edit.is_some() {
                                             return Ok(());
                                         }
-                                        self.scensel_rename_pointer_focus =
+                                        self.scensel.rename_pointer_focus =
                                             Some(self.scensel_focus_snapshot());
                                     }
                                     ElementState::Released
@@ -11273,7 +11273,7 @@ impl GameApp {
                                     let actions =
                                         self.scenario_game_options.handle_pointer_up(point);
                                     self.finish_game_option_input(actions)?;
-                                    self.scensel_rename_pointer_focus = None;
+                                    self.scensel.rename_pointer_focus = None;
                                     return Ok(());
                                 }
                                 ElementState::Released => {}
@@ -11293,7 +11293,7 @@ impl GameApp {
                                     {
                                         self.handle_scensel_parity_click(
                                             point,
-                                            self.scensel_rename_pointer_focus.is_some(),
+                                            self.scensel.rename_pointer_focus.is_some(),
                                         )?;
                                     }
                                 }
@@ -11301,10 +11301,10 @@ impl GameApp {
                             if button_state == ElementState::Pressed {
                                 self.restore_scensel_rename_pointer_focus();
                             } else {
-                                self.scensel_rename_pointer_focus = None;
+                                self.scensel.rename_pointer_focus = None;
                             }
                         } else if button_state == ElementState::Released {
-                            self.scensel_rename_pointer_focus = None;
+                            self.scensel.rename_pointer_focus = None;
                         }
                         Ok(())
                     }
@@ -12191,7 +12191,7 @@ impl GameApp {
             }
             StartupView::ScenarioBrowser => {
                 if phase == TouchPhase::Started {
-                    self.scensel_rename_pointer_focus = None;
+                    self.scensel.rename_pointer_focus = None;
                 }
                 self.menu_state.set_pointer_position(Some(position));
                 if self.menu_state.rename_edit.is_some() {
@@ -12204,7 +12204,7 @@ impl GameApp {
                             if self.menu_state.rename_edit.is_some() {
                                 return Ok(());
                             }
-                            self.scensel_rename_pointer_focus = Some(self.scensel_focus_snapshot());
+                            self.scensel.rename_pointer_focus = Some(self.scensel_focus_snapshot());
                         }
                         TouchPhase::Moved if self.handle_scensel_rename_pointer_move(position) => {
                             return Ok(());
@@ -12249,7 +12249,7 @@ impl GameApp {
                     };
                     self.finish_game_option_input(actions)?;
                     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                        self.scensel_rename_pointer_focus = None;
+                        self.scensel.rename_pointer_focus = None;
                     } else {
                         self.restore_scensel_rename_pointer_focus();
                     }
@@ -12282,17 +12282,17 @@ impl GameApp {
                         {
                             self.handle_scensel_parity_click(
                                 position,
-                                self.scensel_rename_pointer_focus.is_some(),
+                                self.scensel.rename_pointer_focus.is_some(),
                             )?;
                         }
-                        self.scensel_rename_pointer_focus = None;
+                        self.scensel.rename_pointer_focus = None;
                         self.pointer_left_unchecked();
                         Ok(())
                     }
                     TouchPhase::Cancelled => {
                         self.menu_state.search_edit.dragging = false;
                         self.menu_state.scrollbar_interaction = None;
-                        self.scensel_rename_pointer_focus = None;
+                        self.scensel.rename_pointer_focus = None;
                         self.pointer_left_unchecked();
                         Ok(())
                     }
@@ -12540,7 +12540,7 @@ impl GameApp {
                     self.menu_state.set_pointer_position(None);
                     self.menu_state.scrollbar_interaction = None;
                     self.menu_state.search_edit.dragging = false;
-                    self.scensel_search_last_click = None;
+                    self.scensel.search_last_click = None;
                 }
                 StartupView::MainMenu => {
                     self.main_menu_state.pointer_left();

@@ -263,7 +263,7 @@ fn selected_host_lobby_with_commands(
     crate::network::TestNetworkCommands,
 ) {
     let scenario = FrontendScenario::fallback();
-    app.scenario_catalog
+    app.scensel.catalog
         .insert(scenario.identifier.clone(), scenario.clone());
     let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
     lobby.select_scenario(&scenario.identifier, &scenario.title);
@@ -527,7 +527,7 @@ fn classic_command_line_lobby_timeout_starts_the_host_countdown() {
     main_assert_eq!(parse_classic_command_line(&[OsString::from("/lobby")]).lobby_timeout => Some(None),);
     let mut app = new_state_only_menu_app(320, 200);
     let scenario = FrontendScenario::fallback();
-    app.scenario_catalog
+    app.scensel.catalog
         .insert(scenario.identifier.clone(), scenario.clone());
     let mut lobby = host_lobby_state();
     lobby.select_scenario(&scenario.identifier, &scenario.title);
@@ -745,7 +745,7 @@ fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_network_host_scenario_browser();
     app.menu_state.definition_checkbox_checked = false;
 
@@ -7646,7 +7646,7 @@ fn catalog_host_lobby_preload_is_eligible_and_caches_the_selected_scenario() {
         .test_value();
     let frontend = tutorial_frontend(repository);
     let mut app = new_menu_app_with_paths(800, 600, &paths);
-    app.scenario_catalog
+    app.scensel.catalog
         .insert(frontend.identifier.clone(), frontend.clone());
     let mut lobby = NetworkLobbyState::new(0, "Catalog Host".to_string(), true)
         .with_preloading(true, LobbyLabels::default());
@@ -9176,7 +9176,7 @@ fn player_info_add_or_remove_alone_does_not_trigger_ready_autostart() {
     // src/C4GameLobby.cpp:868-893).
     let mut app = new_state_only_menu_app(320, 200);
     let scenario = FrontendScenario::fallback();
-    app.scenario_catalog
+    app.scensel.catalog
         .insert(scenario.identifier.clone(), scenario.clone());
     let mut lobby = host_lobby_state();
     lobby.select_scenario(&scenario.identifier, &scenario.title);

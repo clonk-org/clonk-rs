@@ -991,7 +991,7 @@ impl GameApp {
             &folder_save_journal,
             self.process_group_maker.as_bytes(),
         )?;
-        self.scenario_selector_reload_on_next_show = true;
+        self.scensel.reload_on_next_show = true;
         if retarget_active_scenario {
             let success = match kind {
                 ConsoleSaveKind::Scenario => {
@@ -1308,7 +1308,7 @@ impl GameApp {
                                 },
                             );
                         }
-                        self.scenario_selector_reload_on_next_show = true;
+                        self.scensel.reload_on_next_show = true;
                         self.status_text = format!("Saved {}", completion.status_label);
                         let message =
                             self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.");

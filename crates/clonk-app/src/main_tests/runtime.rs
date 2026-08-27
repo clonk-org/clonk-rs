@@ -155,7 +155,7 @@ fn runtime_scenario_app(
     )
     .test_value();
     wait_for_menu(&mut app);
-    let scenario = resolve_next_mission_scenario(&app.scenario_catalog, scenario_id).test_value();
+    let scenario = resolve_next_mission_scenario(&app.scensel.catalog, scenario_id).test_value();
     (paths_guard, paths, app, scenario)
 }
 
@@ -2005,7 +2005,7 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     )
     .test_value();
     let scenario = app
-        .scenario_catalog
+        .scensel.catalog
         .get("TwoPlayers.c4s")
         .cloned()
         .test_value();
@@ -2070,7 +2070,7 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     )
     .test_value();
     let scenario = app
-        .scenario_catalog
+        .scensel.catalog
         .get("TwoPlayers.c4s")
         .cloned()
         .test_value();
