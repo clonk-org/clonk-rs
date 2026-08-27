@@ -3588,6 +3588,8 @@ impl GameApp {
                     &mut surface,
                     font.as_ref(),
                     &text,
+                    self.developer_console_editing(),
+                    &self.runtime_resource_text("IDS_BTN_RELOADDEF", "Reload def"),
                 );
             }
         }
@@ -3599,7 +3601,10 @@ impl GameApp {
         use crate::developer_toolbox_view::ToolsPageAction;
         use crate::developer_windows::ToolboxPage;
 
-        // The property page is a read-only text box (`IDC_EDITOUTPUT`).
+        if self.developer_toolbox.current_page() == Some(ToolboxPage::Property) {
+            let _ = self.developer_property_page_click(point, extent);
+            return;
+        }
         if self.developer_toolbox.current_page() != Some(ToolboxPage::Tools) {
             return;
         }
@@ -3793,6 +3798,72 @@ impl GameApp {
             .filter(|_| selection.len() == 1)
             .and_then(|id| self.developer_property_page_object(*id));
         property_panel_text(&strings, selection.len(), object.as_ref())
+    }
+
+    /// A click on the property page.
+    ///
+    /// `IDC_BUTTONRELOADDEF` runs `Game.ReloadDef(idSelectedDef)`
+    /// (`C4PropertyDlg.cpp:74-76`), and is enabled on `Console.Editing`
+    /// alone (`:117`) — no selection condition, because the identity itself
+    /// carries that: `ReloadDef` looks it up and returns false when the
+    /// selection named none (`C4Game.cpp:2321-2323`).
+    /// Returns whether a reload was dispatched, which is not the same as the
+    /// click being consumed: the button is enabled whenever editing is, so a
+    /// press with nothing or several things selected is a press on a live
+    /// control that reaches `ReloadDef` with `C4ID_None` and does nothing.
+    pub(crate) fn developer_property_page_click(
+        &mut self,
+        point: (i32, i32),
+        extent: (u32, u32),
+    ) -> bool {
+        use crate::developer_toolbox_view::{property_page_hit, PropertyPageAction};
+
+        let Some(PropertyPageAction::ReloadDef) = property_page_hit(extent, point) else {
+            return false;
+        };
+        let Some(definition) = self.developer_property_reload_target() else {
+            return false;
+        };
+        // `ReloadDef`'s own first line refuses in a network game
+        // (`C4Game.cpp:2314`); the engine keeps that check rather than the
+        // caller, so the live flag is what is passed.
+        let reloaded = self
+            .engine
+            .reload_definition(&definition, self.network.is_some());
+        tracing::debug!(%definition, reloaded, "property page reload dispatched");
+        // `ReloadDef` updates every affected object's face on success and
+        // removes every object of the definition on failure, so the page's
+        // text is stale either way.
+        self.snapshot = self.engine.snapshot();
+        true
+    }
+
+    /// The definition a reload press would act on, if any.
+    ///
+    /// Both halves of C++'s behaviour in one place: the button is enabled on
+    /// `Console.Editing` alone (`C4PropertyDlg.cpp:117`), and its argument is
+    /// `idSelectedDef`, which only a single selection ever sets.
+    pub(crate) fn developer_property_reload_target(&self) -> Option<String> {
+        self.developer_console_editing()
+            .then(|| self.developer_property_selected_definition())
+            .flatten()
+    }
+
+    /// `C4PropertyDlg::idSelectedDef` — the reload button's target.
+    ///
+    /// `Update` clears it before its switch and assigns `cobj->id` only in the
+    /// single-object arm, so an empty or multiple selection leaves it
+    /// `C4ID_None` (`C4PropertyDlg.cpp:175,248-249,253-255`). That is what
+    /// makes the button harmless in those cases rather than disabled:
+    /// `Game.ReloadDef` looks the identity up and returns false when it names
+    /// no definition (`C4Game.cpp:2321-2323`).
+    pub(crate) fn developer_property_selected_definition(&self) -> Option<String> {
+        let selection = self.developer_selection.objects();
+        selection
+            .first()
+            .filter(|_| selection.len() == 1)
+            .and_then(|id| self.snapshot.object(*id))
+            .map(|object| object.definition_id.clone())
     }
 
     /// One selected object's already-formatted detail, in C++'s section order.

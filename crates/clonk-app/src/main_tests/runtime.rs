@@ -5285,6 +5285,128 @@ fn console_pop_keys_need_the_tools_page_the_way_cpp_needs_its_dialog() {
     runtime_assert_eq!(app.developer_tools_open_combo => Some(ToolsCombo::Textures));
 }
 
+/// `idSelectedDef` is only ever the *single* selected object's identity.
+///
+/// `C4PropertyDlg::Update` clears it to `C4ID_None` before the switch and
+/// assigns `cobj->id` in the one-object arm alone; the zero and multiple arms
+/// leave it cleared (`C4PropertyDlg.cpp:175,248-249,253-255`). The reload
+/// button is not disabled for those cases — it is enabled purely on
+/// `Console.Editing` (`:117`) — so pressing it there reaches
+/// `Game.ReloadDef(C4ID_None)`, which finds no definition and returns false
+/// (`C4Game.cpp:2321-2323`).
+#[test]
+fn the_property_page_reload_target_is_the_single_selected_definition() {
+    use clonk_engine::developer_selection::SelectionWriter;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+
+    runtime_assert_eq!(
+        app.developer_property_selected_definition() => None,
+        "no selection names no definition",
+    );
+
+    let first = app.snapshot.objects.first().test_value().clone();
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, first.id);
+    runtime_assert_eq!(
+        app.developer_property_selected_definition() => Some(first.definition_id.clone()),
+        "one selected object names its own definition",
+    );
+
+    let second = app
+        .engine
+        .spawn_test_object(clonk_engine::SpawnConfig::new(first.definition_id.clone()));
+    app.snapshot = app.engine.snapshot();
+    app.developer_selection
+        .toggle(SelectionWriter::EditCursor, second);
+    runtime_assert_eq!(app.developer_selection.objects().len() => 2);
+    runtime_assert_eq!(
+        app.developer_property_selected_definition() => None,
+        "a multiple selection names none, even when both share a definition",
+    );
+}
+
+/// Pressing the reload button dispatches only what `ReloadDef` could act on.
+///
+/// The button is enabled on `Console.Editing` alone (`C4PropertyDlg.cpp:117`),
+/// so a press with nothing or several things selected is a press on a *live*
+/// control — it simply reaches `Game.ReloadDef(C4ID_None)`, which finds no
+/// definition (`C4Game.cpp:2321-2323`). Both are modelled here as "no reload
+/// dispatched", which is the observable difference.
+#[test]
+fn the_property_page_reload_button_dispatches_only_a_single_selection() {
+    use clonk_engine::developer_selection::SelectionWriter;
+    use crate::developer_toolbox_view::property_page_layout;
+    use crate::developer_windows::ToolboxPage;
+
+    let extent = (240u32, 160u32);
+    let layout = property_page_layout(extent.0, extent.1);
+    let button = (
+        layout.reload.x + layout.reload.w / 2,
+        layout.reload.y + layout.reload.h / 2,
+    );
+    let output = (layout.output.x + 1, layout.output.y + 1);
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.open_developer_prop_tools();
+    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+        ConsoleEditMode::Edit,
+    )])
+    .test_value();
+    runtime_assert_eq!(
+        app.developer_toolbox.current_page() => Some(ToolboxPage::Property),
+        "leaving Draw reopens the toolbox on Property",
+    );
+
+    // Editing, but nothing selected.
+    runtime_assert!(app.developer_console_editing());
+    runtime_assert_eq!(app.developer_property_reload_target() => None);
+    runtime_assert!(
+        !app.developer_property_page_click(button, extent),
+        "an empty selection dispatches no reload"
+    );
+
+    // One object selected: the button now has something to act on.
+    let first = app.snapshot.objects.first().test_value().clone();
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, first.id);
+    runtime_assert_eq!(
+        app.developer_property_reload_target() => Some(first.definition_id.clone())
+    );
+    runtime_assert!(
+        app.developer_property_page_click(button, extent),
+        "a single selection dispatches its definition"
+    );
+    runtime_assert!(
+        !app.developer_property_page_click(output, extent),
+        "the read-only output box claims nothing"
+    );
+
+    // Several selected: `idSelectedDef` stays cleared.
+    let second = app
+        .engine
+        .spawn_test_object(clonk_engine::SpawnConfig::new(first.definition_id.clone()));
+    app.snapshot = app.engine.snapshot();
+    app.developer_selection
+        .toggle(SelectionWriter::EditCursor, second);
+    runtime_assert_eq!(app.developer_property_reload_target() => None);
+    runtime_assert!(!app.developer_property_page_click(button, extent));
+
+    // `Console.Editing` off disables the control outright.
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, first.id);
+    app.developer_console_editing_enabled = false;
+    runtime_assert_eq!(
+        app.developer_property_reload_target() => None,
+        "a disabled button reloads nothing however the selection stands",
+    );
+    runtime_assert!(!app.developer_property_page_click(button, extent));
+}
+
 // C4Console.cpp:1353-1356 and C4ObjectListDlg.cpp:599-646,726-787 — the
 // Objects component opens the object list, whose rows are the ported
 // object tree and whose clicks write the edit cursor's selection.
