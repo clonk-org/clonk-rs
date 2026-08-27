@@ -2522,6 +2522,21 @@ pub(crate) enum RuntimeCustomGamepadAction {
     /// `C4GraphicsSystem::FreeScroll` with its registered vector
     /// (C4Game.cpp:3423-3426).
     FreeViewScroll(Vector2),
+    /// `C4Network2::ToggleClientListDlg` (C4Game.cpp:3379).
+    ClientList,
+    /// `C4GraphicsSystem::ViewportNextPlayer` at KEYSCOPE_FreeView — the
+    /// observer registration of the callback `FilmNextPlayer` also names
+    /// (C4Game.cpp:3443).
+    ObserverNextPlayer,
+    /// `C4GameControl::KeyAdjustControlRate` with its registered ±1
+    /// (C4Game.cpp:3444-3445).
+    ControlRate {
+        delta: i32,
+    },
+    /// `C4Network2::ToggleAllowJoin` (C4Game.cpp:3446).
+    AllowJoinToggle,
+    /// `C4GraphicsSystem::ToggleShowNetStatus` (C4Game.cpp:3447).
+    NetStatsToggle,
     /// The port-only `StatsToggle`, which registers after every C++ action.
     StatsToggle,
     SpeedUp,
