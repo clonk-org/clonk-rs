@@ -2012,12 +2012,24 @@ impl GameApp {
         if let Some(detail) = self.loader_error.as_deref() {
             return Err(self.loader_boundary(detail));
         }
-        if let Some(detail) = self.loader_render_error.as_deref() {
-            return Err(self.loader_boundary(detail));
-        }
-        let config = self
-            .loader_render_config
-            .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
+        // A scale the renderer cannot use is not a reason to fail the frame.
+        // `C4LoaderScreen::Draw` validates nothing and lets the draw layer clip
+        // (src/C4LoaderScreen.cpp:126-177), and `Application.GetScale()` hands
+        // it whatever `Graphics.Scale / 100.0f` produces
+        // (src/C4Application.h:119), so a configuration C++ merely draws badly
+        // must not stop the loader here. The native text is skipped; the rest
+        // of the frame still presents.
+        let Some(config) = self
+            .loader_render_error
+            .is_none()
+            .then_some(self.loader_render_config)
+            .flatten()
+        else {
+            if let Some(detail) = self.loader_render_error.as_deref() {
+                tracing::debug!(detail, "loader native text skipped for an unusable scale");
+            }
+            return Ok(());
+        };
         let gamma_value = self.startup_fragment_gamma();
         let gamma = &gamma_value;
         let monitor_gamma = self.startup_monitor_gamma();

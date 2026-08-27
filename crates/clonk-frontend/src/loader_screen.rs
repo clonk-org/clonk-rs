@@ -628,10 +628,17 @@ impl LoaderScreen {
         logical_height: u32,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
-        ensure!(
-            logical_width > 0 && logical_height > 0,
-            "classic loader logical dimensions must be positive"
-        );
+        // `C4LoaderScreen::Draw` validates nothing: it computes every
+        // coordinate straight off `cgo.Wdt`/`cgo.Hgt` and lets the draw layer
+        // clip whatever falls outside (src/C4LoaderScreen.cpp:126-177). A
+        // zero-extent facet therefore paints nothing and the frame carries on,
+        // so a zero logical extent is a no-op here rather than a failure.
+        if logical_width == 0 || logical_height == 0 {
+            return Ok(());
+        }
+        // Not geometry validation: C++'s `cgo.Wdt`/`Hgt` are `int32_t`, so a
+        // wider value is outside what the pinned engine can represent at all,
+        // and the projection below would wrap rather than clip.
         ensure!(
             logical_width <= i32::MAX as u32 && logical_height <= i32::MAX as u32,
             "classic loader logical dimensions exceed C++ integer geometry"
@@ -2652,6 +2659,31 @@ mod tests {
             [10, 20, 30, 255],
         );
         color.render(&mut italic_frame, None).unwrap();
+    }
+
+    /// `C4LoaderScreen::Draw` validates none of its geometry: every coordinate
+    /// comes straight off `cgo.Wdt`/`cgo.Hgt` and the draw layer clips what
+    /// falls outside (src/C4LoaderScreen.cpp:126-177). A zero-extent facet
+    /// therefore paints nothing and the frame carries on, so the port may not
+    /// turn one into an error.
+    #[test]
+    fn a_zero_logical_extent_paints_nothing_instead_of_failing() {
+        let screen = synthetic_screen(LoaderState::initial("Loading"), [10, 20, 30, 255]);
+        let native = build_native_font_set(&endeavour_bytes(), 1.0)
+            .expect("scale-native loader fonts build");
+
+        for (width, height) in [(0, 240), (320, 0), (0, 0)] {
+            let mut surface = Surface::new(320, 240, PixelFormat::Rgba8888);
+            let before = surface.pixels().to_vec();
+            screen
+                .render_native_text(&mut surface, &native, width, height, None)
+                .expect("a zero extent is a no-op, not a failure");
+            assert_eq!(
+                surface.pixels(),
+                before.as_slice(),
+                "{width}x{height} logical pixels must leave the surface untouched"
+            );
+        }
     }
 
     #[test]
