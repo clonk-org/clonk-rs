@@ -16,6 +16,7 @@
 use clonk_engine::developer_inspection::InspectionNode;
 use clonk_engine::ObjectId;
 use clonk_frontend::classic_gui::{draw_facet_stretch, IntRect};
+use clonk_frontend::developer_chrome::PaneScroll;
 use clonk_frontend::developer_chrome::{
     contains, draw_fitted_text, draw_sunken, fill, CONTROL_BACKGROUND, CONTROL_TEXT,
     SELECTED_BACKGROUND, SELECTED_TEXT, SMALL_FONT_SIZE, WINDOW_BACKGROUND,
@@ -137,10 +138,8 @@ pub(crate) fn object_list_rows(
 /// from the selection impossible.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ObjectListScroll {
-    /// The retained first row. Kept unclamped so a tree that shrinks and grows
-    /// again — objects entering and leaving a container — comes back where the
-    /// user left it rather than at whatever the shortest moment allowed.
-    first: usize,
+    /// The shared retained position, over this list's own row metric.
+    inner: PaneScroll,
 }
 
 impl ObjectListScroll {
@@ -152,38 +151,22 @@ impl ObjectListScroll {
     /// The first visible row and the capacity, for the tree as it stands now.
     pub(crate) fn window(&self, rows: usize, height: u32) -> (usize, usize) {
         let capacity = Self::capacity(height);
-        (self.first.min(Self::last_top(rows, capacity)), capacity)
+        (self.inner.window(rows, capacity), capacity)
     }
 
     /// Scroll by whole rows, as a wheel notch or a bar arrow does.
     pub(crate) fn scroll_by(&mut self, delta: i32, rows: usize, height: u32) {
-        let capacity = Self::capacity(height);
-        let last = Self::last_top(rows, capacity);
-        let current = i64::try_from(self.first.min(last)).unwrap_or(i64::MAX);
-        let target = current.saturating_add(i64::from(delta)).max(0);
-        self.first = usize::try_from(target).unwrap_or(usize::MAX).min(last);
+        self.inner.scroll_by(delta, rows, Self::capacity(height));
+    }
+
+    /// Put an absolute first row, as a thumb drag does.
+    pub(crate) fn scroll_to(&mut self, row: usize, rows: usize, height: u32) {
+        self.inner.scroll_to(row, rows, Self::capacity(height));
     }
 
     /// Scroll a row into view, moving as little as possible.
-    ///
-    /// `gtk_tree_view_set_cursor` scrolls the row into view rather than
-    /// centring it, so a row one past the bottom edge moves the window by one.
     pub(crate) fn reveal(&mut self, row: usize, rows: usize, height: u32) {
-        let capacity = Self::capacity(height);
-        let last = Self::last_top(rows, capacity);
-        let first = self.first.min(last);
-        self.first = if row < first {
-            row
-        } else if row >= first + capacity {
-            (row + 1 - capacity).min(last)
-        } else {
-            first
-        };
-    }
-
-    /// The highest first row that still fills the view.
-    fn last_top(rows: usize, capacity: usize) -> usize {
-        rows.saturating_sub(capacity)
+        self.inner.reveal(row, rows, Self::capacity(height));
     }
 }
 

@@ -20,6 +20,68 @@ use crate::classic_gui::IntRect;
 use crate::{fill_rect, GuiPoint};
 
 /// One row of a dropdown or context menu.
+/// A pane's retained first visible line or row.
+///
+/// Both scrolled developer panes need the same three operations and the same
+/// clamping rule, and had a copy each: the property output
+/// (`C4PropertyDlg.cpp:257-262`, which reads `EM_GETFIRSTVISIBLELINE` and
+/// scrolls back to it) and the object tree (`C4ObjectListDlg.cpp:747-780`,
+/// whose position lives in the scrolled window around a model that is rebuilt
+/// on every object change).
+///
+/// Expressed in **lines and capacity** rather than pixels, so a pane supplies
+/// its own row metric and this stays the same type for both.
+///
+/// The position is kept **unclamped**: content that shrinks does not throw
+/// away where the user was, so content that grows again comes back to it. That
+/// is the Win32 edit control's own behaviour, where `EM_LINESCROLL` clamps the
+/// scroll it performs without changing what a later, longer text can reach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneScroll {
+    first: usize,
+}
+
+impl PaneScroll {
+    /// The first visible line for the content as it stands now.
+    pub fn window(&self, lines: usize, capacity: usize) -> usize {
+        self.first.min(Self::last_top(lines, capacity))
+    }
+
+    /// Scroll by whole lines, as a wheel notch or a bar arrow does.
+    pub fn scroll_by(&mut self, delta: i32, lines: usize, capacity: usize) {
+        let last = Self::last_top(lines, capacity);
+        let current = i64::try_from(self.first.min(last)).unwrap_or(i64::MAX);
+        let target = current.saturating_add(i64::from(delta)).max(0);
+        self.first = usize::try_from(target).unwrap_or(usize::MAX).min(last);
+    }
+
+    /// Put an absolute first line, as a thumb drag does.
+    pub fn scroll_to(&mut self, first: usize, lines: usize, capacity: usize) {
+        self.first = first.min(Self::last_top(lines, capacity));
+    }
+
+    /// Scroll one line into view, moving as little as possible.
+    ///
+    /// `gtk_tree_view_set_cursor` scrolls a row into view rather than centring
+    /// it, so a row one past the bottom edge moves the window by one.
+    pub fn reveal(&mut self, line: usize, lines: usize, capacity: usize) {
+        let last = Self::last_top(lines, capacity);
+        let first = self.first.min(last);
+        self.first = if line < first {
+            line
+        } else if line >= first + capacity {
+            (line + 1 - capacity).min(last)
+        } else {
+            first
+        };
+    }
+
+    /// The highest first line that still fills the view.
+    fn last_top(lines: usize, capacity: usize) -> usize {
+        lines.saturating_sub(capacity)
+    }
+}
+
 pub const MENU_ITEM_HEIGHT: i32 = 22;
 /// A separator row, which is shorter than an item and carries no text.
 pub const MENU_SEPARATOR_HEIGHT: i32 = 8;

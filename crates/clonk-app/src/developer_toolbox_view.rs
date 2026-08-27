@@ -19,6 +19,7 @@
 use clonk_engine::developer_landscape::ToolTextureEntry;
 use clonk_engine::developer_tools::{LandscapeMode, Tool, GRADE_MAX, GRADE_MIN};
 use clonk_frontend::classic_gui::IntRect;
+pub(crate) use clonk_frontend::developer_chrome::PaneScroll as LineScroll;
 use clonk_frontend::developer_chrome::{
     contains, draw_fitted_text, draw_raised, draw_sunken, fill, CONTROL_BACKGROUND, CONTROL_TEXT,
     DISABLED_TEXT, MID_EDGE, SELECTED_BACKGROUND, SELECTED_TEXT, SMALL_FONT_SIZE,
@@ -662,42 +663,6 @@ fn grade_at(rect: IntRect, y: i32) -> i32 {
     let travel = (rect.h - BUTTON_HEIGHT).max(1);
     let offset = (y - rect.y - BUTTON_HEIGHT / 2).clamp(0, travel);
     GRADE_MAX - offset * (GRADE_MAX - GRADE_MIN) / travel
-}
-
-/// A retained first-visible-line, for a pane whose content is replaced wholesale.
-///
-/// `C4PropertyDlg::Update` reads `EM_GETFIRSTVISIBLELINE`, replaces the text
-/// and scrolls back to it (`C4PropertyDlg.cpp:257-262`). It runs on every
-/// Tick35 and every selection change, so the position has to survive the
-/// replacement or the pane snaps to the top several times a second.
-///
-/// The line is kept **unclamped**: an object with less to say does not throw
-/// away where the user was, so re-selecting a longer one comes back to it.
-/// That is the same property the Win32 edit control has, where `EM_LINESCROLL`
-/// clamps the scroll without changing what a later, longer text can reach.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct LineScroll {
-    first: usize,
-}
-
-impl LineScroll {
-    /// The first visible line for the content as it stands now.
-    pub(crate) fn window(&self, lines: usize, capacity: usize) -> usize {
-        self.first.min(Self::last_top(lines, capacity))
-    }
-
-    /// Scroll by whole lines, as a wheel notch or a bar arrow does.
-    pub(crate) fn scroll_by(&mut self, delta: i32, lines: usize, capacity: usize) {
-        let last = Self::last_top(lines, capacity);
-        let current = i64::try_from(self.first.min(last)).unwrap_or(i64::MAX);
-        let target = current.saturating_add(i64::from(delta)).max(0);
-        self.first = usize::try_from(target).unwrap_or(usize::MAX).min(last);
-    }
-
-    /// The highest first line that still fills the view.
-    fn last_top(lines: usize, capacity: usize) -> usize {
-        lines.saturating_sub(capacity)
-    }
 }
 
 /// How many lines the output box shows at this page height.
