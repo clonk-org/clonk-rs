@@ -4181,7 +4181,8 @@ pub(crate) fn build_network_host_preparation(
     // over C4GameOptions.cpp:169) are all memory-only writes. This session's
     // pending values therefore outrank the file here.
     let raw_value = |section: &str, key: &str| {
-        app.deferred_config
+        app.config
+            .deferred
             .get(section, key)
             .map(str::to_owned)
             .or_else(|| native_config_text(&config_bytes, section, key))
@@ -4269,7 +4270,7 @@ pub(crate) fn build_network_host_preparation(
         (name, nick)
     };
     let max_load_file_size = crate::settings::session_max_load_file_size(
-        app.compat_profile,
+        app.config.compat_profile,
         value("Network", "MaxLoadFileSize").and_then(|value| value.parse::<u32>().ok()),
     );
     let configured_players = app
@@ -4416,7 +4417,7 @@ pub(crate) fn build_network_host_preparation(
             // CNM_Decentral over this default without touching the saved key
             // (`crate::settings::session_control_mode`).
             control_mode: crate::settings::session_control_mode(
-                app.compat_profile,
+                app.config.compat_profile,
                 integer("Network", "ControlMode", 2),
             ),
             control_rate: integer("Network", "ControlRate", 2),

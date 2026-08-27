@@ -3763,7 +3763,7 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
         clonk_frontend::startup_netdlg::NetDlgAction::MasterserverSignupChanged(false),
     ])
     .test_value();
-    main_assert_eq!(app.deferred_config.get("Network", "MasterServerSignUp") => Some("0"));
+    main_assert_eq!(app.config.deferred.get("Network", "MasterServerSignUp") => Some("0"));
     main_assert!(load_network_startup_settings(Some(&paths)).0, "the toggle is deliberately not written through, so the file still reads enabled");
 
     app.refresh_retained_network_dialog_internet();
@@ -3776,7 +3776,7 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
     // no C++ game-option surface saves the file — so it replaces the netdlg's
     // pending change rather than superseding it through the file.
     app.persist_game_option_value("Network", "MasterServerSignUp", "1".to_string());
-    main_assert_eq!(app.deferred_config.get("Network", "MasterServerSignUp") => Some("1"));
+    main_assert_eq!(app.config.deferred.get("Network", "MasterServerSignUp") => Some("1"));
     main_assert!(app.masterserver_signup_setting());
     main_assert!(load_network_startup_settings(Some(&paths)).0, "and the file still holds the value this session started from");
 }
@@ -5469,7 +5469,7 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
     // `ChangeMode` writes only memory (C4MessageBoard.cpp:65-118); the subject
     // here is the written *content*, so flush the session's pending value the
     // way a clean shutdown would.
-    main_assert_eq!(app.deferred_config.get("Graphics", "MsgBoard") => Some("1"));
+    main_assert_eq!(app.config.deferred.get("Graphics", "MsgBoard") => Some("1"));
     app.flush_deferred_config();
     let config = Config::load(paths.config_file()).test_value();
     main_assert_eq!(config.get_in(Some("Graphics"), "MsgBoard") => Some("1"));
@@ -5521,7 +5521,7 @@ fn running_set_comment_is_direct_host_effect() {
     client.app_paths = Some(paths.clone());
     let (_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 2);
     client.process_running_chat_text("/set comment rejected client comment");
-    main_assert!(client.deferred_config.is_empty(), "a client's refused /set comment records nothing to write");
+    main_assert!(client.config.deferred.is_empty(), "a client's refused /set comment records nothing to write");
     client.flush_deferred_config();
     main_assert_eq!(Config::load(paths.config_file()).expect("load host-only runtime config").get_in(Some("Network"), "Comment") => Some("live runtime comment"));
     main_assert!(client_commands.take_submitted_decided_controls().is_empty());
@@ -14473,7 +14473,7 @@ fn network_cleanup_records_cpp_network_error_bytes_before_clearing() {
     // (src/C4Network2.cpp:1825-1833;
     // src/C4RoundResults.cpp:315-323).
     let mut app = new_state_only_running_sandbox_app();
-    app.runtime_language_charset = RuntimeHelpCharset::Windows1252;
+    app.config.language_charset = RuntimeHelpCharset::Windows1252;
 
     app.record_network_error_round_result("Network: host André disconnected!");
 

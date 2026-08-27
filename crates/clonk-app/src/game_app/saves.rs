@@ -1784,7 +1784,7 @@ impl GameApp {
                             owner: binding.number,
                             preferred_set: preferred_control_set,
                             prefers_mouse,
-                            gamepads_enabled: self.gamepads_enabled,
+                            gamepads_enabled: self.config.gamepads_enabled,
                             replay: false,
                             disable_mouse: !self.mouse_control_allowed,
                         };

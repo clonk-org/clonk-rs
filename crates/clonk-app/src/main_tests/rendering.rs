@@ -4870,7 +4870,7 @@ fn material_render_bytes_keep_the_cpp_uint32_low_byte() {
 fn set_plr_show_command_request_force_enables_display_once() {
     let mut app = new_state_only_menu_app(320, 200);
     app.display_flags.show_commands = false;
-    app.show_commands_requests.request_enable();
+    app.config.show_commands_requests.request_enable();
     app.apply_show_commands_enable_request();
     main_assert!(app.display_flags.show_commands);
 

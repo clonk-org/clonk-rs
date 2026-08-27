@@ -4739,8 +4739,8 @@ fn gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
         Some(Vec::new()),
     )
     .test_value();
-    main_assert!(!app.gamepads_enabled, "startup config writes must not change the process snapshot");
-    main_assert!(!app.gamepad_input_enabled);
+    main_assert!(!app.config.gamepads_enabled, "startup config writes must not change the process snapshot");
+    main_assert!(!app.config.gamepad_input_enabled);
     drop(app);
     reset_cached_app_paths();
 }
@@ -4750,8 +4750,8 @@ fn global_gamepad_disable_drops_events_before_dispatch() {
     let mut app = new_real_classic_menu_app(640, 480);
     let mut initial = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut initial);
-    app.gamepads_enabled = false;
-    app.gamepad_input_enabled = false;
+    app.config.gamepads_enabled = false;
+    app.config.gamepad_input_enabled = false;
     process_primary_direction(
         &mut app,
         ControlButton::Down,
@@ -4761,8 +4761,8 @@ fn global_gamepad_disable_drops_events_before_dispatch() {
     app.test_render(&mut discarded);
     main_assert_eq!(discarded => initial, "disabled events must not reach startup input dispatch");
 
-    app.gamepads_enabled = true;
-    app.gamepad_input_enabled = true;
+    app.config.gamepads_enabled = true;
+    app.config.gamepad_input_enabled = true;
     process_primary_direction(
         &mut app,
         ControlButton::Down,
@@ -4779,13 +4779,13 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
 
     let open_about = |gamepad_gui_control| {
         let mut app = new_classic_menu_app(640, 480);
-        app.gamepad_gui_control = gamepad_gui_control;
+        app.config.gamepad_gui_control = gamepad_gui_control;
         app.open_about_dialog();
         app.startup_dialog_fade = None;
         app
     };
     let send_direction = |app: &mut GameApp, gamepad: u8, button: ControlButton| {
-        let gamepad_gui_control = app.gamepad_gui_control;
+        let gamepad_gui_control = app.config.gamepad_gui_control;
         app.process_sourced_gamepad_event_batch(
             [sourced_gamepad_event(
                 usize::from(gamepad),
@@ -4900,7 +4900,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
         &app.bindings,
         &app.gamepad_bindings,
         3,
-        app.gamepad_gui_control,
+        app.config.gamepad_gui_control,
     );
     *app.startup_options_dialog.test_mut().controls_mut() = controls;
 
@@ -4964,7 +4964,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
     main_assert_eq!(app.startup_view => StartupView::Options);
     main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
 
-    app.gamepad_gui_control = true;
+    app.config.gamepad_gui_control = true;
     app.process_sourced_gamepad_event_batch([high(0, GamepadSlot::new(0))], true)
         .test_value();
     main_assert_eq!(app.startup_view => StartupView::MainMenu);
@@ -5271,8 +5271,8 @@ fn false_startup_config_never_polls_gamepad_manager() {
     )
     .test_value();
 
-    main_assert!(!app.gamepads_enabled);
-    main_assert!(!app.gamepad_input_enabled);
+    main_assert!(!app.config.gamepads_enabled);
+    main_assert!(!app.config.gamepad_input_enabled);
     main_assert!(!load_gamepads_enabled(Some(&paths)));
     persist_config_value(&paths, "Network", "Comment", "resaved").test_value();
     main_assert!(!load_gamepads_enabled(Some(&paths)));
@@ -5292,7 +5292,7 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
         false,
         false,
     ));
-    app.gamepad_input_enabled = false;
+    app.config.gamepad_input_enabled = false;
     let pressed_coms = |app: &GameApp, owner| {
         app.engine
             .snapshot()
@@ -5321,7 +5321,7 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
         pref_mouse: false,
         ..PlayerFile::default()
     });
-    app.gamepads_enabled = false;
+    app.config.gamepads_enabled = false;
 
     app.join_local_player().test_value();
     let player = app.engine.test_player(app.local_owner);

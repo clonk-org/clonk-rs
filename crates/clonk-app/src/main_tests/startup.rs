@@ -1172,7 +1172,7 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
     main_assert_eq!(saved.get_in(Some("Graphics"), "ShowClock") => Some("true"));
     main_assert_eq!(saved.get_in(Some("General"), "FPS") => Some("true"));
     main_assert_eq!(saved.get_in(Some("Graphics"), "UpperBoard") => Some("Small"));
-    main_assert_eq!(app.deferred_config.len() => 0);
+    main_assert_eq!(app.config.deferred.len() => 0);
 
     // A second request while one is in flight says so rather than starting
     // another; C++ cannot reach this because its check blocks.
@@ -4942,7 +4942,7 @@ fn a_ticked_dont_show_again_box_suppresses_its_warning_before_any_save() {
     app.app_paths = Some(paths.clone());
     main_assert!(!app.startup_message_hidden("HideMsgStartDedicated"));
 
-    app.deferred_config
+    app.config.deferred
         .set("Startup", "HideMsgStartDedicated", "1");
 
     main_assert!(app.startup_message_hidden("HideMsgStartDedicated"), "the tick suppresses the warning without waiting for a save");

@@ -2581,8 +2581,8 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     main_assert!(app.startup_options_advanced_dialog.is_none());
     main_assert_eq!(app.startup_view => StartupView::Options);
     main_assert_eq!(app.graphics_smoke_level => 321);
-    main_assert_eq!(app.mission_access.snapshot() => "Secret;Beta");
-    main_assert!(!app.show_folder_maps);
+    main_assert_eq!(app.config.mission_access.snapshot() => "Secret;Beta");
+    main_assert!(!app.config.show_folder_maps);
     main_assert!(app.startup_view_flags.record);
     main_assert_eq!(app.recording_enabled => app.recordings_dir.is_some());
     main_assert!(app.startup_view_flags.fair_crew);
@@ -2908,7 +2908,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         .rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::KeyZ);
     app.gamepad_bindings
         .rebind_button(1, ControlBindingId::Up, 1, 4);
-    app.gamepad_gui_control = true;
+    app.config.gamepad_gui_control = true;
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 

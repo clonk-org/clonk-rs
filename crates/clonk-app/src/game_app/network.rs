@@ -984,7 +984,7 @@ impl GameApp {
             owner: predicted_owner,
             preferred_set: preferred_control,
             prefers_mouse,
-            gamepads_enabled: self.gamepads_enabled,
+            gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         });
@@ -3745,7 +3745,7 @@ impl GameApp {
     }
 
     pub(crate) fn record_network_error_round_result(&mut self, message: &str) {
-        let encoded = match self.runtime_language_charset {
+        let encoded = match self.config.language_charset {
             RuntimeHelpCharset::Windows1252 => message
                 .chars()
                 .map(runtime_cp1252_byte)
@@ -5434,7 +5434,7 @@ impl GameApp {
         if advertised.eq_ignore_ascii_case(claimed.display_name()) {
             return None;
         }
-        if self.compat_profile != claimed {
+        if self.config.compat_profile != claimed {
             // The mismatch is ours: this session asked for a profile it cannot
             // claim. Say so, rather than leave the player comparing two names
             // that look like they already agree.
@@ -8179,7 +8179,7 @@ impl GameApp {
             owner: predicted_owner,
             preferred_set,
             prefers_mouse,
-            gamepads_enabled: self.gamepads_enabled,
+            gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         };
@@ -9385,7 +9385,8 @@ impl GameApp {
         // memory alone. Re-reading the config *file* here would hide every
         // password earned this session from the network selector while the local
         // one already honours it.
-        if !head.mission_access().is_empty() && !self.mission_access.contains(head.mission_access())
+        if !head.mission_access().is_empty()
+            && !self.config.mission_access.contains(head.mission_access())
         {
             return Ok(NetworkScenarioOpenDecision::Error {
                 message: self.runtime_resource_text(
@@ -9786,7 +9787,7 @@ impl GameApp {
             owner: binding.number,
             preferred_set: preferred_control_set,
             prefers_mouse,
-            gamepads_enabled: self.gamepads_enabled,
+            gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         };
@@ -10329,7 +10330,7 @@ impl GameApp {
                 owner: binding.number,
                 preferred_set: preferred_control_set,
                 prefers_mouse,
-                gamepads_enabled: self.gamepads_enabled,
+                gamepads_enabled: self.config.gamepads_enabled,
                 replay: false,
                 disable_mouse: !self.mouse_control_allowed,
             };

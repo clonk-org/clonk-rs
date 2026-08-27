@@ -5125,7 +5125,7 @@ fn game_over_gui_stack_requires_enabled_primary_gamepad_source() {
     for (gamepad_gui_control, gamepad) in [(false, 0), (true, 1)] {
         let slot = GamepadSlot::new(gamepad as u8);
         let mut app = new_game_over_keyboard_app();
-        app.gamepad_gui_control = gamepad_gui_control;
+        app.config.gamepad_gui_control = gamepad_gui_control;
         hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
         app.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -5142,7 +5142,7 @@ fn game_over_gui_stack_requires_enabled_primary_gamepad_source() {
             cluster,
             event,
         };
-        let gate = app.gamepad_gui_control;
+        let gate = app.config.gamepad_gui_control;
 
         app.process_sourced_gamepad_event_batch(
             [

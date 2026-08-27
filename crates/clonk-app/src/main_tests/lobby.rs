@@ -6989,7 +6989,7 @@ fn only_a_host_announces_its_compatibility_profile_in_the_lobby() {
         "Client",
         NetworkLobbyState::new(7, "Client".to_string(), false),
     );
-    client.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    client.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     client.open_network_lobby();
     main_assert!(
         !compat_line(&client),
@@ -7000,7 +7000,7 @@ fn only_a_host_announces_its_compatibility_profile_in_the_lobby() {
         new_menu_app(640, 480),
         NetworkLobbyState::new(0, "Host".to_string(), true),
     );
-    host.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    host.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     host.open_network_lobby();
     main_assert!(
         compat_line(&host),
@@ -7031,7 +7031,7 @@ fn a_joining_client_is_told_its_own_requested_profile_is_unavailable() {
         "Client",
         NetworkLobbyState::new(7, "Client".to_string(), false),
     );
-    client.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    client.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     client.open_network_lobby();
 
     let blocked = !crate::compat_readiness::is_ready();
@@ -7051,7 +7051,7 @@ fn a_joining_client_is_told_its_own_requested_profile_is_unavailable() {
         "the session's profile is the host's statement, not the client's"
     );
     // The request itself is never rewritten: a player who asked still sees it.
-    main_assert_eq!(client.compat_profile => crate::settings::CompatProfile::LegacyClonk);
+    main_assert_eq!(client.config.compat_profile => crate::settings::CompatProfile::LegacyClonk);
 
     // A normal-profile client says nothing at all.
     let (mut ordinary, _ordinary_events) = networked_client_lobby(
@@ -7077,7 +7077,7 @@ fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
         new_menu_app(640, 480),
         NetworkLobbyState::new(0, "Host".to_string(), true),
     );
-    host.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    host.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     host.open_network_lobby();
 
     let logs = &host.network_lobby.as_ref().test_value().logs;
@@ -7090,7 +7090,7 @@ fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
         "a blocked profile must say so in the lobby, and a claimable one must not"
     );
     main_assert_eq!(
-        host.compat_profile => crate::settings::CompatProfile::LegacyClonk,
+        host.config.compat_profile => crate::settings::CompatProfile::LegacyClonk,
         "the requested profile is never rewritten"
     );
     main_assert_eq!(

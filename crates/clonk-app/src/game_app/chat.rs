@@ -1479,7 +1479,8 @@ impl GameApp {
         // `C4MessageBoard::ChangeMode` assigns `Config.Graphics.MsgBoard` for
         // each of its three modes and saves nothing (C4MessageBoard.cpp:65-118),
         // so the mode a session ends on reaches the file at shutdown.
-        self.deferred_config
+        self.config
+            .deferred
             .set("Graphics", "MsgBoard", i32::from(enabled).to_string());
     }
 

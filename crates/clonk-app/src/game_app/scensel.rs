@@ -1799,7 +1799,7 @@ impl GameApp {
         scenario: &FrontendScenario,
         selector_mode: ScenarioSelectorMode,
     ) -> std::result::Result<Option<String>, ClassicParityBoundary> {
-        if !scenario.has_mission_access(&self.mission_access) {
+        if !scenario.has_mission_access(&self.config.mission_access) {
             return Ok(Some(
                 self.runtime_resource_string("IDS_PRC_NOMISSIONACCESS"),
             ));
@@ -1818,7 +1818,8 @@ impl GameApp {
         let Some(head) = self.scenario_loader_head_for_start(scenario)? else {
             return Ok(None);
         };
-        if !head.mission_access().is_empty() && !self.mission_access.contains(head.mission_access())
+        if !head.mission_access().is_empty()
+            && !self.config.mission_access.contains(head.mission_access())
         {
             return Ok(Some(
                 self.runtime_resource_string("IDS_PRC_NOMISSIONACCESS"),

@@ -7175,7 +7175,7 @@ impl GameApp {
     /// would add a line to a C++-mirrored surface for no information — the
     /// default lobby stays exactly as it was.
     fn announce_compat_profile_in_lobby(&mut self) {
-        if self.compat_profile == crate::settings::CompatProfile::Normal {
+        if self.config.compat_profile == crate::settings::CompatProfile::Normal {
             return;
         }
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
@@ -7184,8 +7184,9 @@ impl GameApp {
             // clonk-org/clonk-rs#588 forbids letting that be downgraded in
             // silence, so a request the contract cannot back is reported here
             // and nowhere else.
-            let report =
-                crate::compat_readiness::blocked_join_report(self.compat_profile.display_name());
+            let report = crate::compat_readiness::blocked_join_report(
+                self.config.compat_profile.display_name(),
+            );
             if let Some(lobby) = self.network_lobby.as_mut() {
                 for text in report {
                     lobby.push_log(clonk_frontend::game_lobby::LobbyLogLine {
@@ -7200,13 +7201,14 @@ impl GameApp {
         // only worth having if the host is told *before* anyone joins. A
         // blocked profile is reported and not claimed; discovering it mid-round
         // costs everyone in a lockstep session their round.
-        let report =
-            crate::compat_readiness::blocked_profile_report(self.compat_profile.display_name());
+        let report = crate::compat_readiness::blocked_profile_report(
+            self.config.compat_profile.display_name(),
+        );
         let lines = if report.is_empty() {
             vec![(
                 format!(
                     "Compatibility profile: {}",
-                    self.compat_profile.display_name()
+                    self.config.compat_profile.display_name()
                 ),
                 [0xff, 0xff, 0xff, 0xff],
             )]
@@ -7235,10 +7237,10 @@ impl GameApp {
     /// Advertisement and admission are clonk-org/clonk-rs#583's subject; this
     /// is the single honest answer they will read.
     pub(crate) fn claimed_compat_profile(&self) -> crate::settings::CompatProfile {
-        if self.compat_profile == crate::settings::CompatProfile::Normal
+        if self.config.compat_profile == crate::settings::CompatProfile::Normal
             || crate::compat_readiness::is_ready()
         {
-            self.compat_profile
+            self.config.compat_profile
         } else {
             crate::settings::CompatProfile::Normal
         }

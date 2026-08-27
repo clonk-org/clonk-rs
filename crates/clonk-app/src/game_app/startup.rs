@@ -38,7 +38,8 @@ impl GameApp {
             );
             return;
         };
-        self.deferred_config
+        self.config
+            .deferred
             .set_escaped("General", "Participants", participants, native);
     }
 
@@ -5990,7 +5991,7 @@ impl GameApp {
     /// immediately, from memory. The pending change therefore outranks the
     /// file, which only catches up at a save surface.
     pub(crate) fn startup_message_hidden(&self, key: &str) -> bool {
-        if let Some(pending) = self.deferred_config.get("Startup", key) {
+        if let Some(pending) = self.config.deferred.get("Startup", key) {
             return parse_config_bool(pending);
         }
         self.app_paths
