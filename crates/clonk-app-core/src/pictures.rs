@@ -11,10 +11,9 @@ use clonk_graphics::{
 };
 use clonk_gui::ImageData;
 
-use crate::menu_images::{
-    composite_software_picture_layer, copy_menu_image, copy_menu_image_aspect,
-    copy_stretched_picture, menu_aspect_fit_rect, software_blit_menu_image,
-};
+use clonk_graphics::compositing::{aspect_fit_rect, composite_picture_layer, copy_stretched};
+
+use crate::menu_images::{copy_menu_image, copy_menu_image_aspect, software_blit_menu_image};
 
 #[derive(Clone, Copy, Default)]
 pub struct ScriptTextSpecResources<'a> {
@@ -421,11 +420,11 @@ pub fn compose_owned_menu_picture_with_allowed_modes(
     )
     .ok()?;
     let mut composed = Surface::new(side, side, PixelFormat::Rgba8888);
-    copy_stretched_picture(
+    copy_stretched(
         &base,
         Rect::new(0, 0, image.width(), image.height()),
         &mut composed,
-        menu_aspect_fit_rect(image.width(), image.height(), destination)?,
+        aspect_fit_rect(image.width(), image.height(), destination)?,
     )?;
 
     for (overlay, image) in overlays {
@@ -462,7 +461,7 @@ pub fn compose_owned_menu_picture_with_allowed_modes(
         )
         .ok()?;
         let source_rect = Rect::new(0, 0, image.width(), image.height());
-        let fitted = menu_aspect_fit_rect(image.width(), image.height(), destination)?;
+        let fitted = aspect_fit_rect(image.width(), image.height(), destination)?;
         let mut layer = Surface::new(side, side, PixelFormat::Rgba8888);
         let mut coverage_source =
             Surface::new(image.width(), image.height(), PixelFormat::Rgba8888);
@@ -470,9 +469,9 @@ pub fn compose_owned_menu_picture_with_allowed_modes(
         let mut coverage = Surface::new(side, side, PixelFormat::Rgba8888);
         if let Some(transform) = overlay.transform {
             let mut stretched = Surface::new(side, side, PixelFormat::Rgba8888);
-            copy_stretched_picture(&overlay_surface, source_rect, &mut stretched, fitted)?;
+            copy_stretched(&overlay_surface, source_rect, &mut stretched, fitted)?;
             let mut stretched_coverage = Surface::new(side, side, PixelFormat::Rgba8888);
-            copy_stretched_picture(
+            copy_stretched(
                 &coverage_source,
                 source_rect,
                 &mut stretched_coverage,
@@ -494,10 +493,10 @@ pub fn compose_owned_menu_picture_with_allowed_modes(
                 )
                 .ok()?;
         } else {
-            copy_stretched_picture(&overlay_surface, source_rect, &mut layer, fitted)?;
-            copy_stretched_picture(&coverage_source, source_rect, &mut coverage, fitted)?;
+            copy_stretched(&overlay_surface, source_rect, &mut layer, fitted)?;
+            copy_stretched(&coverage_source, source_rect, &mut coverage, fitted)?;
         }
-        composite_software_picture_layer(&mut composed, &layer, &coverage, mode)?;
+        composite_picture_layer(&mut composed, &layer, &coverage, mode)?;
     }
 
     Some(ImageData::new(side, side, composed.pixels().to_vec()))
@@ -630,7 +629,7 @@ pub fn prepare_inventory_picture_with_renderer_config(
                     center_y,
                 );
                 let mut stretched = Surface::new(width, height, PixelFormat::Rgba8888);
-                copy_stretched_picture(
+                copy_stretched(
                     &overlay_surface,
                     source_rect,
                     &mut stretched,
@@ -645,12 +644,7 @@ pub fn prepare_inventory_picture_with_renderer_config(
                     )
                     .ok()?;
             } else {
-                copy_stretched_picture(
-                    &overlay_surface,
-                    source_rect,
-                    &mut layer,
-                    destination_rect,
-                )?;
+                copy_stretched(&overlay_surface, source_rect, &mut layer, destination_rect)?;
             }
             prepared_overlays.push(InventoryPictureOverlay {
                 picture: ImageData::new(width, height, layer.pixels().to_vec()),
