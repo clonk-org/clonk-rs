@@ -1257,7 +1257,7 @@ async fn headless_round_end_drains_pending_league_record_stream() {
         serve_delayed_record_stream_upload(Duration::from_millis(500));
     let mut app = new_classic_running_sandbox_app();
     install_test_recording_template(&mut app, output_path);
-    app.recording_template
+    app.records.template
         .as_mut()
         .test_value()
         .initial_stream_chunk = b"initial record".to_vec();
@@ -1321,7 +1321,7 @@ fn forced_recording_writes_replay_group_and_league_sha() {
     nested
         .add_file("Nested.txt", b"nested".to_vec())
         .test_value();
-    app.recording_template
+    app.records.template
         .as_mut()
         .test_value()
         .group
@@ -1343,7 +1343,7 @@ fn forced_recording_writes_replay_group_and_league_sha() {
     .test_value();
     main_assert_eq!(
         fs::read(output_path.join("CtrlRec.c4b")).expect("live CtrlRec is durable") =>
-        app.recording
+        app.records.session
             .as_ref()
             .expect("recording remains active")
             .writer
@@ -1418,7 +1418,7 @@ async fn league_streamed_player_strip_and_record_name_match_cpp_bytes() {
     let initial_chunk =
         clonk_network::encode_league_stream_file_chunk(&initial_name, b"packed initial record")
             .test_value();
-    app.recording_template
+    app.records.template
         .as_mut()
         .test_value()
         .initial_stream_chunk = initial_chunk.clone();

@@ -400,6 +400,36 @@ pub(crate) struct PlayerState {
     pub(crate) generated_team_name_template: LegacyCString,
 }
 
+/// Control recording and playback: whether to record, what to record
+/// against, and the session doing it.
+///
+/// `C4GameControl` treats a record as a save plus a control stream, which
+/// is why the seed sits here beside the session: the template and the live
+/// session are both written against the same scenario and parameters, and
+/// `fRecordNeeded` is armed by the console but only cleared once the queued
+/// `CID_Synchronize` actually starts the record. Playback is the same state
+/// read backwards, so it belongs with them rather than beside the engine it
+/// feeds.
+///
+/// Named `records` rather than `recording`: the app field must not share
+/// a name with the `recording` session inside it, or a site that meant the
+/// session resolves to the whole state and only fails later, on a type.
+#[derive(Default)]
+pub(crate) struct RecordingState {
+    pub(crate) enabled: bool,
+    pub(crate) directory: Option<PathBuf>,
+    /// Scenario and parameter inputs shared by developer saves and
+    /// non-initial records. This survives consuming `recording_template`.
+    pub(crate) live_save_seed: Option<RuntimeRecordingSeed>,
+    pub(crate) template: Option<RecordingTemplate>,
+    pub(crate) session: Option<RecordingSession>,
+    /// `C4GameControl::fRecordNeeded`: set as soon as the developer console
+    /// requests a runtime record and cleared only when its queued
+    /// `CID_Synchronize` starts the record (or submission fails).
+    pub(crate) runtime_requested: bool,
+    pub(crate) playback: Option<ControlRecordPlayback>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -1054,18 +1084,8 @@ pub(crate) struct GameApp {
     /// a process-local global Material.c4g.
     pub(crate) network_material_resource_groups: Option<Vec<Group>>,
     pub(crate) executing_ready_tick: Option<Tick>,
-    pub(crate) recording_enabled: bool,
-    pub(crate) recordings_dir: Option<PathBuf>,
-    /// Scenario and parameter inputs shared by developer saves and
-    /// non-initial records. This survives consuming `recording_template`.
-    pub(crate) live_save_seed: Option<RuntimeRecordingSeed>,
-    pub(crate) recording_template: Option<RecordingTemplate>,
-    pub(crate) recording: Option<RecordingSession>,
-    /// `C4GameControl::fRecordNeeded`: set as soon as the developer console
-    /// requests a runtime record and cleared only when its queued
-    /// `CID_Synchronize` starts the record (or submission fails).
-    pub(crate) runtime_record_requested: bool,
-    pub(crate) control_playback: Option<ControlRecordPlayback>,
+    /// Control recording and playback.
+    pub(crate) records: RecordingState,
     pub(crate) object_sprites: HashMap<String, DefinitionSprite>,
     pub(crate) sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     pub(crate) loading_state: Option<ScenarioLoadingState>,

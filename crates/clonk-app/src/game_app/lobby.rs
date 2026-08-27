@@ -7609,7 +7609,7 @@ impl GameApp {
             }
             GameOptionAction::RecordPreferenceChanged(enabled) => {
                 self.startup.view_flags.record = enabled;
-                self.recording_enabled = enabled && self.recordings_dir.is_some();
+                self.records.enabled = enabled && self.records.directory.is_some();
                 self.persist_game_option_value("General", "Record", i32::from(enabled).to_string());
             }
             GameOptionAction::FairCrewPreferenceChanged(_) => {

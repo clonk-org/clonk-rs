@@ -40,6 +40,7 @@ impl GameApp {
 
     fn developer_console_save_parameters(&self) -> Result<Vec<u8>> {
         let seed = self
+            .records
             .live_save_seed
             .as_ref()
             .ok_or_else(|| anyhow!("live save parameter seed is unavailable"))?;
@@ -338,14 +339,16 @@ impl GameApp {
         let mut source_path = if retarget_active_scenario {
             active.path.clone()
         } else {
-            self.live_save_seed
+            self.records
+                .live_save_seed
                 .as_ref()
                 .map(|seed| seed.scenario_source_path.clone())
                 .or_else(|| active.path.clone())
         }
         .ok_or_else(|| anyhow!("active scenario has no filesystem path"))?;
         let retained_origin = (!retarget_active_scenario).then(|| {
-            self.live_save_seed
+            self.records
+                .live_save_seed
                 .as_ref()
                 .map(|seed| seed.scenario_origin.clone())
                 .unwrap_or_else(|| {
@@ -425,7 +428,7 @@ impl GameApp {
                     active.path = Some(destination.clone());
                     active.source_paths = vec![destination.clone()];
                 }
-                if let Some(seed) = self.live_save_seed.as_mut() {
+                if let Some(seed) = self.records.live_save_seed.as_mut() {
                     seed.scenario_source_path = destination.clone();
                     seed.scenario_origin = record_scenario_origin(
                         &destination,
@@ -573,7 +576,8 @@ impl GameApp {
             .as_ref()
             .map(|snapshot| native_bytes_as_legacy_text(snapshot.parameters.title.as_bytes()))
             .or_else(|| {
-                self.live_save_seed
+                self.records
+                    .live_save_seed
                     .as_ref()
                     .map(|seed| native_bytes_as_legacy_text(seed.scenario_title.as_bytes()))
             })
@@ -1163,7 +1167,8 @@ impl GameApp {
                 .as_ref()
                 .map(|snapshot| snapshot.parameters.title.as_bytes().to_vec())
                 .or_else(|| {
-                    self.live_save_seed
+                    self.records
+                        .live_save_seed
                         .as_ref()
                         .map(|seed| seed.scenario_title.as_bytes().to_vec())
                 })
@@ -1715,7 +1720,7 @@ impl GameApp {
         let mut prejoin_recorded_player_files = Vec::new();
         let mut filename_ledger = clonk_engine::RuntimeJoinPlayerFilenameLedger::default();
         for source in &savegame.runtime_players {
-            if self.recording_enabled || self.network_is_league {
+            if self.records.enabled || self.network_is_league {
                 if let Some(path) = savegame.recreation_record_paths.get(&source.info.id) {
                     match packed_group_bytes(path, self.process_group_maker.as_bytes()) {
                         Ok(bytes) => prejoin_recorded_player_files.push((source.info.id, bytes)),

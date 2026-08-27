@@ -777,7 +777,7 @@ impl GameApp {
         let values = self.scenario_game_option_values();
         self.startup.view_flags.fair_crew = values.fair_crew;
         self.startup.view_flags.record = values.record;
-        self.recording_enabled = values.record && self.recordings_dir.is_some();
+        self.records.enabled = values.record && self.records.directory.is_some();
         self.scenario_game_options =
             GameOptionButtons::new(selector_mode.game_option_context(), values);
         self.apply_classic_game_option_overrides();
@@ -1440,9 +1440,9 @@ impl GameApp {
         scenario_data: &Scenario,
     ) -> std::result::Result<(), ScenarioActivationError> {
         self.finish_recording();
-        self.live_save_seed = None;
-        self.recording_template = None;
-        self.control_playback = None;
+        self.records.live_save_seed = None;
+        self.records.template = None;
+        self.records.playback = None;
         self.local_player_profile_paths.clear();
         self.saves.deferred_network_recreation.clear();
         self.saves.network_recreation_progress = None;
@@ -1933,8 +1933,7 @@ impl GameApp {
         // StartRecord precedes InitPlayers and InitGameFinal, so profile-load
         // failure callbacks and Script.Initialize already execute in control
         // sync mode (C4Game.cpp:2467-2474,478-484,2901-2948).
-        let initial_recording_active =
-            !replay && (self.recording_enabled || self.network_is_league);
+        let initial_recording_active = !replay && (self.records.enabled || self.network_is_league);
         engine.set_recording_active(initial_recording_active);
         engine.set_replay_control(replay);
         engine.set_league_game(self.network_is_league);
@@ -2373,7 +2372,7 @@ impl GameApp {
                             continue;
                         }
                     };
-                    if self.recording.is_some() {
+                    if self.records.session.is_some() {
                         match packed_group_bytes(
                             selected.source_path(),
                             self.process_group_maker.as_bytes(),
@@ -2616,7 +2615,7 @@ impl GameApp {
             effective_definition_load,
         ));
         self.active_description_definition_modules = effective_description_definition_modules;
-        self.control_playback = control_playback;
+        self.records.playback = control_playback;
         self.play_scenario_audio(&path);
         if initial_game_data.is_some() {
             let restored_music_level = self.engine.music_level();
@@ -2670,9 +2669,9 @@ impl GameApp {
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
         self.finish_recording();
-        self.live_save_seed = None;
-        self.recording_template = None;
-        self.control_playback = None;
+        self.records.live_save_seed = None;
+        self.records.template = None;
+        self.records.playback = None;
         self.saves.deferred_network_recreation.clear();
         self.saves.network_recreation_progress = None;
         self.loading_state = None;

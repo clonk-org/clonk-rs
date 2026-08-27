@@ -4568,7 +4568,7 @@ fn replay_script_injection_obeys_native_config() {
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     app.synchronize_advanced_options_runtime();
-    app.control_playback =
+    app.records.playback =
         Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.engine.set_debug_mode(true);
     let initial_gravity = app.engine.physics().gravity;

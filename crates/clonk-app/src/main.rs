@@ -2942,13 +2942,15 @@ impl GameApp {
             client_combined_preload_file: ClientCombinedPreloadFile::default(),
             network_material_resource_groups: None,
             executing_ready_tick: None,
-            recording_enabled: runtime.record_enabled && paths.is_some(),
-            recordings_dir: paths.map(AppPaths::recordings_dir),
-            live_save_seed: None,
-            recording_template: None,
-            recording: None,
-            runtime_record_requested: false,
-            control_playback: None,
+            records: RecordingState {
+                enabled: runtime.record_enabled && paths.is_some(),
+                directory: paths.map(AppPaths::recordings_dir),
+                live_save_seed: None,
+                template: None,
+                session: None,
+                runtime_requested: false,
+                playback: None,
+            },
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
@@ -5454,7 +5456,7 @@ impl GameApp {
             objects: selected_object_numbers.to_vec(),
             strictness: self.running_console_script_strictness(),
             script,
-            by_client: if self.control_playback.is_some() {
+            by_client: if self.records.playback.is_some() {
                 -1
             } else {
                 0
@@ -7089,8 +7091,9 @@ impl GameApp {
             .cloned()
             .filter_map(NetworkControl::into_packet)
             .collect::<Vec<_>>();
-        let runtime_record_waiting = self.runtime_record_requested && self.recording.is_none();
-        let mut batch_recorded = self.recording.is_some();
+        let runtime_record_waiting =
+            self.records.runtime_requested && self.records.session.is_none();
+        let mut batch_recorded = self.records.session.is_some();
         if batch_recorded {
             self.record_control_batch(&packets);
         }
@@ -7098,7 +7101,7 @@ impl GameApp {
         self.executing_ready_tick = Some(tick);
         let stop_if_running_mode_exits = matches!(self.mode, AppMode::Running);
         let require_live_network = self.network.is_some();
-        let replaying = self.control_playback.is_some();
+        let replaying = self.records.playback.is_some();
         let allow_scripting_in_replays = replaying && self.allow_scripting_in_replays;
         let console_active = self.console_mode;
         let mut result = Ok(());
@@ -7160,7 +7163,7 @@ impl GameApp {
                                 (!info.filename.is_empty()).then(|| info.filename.clone())
                             });
                         for join in joins {
-                            if self.recording.is_some() {
+                            if self.records.session.is_some() {
                                 let mut recorded_join = join.clone();
                                 let recorded = if join.filename.is_empty() {
                                     Some(recorded_join)
@@ -7318,14 +7321,14 @@ impl GameApp {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
                 NetworkControl::Synchronize(control) => (|| {
-                    if runtime_record_waiting && self.runtime_record_requested {
+                    if runtime_record_waiting && self.records.runtime_requested {
                         // C4Game::Synchronize calls OnGameSynchronizing before
                         // mutating synchronized state. Earlier packets in this
                         // complete control have already executed, so capture
                         // the non-initial record here rather than at batch
                         // admission. StartRecord then records the entire
                         // executing C4Control, including those earlier rows.
-                        self.runtime_record_requested = false;
+                        self.records.runtime_requested = false;
                         let started = self
                             .prepare_runtime_recording_at_synchronize()
                             .and_then(|()| self.start_recording(true));
@@ -8500,9 +8503,9 @@ impl GameApp {
         }
 
         self.finish_recording();
-        self.live_save_seed = None;
-        self.recording_template = None;
-        self.control_playback = None;
+        self.records.live_save_seed = None;
+        self.records.template = None;
+        self.records.playback = None;
         if let Some(audio) = self.sound.context.as_ref() {
             // Loading a save starts a fresh native round. Rebuild the
             // SoundSystem generation before installing that round's effects.
@@ -8527,7 +8530,7 @@ impl GameApp {
         );
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
-        self.engine.set_recording_active(self.recording_enabled);
+        self.engine.set_recording_active(self.records.enabled);
         self.engine.set_fair_crew_forced(parameter_bootstrap.0);
         self.engine
             .set_allow_debug(saved_allow_debug.unwrap_or(parameter_bootstrap.1));
@@ -8678,7 +8681,8 @@ impl GameApp {
         // takeover rows through SetSavegameResume.
         let loaded_record_prepare_result = recording_scenario_data.as_ref().map(|scenario_data| {
             let initial_source = self
-                .recording_enabled
+                .records
+                .enabled
                 .then_some(InitialRecordingSource::Loaded {
                     music_enabled: save.runtime_music_enabled.unwrap_or(false),
                     source_save_player_infos: save.source_save_player_infos.as_deref(),

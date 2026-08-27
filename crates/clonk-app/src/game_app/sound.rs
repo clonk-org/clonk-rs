@@ -914,7 +914,7 @@ impl GameApp {
                         }
                     }
                 }
-                let replay_finished = if let Some(playback) = self.control_playback.as_mut() {
+                let replay_finished = if let Some(playback) = self.records.playback.as_mut() {
                     let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
                     let controls = playback
                         .take_controls(frame)
@@ -930,7 +930,7 @@ impl GameApp {
                     false
                 };
                 if replay_finished {
-                    self.control_playback = None;
+                    self.records.playback = None;
                     self.engine.finish_replay()?;
                 }
                 self.apply_direct_film_view_projection();
