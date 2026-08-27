@@ -3319,12 +3319,15 @@ impl GameApp {
                 self.lobby_ready_check_sink.as_ref(),
                 &self.lobby_ready_check_actions(),
             );
-            self.pending_desktop_notifications
-                .push_back(DesktopNotification::new(
+            // A check that somehow starts over an unresolved one takes the
+            // older toast down first, so only the live prompt is ever shown.
+            self.dismiss_ready_check_notification();
+            self.live_ready_check_notification =
+                Some(self.queue_desktop_notification(DesktopNotification::new(
                     "Are you ready?",
                     lobby_ready_check_message(remaining_seconds).replace('|', "\n"),
                     Duration::from_secs(u64::from(remaining_seconds)),
-                ));
+                )));
         }
         self.lobby_ready_check_continuation = Some(continuation);
         Ok(())
@@ -3349,9 +3352,24 @@ impl GameApp {
     ///
     /// Returns whether there was one to close.
     pub(crate) fn close_lobby_ready_check_continuation(&mut self) -> bool {
+        self.dismiss_ready_check_notification();
         self.lobby_ready_check_continuation
             .take()
             .is_some_and(|continuation| continuation.close(self.lobby_ready_check_sink.as_ref()))
+    }
+
+    /// Take the live ready check's toast back off the desktop.
+    ///
+    /// `Option::take` is what makes this exactly-once: the identity is minted
+    /// with the toast and consumed by the first terminal path to run, so a
+    /// second one — an answer racing the countdown, or teardown following
+    /// either — queues nothing. `ReadyCheckDialog::OnClosed` has the same
+    /// property structurally, being the destructor of the object that owns
+    /// the toast (`src/C4Network2.cpp:176-183`).
+    pub(crate) fn dismiss_ready_check_notification(&mut self) {
+        if let Some(id) = self.live_ready_check_notification.take() {
+            self.pending_desktop_notification_dismissals.push_back(id);
+        }
     }
 
     /// Submit an answer a notification action claimed on another thread.
@@ -3370,6 +3388,7 @@ impl GameApp {
             return Ok(());
         };
         self.lobby_ready_check_continuation = None;
+        self.dismiss_ready_check_notification();
         // The prompt is still open: the claim happened outside it. Drop it
         // without running its continuation, which is already resolved.
         if let Some(index) = self.message_dialogs.iter().position(|dialog| {
@@ -7590,6 +7609,7 @@ impl GameApp {
             return Ok(());
         }
         self.lobby_ready_check_continuation = None;
+        self.dismiss_ready_check_notification();
         self.submit_lobby_ready_check_response(ready)
     }
 

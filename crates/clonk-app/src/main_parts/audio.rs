@@ -1440,17 +1440,28 @@ pub(crate) fn present_retained_gpu_frame_profiled(
     Ok(outcome)
 }
 
-pub(crate) fn deliver_desktop_notifications<F>(app: &mut GameApp, mut show: F)
+pub(crate) fn deliver_desktop_notifications<S, H>(app: &mut GameApp, mut show: S, mut hide: H)
 where
-    F: FnMut(&DesktopNotification) -> Result<()>,
+    S: FnMut(DesktopNotificationId, &DesktopNotification) -> Result<()>,
+    H: FnMut(DesktopNotificationId) -> Result<()>,
 {
-    while let Some(notification) = app.take_desktop_notification() {
-        if let Err(error) = show(&notification) {
+    while let Some((id, notification)) = app.take_desktop_notification() {
+        if let Err(error) = show(id, &notification) {
             tracing::warn!(
                 %error,
                 title = %notification.title,
                 "failed to show desktop notification"
             );
+        }
+    }
+    // Hides are drained after shows so a check that was answered inside one
+    // frame still takes its own toast down rather than a stale identity.
+    while let Some(id) = app.take_dismissed_desktop_notification() {
+        if let Err(error) = hide(id) {
+            // C++ ignores the result of `toast->Hide()` entirely
+            // (`src/C4Network2.cpp:176-178`): a toast the desktop has already
+            // expired or replaced is not an error worth acting on.
+            tracing::debug!(%error, "failed to hide desktop notification");
         }
     }
 }

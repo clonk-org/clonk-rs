@@ -563,7 +563,17 @@ pub(crate) struct GameApp {
     pub(crate) pending_local_lobby_countdown_echoes: VecDeque<clonk_network::LobbyCountdownPacket>,
     pub(crate) lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
     pub(crate) ready_check_toasts_enabled: bool,
-    pub(crate) pending_desktop_notifications: VecDeque<DesktopNotification>,
+    pub(crate) pending_desktop_notifications:
+        VecDeque<(DesktopNotificationId, DesktopNotification)>,
+    /// Notifications the application has taken back, drained beside the
+    /// shows. `ReadyCheckDialog::OnClosed` hides the dialog's toast from
+    /// whichever side closed the prompt (`src/C4Network2.cpp:176-183`).
+    pub(crate) pending_desktop_notification_dismissals: VecDeque<DesktopNotificationId>,
+    /// The live ready check's toast, while it has one.
+    pub(crate) live_ready_check_notification: Option<DesktopNotificationId>,
+    /// Source of [`DesktopNotificationId`]s, so a dismissal names exactly the
+    /// notification its check queued and never a later one.
+    pub(crate) next_desktop_notification_id: u64,
     /// The live ready check's single-claim continuation.
     ///
     /// `C4Network2::ReadyCheckDialog` is one modal whose `ShowModalDlg` return

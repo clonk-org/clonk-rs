@@ -8002,7 +8002,7 @@ fn ready_check_toast_follows_the_config_flag_rather_than_window_focus() {
     app.handle_lobby_ready_check_request(packet).test_value();
 
     main_assert_eq!(
-        app.take_desktop_notification() =>
+        app.take_desktop_notification().map(|(_, notification)| notification) =>
         Some(DesktopNotification::new(
             "Are you ready?",
             "The host wants to know whether you're ready.\n15 seconds remaining.",
@@ -8031,21 +8031,136 @@ fn ready_check_toast_follows_the_config_flag_rather_than_window_focus() {
 #[test]
 fn desktop_notification_delivery_failure_is_nonfatal() {
     let mut app = new_state_only_menu_app(320, 200);
-    app.pending_desktop_notifications
-        .push_back(DesktopNotification::new(
-            "Ready check",
-            "Synthetic failure",
-            Duration::from_secs(15),
-        ));
-    let mut attempts = 0;
+    let shown = app.queue_desktop_notification(DesktopNotification::new(
+        "Ready check",
+        "Synthetic failure",
+        Duration::from_secs(15),
+    ));
+    app.pending_desktop_notification_dismissals.push_back(shown);
+    let mut shows = 0;
+    let mut hides = 0;
 
-    deliver_desktop_notifications(&mut app, |_| {
-        attempts += 1;
-        Err(anyhow!("synthetic notification backend failure"))
-    });
+    deliver_desktop_notifications(
+        &mut app,
+        |_, _| {
+            shows += 1;
+            Err(anyhow!("synthetic notification backend failure"))
+        },
+        |_| {
+            hides += 1;
+            Err(anyhow!("synthetic notification close failure"))
+        },
+    );
 
-    main_assert_eq!(attempts => 1);
+    main_assert_eq!(shows => 1);
+    main_assert_eq!(hides => 1, "a failed show still lets the hide be attempted");
     main_assert!(app.take_desktop_notification().is_none());
+    main_assert!(app.take_dismissed_desktop_notification().is_none());
+}
+
+/// The ready check's toast dies with its dialog, whichever side closed it.
+///
+/// `ReadyCheckDialog::OnClosed` detaches the toast's handler and hides it
+/// (`src/C4Network2.cpp:176-183`), and it runs for every way the modal can
+/// end. C++ cannot leave one on screen: the toast is a member of the dialog
+/// being destroyed.
+#[test]
+fn answering_a_ready_check_dismisses_its_notification_exactly_once() {
+    let mut app = new_menu_app(320, 200);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_lobby = Some(client_lobby_state());
+    app.window_active = false;
+    app.ready_check_toasts_enabled = true;
+
+    let packet = clonk_network::ReadyCheckPacket::new(0, clonk_network::ReadyCheckData::Request);
+    app.handle_lobby_ready_check_request(packet).test_value();
+
+    let (shown, _) = app
+        .take_desktop_notification()
+        .expect("the request queues one notification");
+    main_assert!(
+        app.take_dismissed_desktop_notification().is_none(),
+        "an open check dismisses nothing"
+    );
+
+    app.complete_lobby_ready_check_response(true).test_value();
+
+    main_assert_eq!(
+        app.take_dismissed_desktop_notification() => Some(shown),
+        "the answer hides the toast it was shown for",
+    );
+    main_assert!(
+        app.take_dismissed_desktop_notification().is_none(),
+        "and hides it once, not once per drain"
+    );
+}
+
+/// The countdown ends the dialog too, so it takes the toast with it.
+///
+/// `ReadyCheckDialog` is a `TimedDialog{15}` whose last callback closes it
+/// false (`src/C4Network2.cpp:129-146`), and closing is what runs `OnClosed`.
+/// A toast left behind here is the visible form of the bug: it outlives the
+/// check by whatever remains of its own expiry.
+#[test]
+fn a_timed_out_ready_check_dismisses_its_notification() {
+    let (mut app, event_tx, _commands) = networked_client_lobby_with_commands(
+        new_menu_app(320, 200),
+        "Client",
+        client_lobby_state(),
+    );
+    app.window_active = false;
+    app.ready_check_toasts_enabled = true;
+    send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
+    app.test_network_events();
+
+    let (shown, _) = app
+        .take_desktop_notification()
+        .expect("the request queues one notification");
+
+    for _ in 0..LOBBY_READY_CHECK_PROMPT_SECONDS {
+        app.sec1_timer().test_value();
+    }
+
+    main_assert!(app.message_dialogs.is_empty(), "the countdown closed it");
+    main_assert_eq!(
+        app.take_dismissed_desktop_notification() => Some(shown),
+        "and the toast went with the dialog",
+    );
+    main_assert!(app.take_dismissed_desktop_notification().is_none());
+}
+
+/// Lobby teardown resolves a live check, so it dismisses the toast as well.
+///
+/// `C4Network2::LobbyDestroyed` clears every remaining dialog without running
+/// their callbacks (`src/C4Network2.cpp:493-512`); the toast is not a callback
+/// but a member, so it dies regardless.
+#[test]
+fn lobby_teardown_dismisses_a_live_ready_check_notification() {
+    let mut app = new_menu_app(320, 200);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_lobby = Some(client_lobby_state());
+    app.window_active = false;
+    app.ready_check_toasts_enabled = true;
+
+    let packet = clonk_network::ReadyCheckPacket::new(0, clonk_network::ReadyCheckData::Request);
+    app.handle_lobby_ready_check_request(packet).test_value();
+    let (shown, _) = app
+        .take_desktop_notification()
+        .expect("the request queues one notification");
+
+    app.close_lobby_ready_check_continuation();
+
+    main_assert_eq!(app.take_dismissed_desktop_notification() => Some(shown));
+    // Teardown runs the same close again on its way out; the toast is already
+    // gone and must not be named a second time.
+    app.close_lobby_ready_check_continuation();
+    main_assert!(app.take_dismissed_desktop_notification().is_none());
 }
 
 #[test]

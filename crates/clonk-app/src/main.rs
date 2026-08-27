@@ -313,7 +313,7 @@ use clonk_resources::{
 };
 use clonk_surface::WindowSurface;
 use control_options::format_key_label;
-use desktop_notification::{DesktopNotification, DesktopNotifier};
+use desktop_notification::{DesktopNotification, DesktopNotificationId, DesktopNotifier};
 use display_sleep_inhibitor::DisplaySleepInhibitor;
 use gamepad::{
     GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
@@ -1539,11 +1539,19 @@ fn run() -> Result<()> {
                     if app.take_user_attention_request() {
                         window.request_user_attention(Some(UserAttentionType::Informational));
                     }
-                    deliver_desktop_notifications(&mut app, |notification| {
-                        desktop_notifier
-                            .as_ref()
-                            .map_or(Ok(()), |notifier| notifier.show(notification))
-                    });
+                    deliver_desktop_notifications(
+                        &mut app,
+                        |id, notification| {
+                            desktop_notifier
+                                .as_ref()
+                                .map_or(Ok(()), |notifier| notifier.show(id, notification))
+                        },
+                        |id| {
+                            desktop_notifier
+                                .as_ref()
+                                .map_or(Ok(()), |notifier| notifier.hide(id))
+                        },
+                    );
                     // A toast button resolves the ready check on the backend's
                     // own thread, which can neither touch the lobby state nor
                     // call the blocking submit. Drain it here instead.
@@ -2795,6 +2803,9 @@ impl GameApp {
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
             ready_check_toasts_enabled: load_ready_check_toasts_enabled(paths),
             pending_desktop_notifications: VecDeque::new(),
+            pending_desktop_notification_dismissals: VecDeque::new(),
+            live_ready_check_notification: None,
+            next_desktop_notification_id: 0,
             lobby_ready_check_continuation: None,
             lobby_ready_check_sink: std::sync::Arc::new(ready_check_notification::SilentSink),
             control_messages,
@@ -6539,8 +6550,27 @@ impl GameApp {
         self.control_messages.take_user_attention_request()
     }
 
-    fn take_desktop_notification(&mut self) -> Option<DesktopNotification> {
+    fn take_desktop_notification(
+        &mut self,
+    ) -> Option<(DesktopNotificationId, DesktopNotification)> {
         self.pending_desktop_notifications.pop_front()
+    }
+
+    /// The next notification to take back off the desktop.
+    fn take_dismissed_desktop_notification(&mut self) -> Option<DesktopNotificationId> {
+        self.pending_desktop_notification_dismissals.pop_front()
+    }
+
+    /// Queue one notification and hand back the identity that addresses it.
+    fn queue_desktop_notification(
+        &mut self,
+        notification: DesktopNotification,
+    ) -> DesktopNotificationId {
+        let id = DesktopNotificationId(self.next_desktop_notification_id);
+        self.next_desktop_notification_id = self.next_desktop_notification_id.wrapping_add(1);
+        self.pending_desktop_notifications
+            .push_back((id, notification));
+        id
     }
 
     /// Shared `pVP->Init(target, true)` path for observer selection previews

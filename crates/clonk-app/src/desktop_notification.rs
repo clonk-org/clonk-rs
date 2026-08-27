@@ -2,6 +2,16 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+/// One shown notification's handle.
+///
+/// A toast has to be addressable to be taken back: `ReadyCheckDialog::OnClosed`
+/// hides the one the dialog is holding (`src/C4Network2.cpp:176-183`). The
+/// backends' own identifiers differ — freedesktop `Notify` returns a `u32` and
+/// WinRT hands back the `ToastNotification` object — so the application mints
+/// its own and the notifier maps it to whichever the platform uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct DesktopNotificationId(pub(crate) u64);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DesktopNotification {
     pub(crate) title: String,
@@ -26,13 +36,26 @@ impl DesktopNotification {
 pub(crate) struct DesktopNotifier {
     #[cfg(any(target_os = "linux", windows))]
     backend: backend::Notifier,
+    /// What each shown notification is called on the platform that shows it.
+    ///
+    /// An entry lives from the show until the hide that consumes it, so a
+    /// repeated hide — the countdown and an answer racing, say — finds
+    /// nothing and does nothing.
+    #[cfg(any(target_os = "linux", windows))]
+    shown:
+        std::cell::RefCell<std::collections::HashMap<DesktopNotificationId, backend::ShownToast>>,
 }
 
 impl DesktopNotifier {
     pub(crate) fn initialize() -> Result<Option<Self>> {
         #[cfg(any(target_os = "linux", windows))]
         {
-            backend::Notifier::initialize().map(|backend| Some(Self { backend }))
+            backend::Notifier::initialize().map(|backend| {
+                Some(Self {
+                    backend,
+                    shown: std::cell::RefCell::new(std::collections::HashMap::new()),
+                })
+            })
         }
 
         #[cfg(not(any(target_os = "linux", windows)))]
@@ -41,15 +64,42 @@ impl DesktopNotifier {
         }
     }
 
-    pub(crate) fn show(&self, notification: &DesktopNotification) -> Result<()> {
+    pub(crate) fn show(
+        &self,
+        id: DesktopNotificationId,
+        notification: &DesktopNotification,
+    ) -> Result<()> {
         #[cfg(any(target_os = "linux", windows))]
         {
-            self.backend.show(notification)
+            let shown = self.backend.show(notification)?;
+            self.shown.borrow_mut().insert(id, shown);
+            Ok(())
         }
 
         #[cfg(not(any(target_os = "linux", windows)))]
         {
-            let _ = notification;
+            let _ = (id, notification);
+            Ok(())
+        }
+    }
+
+    /// Take a shown notification back off the desktop.
+    ///
+    /// An identity this notifier never showed — or has already hidden — is
+    /// not an error: `ReadyCheckDialog::OnClosed` hides unconditionally and
+    /// ignores the result (`src/C4Network2.cpp:176-178`).
+    pub(crate) fn hide(&self, id: DesktopNotificationId) -> Result<()> {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            match self.shown.borrow_mut().remove(&id) {
+                Some(shown) => self.backend.hide(shown),
+                None => Ok(()),
+            }
+        }
+
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            let _ = id;
             Ok(())
         }
     }
@@ -67,6 +117,10 @@ mod backend {
 
     use super::DesktopNotification;
 
+    /// `Notify` returns the server's identifier for the notification, which
+    /// is what `CloseNotification` takes.
+    pub(super) type ShownToast = u32;
+
     pub(super) struct Notifier {
         connection: Connection,
     }
@@ -78,7 +132,7 @@ mod backend {
             Ok(Self { connection })
         }
 
-        pub(super) fn show(&self, notification: &DesktopNotification) -> Result<()> {
+        pub(super) fn show(&self, notification: &DesktopNotification) -> Result<ShownToast> {
             let proxy = Proxy::new(
                 &self.connection,
                 "org.freedesktop.Notifications",
@@ -89,7 +143,7 @@ mod backend {
             let actions = Vec::<&str>::new();
             let hints = HashMap::<&str, Value<'_>>::new();
             let expiration = i32::try_from(notification.expiration.as_millis()).unwrap_or(i32::MAX);
-            let _: u32 = proxy
+            let shown: ShownToast = proxy
                 .call(
                     "Notify",
                     &(
@@ -104,6 +158,24 @@ mod backend {
                     ),
                 )
                 .context("desktop notification service rejected the ready check")?;
+            Ok(shown)
+        }
+
+        /// `org.freedesktop.Notifications.CloseNotification` withdraws a
+        /// notification the server is still showing. An identifier the server
+        /// has already expired is accepted and ignored by the specification,
+        /// so this reports only transport failures.
+        pub(super) fn hide(&self, shown: ShownToast) -> Result<()> {
+            let proxy = Proxy::new(
+                &self.connection,
+                "org.freedesktop.Notifications",
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+            )
+            .context("failed to create the desktop notification proxy")?;
+            proxy
+                .call::<_, _, ()>("CloseNotification", &(shown,))
+                .context("desktop notification service rejected the close")?;
             Ok(())
         }
     }
@@ -141,6 +213,10 @@ mod backend {
     // toast permissions and history continue to apply after the visible rename.
     const APP_USER_MODEL_ID: &str = "LegacyClonkTeam.LegacyClonk";
 
+    /// `ToastNotifier::Hide` takes the notification object itself, so the
+    /// toast has to be retained rather than reduced to an identifier.
+    pub(super) type ShownToast = ToastNotification;
+
     pub(super) struct Notifier {
         notifier: Option<ToastNotifier>,
         apartment_initialized: bool,
@@ -170,7 +246,7 @@ mod backend {
             }
         }
 
-        pub(super) fn show(&self, notification: &DesktopNotification) -> Result<()> {
+        pub(super) fn show(&self, notification: &DesktopNotification) -> Result<ShownToast> {
             let content =
                 ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02)
                     .context("failed to create WinRT toast content")?;
@@ -197,6 +273,18 @@ mod backend {
                 .expect("notifier exists until drop")
                 .Show(&toast)
                 .context("failed to show WinRT toast")?;
+            Ok(toast)
+        }
+
+        /// `ToastNotifier::Hide` withdraws a toast that is still on screen. A
+        /// toast the user or the system already dismissed is accepted, so this
+        /// reports only a failure of the call itself.
+        pub(super) fn hide(&self, shown: ShownToast) -> Result<()> {
+            self.notifier
+                .as_ref()
+                .expect("notifier exists until drop")
+                .Hide(&shown)
+                .context("failed to hide WinRT toast")?;
             Ok(())
         }
     }
