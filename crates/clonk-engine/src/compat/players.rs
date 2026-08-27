@@ -4576,10 +4576,8 @@ pub(crate) fn set_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "SetCrewEnabled", "obj"))
         .transpose()?
         .flatten();
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     if let Some(target) = target {
         if Some(target) != active {

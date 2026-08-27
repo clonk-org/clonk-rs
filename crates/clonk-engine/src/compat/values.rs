@@ -1447,15 +1447,13 @@ pub(crate) fn inc_var(args: &[Value]) -> Result<Value, RuntimeError> {
 /// divergence in clonk-org/clonk-rs#1050 needs; this shares the draw's sink so
 /// the annotation lands immediately above the line it describes.
 fn script_draw_callsite(range: i32) -> String {
-    let caller = HOST_CONTEXT.with(|cell| {
-        cell.borrow().as_ref().and_then(|context| {
-            context.object_context().map(|object| {
-                format!(
-                    "{} {}",
-                    object.id().as_u64(),
-                    object.effective_action_name()
-                )
-            })
+    let caller = with_host_context(None, |context| {
+        context.object_context().map(|object| {
+            format!(
+                "{} {}",
+                object.id().as_u64(),
+                object.effective_action_name()
+            )
         })
     });
     let frame = ENVIRONMENT_CONTEXT.with(|cell| {

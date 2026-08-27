@@ -282,11 +282,7 @@ pub(crate) fn broadcast_global_callback(
         }
     }
 
-    let script = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.world.scenario_script().cloned())
-    });
+    let script = with_host_context(None, |context| context.world.scenario_script().cloned());
     match script {
         Some(script) => {
             call_scoped_scenario_function(script, function, args).unwrap_or(Ok(Value::Nil))
@@ -328,10 +324,8 @@ pub(crate) fn with_creatorless_object_context<T>(
 
 /// The active object of the executing call (`cthr->Obj`).
 pub(crate) fn active_object_id() -> Option<ObjectId> {
-    HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     })
 }
 
@@ -390,13 +384,11 @@ pub(crate) fn call_self(args: &[Value]) -> Result<Value, RuntimeError> {
     if name.is_empty() {
         return Ok(Value::Nil);
     }
-    let target = HOST_CONTEXT.with(|cell| {
-        cell.borrow().as_ref().and_then(|context| {
-            context
-                .object_context()
-                .filter(|scope| !scope.destroy && scope.status() != ObjectStatus::Deleted)
-                .map(ObjectScopeContext::id)
-        })
+    let target = with_host_context(None, |context| {
+        context
+            .object_context()
+            .filter(|scope| !scope.destroy && scope.status() != ObjectStatus::Deleted)
+            .map(ObjectScopeContext::id)
     });
     let Some(target) = target else {
         return Ok(Value::Nil);
@@ -573,10 +565,8 @@ pub(crate) fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeErro
         // Definition call (C4AulExec.cpp:1235-1245): the definition must be
         // known — that error is NOT covered by the failsafe.
         let def_id = definition_id_for_c4id(stored_id).unwrap_or_default();
-        let script = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.world.definition_script(&def_id).cloned())
+        let script = with_host_context(None, |context| {
+            context.world.definition_script(&def_id).cloned()
         });
         let Some(script) = script else {
             return Err(RuntimeError::new(format!(
@@ -612,10 +602,8 @@ pub(crate) fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeErro
     // Preserve the validation, then let the paired AB_CALL re-resolve Func
     // on the target definition just like a plain arrow call.
     if let Some((namespace, function)) = name.split_once("::") {
-        let script = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.world.definition_script(namespace).cloned())
+        let script = with_host_context(None, |context| {
+            context.world.definition_script(namespace).cloned()
         });
         let Some(script) = script else {
             return Err(RuntimeError::new(format!(
@@ -690,10 +678,8 @@ pub(crate) fn arrow_method_ref_args_dispatch(
 
     if let Value::C4Id(stored_id) = &target_value {
         let def_id = definition_id_for_c4id(stored_id).unwrap_or_default();
-        let script = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.world.definition_script(&def_id).cloned())
+        let script = with_host_context(None, |context| {
+            context.world.definition_script(&def_id).cloned()
         });
         let Some(script) = script else {
             return Err(RuntimeError::new(format!(
@@ -723,10 +709,8 @@ pub(crate) fn arrow_method_ref_args_dispatch(
     // `obj->ID::Func(...)`: AB_CALLNS only validates, AB_CALL re-resolves.
     let name = match name.split_once("::") {
         Some((namespace, function)) => {
-            let script = HOST_CONTEXT.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .and_then(|context| context.world.definition_script(namespace).cloned())
+            let script = with_host_context(None, |context| {
+                context.world.definition_script(namespace).cloned()
             });
             let Some(script) = script else {
                 return Err(RuntimeError::new(format!(
@@ -769,10 +753,8 @@ pub(crate) fn arrow_method_reference_dispatch(
 
     if let Value::C4Id(stored_id) = &target_value {
         let def_id = definition_id_for_c4id(stored_id).unwrap_or_default();
-        let script = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.world.definition_script(&def_id).cloned())
+        let script = with_host_context(None, |context| {
+            context.world.definition_script(&def_id).cloned()
         });
         let Some(script) = script else {
             return Err(RuntimeError::new(format!(
@@ -802,10 +784,8 @@ pub(crate) fn arrow_method_reference_dispatch(
         return Err(RuntimeError::new("Object call: target is zero!"));
     }
     if let Some((namespace, function)) = name.split_once("::") {
-        let script = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.world.definition_script(namespace).cloned())
+        let script = with_host_context(None, |context| {
+            context.world.definition_script(namespace).cloned()
         });
         let Some(script) = script else {
             return Err(RuntimeError::new(format!(
@@ -1232,10 +1212,8 @@ pub(crate) fn definition_call(args: &[Value]) -> Result<Value, RuntimeError> {
     if name.is_empty() {
         return Ok(Value::Nil);
     }
-    let script = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.world.definition_script(&def_id).cloned())
+    let script = with_host_context(None, |context| {
+        context.world.definition_script(&def_id).cloned()
     });
     let Some(script) = script else {
         return Ok(Value::Nil); // C4Id2Def failure → C4VNull (C4Script.cpp:3462)
@@ -1257,11 +1235,7 @@ pub(crate) fn game_call(args: &[Value]) -> Result<Value, RuntimeError> {
     if name.is_empty() {
         return Ok(Value::Nil);
     }
-    let script = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.world.scenario_script().cloned())
-    });
+    let script = with_host_context(None, |context| context.world.scenario_script().cloned());
     let Some(script) = script else {
         return Ok(Value::Nil);
     };
@@ -1317,11 +1291,7 @@ pub(crate) fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    let script = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.world.scenario_script().cloned())
-    });
+    let script = with_host_context(None, |context| context.world.scenario_script().cloned());
     match script {
         Some(script) => {
             call_scoped_scenario_function(script, &name, pars).unwrap_or(Ok(Value::Nil))
@@ -2601,10 +2571,8 @@ pub(crate) fn redirect_foreign_effect_target(
         Some(value @ (Value::Object(_) | Value::Proplist(_))) => object_id_from_value(value)?,
         _ => return None,
     };
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+    let active = with_host_context(None, |context| {
+        context.object_context().map(|object| object.id())
     });
     if Some(target) == active {
         return None;
@@ -2630,7 +2598,7 @@ pub(crate) fn with_context_mut<R>(
 }
 
 pub(crate) fn snapshot_effects_from_context(scope: EffectScope) -> Option<Vec<EffectState>> {
-    HOST_CONTEXT.with(|cell| cell.borrow().as_ref().and_then(|ctx| ctx.snapshot(scope)))
+    with_host_context(None, |ctx| ctx.snapshot(scope))
 }
 
 pub(crate) fn with_effects_from_context<R>(
