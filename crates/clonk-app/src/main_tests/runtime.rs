@@ -5181,6 +5181,110 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     assert!(!app.developer_object_list_open);
 }
 
+/// Press and release one key, the way the console shell delivers it.
+fn press_console_key(app: &mut GameApp, key: VirtualKeyCode, modifiers: ModifiersState) {
+    app.handle_modifiers_changed(modifiers).test_value();
+    app.handle_key(key, ElementState::Pressed).test_value();
+    app.handle_key(key, ElementState::Released).test_value();
+    app.handle_modifiers_changed(ModifiersState::empty())
+        .test_value();
+}
+
+/// `C4Game.cpp:3433-3439` registers the C4ToolsDlg actions at
+/// `KEYSCOPE_Console`, so they act only in console mode. `ChangeGrade` clamps
+/// into `[C4TLS_GradeMin, C4TLS_GradeMax]` and has no availability gate of its
+/// own (`C4ToolsDlg.cpp:739-745`); `ToggleTool` is `(Tool + 1) % 4`, which never
+/// lands on Picker (`C4ToolsDlg.h:148`).
+#[test]
+fn console_tool_keys_drive_the_retained_tools_dialog_state() {
+    use clonk_engine::developer_tools::{Tool, GRADE_MAX, GRADE_MIN};
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+
+    let grade = app.developer_tools.grade();
+    press_console_key(&mut app, VirtualKeyCode::NumpadAdd, ModifiersState::empty());
+    runtime_assert_eq!(
+        app.developer_tools.grade() => (grade + 5).min(GRADE_MAX),
+        "the keyboard step is five grades, clamped at the maximum",
+    );
+    press_console_key(
+        &mut app,
+        VirtualKeyCode::NumpadSubtract,
+        ModifiersState::empty(),
+    );
+    runtime_assert_eq!(app.developer_tools.grade() => grade);
+
+    // The clamp is C++'s BoundBy, not a wrap.
+    for _ in 0..40 {
+        press_console_key(
+            &mut app,
+            VirtualKeyCode::NumpadSubtract,
+            ModifiersState::empty(),
+        );
+    }
+    runtime_assert_eq!(app.developer_tools.grade() => GRADE_MIN);
+
+    let ift = app.developer_tools.ift();
+    press_console_key(&mut app, VirtualKeyCode::KeyI, ModifiersState::CONTROL);
+    runtime_assert_eq!(app.developer_tools.ift() => !ift);
+
+    // Four tools, cycling, never Picker.
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        press_console_key(&mut app, VirtualKeyCode::KeyW, ModifiersState::CONTROL);
+        seen.push(app.developer_tools.tool());
+    }
+    runtime_assert!(
+        !seen.contains(&Tool::Picker),
+        "(Tool + 1) % 4 never reaches Picker, got {seen:?}"
+    );
+    runtime_assert_eq!(seen.last().copied() => Some(app.developer_tools.tool()));
+
+    // Fullscreen must not see any of them: these are KEYSCOPE_Console.
+    let mut fullscreen = new_lightweight_running_sandbox_app();
+    let untouched = fullscreen.developer_tools.grade();
+    press_console_key(
+        &mut fullscreen,
+        VirtualKeyCode::NumpadAdd,
+        ModifiersState::empty(),
+    );
+    runtime_assert_eq!(
+        fullscreen.developer_tools.grade() => untouched,
+        "KEYSCOPE_Console actions are inert outside the console",
+    );
+}
+
+/// `PopMaterial`/`PopTextures` return false when the dialog has no window
+/// (`C4ToolsDlg.cpp:748-749,762-763`), so they only pop a combo while the
+/// tools page is actually up.
+#[test]
+fn console_pop_keys_need_the_tools_page_the_way_cpp_needs_its_dialog() {
+    use crate::developer_toolbox_view::ToolsCombo;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    // Draw mode is what opens the Tools page; `open_developer_prop_tools`
+    // lands on Property in any other mode.
+    app.developer_console_edit_mode = ConsoleEditMode::Draw;
+
+    // No toolbox page: C++ would return false without touching anything.
+    press_console_key(&mut app, VirtualKeyCode::KeyM, ModifiersState::CONTROL);
+    runtime_assert!(
+        app.developer_tools_open_combo.is_none(),
+        "no tools dialog means no combo to pop"
+    );
+
+    // `C4ToolsDlg::Open`'s tail sets Active even with no dialog of its own.
+    app.open_developer_prop_tools();
+    press_console_key(&mut app, VirtualKeyCode::KeyM, ModifiersState::CONTROL);
+    runtime_assert_eq!(app.developer_tools_open_combo => Some(ToolsCombo::Materials));
+
+    press_console_key(&mut app, VirtualKeyCode::KeyT, ModifiersState::CONTROL);
+    runtime_assert_eq!(app.developer_tools_open_combo => Some(ToolsCombo::Textures));
+}
+
 // C4Console.cpp:1353-1356 and C4ObjectListDlg.cpp:599-646,726-787 — the
 // Objects component opens the object list, whose rows are the ported
 // object tree and whose clicks write the edit cursor's selection.
