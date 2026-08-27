@@ -4570,7 +4570,7 @@ impl GameApp {
                                 )
                             });
                         let recreating_after_go = self.mode == AppMode::Loading
-                            && self.network_savegame_recreation_progress.is_some()
+                            && self.saves.network_recreation_progress.is_some()
                             && self.runtime_network_committed_status.is_some_and(|status| {
                                 status.state == clonk_network::NETWORK_STATE_GO
                             });
@@ -7091,7 +7091,7 @@ impl GameApp {
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
         self.clear_blocking_resource_wait();
-        if self.network_savegame_recreation_progress.is_some() {
+        if self.saves.network_recreation_progress.is_some() {
             let loading_resources = self
                 .admission_resources
                 .resources
@@ -9693,7 +9693,8 @@ impl GameApp {
             .unwrap_or_default();
         let result = {
             let filename_ledger = self
-                .network_savegame_recreation_progress
+                .saves
+                .network_recreation_progress
                 .as_mut()
                 .map(|progress| &mut progress.filename_ledger);
             match filename_ledger {
@@ -9826,7 +9827,8 @@ impl GameApp {
             return;
         };
         let staged_info_ids = self
-            .deferred_network_savegame_recreation
+            .saves
+            .deferred_network_recreation
             .iter()
             .filter_map(|(_, info_id)| {
                 let info = self.control_player_infos.get(*info_id)?;
@@ -9855,14 +9857,14 @@ impl GameApp {
         &mut self,
         save_game: bool,
     ) -> Result<bool, EngineError> {
-        if self.deferred_network_savegame_recreation.is_empty() {
+        if self.saves.deferred_network_recreation.is_empty() {
             self.local_controls.finalize_restored_mouse_owner(
                 self.engine
                     .players()
                     .map(|player| (player.id(), player.status())),
             );
             self.mouse_control = self.local_controls.mouse_owner().is_some();
-            self.network_savegame_recreation_progress = None;
+            self.saves.network_recreation_progress = None;
             return Ok(true);
         }
         let scenario_path = self
@@ -9874,19 +9876,19 @@ impl GameApp {
             })?;
         let scenario_group = open_group_path_for_folder_map(&scenario_path).ok();
         let local_client_id = self
-            .network_savegame_recreation_progress
+            .saves
+            .network_recreation_progress
             .as_ref()
             .map(|progress| progress.local_client_id)
             .unwrap_or(0);
         loop {
             let cursor = self
-                .network_savegame_recreation_progress
+                .saves
+                .network_recreation_progress
                 .as_ref()
                 .map_or(0, |progress| progress.cursor);
-            let Some((client_id, info_id)) = self
-                .deferred_network_savegame_recreation
-                .get(cursor)
-                .copied()
+            let Some((client_id, info_id)) =
+                self.saves.deferred_network_recreation.get(cursor).copied()
             else {
                 self.local_controls.finalize_restored_mouse_owner(
                     self.engine
@@ -9894,13 +9896,14 @@ impl GameApp {
                         .map(|player| (player.id(), player.status())),
                 );
                 self.mouse_control = self.local_controls.mouse_owner().is_some();
-                self.network_savegame_recreation_progress = None;
-                self.deferred_network_savegame_recreation.clear();
+                self.saves.network_recreation_progress = None;
+                self.saves.deferred_network_recreation.clear();
                 return Ok(true);
             };
 
             let active_client = self
-                .network_savegame_recreation_progress
+                .saves
+                .network_recreation_progress
                 .as_ref()
                 .and_then(|progress| progress.active_client.clone());
             let client_name = if active_client
@@ -9910,20 +9913,21 @@ impl GameApp {
                 active_client.map(|(_, name)| name).unwrap_or_default()
             } else if let Some(client) = self.control_clients.state(client_id) {
                 let name = clonk_script::c4_string_from_bytes(client.name.as_bytes());
-                if let Some(progress) = self.network_savegame_recreation_progress.as_mut() {
+                if let Some(progress) = self.saves.network_recreation_progress.as_mut() {
                     progress.active_client = Some((client_id, name.clone()));
                 }
                 name
             } else {
                 let mut next = cursor;
                 while self
-                    .deferred_network_savegame_recreation
+                    .saves
+                    .deferred_network_recreation
                     .get(next)
                     .is_some_and(|(candidate, _)| *candidate == client_id)
                 {
                     next += 1;
                 }
-                if let Some(progress) = self.network_savegame_recreation_progress.as_mut() {
+                if let Some(progress) = self.saves.network_recreation_progress.as_mut() {
                     progress.cursor = next;
                     progress.active_client = None;
                 }
@@ -9931,7 +9935,7 @@ impl GameApp {
             };
 
             let Some(info) = self.control_player_infos.get(info_id).cloned() else {
-                if let Some(progress) = self.network_savegame_recreation_progress.as_mut() {
+                if let Some(progress) = self.saves.network_recreation_progress.as_mut() {
                     progress.cursor += 1;
                 }
                 continue;
@@ -10036,7 +10040,7 @@ impl GameApp {
                     local_client_id,
                 )?;
             }
-            if let Some(progress) = self.network_savegame_recreation_progress.as_mut() {
+            if let Some(progress) = self.saves.network_recreation_progress.as_mut() {
                 progress.cursor += 1;
             }
         }
@@ -10061,7 +10065,8 @@ impl GameApp {
             .unwrap_or(0);
         let ordinary_recreation = !network_runtime_join;
         let staged_sources = if ordinary_recreation {
-            self.deferred_network_savegame_recreation
+            self.saves
+                .deferred_network_recreation
                 .iter()
                 .filter_map(|(client_id, info_id)| {
                     self.control_player_infos
@@ -10098,7 +10103,7 @@ impl GameApp {
                 .unwrap_or_default();
         }
         if sources.is_empty() {
-            self.deferred_network_savegame_recreation.clear();
+            self.saves.deferred_network_recreation.clear();
             return Ok(());
         }
         let scenario_path = self
@@ -10185,7 +10190,7 @@ impl GameApp {
                 true
             });
             if sources.is_empty() {
-                self.deferred_network_savegame_recreation.clear();
+                self.saves.deferred_network_recreation.clear();
                 return Ok(());
             }
         }
@@ -10360,7 +10365,7 @@ impl GameApp {
         }
         self.engine.set_local_players(local_players);
         self.mouse_control = self.local_controls.mouse_owner().is_some();
-        self.deferred_network_savegame_recreation.clear();
+        self.saves.deferred_network_recreation.clear();
         Ok(())
     }
 
@@ -10383,10 +10388,10 @@ impl GameApp {
             // C4Game::InitPlayers handles NetworkRuntimeJoin in an exclusive
             // first branch. Parameters.RestorePlayerInfos must not run the
             // ordinary RestoreSavegameInfos association path first.
-            self.deferred_network_savegame_recreation.clear();
+            self.saves.deferred_network_recreation.clear();
             self.recreate_runtime_join_players(network_savegame)?;
         } else {
-            if self.network_savegame_recreation_progress.is_none() {
+            if self.saves.network_recreation_progress.is_none() {
                 self.engine.game_start_synchronize()?;
                 self.prepare_network_savegame_recreation(network_savegame)?;
                 self.stage_ordinary_network_recreated_script_files();
@@ -10397,11 +10402,10 @@ impl GameApp {
                     .as_ref()
                     .and_then(|network| i32::try_from(network.local_client_id()).ok())
                     .unwrap_or(0);
-                self.network_savegame_recreation_progress =
-                    Some(NetworkSavegameRecreationProgress {
-                        local_client_id,
-                        ..Default::default()
-                    });
+                self.saves.network_recreation_progress = Some(NetworkSavegameRecreationProgress {
+                    local_client_id,
+                    ..Default::default()
+                });
             }
             if !self.advance_ordinary_network_savegame_recreation(network_savegame)? {
                 return Ok(false);

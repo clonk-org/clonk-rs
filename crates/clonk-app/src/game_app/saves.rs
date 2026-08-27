@@ -25,7 +25,8 @@ impl GameApp {
     pub(crate) fn developer_console_player_save_options(&self) -> (bool, bool, String) {
         let graphics = load_options_graphics_state(self.app_paths.as_ref());
         let rank_name = self
-            .save_description_language_table
+            .saves
+            .description_language_table
             .as_ref()
             .and_then(|table| table.entries.get("IDS_MSG_RANK"))
             .map(|value| clonk_script::c4_string_from_bytes(value))
@@ -71,7 +72,7 @@ impl GameApp {
         definition_modules: &[Vec<u8>],
         kind: ClassicSaveDescriptionKind,
     ) -> (Vec<u8>, Vec<u8>) {
-        let table = self.save_description_language_table.as_ref();
+        let table = self.saves.description_language_table.as_ref();
         let resource_bytes = |key: &str, _fallback: &str| {
             let Some(table) = table else {
                 return b"Language string table not loaded.".to_vec();
@@ -90,7 +91,7 @@ impl GameApp {
             .and_then(|value| std::str::from_utf8(value).ok())
             .unwrap_or_default();
         let charset_code = classic_rtf_charset_code(charset_name);
-        let language = self.save_description_language.clone();
+        let language = self.saves.description_language.clone();
         let mut title = clonk_script::c4_string_from_bytes(title);
         Markup::strip_markup(&mut title);
         let title = clonk_script::c4_string_bytes(&title);
@@ -1118,7 +1119,7 @@ impl GameApp {
     }
 
     pub(crate) fn finish_pending_native_save_thumbnails(&mut self, title_png: Option<&[u8]>) {
-        while let Some(request) = self.pending_native_save_thumbnails.pop_front() {
+        while let Some(request) = self.saves.pending_native_thumbnails.pop_front() {
             let Some(title_png) = title_png else {
                 continue;
             };
@@ -1224,11 +1225,12 @@ impl GameApp {
         &mut self,
         job: save_worker::BackgroundSaveJob<save_worker::BackgroundSaveCompletion>,
     ) -> Result<()> {
-        if self.background_save_worker.is_none() {
-            self.background_save_worker = Some(save_worker::new_app_save_worker()?);
+        if self.saves.background_worker.is_none() {
+            self.saves.background_worker = Some(save_worker::new_app_save_worker()?);
         }
         let worker = self
-            .background_save_worker
+            .saves
+            .background_worker
             .as_ref()
             .context("background save worker is unavailable")?;
         worker.try_submit(job).map_err(|error| match error {
@@ -1244,7 +1246,8 @@ impl GameApp {
     pub(crate) fn poll_background_save_jobs(&mut self) {
         loop {
             let completion = self
-                .background_save_worker
+                .saves
+                .background_worker
                 .as_ref()
                 .and_then(save_worker::BackgroundSaveWorker::try_recv);
             let Some(completion) = completion else {
@@ -1256,7 +1259,8 @@ impl GameApp {
 
     pub(crate) fn finish_background_save_jobs(&mut self) {
         let completions = self
-            .background_save_worker
+            .saves
+            .background_worker
             .take()
             .map(|mut worker| worker.finish())
             .unwrap_or_default();
@@ -1285,7 +1289,7 @@ impl GameApp {
                             physical_publish_us = persisted.timings.physical_publish.as_micros(),
                             "native save latency stages"
                         );
-                        self.last_native_save_timings = Some(persisted.timings);
+                        self.saves.last_native_timings = Some(persisted.timings);
                         if let Some(error) = persisted.thumbnail_retention_error {
                             tracing::warn!(
                                 path = %completion.path.display(),
@@ -1294,9 +1298,10 @@ impl GameApp {
                             );
                         }
                         if let Some(packed_group) = persisted.packed_group {
-                            self.pending_native_save_thumbnails
+                            self.saves
+                                .pending_native_thumbnails
                                 .retain(|request| request.path != completion.path);
-                            self.pending_native_save_thumbnails.push_back(
+                            self.saves.pending_native_thumbnails.push_back(
                                 PendingNativeSaveThumbnail {
                                     path: completion.path.clone(),
                                     packed_group,
@@ -1470,7 +1475,7 @@ impl GameApp {
         writer.flush().context("failed to flush save data")?;
 
         self.write_save_thumbnail(&path)?;
-        self.last_save_path = Some(path.clone());
+        self.saves.last_path = Some(path.clone());
         self.status_text = format!("Saved {}", saved.scenario.title);
         Ok(path)
     }
@@ -1478,7 +1483,7 @@ impl GameApp {
     pub(crate) fn write_save_thumbnail(&mut self, path: &Path) -> Result<()> {
         let target = path.with_extension("png");
         if self.retained_gpu_presentation_active {
-            self.pending_gpu_thumbnail_paths.push_back(target);
+            self.saves.pending_gpu_thumbnail_paths.push_back(target);
             return Ok(());
         }
         let surface = self.graphics.surface();
@@ -1560,10 +1565,10 @@ impl GameApp {
             .iter()
             .any(|restore| restore.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0)
         {
-            self.deferred_network_savegame_recreation.clear();
+            self.saves.deferred_network_recreation.clear();
             return Ok(());
         }
-        self.deferred_network_savegame_recreation = route_network_savegame_recreation(
+        self.saves.deferred_network_recreation = route_network_savegame_recreation(
             &mut self.control_player_infos,
             &restore_player_infos,
         );
@@ -1615,9 +1620,9 @@ impl GameApp {
             prepared.team_registry = runtime_teams;
         }
         self.publish_current_host_player_infos();
-        if !self.deferred_network_savegame_recreation.is_empty() {
+        if !self.saves.deferred_network_recreation.is_empty() {
             tracing::debug!(
-                players = ?self.deferred_network_savegame_recreation,
+                players = ?self.saves.deferred_network_recreation,
                 "routed joined savegame infos to deferred recreation"
             );
         }

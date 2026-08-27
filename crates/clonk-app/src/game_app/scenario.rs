@@ -1444,8 +1444,8 @@ impl GameApp {
         self.recording_template = None;
         self.control_playback = None;
         self.local_player_profile_paths.clear();
-        self.deferred_network_savegame_recreation.clear();
-        self.network_savegame_recreation_progress = None;
+        self.saves.deferred_network_recreation.clear();
+        self.saves.network_recreation_progress = None;
         let prepared_go = self
             .loading_state
             .as_ref()
@@ -2672,8 +2672,8 @@ impl GameApp {
         self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;
-        self.deferred_network_savegame_recreation.clear();
-        self.network_savegame_recreation_progress = None;
+        self.saves.deferred_network_recreation.clear();
+        self.saves.network_recreation_progress = None;
         self.loading_state = None;
         self.engine = Engine::new();
         reconnect_audio_context(&mut self.engine, self.audio.as_ref());
