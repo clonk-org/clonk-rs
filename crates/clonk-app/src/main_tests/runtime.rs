@@ -8612,7 +8612,14 @@ fn network_global_gamepad_overrides_reach_their_callbacks() {
                     clonk_network::LegacyControlSet::from_control_packet(control).test_value()
                 })
                 .collect::<Vec<_>>() =>
-            [n2_fixture!(control_set: 0, delta, 0)],
+            // Spelled out rather than built with `n2_fixture!`: that macro
+            // lives in another test part, and the sharded builds compile only
+            // one part at a time.
+            [clonk_network::LegacyControlSet {
+                value_type: 0,
+                data: delta,
+                by_client: 0,
+            }],
             "{name} submits its registered relative adjustment",
         );
     }
