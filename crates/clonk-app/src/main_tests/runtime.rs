@@ -5486,6 +5486,77 @@ fn the_object_list_scroll_survives_rebuilds_and_follows_only_a_new_selection() {
     );
 }
 
+/// The property output survives the rebuild that produces it.
+///
+/// `C4PropertyDlg::Update` composes the whole text afresh and then scrolls
+/// back to the line it read before replacing it
+/// (`C4PropertyDlg.cpp:170-262`). It runs on Tick35 and on every selection
+/// change, so a pane that reset would be unusable on anything longer than the
+/// box.
+#[test]
+fn the_property_output_scroll_survives_a_refresh_and_clamps_for_a_shorter_object() {
+    use clonk_engine::developer_selection::SelectionWriter;
+    use crate::developer_toolbox_view::{property_output_capacity, property_output_window};
+    use crate::developer_windows::ToolboxPage;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    // A box two lines tall, so the fixture object's three-line detail
+    // overflows it — the whole point of the pane being scrollable.
+    let height = 74u32;
+    let capacity = property_output_capacity(height);
+    runtime_assert_eq!(capacity => 2);
+
+    // Nothing selected is a one-line pane: there is nothing to scroll.
+    runtime_assert!(
+        !app.scroll_developer_property_page(3, height),
+        "a pane shorter than its box does not scroll"
+    );
+
+    // Select something with enough detail to overflow the box.
+    let subject = app.snapshot.objects.first().test_value().clone();
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, subject.id);
+    let lines = app.developer_property_page_line_count();
+    runtime_assert!(
+        lines > capacity,
+        "the selected object's detail has to overflow the box: {lines} lines in {capacity}"
+    );
+
+    runtime_assert!(app.scroll_developer_property_page(1, height));
+    let scrolled = app.developer_property_scroll;
+    // What is *shown* has to follow the retained line, not merely be stored
+    // beside it.
+    let shown = |app: &GameApp| {
+        property_output_window(
+            app.developer_property_page_line_count(),
+            app.developer_property_scroll,
+            height,
+        )
+        .0
+    };
+    runtime_assert_eq!(shown(&app) => 1, "the box starts at the scrolled line");
+    let _ = app.render_developer_toolbox_page(ToolboxPage::Property, 240, height);
+    runtime_assert_eq!(
+        app.developer_property_scroll => scrolled,
+        "drawing the pane does not move it",
+    );
+    runtime_assert_eq!(shown(&app) => 1);
+
+    // Deselecting shortens the output to one line; the retained position is
+    // clamped for display but not thrown away.
+    app.developer_selection.clear(SelectionWriter::EditCursor);
+    let _ = app.render_developer_toolbox_page(ToolboxPage::Property, 240, height);
+    app.developer_selection
+        .replace(SelectionWriter::EditCursor, subject.id);
+    runtime_assert_eq!(
+        app.developer_property_scroll => scrolled,
+        "re-selecting comes back to where the user was",
+    );
+    runtime_assert_eq!(shown(&app) => 1, "and shows that line again");
+}
+
 // C4Console.cpp:1353-1356 and C4ObjectListDlg.cpp:599-646,726-787 — the
 // Objects component opens the object list, whose rows are the ported
 // object tree and whose clicks write the edit cursor's selection.

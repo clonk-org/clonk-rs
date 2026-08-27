@@ -445,6 +445,9 @@ pub(crate) struct GameApp {
     /// from the selection would be impossible.
     pub(crate) developer_object_list_scroll: crate::developer_object_list_view::ObjectListScroll,
     pub(crate) developer_object_list_revealed: Option<clonk_engine::ObjectId>,
+    /// The property pane's retained first visible line
+    /// (`C4PropertyDlg.cpp:257-262`).
+    pub(crate) developer_property_scroll: crate::developer_toolbox_view::LineScroll,
     pub(crate) console_viewport_projections:
         std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
     /// The last pointer position in world coordinates, so a held drag can
