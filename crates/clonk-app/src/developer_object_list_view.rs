@@ -48,38 +48,82 @@ pub(crate) struct ObjectListRow {
     pub(crate) depth: usize,
     pub(crate) name: String,
     pub(crate) icon: Option<ImageData>,
+    /// Whether the row holds anything — an expander is drawn only for those.
+    pub(crate) has_children: bool,
+    /// Whether that expander is open. False without children, whatever the
+    /// retained state says, because there is nothing to show.
+    pub(crate) expanded: bool,
 }
 
-/// Flatten the ported tree into rows, parents before their contents.
+/// Which containers the user has opened.
 ///
-/// `GtkTreeView` draws an expanded tree in exactly this order, and the port
-/// has no expanders — the tree is always open, because a collapsed row would
-/// hide a selection the edit cursor can still be holding.
+/// `GtkTreeView` keys expansion by tree *path*, which a rebuild invalidates.
+/// Keying by the object instead is what carries it through the rebuild
+/// `C4ObjectListDlg::Update` performs on every object change, and through a
+/// reparent that would move the path: an object put down elsewhere is still
+/// the row the user opened.
+///
+/// A container that empties is not forgotten — GTK drops its expander through
+/// `row_has_child_toggled` (`C4ObjectListDlg.cpp:504-517`) while the row
+/// itself stays — so refilling it comes back open.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ObjectTreeExpansion {
+    open: std::collections::HashSet<ObjectId>,
+}
+
+impl ObjectTreeExpansion {
+    pub(crate) fn is_open(&self, id: ObjectId) -> bool {
+        self.open.contains(&id)
+    }
+
+    /// Open a closed container, or close an open one.
+    pub(crate) fn toggle(&mut self, id: ObjectId) {
+        if !self.open.remove(&id) {
+            self.open.insert(id);
+        }
+    }
+}
+
+/// Flatten the ported tree into the rows that are actually visible, parents
+/// before their contents.
+///
+/// `GtkTreeView` draws an expanded tree in exactly this order, and draws
+/// nothing under a closed one. The tree view is created with no
+/// `expand_all` call (`C4ObjectListDlg.cpp:726-787`), so GTK's default holds
+/// and a container starts closed.
 pub(crate) fn object_list_rows(
     tree: &[InspectionNode],
+    expansion: &ObjectTreeExpansion,
     name_of: impl Fn(ObjectId) -> String,
     icon_of: impl Fn(ObjectId) -> Option<ImageData>,
 ) -> Vec<ObjectListRow> {
     fn walk(
         nodes: &[InspectionNode],
         depth: usize,
+        expansion: &ObjectTreeExpansion,
         name_of: &impl Fn(ObjectId) -> String,
         icon_of: &impl Fn(ObjectId) -> Option<ImageData>,
         rows: &mut Vec<ObjectListRow>,
     ) {
         for node in nodes {
+            let has_children = !node.contents.is_empty();
+            let expanded = has_children && expansion.is_open(node.id);
             rows.push(ObjectListRow {
                 id: node.id,
                 depth,
                 name: name_of(node.id),
                 icon: icon_of(node.id),
+                has_children,
+                expanded,
             });
-            walk(&node.contents, depth + 1, name_of, icon_of, rows);
+            if expanded {
+                walk(&node.contents, depth + 1, expansion, name_of, icon_of, rows);
+            }
         }
     }
 
     let mut rows = Vec::new();
-    walk(tree, 0, &name_of, &icon_of, &mut rows);
+    walk(tree, 0, expansion, &name_of, &icon_of, &mut rows);
     rows
 }
 
@@ -177,7 +221,9 @@ fn icon_extent(icon: &ImageData) -> Option<(i32, i32)> {
 
 fn icon_rect(row: IntRect, depth: usize, icon: &ImageData) -> Option<IntRect> {
     let (width, height) = icon_extent(icon)?;
-    let x = row.x + depth as i32 * INDENT;
+    // The expander column comes first at every depth, whether or not this row
+    // draws one — `GtkTreeView` reserves it so sibling rows line up.
+    let x = row.x + depth as i32 * INDENT + EXPANDER_SIZE;
     Some(IntRect::new(
         x,
         row.y + (ROW_HEIGHT - height) / 2,
@@ -186,7 +232,45 @@ fn icon_rect(row: IntRect, depth: usize, icon: &ImageData) -> Option<IntRect> {
     ))
 }
 
-/// Which object a click landed on, or `None` past the last row.
+/// The expander occupies the indent step before the row's own content, which
+/// is where `GtkTreeView` puts it.
+const EXPANDER_SIZE: i32 = 9;
+
+/// Where a row's disclosure control sits, if it has one.
+///
+/// `GtkTreeView` prepends the expander to the first column, so it takes the
+/// space the row's contents would otherwise be indented into. A row with
+/// nothing inside has none: GTK drops it through `row_has_child_toggled` the
+/// moment a container empties (`C4ObjectListDlg.cpp:504-517`).
+pub(crate) fn expander_rect(row: IntRect, depth: usize) -> Option<IntRect> {
+    let x = row.x + depth as i32 * INDENT;
+    (x + EXPANDER_SIZE <= row.x + row.w).then(|| {
+        IntRect::new(
+            x,
+            row.y + (ROW_HEIGHT - EXPANDER_SIZE) / 2,
+            EXPANDER_SIZE,
+            EXPANDER_SIZE,
+        )
+    })
+}
+
+/// A visible row's rectangle at the top of an unscrolled list, for a test that
+/// needs to aim at one.
+#[cfg(test)]
+pub(crate) fn object_list_row_rect_for_test(index: usize, width: u32) -> IntRect {
+    row_rect(index, 0, width)
+}
+
+/// What a click on the list asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObjectListClick {
+    /// The row's own content: select it.
+    Select(ObjectId),
+    /// The row's expander: open or close it, without changing the selection.
+    Toggle(ObjectId),
+}
+
+/// What a click landed on, or `None` past the last row.
 ///
 /// A click on empty space selects nothing rather than the nearest object —
 /// `GtkTreeSelection` reports no path there, and `OnSelectionChanged` then
@@ -198,7 +282,7 @@ pub(crate) fn object_list_hit(
     width: u32,
     height: u32,
     point: (i32, i32),
-) -> Option<ObjectId> {
+) -> Option<ObjectListClick> {
     let (first, capacity) = scroll.window(rows.len(), height);
     let position = GuiPoint::new(point.0 as f32, point.1 as f32);
     rows.iter()
@@ -206,7 +290,44 @@ pub(crate) fn object_list_hit(
         .skip(first)
         .take(capacity)
         .find(|(index, _)| contains(row_rect(*index, first, width), position))
-        .map(|(_, row)| row.id)
+        .map(|(index, row)| {
+            let expander = row
+                .has_children
+                .then(|| expander_rect(row_rect(index, first, width), row.depth))
+                .flatten();
+            match expander {
+                Some(rect) if contains(rect, position) => ObjectListClick::Toggle(row.id),
+                _ => ObjectListClick::Select(row.id),
+            }
+        })
+}
+
+/// A closed or open disclosure triangle, in the flat style the rest of these
+/// windows use.
+///
+/// `GtkTreeView` draws its own themed expander; the shape is the port's, the
+/// two states are not.
+fn draw_expander(surface: &mut Surface, rect: IntRect, expanded: bool) {
+    for step in 0..(EXPANDER_SIZE / 2 + 1) {
+        let (x, y, w, h) = if expanded {
+            // Pointing down: a wide top row narrowing as it descends.
+            (
+                rect.x + step,
+                rect.y + EXPANDER_SIZE / 4 + step,
+                (EXPANDER_SIZE - step * 2).max(1),
+                1,
+            )
+        } else {
+            // Pointing right.
+            (
+                rect.x + EXPANDER_SIZE / 4 + step,
+                rect.y + step,
+                1,
+                (EXPANDER_SIZE - step * 2).max(1),
+            )
+        };
+        fill(surface, IntRect::new(x, y, w, h), CONTROL_TEXT);
+    }
 }
 
 /// Draw the list.
@@ -233,6 +354,13 @@ pub(crate) fn render_object_list(
     let (first, capacity) = scroll.window(rows.len(), height);
     for (index, row) in rows.iter().enumerate().skip(first).take(capacity) {
         let rect = row_rect(index, first, width);
+        // The expander comes before the cell renderers, so it is drawn first
+        // and is never covered by the icon or the name.
+        if row.has_children {
+            if let Some(expander) = expander_rect(rect, row.depth) {
+                draw_expander(surface, expander, row.expanded);
+            }
+        }
         let chosen = selected.contains(&row.id);
         if chosen {
             fill(surface, rect, SELECTED_BACKGROUND);
@@ -339,12 +467,194 @@ mod tests {
         }
     }
 
+    /// The expander is its own click target, ahead of the row's own.
+    ///
+    /// `GtkTreeView`'s expander column sits before the cell renderers and
+    /// consumes the click that opens or closes a row — the selection does not
+    /// change with it (`C4ObjectListDlg.cpp:757-773` builds the one column the
+    /// expander is prepended to).
+    #[test]
+    fn a_click_on_the_expander_toggles_instead_of_selecting() {
+        let tree = vec![node(1, vec![node(2, vec![])]), node(3, vec![])];
+        let expansion = ObjectTreeExpansion::default();
+        let rows = object_list_rows(&tree, &expansion, |_| String::new(), |_| None);
+        let extent = (OBJECT_LIST_WIDTH, OBJECT_LIST_HEIGHT);
+        let scroll = ObjectListScroll::default();
+
+        let container = row_rect(0, 0, extent.0);
+        let expander =
+            expander_rect(container, rows[0].depth).expect("a container carries an expander");
+        let middle = (expander.x + expander.w / 2, expander.y + expander.h / 2);
+        assert_eq!(
+            object_list_hit(&rows, scroll, extent.0, extent.1, middle),
+            Some(ObjectListClick::Toggle(ObjectId::new(1)))
+        );
+
+        // Past the expander, the same row selects as before.
+        let name = (expander.x + expander.w + 4, middle.1);
+        assert_eq!(
+            object_list_hit(&rows, scroll, extent.0, extent.1, name),
+            Some(ObjectListClick::Select(ObjectId::new(1)))
+        );
+
+        // A childless row draws no expander, so the same spot selects it: the
+        // column is reserved for alignment but claims nothing.
+        let leaf = row_rect(1, 0, extent.0);
+        assert!(!rows[1].has_children);
+        assert_eq!(
+            object_list_hit(
+                &rows,
+                scroll,
+                extent.0,
+                extent.1,
+                (leaf.x + 2, leaf.y + ROW_HEIGHT / 2)
+            ),
+            Some(ObjectListClick::Select(ObjectId::new(3)))
+        );
+    }
+
+    /// A container's contents are hidden until it is opened.
+    ///
+    /// The tree is a plain `GtkTreeView` over a hierarchical model
+    /// (`C4ObjectListDlg.cpp:726-787`): it never calls
+    /// `gtk_tree_view_expand_all`, so GTK's default stands and a row with
+    /// children starts closed behind an expander. The port drew the whole
+    /// hierarchy open, which is what this replaces.
+    #[test]
+    fn collapsed_containers_hide_their_contents_and_carry_an_expander() {
+        let tree = vec![
+            node(1, vec![node(2, vec![node(3, vec![])]), node(4, vec![])]),
+            node(5, vec![]),
+        ];
+        let name = |id: ObjectId| format!("Object {}", id.as_u64());
+        let icon = |_: ObjectId| None;
+
+        let mut expansion = ObjectTreeExpansion::default();
+        let closed = object_list_rows(&tree, &expansion, name, icon);
+        assert_eq!(
+            closed.iter().map(|row| row.id.as_u64()).collect::<Vec<_>>(),
+            vec![1, 5],
+            "only the roots are drawn while everything is closed"
+        );
+        assert!(closed[0].has_children, "object 1 contains two objects");
+        assert!(!closed[0].expanded);
+        assert!(
+            !closed[1].has_children,
+            "an object with nothing inside gets no expander"
+        );
+
+        expansion.toggle(ObjectId::new(1));
+        let one_open = object_list_rows(&tree, &expansion, name, icon);
+        assert_eq!(
+            one_open
+                .iter()
+                .map(|row| row.id.as_u64())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 4, 5],
+            "opening a container shows its own contents, not its grandchildren"
+        );
+        assert!(one_open[0].expanded);
+        assert!(one_open[1].has_children, "object 2 still contains object 3");
+
+        expansion.toggle(ObjectId::new(2));
+        let both_open = object_list_rows(&tree, &expansion, name, icon);
+        assert_eq!(
+            both_open
+                .iter()
+                .map(|row| (row.id.as_u64(), row.depth))
+                .collect::<Vec<_>>(),
+            vec![(1, 0), (2, 1), (3, 2), (4, 1), (5, 0)],
+            "depth is the nesting, whatever is open"
+        );
+
+        // Closing the outer one hides the inner one too, without forgetting
+        // that it was open: GTK keeps a collapsed subtree's own expansion.
+        expansion.toggle(ObjectId::new(1));
+        assert_eq!(
+            object_list_rows(&tree, &expansion, name, icon)
+                .iter()
+                .map(|row| row.id.as_u64())
+                .collect::<Vec<_>>(),
+            vec![1, 5]
+        );
+        expansion.toggle(ObjectId::new(1));
+        assert_eq!(
+            object_list_rows(&tree, &expansion, name, icon)
+                .iter()
+                .map(|row| row.id.as_u64())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5],
+            "reopening restores the subtree the user had opened"
+        );
+    }
+
+    /// Expansion is keyed by the object, so a rebuild that moves it keeps it.
+    ///
+    /// `Update` rebuilds the model on every object change, and a container
+    /// that empties loses its expander through `row_has_child_toggled`
+    /// (`C4ObjectListDlg.cpp:504-517`) without the view forgetting the row.
+    #[test]
+    fn expansion_follows_the_object_through_reparenting_and_emptying() {
+        let name = |id: ObjectId| format!("Object {}", id.as_u64());
+        let icon = |_: ObjectId| None;
+        let mut expansion = ObjectTreeExpansion::default();
+        expansion.toggle(ObjectId::new(2));
+
+        // Object 2 starts inside 1.
+        let nested = vec![node(1, vec![node(2, vec![node(3, vec![])])])];
+        expansion.toggle(ObjectId::new(1));
+        assert_eq!(
+            object_list_rows(&nested, &expansion, name, icon)
+                .iter()
+                .map(|row| row.id.as_u64())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
+        // It leaves the container: still open, now at the top level.
+        let reparented = vec![node(1, vec![]), node(2, vec![node(3, vec![])])];
+        let rows = object_list_rows(&reparented, &expansion, name, icon);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_u64()).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "reparenting does not close it"
+        );
+        assert!(
+            !rows[0].has_children,
+            "the emptied container loses its expander"
+        );
+
+        // Emptied itself, it keeps no expander and draws nothing under it.
+        let emptied = vec![node(1, vec![]), node(2, vec![])];
+        let rows = object_list_rows(&emptied, &expansion, name, icon);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_u64()).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(!rows[1].has_children);
+        assert!(
+            !rows[1].expanded,
+            "a row with nothing to show is not drawn open"
+        );
+    }
+
+    /// Every container open, which is what the older tests assume: they were
+    /// written when the port drew the whole hierarchy unconditionally.
+    fn open_tree() -> ObjectTreeExpansion {
+        let mut expansion = ObjectTreeExpansion::default();
+        for id in [1, 2, 4] {
+            expansion.toggle(ObjectId::new(id));
+        }
+        expansion
+    }
+
     fn rows() -> Vec<ObjectListRow> {
         object_list_rows(
             &[
                 node(1, vec![node(2, vec![node(3, vec![])]), node(4, vec![])]),
                 node(5, vec![]),
             ],
+            &open_tree(),
             |id| format!("Object {}", id.as_u64()),
             |id| Some(ImageData::new(1, 1, vec![id.as_u64() as u8, 0, 0, 255])),
         )
@@ -363,7 +673,13 @@ mod tests {
             "parents come before their contents, at one step less depth"
         );
         assert_eq!(rows[0].name, "Object 1");
-        assert!(object_list_rows(&[], |_| String::new(), |_| None).is_empty());
+        assert!(object_list_rows(
+            &[],
+            &ObjectTreeExpansion::default(),
+            |_| String::new(),
+            |_| None
+        )
+        .is_empty());
     }
 
     // C4ObjectListDlg.cpp:669-724 — each row's icon is sourced from that
@@ -374,6 +690,7 @@ mod tests {
         let second = ImageData::new(1, 2, vec![0, 255, 0, 255, 255, 255, 0, 255]);
         let rows = object_list_rows(
             &[node(1, vec![]), node(2, vec![])],
+            &ObjectTreeExpansion::default(),
             |id| format!("Object {}", id.as_u64()),
             |id| match id.as_u64() {
                 1 => Some(first.clone()),
@@ -399,7 +716,7 @@ mod tests {
         assert_eq!(
             icon_rect(row, 1, &wide),
             Some(IntRect::new(
-                row.x + INDENT,
+                row.x + INDENT + EXPANDER_SIZE,
                 row.y + (ROW_HEIGHT - ICON_SIZE / 2) / 2,
                 ICON_SIZE,
                 ICON_SIZE / 2
@@ -418,9 +735,11 @@ mod tests {
                 ObjectListScroll::default(),
                 extent.0,
                 extent.1,
-                (first.x + 2, first.y + ROW_HEIGHT / 2)
+                // Past the expander: object 1 is a container, and its left
+                // edge belongs to the disclosure control.
+                (first.x + EXPANDER_SIZE + 2, first.y + ROW_HEIGHT / 2)
             ),
-            Some(ObjectId::new(1))
+            Some(ObjectListClick::Select(ObjectId::new(1)))
         );
         // The third row is the doubly-contained object, indented twice; the
         // row is still full width, so a click at its left edge finds it.
@@ -433,7 +752,7 @@ mod tests {
                 extent.1,
                 (third.x + 2, third.y + ROW_HEIGHT / 2)
             ),
-            Some(ObjectId::new(3))
+            Some(ObjectListClick::Select(ObjectId::new(3)))
         );
         // Past the last row, and outside the client area, select nothing.
         assert_eq!(
@@ -474,6 +793,7 @@ mod tests {
     fn object_list_hit_testing_follows_the_retained_scroll_offset() {
         let rows = object_list_rows(
             &(0..100).map(|id| node(id, vec![])).collect::<Vec<_>>(),
+            &ObjectTreeExpansion::default(),
             |id| format!("Object {}", id.as_u64()),
             |_| None,
         );
@@ -490,7 +810,7 @@ mod tests {
         let rect = row_rect(80, first, width);
         assert_eq!(
             object_list_hit(&rows, scroll, width, height, (rect.x + 2, rect.y + 2)),
-            Some(ObjectId::new(80))
+            Some(ObjectListClick::Select(ObjectId::new(80)))
         );
         // The window never scrolls past the end of the list.
         scroll.reveal(99, rows.len(), height);

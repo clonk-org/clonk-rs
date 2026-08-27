@@ -2765,6 +2765,7 @@ impl GameApp {
             developer_tools: Default::default(),
             developer_tools_open_combo: None,
             developer_object_list_scroll: Default::default(),
+            developer_object_tree_expansion: Default::default(),
             developer_object_list_revealed: None,
             developer_property_scroll: Default::default(),
             console_viewport_projections: Default::default(),
