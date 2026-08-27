@@ -2011,11 +2011,11 @@ fn running_render_draws_resolved_world_cursor() {
     let origin_y = (pointer.screen.y as i32 - 2) as u32;
     main_assert_eq!(app.graphics.surface().get_pixel(origin_x, origin_y) => Some(Color::opaque(3, 43, 200)));
 
-    app.external_irc_dialog_visible = true;
+    app.chat.external_dialog_visible = true;
     app.running_world_mouse_owned = true;
     app.pointer_left().test_value();
     main_assert!(app.ingame_pointer.is_some(), "fixture exercises the dialog-owned pointer-left early return");
-    app.external_irc_dialog_visible = false;
+    app.chat.external_dialog_visible = false;
     app.test_render(&mut frame);
     main_assert_ne!(
         app.graphics.surface().get_pixel(origin_x, origin_y) =>

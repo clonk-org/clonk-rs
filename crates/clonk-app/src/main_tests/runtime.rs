@@ -9912,9 +9912,9 @@ fn runtime_gamepad_overrides_reach_every_fullscreen_global_action() {
     press(&mut app, 0x0b);
 
     // ToggleChat opens the external IRC dialog.
-    runtime_assert!(!app.external_irc_dialog_visible);
+    runtime_assert!(!app.chat.external_dialog_visible);
     press(&mut app, 0x0e);
-    runtime_assert!(app.external_irc_dialog_visible);
+    runtime_assert!(app.chat.external_dialog_visible);
 }
 
 // Every one of these actions is default-unbound on a gamepad: C++ registers
@@ -9928,7 +9928,7 @@ fn runtime_gamepad_fullscreen_globals_have_no_default_binding() {
         app.pending_screenshots.len(),
         app.runtime_help_visible,
         app.display_flags.show_stats,
-        app.external_irc_dialog_visible,
+        app.chat.external_dialog_visible,
     );
 
     for button in 0..8 {
@@ -9954,7 +9954,7 @@ fn runtime_gamepad_fullscreen_globals_have_no_default_binding() {
             app.pending_screenshots.len(),
             app.runtime_help_visible,
             app.display_flags.show_stats,
-            app.external_irc_dialog_visible,
+            app.chat.external_dialog_visible,
         ) => before
     );
 }

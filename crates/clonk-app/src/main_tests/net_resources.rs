@@ -1469,7 +1469,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         .test_ref()
         .layout(preferred, line_height)
         .bounds;
-    app.external_irc_dialog_visible = true;
+    app.chat.external_dialog_visible = true;
     app.test_cursor(PhysicalPosition::new(
         f64::from(dragged_point.x),
         f64::from(dragged_point.y),
@@ -1486,7 +1486,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     main_assert!(app.runtime_client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
     app.test_left_button(ElementState::Released);
     main_assert!(!app.runtime_client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
-    app.external_irc_dialog_visible = false;
+    app.chat.external_dialog_visible = false;
 
     let dragged_layout = app
         .runtime_client_list

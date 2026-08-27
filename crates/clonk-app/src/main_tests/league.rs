@@ -419,7 +419,7 @@ fn forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
     app.process_classic_lobby_chat_request(LobbyChatRequest::OpenExternalDialog)
         .test_value();
     main_assert!(app.classic_host_lobby.is_some());
-    main_assert!(app.external_irc_dialog_visible);
+    main_assert!(app.chat.external_dialog_visible);
 }
 
 #[test]

@@ -5185,7 +5185,7 @@ impl GameApp {
         &mut self,
         command: clonk_frontend::startup_netdlg::NetDlgEditContextCommand,
     ) -> Result<(), EngineError> {
-        if !self.external_irc_dialog_visible
+        if !self.chat.external_dialog_visible
             && (self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkGame)
         {
             tracing::error!(?command, "stale join-address context command");

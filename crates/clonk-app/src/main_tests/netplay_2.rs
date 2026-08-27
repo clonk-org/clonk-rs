@@ -5821,7 +5821,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     let mut irc = configured("F8");
     irc.show_external_irc_dialog().test_value();
     irc.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(irc.external_irc_dialog_visible);
+    main_assert!(irc.chat.external_dialog_visible);
     main_assert!(irc.network_chart_dialog.is_some());
     main_assert!(irc.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart));
 
@@ -5834,7 +5834,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     let mut irc_edit = configured("Ctrl+Shift+Left");
     irc_edit.show_external_irc_dialog().test_value();
     irc_edit
-        .external_irc_dialog
+        .chat.external_dialog
         .test_mut()
         .force_chat_mode_and_focus();
     irc_edit.keyboard_modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;

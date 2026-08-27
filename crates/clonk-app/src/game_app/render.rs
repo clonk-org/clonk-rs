@@ -1485,7 +1485,7 @@ impl GameApp {
                             self.next_pending_native_overlay();
                         }
                     }
-                    if self.external_irc_dialog_visible {
+                    if self.chat.external_dialog_visible {
                         self.render_external_irc_dialog(gamma.as_ref())?;
                         if ordered_native {
                             self.next_pending_native_overlay();
@@ -1610,7 +1610,7 @@ impl GameApp {
                 let context_menu_open = self.context_menu.is_some()
                     || self.startup_player_properties_dialog.is_some()
                     || league_signup_open
-                    || self.external_irc_dialog_visible
+                    || self.chat.external_dialog_visible
                     || self.runtime_client_list.is_some()
                     || fade_draw_inactive;
                 let options_draw_focus =
@@ -1841,7 +1841,7 @@ impl GameApp {
                         self.next_pending_native_overlay();
                     }
                 }
-                if self.external_irc_dialog_visible {
+                if self.chat.external_dialog_visible {
                     self.render_external_irc_dialog(Some(menu_gamma))?;
                     if ordered_native {
                         self.next_pending_native_overlay();
@@ -1922,7 +1922,7 @@ impl GameApp {
                         || definition_selector_open
                         || game_option_input_open
                         || league_signup_open
-                        || self.external_irc_dialog_visible
+                        || self.chat.external_dialog_visible
                         || self.runtime_client_list.is_some()
                         || !self.message_dialogs.is_empty()
                         || gui_cursor_drawn

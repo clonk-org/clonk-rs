@@ -5555,7 +5555,7 @@ fn running_paste_obeys_finish_result_and_crlf_more_flag() {
     let submitted = commands.take_submitted_messages();
     main_assert_eq!(submitted.len() => 1);
     main_assert_eq!(submitted[0].message.as_bytes() => b"done");
-    main_assert!(app.running_chat.is_none());
+    main_assert!(app.chat.running.is_none());
 
     app.start_running_chat(RunningChatMode::All);
     paste(&mut app, "stay\r\n");

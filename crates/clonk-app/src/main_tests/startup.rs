@@ -707,7 +707,7 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
     app.persist_top_message_dialog_checkbox_changes();
     app.finish_message_dialog(MessageDialogResult::Cancel)
         .test_value();
-    main_assert!(app.startup_irc_client.is_none());
+    main_assert!(app.chat.client.is_none());
 
     let persisted = Config::load(paths.config_file()).test_value();
     main_assert_eq!(persisted.get_in(Some("IRC"), "Nick") => Some("SavedNick"));
@@ -727,10 +727,10 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
         channel: "#accepted".into(),
     };
     app.request_startup_irc_connection(accepted).test_value();
-    main_assert!(app.startup_irc_client.is_none());
+    main_assert!(app.chat.client.is_none());
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    let client = app.startup_irc_client.test_ref();
+    let client = app.chat.client.test_ref();
     main_assert!(matches!(client.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
     drop(app);
     server.test_join();
@@ -760,8 +760,8 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
     main_assert!(matches!(handle.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
 
     let mut app = new_real_classic_menu_app(640, 480);
-    app.startup_irc_server = address.to_string();
-    app.startup_irc_client = Some(handle);
+    app.chat.server = address.to_string();
+    app.chat.client = Some(handle);
     app.open_network_game_dialog();
     let browser_status = app.status_text.clone();
     activate_startup_network_chat(&mut app);
@@ -794,7 +794,7 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
     app.show_main_menu();
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
-    main_assert!(app.startup_irc_client.is_some());
+    main_assert!(app.chat.client.is_some());
     main_assert_eq!(
         app.startup_network_dialog
             .as_ref()

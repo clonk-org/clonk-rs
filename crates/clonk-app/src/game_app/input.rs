@@ -61,7 +61,7 @@ impl GameApp {
                 && (self.running_chat_controller().is_none()
                     || self.running_chat_keyboard_active()))
             || self.league_signup_dialog.is_some()
-            || (self.external_irc_dialog_visible
+            || (self.chat.external_dialog_visible
                 && (self.mode != AppMode::Running
                     || self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)))
     }
@@ -113,10 +113,10 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.external_irc_dialog_visible && self.context_menu.is_some() {
+        if self.chat.external_dialog_visible && self.context_menu.is_some() {
             return Ok(());
         }
-        if self.external_irc_dialog_visible
+        if self.chat.external_dialog_visible
             && (!matches!(self.mode, AppMode::Running)
                 || self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc))
         {
@@ -126,7 +126,8 @@ impl GameApp {
             let mut encoded = [0_u8; 4];
             let text = character.encode_utf8(&mut encoded);
             let actions = self
-                .external_irc_dialog
+                .chat
+                .external_dialog
                 .as_mut()
                 .map(|dialog| dialog.handle_text_input(text, &fonts.text))
                 .unwrap_or_default();
@@ -434,7 +435,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.external_irc_dialog_visible && !context_routed_before_running_dialogs {
+        if self.chat.external_dialog_visible && !context_routed_before_running_dialogs {
             if let Some(menu) = self.context_menu.as_mut() {
                 let point = menu.pointer_position();
                 let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
@@ -445,7 +446,7 @@ impl GameApp {
                 }
             }
         }
-        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
+        if self.chat.external_dialog_visible && !matches!(self.mode, AppMode::Running) {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -453,7 +454,8 @@ impl GameApp {
                 }
             };
             let actions = self
-                .external_irc_dialog
+                .chat
+                .external_dialog
                 .as_mut()
                 .and_then(|dialog| {
                     dialog
@@ -565,7 +567,8 @@ impl GameApp {
                     match dialog_kind {
                         RuntimeDefaultDialog::ExternalIrc => {
                             let actions = self
-                                .external_irc_dialog
+                                .chat
+                                .external_dialog
                                 .as_mut()
                                 .map(|dialog| dialog.handle_wheel(point, native_delta))
                                 .unwrap_or_default();
@@ -853,8 +856,8 @@ impl GameApp {
     }
 
     fn input_network_dialog(&self) -> Option<&clonk_frontend::startup_netdlg::NetDlgController> {
-        if self.external_irc_dialog_visible {
-            self.external_irc_dialog.as_ref()
+        if self.chat.external_dialog_visible {
+            self.chat.external_dialog.as_ref()
         } else {
             self.startup_network_dialog.as_ref()
         }
@@ -863,8 +866,8 @@ impl GameApp {
     pub(crate) fn input_network_dialog_mut(
         &mut self,
     ) -> Option<&mut clonk_frontend::startup_netdlg::NetDlgController> {
-        if self.external_irc_dialog_visible {
-            self.external_irc_dialog.as_mut()
+        if self.chat.external_dialog_visible {
+            self.chat.external_dialog.as_mut()
         } else {
             self.startup_network_dialog.as_mut()
         }
@@ -881,7 +884,7 @@ impl GameApp {
 
         let embedded_network_chat =
             self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame;
-        if !self.external_irc_dialog_visible && !embedded_network_chat {
+        if !self.chat.external_dialog_visible && !embedded_network_chat {
             return Ok(false);
         }
         if state == ElementState::Released && self.netdlg_edit_consumed_keys.remove(&key) {
@@ -2912,7 +2915,7 @@ impl GameApp {
             });
         let external_irc_control_key = dialog_callbacks_active
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
-            && self.external_irc_dialog.as_ref().is_some_and(|dialog| {
+            && self.chat.external_dialog.as_ref().is_some_and(|dialog| {
                 let edit_shortcut = c4_modifiers == ModifiersState::CONTROL
                     && matches!(
                         key,
@@ -3307,7 +3310,7 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running)
             || self.running_chat_active()
             || self.game_over_dialog.is_some()
-            || self.external_irc_dialog_visible
+            || self.chat.external_dialog_visible
         {
             return None;
         }
@@ -3752,7 +3755,7 @@ impl GameApp {
         }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
-        if state == ElementState::Released && self.chat_paste_consumed_keys.remove(&key) {
+        if state == ElementState::Released && self.chat.paste_consumed_keys.remove(&key) {
             return Ok(());
         }
         if self.handle_options_control_capture_key(key, state)? {
@@ -3954,7 +3957,7 @@ impl GameApp {
         if lobby_client_info_owns_key && self.handle_runtime_client_list_key(key, state)? {
             return Ok(());
         }
-        if self.external_irc_dialog_visible {
+        if self.chat.external_dialog_visible {
             let c4_modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             if c4_modifiers.is_empty() && self.handle_context_menu_key(key, state)? {
@@ -3967,7 +3970,7 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if (self.external_irc_dialog_visible || self.running_chat_active())
+        if (self.chat.external_dialog_visible || self.running_chat_active())
             && self.handle_runtime_irc_toggle_key(key, state)?
         {
             return Ok(());
@@ -5162,7 +5165,7 @@ impl GameApp {
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             dialog.set_chat_history(history.clone());
         }
-        if let Some(dialog) = self.external_irc_dialog.as_mut() {
+        if let Some(dialog) = self.chat.external_dialog.as_mut() {
             dialog.set_chat_history(history);
         }
     }
@@ -5478,7 +5481,7 @@ impl GameApp {
                     .is_some_and(|dialog| dialog.is_info_only())
             {
                 ClusterOwner::RuntimeClientInfo
-            } else if self.external_irc_dialog_visible {
+            } else if self.chat.external_dialog_visible {
                 // C4ChatDlg is the active shared-screen dialog. It has no
                 // legacy gamepad navigation callbacks, but the raw cluster
                 // must not leak to the lobby or running game behind it.
@@ -5625,7 +5628,7 @@ impl GameApp {
                                     ClusterOwner::GameOver
                                 } else if (self.startup_dialog_fade_active()
                                     && self.startup_player_properties_dialog.is_none())
-                                    || self.external_irc_dialog_visible
+                                    || self.chat.external_dialog_visible
                                 {
                                     ClusterOwner::Suppressed
                                 } else if eligible_gamepad_gui
@@ -7397,7 +7400,7 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if self.external_irc_dialog_visible {
+        if self.chat.external_dialog_visible {
             if !context_routed_before_running_dialogs
                 && self.handle_context_menu_pointer_move(point)?
             {
@@ -7409,14 +7412,15 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
+        if self.chat.external_dialog_visible && !matches!(self.mode, AppMode::Running) {
             if self.message_dialogs.is_empty() {
                 let actions = self
                     .assets
                     .clonk_fonts
                     .clone()
                     .and_then(|fonts| {
-                        self.external_irc_dialog
+                        self.chat
+                            .external_dialog
                             .as_mut()
                             .map(|dialog| dialog.handle_pointer_move(point, &fonts.text))
                     })
@@ -9320,10 +9324,11 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
+        if self.chat.external_dialog_visible && !matches!(self.mode, AppMode::Running) {
             if button_state == ElementState::Pressed {
                 let outcome = self
-                    .external_irc_dialog
+                    .chat
+                    .external_dialog
                     .as_mut()
                     .and_then(|dialog| {
                         dialog.pointer_position().map(|point| {
@@ -9372,7 +9377,8 @@ impl GameApp {
                             if button_state == ElementState::Pressed =>
                         {
                             let outcome = self
-                                .external_irc_dialog
+                                .chat
+                                .external_dialog
                                 .as_mut()
                                 .map(|dialog| {
                                     dialog
@@ -9617,14 +9623,14 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
+        if self.chat.external_dialog_visible && !matches!(self.mode, AppMode::Running) {
             if button_state == ElementState::Pressed {
                 let primary = primary_clipboard_text();
                 let fonts = self.assets.clonk_fonts.clone();
                 let outcome = fonts
                     .as_deref()
                     .and_then(|fonts| {
-                        self.external_irc_dialog.as_mut().and_then(|dialog| {
+                        self.chat.external_dialog.as_mut().and_then(|dialog| {
                             dialog.pointer_position().map(|point| {
                                 dialog.handle_pointer_middle_down(
                                     point,
@@ -9688,7 +9694,7 @@ impl GameApp {
                         let outcome = fonts
                             .as_deref()
                             .and_then(|fonts| {
-                                self.external_irc_dialog.as_mut().map(|dialog| {
+                                self.chat.external_dialog.as_mut().map(|dialog| {
                                     dialog.handle_pointer_middle_down(
                                         point,
                                         primary.as_deref(),
@@ -10780,7 +10786,7 @@ impl GameApp {
         if league_signup_release_latched {
             return Ok(());
         }
-        if self.external_irc_dialog_visible {
+        if self.chat.external_dialog_visible {
             if self
                 .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)?
             {
@@ -10790,7 +10796,7 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
+        if self.chat.external_dialog_visible && !matches!(self.mode, AppMode::Running) {
             if !self.message_dialogs.is_empty() {
                 return Ok(());
             }
@@ -10801,7 +10807,8 @@ impl GameApp {
                 return Ok(());
             };
             let mut actions = self
-                .external_irc_dialog
+                .chat
+                .external_dialog
                 .as_mut()
                 .map(|dialog| match button_state {
                     ElementState::Pressed => dialog.handle_pointer_down(point, &fonts.text),
@@ -10810,15 +10817,16 @@ impl GameApp {
                 .unwrap_or_default();
             if button_state == ElementState::Released {
                 let now = Instant::now();
-                let double = self.irc_dialog_last_click.is_some_and(|(last, at)| {
+                let double = self.chat.dialog_last_click.is_some_and(|(last, at)| {
                     now.saturating_duration_since(at) < CPP_DOUBLE_CLICK_INTERVAL
                         && (last.x - point.x).abs() <= 4.0
                         && (last.y - point.y).abs() <= 4.0
                 });
-                self.irc_dialog_last_click = (!double).then_some((point, now));
+                self.chat.dialog_last_click = (!double).then_some((point, now));
                 if double {
                     actions.extend(
-                        self.external_irc_dialog
+                        self.chat
+                            .external_dialog
                             .as_mut()
                             .map(|dialog| dialog.handle_pointer_double_click(point, &fonts.text))
                             .unwrap_or_default(),
@@ -11095,13 +11103,13 @@ impl GameApp {
                             && point.is_some_and(|point| {
                                 let now = Instant::now();
                                 let double =
-                                    self.irc_dialog_last_click.is_some_and(|(last, at)| {
+                                    self.chat.dialog_last_click.is_some_and(|(last, at)| {
                                         now.saturating_duration_since(at)
                                             < CPP_DOUBLE_CLICK_INTERVAL
                                             && (last.x - point.x).abs() <= 4.0
                                             && (last.y - point.y).abs() <= 4.0
                                     });
-                                self.irc_dialog_last_click = (!double).then_some((point, now));
+                                self.chat.dialog_last_click = (!double).then_some((point, now));
                                 double
                             });
                         if chat_double {
@@ -11115,7 +11123,7 @@ impl GameApp {
                                     })
                                     .unwrap_or_default(),
                             );
-                            self.irc_dialog_last_click = None;
+                            self.chat.dialog_last_click = None;
                         }
                         self.process_network_dialog_actions(actions)
                     }
@@ -11484,7 +11492,7 @@ impl GameApp {
             self.cancel_ingame_mouse_gestures();
             return Ok(());
         }
-        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
+        if self.chat.external_dialog_visible && !matches!(self.mode, AppMode::Running) {
             match phase {
                 TouchPhase::Started => {
                     self.handle_cursor_moved(PhysicalPosition::new(
@@ -11501,7 +11509,7 @@ impl GameApp {
                 }
                 TouchPhase::Ended => self.handle_mouse_button(ElementState::Released)?,
                 TouchPhase::Cancelled => {
-                    if let Some(dialog) = self.external_irc_dialog.as_mut() {
+                    if let Some(dialog) = self.chat.external_dialog.as_mut() {
                         dialog.pointer_left();
                     }
                 }
@@ -11965,7 +11973,7 @@ impl GameApp {
                 let handled = match dialog_kind {
                     RuntimeDefaultDialog::ExternalIrc => {
                         let hit = self.external_irc_dialog_contains_point(position)
-                            || self.external_irc_pointer_capture;
+                            || self.chat.external_pointer_capture;
                         if !hit {
                             false
                         } else {
@@ -11984,8 +11992,8 @@ impl GameApp {
                                         ElementState::Released,
                                     )?,
                                 TouchPhase::Cancelled => {
-                                    self.external_irc_pointer_capture = false;
-                                    if let Some(dialog) = self.external_irc_dialog.as_mut() {
+                                    self.chat.external_pointer_capture = false;
+                                    if let Some(dialog) = self.chat.external_dialog.as_mut() {
                                         dialog.pointer_left();
                                     }
                                     true
@@ -12438,16 +12446,16 @@ impl GameApp {
             self.league_signup_pointer_left(true);
             return;
         }
-        if self.external_irc_dialog_visible {
+        if self.chat.external_dialog_visible {
             if let Some(menu) = self.context_menu.as_mut() {
                 let _ = menu.handle_pointer_left();
             }
         }
-        if self.external_irc_dialog_visible {
-            if let Some(dialog) = self.external_irc_dialog.as_mut() {
+        if self.chat.external_dialog_visible {
+            if let Some(dialog) = self.chat.external_dialog.as_mut() {
                 dialog.pointer_left();
             }
-            self.irc_dialog_last_click = None;
+            self.chat.dialog_last_click = None;
             return;
         }
         if self

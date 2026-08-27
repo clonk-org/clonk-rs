@@ -201,7 +201,7 @@ impl GameApp {
             RuntimeDefaultDialog::NetworkChart => self.network_chart_dialog.is_some(),
             RuntimeDefaultDialog::ClientList => self.runtime_client_list.is_some(),
             RuntimeDefaultDialog::GameOver => self.game_over_dialog.is_some(),
-            RuntimeDefaultDialog::ExternalIrc => self.external_irc_dialog_visible,
+            RuntimeDefaultDialog::ExternalIrc => self.chat.external_dialog_visible,
         }
     }
 
@@ -311,7 +311,7 @@ impl GameApp {
             self.network_chart_elevated = false;
             if chart_owned_input {
                 match self.running_active_dialog {
-                    Some(RunningDialogStackEntry::Chat) if self.running_chat.is_some() => {
+                    Some(RunningDialogStackEntry::Chat) if self.chat.running.is_some() => {
                         self.set_running_chat_active(true);
                     }
                     Some(RunningDialogStackEntry::Message(stack_id)) => {
@@ -329,7 +329,7 @@ impl GameApp {
     pub(crate) fn reset_runtime_default_dialog_order(&mut self) {
         self.runtime_default_dialog_order.clear();
         self.network_chart_elevated = false;
-        if self.external_irc_dialog_visible {
+        if self.chat.external_dialog_visible {
             self.runtime_default_dialog_order
                 .push(RuntimeDefaultDialog::ExternalIrc);
         }
@@ -372,7 +372,7 @@ impl GameApp {
 
     fn set_running_active_dialog(&mut self, entry: Option<RunningDialogStackEntry>) {
         self.running_active_dialog = entry;
-        if let Some(chat) = self.running_chat.as_mut() {
+        if let Some(chat) = self.chat.running.as_mut() {
             chat.active = entry == Some(RunningDialogStackEntry::Chat);
         }
     }
@@ -3619,11 +3619,11 @@ impl GameApp {
     }
 
     pub(crate) fn open_network_game_dialog(&mut self) {
-        self.external_irc_dialog_visible = false;
-        self.external_irc_dialog = None;
+        self.chat.external_dialog_visible = false;
+        self.chat.external_dialog = None;
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
-        self.irc_dialog_last_click = None;
-        self.external_irc_pointer_capture = false;
+        self.chat.dialog_last_click = None;
+        self.chat.external_pointer_capture = false;
         self.close_context_menu_silently();
         self.status_text.clear();
         self.startup_network_refresh_waiting_for_clear = false;
@@ -4151,7 +4151,7 @@ impl GameApp {
             if self.mode == AppMode::Running {
                 if self.network_chart_elevated {
                     self.message_dialog_active_index = None;
-                    if let Some(chat) = self.running_chat.as_mut() {
+                    if let Some(chat) = self.chat.running.as_mut() {
                         chat.active = false;
                     }
                 } else {
@@ -4162,12 +4162,12 @@ impl GameApp {
                         _ => None,
                     };
                     if self.running_active_dialog == Some(RunningDialogStackEntry::Chat) {
-                        if let Some(chat) = self.running_chat.as_mut() {
+                        if let Some(chat) = self.chat.running.as_mut() {
                             chat.active = true;
                         }
                     }
                 }
-            } else if self.running_chat.is_some() {
+            } else if self.chat.running.is_some() {
                 self.set_running_chat_active(true);
             } else {
                 self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
@@ -4704,7 +4704,7 @@ impl GameApp {
                 };
             }
         }
-        if self.external_irc_dialog_visible || self.game_option_input_dialog.is_some() {
+        if self.chat.external_dialog_visible || self.game_option_input_dialog.is_some() {
             return None;
         }
         if self.mode == AppMode::Running {
@@ -4735,7 +4735,7 @@ impl GameApp {
                 return self.scoreboard_tooltip_target_cached(point);
             }
         }
-        if self.external_irc_dialog_visible {
+        if self.chat.external_dialog_visible {
             return None;
         }
         if let Some(controller) = self.definition_selector.as_ref() {
