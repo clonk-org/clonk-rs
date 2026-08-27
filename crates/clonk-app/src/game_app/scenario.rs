@@ -1757,7 +1757,7 @@ impl GameApp {
                 let mut assignment =
                     NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
                         metadata,
-                        self.generated_team_name_template.clone(),
+                        self.players.generated_team_name_template.clone(),
                     );
                 // Replay PlayerInfos are projected before definitions and
                 // objects load. RestoreSavegameInfos performs a distinct
@@ -1909,7 +1909,7 @@ impl GameApp {
             // is locally controlled.
             engine.set_local_players([]);
         } else {
-            engine.set_local_players([self.local_owner]);
+            engine.set_local_players([self.players.local_owner]);
         }
         engine.set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         if let Some(timing) = self
@@ -1949,13 +1949,13 @@ impl GameApp {
         // Full C4Game::InitGame clears the consumed restart handoff and
         // snapshots the authoritative PlayerInfos before this round's script
         // selects which fields a later Restart should restore.
-        self.restart_restore_infos.capture_player_infos(
+        self.players.restart_restore_infos.capture_player_infos(
             replay_player_startup
                 .as_ref()
                 .map(|startup| &startup.restart_player_infos)
                 .unwrap_or(&self.control_player_infos),
         );
-        self.restart_restore_roster_items.clear();
+        self.players.restart_restore_roster_items.clear();
         self.apply_material_library_to(&mut engine);
         if replay {
             // C4GameControl::InitReplay sets fHost=false; replayed Set
@@ -2282,7 +2282,7 @@ impl GameApp {
                 let restored = std::mem::take(&mut startup.local_controls);
                 self.install_local_controls(restored);
                 if let Some(owner) = startup.local_players.first().copied() {
-                    self.local_owner = owner;
+                    self.players.local_owner = owner;
                 }
                 self.mouse_control = self.local_controls.mouse_owner().is_some();
             }
@@ -2488,11 +2488,11 @@ impl GameApp {
                 }
                 self.mouse_control = self.local_controls.mouse_owner().is_some();
                 if let Some(first) = local_players.first().copied() {
-                    self.local_owner = first;
+                    self.players.local_owner = first;
                 }
                 self.engine.set_local_players(local_players);
-                if team_selection_players.contains(&self.local_owner) {
-                    self.open_initial_team_selection(self.local_owner);
+                if team_selection_players.contains(&self.players.local_owner) {
+                    self.open_initial_team_selection(self.players.local_owner);
                 }
             } else if let Err(err) = self.join_local_player() {
                 tracing::error!(
@@ -2507,7 +2507,7 @@ impl GameApp {
             // projection. C++ derives LocalControl at the actual player join, so
             // restore the authoritative local set after that join completes.
             if offline_startup_players.is_none() {
-                self.engine.set_local_players([self.local_owner]);
+                self.engine.set_local_players([self.players.local_owner]);
             }
         }
         if !prepared_go {
@@ -2582,20 +2582,20 @@ impl GameApp {
         }
         if !network_game && !replay {
             self.refresh_current_player_info_teams();
-            self.network_team_assignment = offline_team_metadata.take().map(|mut metadata| {
+            self.players.team_assignment = offline_team_metadata.take().map(|mut metadata| {
                 project_runtime_memberships_into_initial_metadata(
                     &mut metadata,
                     self.engine.teams(),
                 );
                 NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
                     metadata,
-                    self.generated_team_name_template.clone(),
+                    self.players.generated_team_name_template.clone(),
                 )
             });
         } else if replay {
-            self.network_team_assignment = None;
+            self.players.team_assignment = None;
         }
-        self.open_initial_team_selection(self.local_owner);
+        self.open_initial_team_selection(self.players.local_owner);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
         if !network_game {
@@ -2684,7 +2684,7 @@ impl GameApp {
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
             .set_fire_particles(self.display_flags.fire_particles);
-        self.engine.set_local_players([self.local_owner]);
+        self.engine.set_local_players([self.players.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_network_control_mode(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
@@ -2730,7 +2730,7 @@ impl GameApp {
         self.ensure_local_player_registered()?;
 
         let spawn = SpawnConfig::new(spawn_definition)
-            .with_owner(self.local_owner)
+            .with_owner(self.players.local_owner)
             .with_position(Vector2::new(240, 180))
             .with_energy(100)
             .with_action(ActionState::new("Walk"))
@@ -2744,14 +2744,14 @@ impl GameApp {
         if matches!(self.runtime_network_role(), RuntimeNetworkRole::Offline)
             && self.engine.is_control_host()
         {
-            self.network_team_assignment = initial_team_metadata_from_runtime(
+            self.players.team_assignment = initial_team_metadata_from_runtime(
                 self.engine.team_configuration(),
                 self.engine.teams(),
             )
             .map(|metadata| {
                 NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
                     metadata,
-                    self.generated_team_name_template.clone(),
+                    self.players.generated_team_name_template.clone(),
                 )
             });
         }

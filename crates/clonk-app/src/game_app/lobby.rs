@@ -398,7 +398,8 @@ impl GameApp {
         .unwrap_or(i32::MAX);
         let teams = match mode {
             NetworkMode::Host(_) => self
-                .network_team_assignment
+                .players
+                .team_assignment
                 .as_ref()
                 .map(NetworkTeamAssignmentState::teams)
                 .map(|teams| Self::engine_team_option_state(teams, active_player_count)),
@@ -996,7 +997,8 @@ impl GameApp {
     fn visible_classic_lobby_team_metadata(
         &self,
     ) -> Option<clonk_engine::InitialNetworkTeamMetadata> {
-        self.network_team_assignment
+        self.players
+            .team_assignment
             .as_ref()
             .map(|assignment| assignment.teams().clone())
             .or_else(|| {
@@ -1217,7 +1219,8 @@ impl GameApp {
             .as_ref()
             .and_then(|join| initial_team_metadata_from_join_snapshot(&join.parameters.teams));
         let teams = self
-            .network_team_assignment
+            .players
+            .team_assignment
             .as_ref()
             .map(NetworkTeamAssignmentState::teams)
             .or(joined_teams.as_ref());
@@ -1754,14 +1757,15 @@ impl GameApp {
     }
 
     fn exit_startup_lobby_to_main(&mut self) {
-        self.restart_restore_roster_items.clear();
+        self.players.restart_restore_roster_items.clear();
         self.show_main_menu();
         self.resume_startup_music_after_failed_open_game();
     }
 
     pub(crate) fn select_classic_lobby_sheet(&mut self, sheet: LobbySheet) -> bool {
         let has_teams = self
-            .network_team_assignment
+            .players
+            .team_assignment
             .as_ref()
             .is_some_and(|assignment| assignment.teams().active);
         if sheet == LobbySheet::Teams && !has_teams {
@@ -1831,7 +1835,8 @@ impl GameApp {
     fn open_lobby_tab_context(&mut self, position: GuiPoint) -> Result<bool, EngineError> {
         let (has_teams, options_available) = if self.classic_host_lobby_active() {
             (
-                self.network_team_assignment
+                self.players
+                    .team_assignment
                     .as_ref()
                     .is_some_and(|assignment| assignment.teams().active),
                 true,
@@ -2312,7 +2317,7 @@ impl GameApp {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             return None;
         }
-        let metadata = self.network_team_assignment.as_ref()?.teams();
+        let metadata = self.players.team_assignment.as_ref()?.teams();
         let (_, packets) = self.control_player_infos.retained_rows_snapshot();
         let active = packets
             .iter()
@@ -2631,7 +2636,7 @@ impl GameApp {
             return;
         }
         let has_or_will_have_lobby = self.has_or_will_have_network_lobby();
-        let Some((metadata, updates)) = self.network_team_assignment.as_mut().map(|assignment| {
+        let Some((metadata, updates)) = self.players.team_assignment.as_mut().map(|assignment| {
             let updates = assignment.set_random_team_count(
                 &mut self.control_player_infos,
                 selected,
@@ -4438,7 +4443,8 @@ impl GameApp {
             return Ok(true);
         }
         let teams_custom = self
-            .network_team_assignment
+            .players
+            .team_assignment
             .as_ref()
             .map(NetworkTeamAssignmentState::teams)
             .map(|teams| teams.custom)

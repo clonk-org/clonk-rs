@@ -495,7 +495,7 @@ fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
             by_client: 0,
         }],
     );
-    app.restart_restore_infos
+    app.players.restart_restore_infos
         .capture_player_infos(&app.control_player_infos);
     app.control_player_infos.replace_snapshot(
         8,
@@ -544,7 +544,7 @@ fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
         "each synchronous PlayerListItem update carries earlier restored teammates forward"
     );
     main_assert!(
-        app.network_team_assignment
+        app.players.team_assignment
             .as_ref()
             .unwrap()
             .teams()
@@ -580,7 +580,7 @@ fn host_round_restart_returns_to_network_lobby_staging() {
 
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost, "a hosted round must rebuild its lobby instead of launching locally");
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.restart_restore_infos.what => RESTART_RESTORE_PLAYER_TEAMS, "the lobby handoff retains the raw SetRestoreInfos mask");
+    main_assert_eq!(app.players.restart_restore_infos.what => RESTART_RESTORE_PLAYER_TEAMS, "the lobby handoff retains the raw SetRestoreInfos mask");
     // The pathless sandbox fixture reaches host staging and fails there. A
     // failed OpenGame returns through QuitGame to the remembered startup
     // dialog and reports its fatal error in the Error Log instead of leaving a
@@ -642,7 +642,7 @@ fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
     });
 
     app.mode = AppMode::Running;
-    main_assert!(app.show_abort_dialog(app.local_owner));
+    main_assert!(app.show_abort_dialog(app.players.local_owner));
     finish_abort_dialog(
         &mut app,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
@@ -1295,7 +1295,7 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     drop(client_listener);
 
     let mut client = new_menu_app_with_paths(800, 600, &client_paths);
-    client.player_name = "Connected Client".to_string();
+    client.players.local_name = "Connected Client".to_string();
     client
         .activate_network_join(host_endpoint.to_string())
         .test_value();
@@ -1371,7 +1371,7 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     let host_routes = route_keys(&host);
     let client_routes = route_keys(&client);
     main_assert!(!host_routes.is_empty() && !client_routes.is_empty(), "the E2E must observe both live workers' real routes");
-    main_assert!(host.show_abort_dialog(host.local_owner));
+    main_assert!(host.show_abort_dialog(host.players.local_owner));
     finish_abort_dialog(
         &mut host,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
@@ -1428,7 +1428,7 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     main_assert_eq!(client.network_lobby.test_ref().scenario_label() => host_scenario.title);
 
     let mut joining_client = new_menu_app_with_paths(800, 600, &joining_client_paths);
-    joining_client.player_name = "Joining Client".to_string();
+    joining_client.players.local_name = "Joining Client".to_string();
     drop(joining_client_listener);
     joining_client
         .activate_network_join(host_endpoint.to_string())
@@ -1661,8 +1661,8 @@ fn restart_restore_team_obeys_mask_user_and_equal_team_guards() {
         app.network_mode = Some(NetworkMode::Host(
             game_over_fixture!(host: 0, "Host".to_string(), None),
         ));
-        app.restart_restore_infos.what = mask;
-        app.restart_restore_infos.players.insert(
+        app.players.restart_restore_infos.what = mask;
+        app.players.restart_restore_infos.players.insert(
             b"Chooser".to_vec(),
             RestartRestorePlayerInfo {
                 player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
@@ -1978,7 +1978,7 @@ fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
 
     let mut menu = new_running_sandbox_app();
     menu.ingame_menu.replace(
-        menu.local_owner,
+        menu.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
     check(menu, "running player menu");
@@ -2310,9 +2310,9 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
             .to_string(),
     );
     app.gamepad_bindings = GamepadBindings::from_config(&config);
-    app.local_controls.remove(app.local_owner);
+    app.local_controls.remove(app.players.local_owner);
     app.local_controls.initialize(LocalControlInit {
-        owner: app.local_owner,
+        owner: app.players.local_owner,
         preferred_set: GamepadSlot::new(1).control_set(),
         prefers_mouse: false,
         gamepads_enabled: true,
@@ -2321,7 +2321,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
     });
     app.start_running_chat(RunningChatMode::All);
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .control
         .pressed_coms = 0;
 
@@ -2346,7 +2346,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
     )
     .test_value();
 
-    main_assert_ne!(app.engine.player(app.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+    main_assert_ne!(app.engine.player(app.players.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     main_assert!(app.game_over_dialog.is_some());
     main_assert!(app.chat.running.is_some());
     main_assert!(app.ingame_menu.is_none());
@@ -2485,7 +2485,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
     gamepad_priority
         .local_controls
         .initialize(LocalControlInit {
-            owner: gamepad_priority.local_owner,
+            owner: gamepad_priority.players.local_owner,
             preferred_set: 4,
             prefers_mouse: false,
             gamepads_enabled: true,
@@ -2500,7 +2500,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
     main_assert_ne!(
         gamepad_priority
             .engine
-            .player(gamepad_priority.local_owner)
+            .player(gamepad_priority.players.local_owner)
             .expect("local gamepad player")
             .control
             .pressed_coms
@@ -4204,7 +4204,7 @@ fn ordinary_message_behind_scoreboard_does_not_suppress_gamepad_gameplay() {
         game_over_fixture!(direction: GamepadSlot::new(0), ControlButton::Right, ElementState::Pressed),
     ]);
 
-    main_assert_ne!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_RIGHT) => 0,);
+    main_assert_ne!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_RIGHT) => 0,);
     main_assert_eq!(app.dialogs.messages.len() => 1);
 }
 
@@ -4283,13 +4283,13 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     app.bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .control
         .control_style = true;
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     main_assert!(app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
-    main_assert_ne!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0,);
+    main_assert_ne!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0,);
     app.open_context_menu_at(
         vec![ContextMenuEntry::<AppContextMenuCommand>::new(
             "Remain open",
@@ -4302,7 +4302,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     main_assert!(!app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
     main_assert_ne!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -4323,7 +4323,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
     exclusive_release
         .engine
-        .test_player_mut(exclusive_release.local_owner)
+        .test_player_mut(exclusive_release.players.local_owner)
         .control
         .control_style = true;
     exclusive_release.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
@@ -4334,7 +4334,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     main_assert_ne!(
         exclusive_release
             .engine
-            .player(exclusive_release.local_owner)
+            .player(exclusive_release.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -4354,7 +4354,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
     dialog_press
         .engine
-        .test_player_mut(dialog_press.local_owner)
+        .test_player_mut(dialog_press.players.local_owner)
         .control
         .control_style = true;
     dialog_press.handle_game_over().test_value();
@@ -4370,7 +4370,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     main_assert_eq!(
         dialog_press
             .engine
-            .player(dialog_press.local_owner)
+            .player(dialog_press.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -4840,12 +4840,12 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
             }"#;
     let mut app = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .control
         .control_style = true;
     app.dispatch_control_event(ControlEvent::Press(ControlButton::Left))
         .test_value();
-    main_assert_ne!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0,);
+    main_assert_ne!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0,);
     app.open_ingame_menu().test_value();
     call_scoreboard_function_and_update(&mut app, "ShowAndEnd");
     main_assert!(app.game_over_dialog.is_some());
@@ -4853,7 +4853,7 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
     main_assert!(app.ingame_menu.is_none());
     main_assert_eq!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -5760,12 +5760,12 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
     player
         .engine
-        .test_player_mut(player.local_owner)
+        .test_player_mut(player.players.local_owner)
         .control
         .control_style = true;
     player.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert!(player.runtime_flash_message.is_none());
-    main_assert_ne!(player.engine.player(player.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+    main_assert_ne!(player.engine.player(player.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 
     for modifiers in [
         ModifiersState::ALT,

@@ -404,14 +404,14 @@ fn focus_loss_clears_controls_repeat_tracking_and_pointer_state() {
     app.join_local_player().test_value();
     app.mode = AppMode::Running;
     app.live_input.ingame_pointer = Some(ViewportPointer {
-        owner: app.local_owner,
+        owner: app.players.local_owner,
         world: FloatVector2::new(10.0, 20.0),
         screen: GuiPoint::new(30.0, 40.0),
     });
 
     AppVirtualKeyboard::new(&mut app).press(VirtualKeyCode::KeyX);
     main_assert!(!app.live_input.pressed_engine_keys.is_empty());
-    main_assert_ne!(app.engine.snapshot().players.into_iter().find(|player| player.id == app.local_owner).expect("local player").control.pressed_coms => 0);
+    main_assert_ne!(app.engine.snapshot().players.into_iter().find(|player| player.id == app.players.local_owner).expect("local player").control.pressed_coms => 0);
 
     app.handle_focus_lost().test_value();
 
@@ -421,7 +421,7 @@ fn focus_loss_clears_controls_repeat_tracking_and_pointer_state() {
             .snapshot()
             .players
             .into_iter()
-            .find(|player| player.id == app.local_owner)
+            .find(|player| player.id == app.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms =>
@@ -4018,7 +4018,7 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
     // endpoint, and ButtonUp removes the frame immediately
     // (C4MouseControl.cpp:203-316,406-414,893-980,1009-1037,1158-1170).
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let viewport = app.graphics.viewport_rect(owner).test_value();
@@ -4318,7 +4318,7 @@ fn runtime_music_flash_reaches_every_nonexclusive_running_layer() {
     let mut observer = new_running_sandbox_app();
     observer
         .engine
-        .remove_player(observer.local_owner)
+        .remove_player(observer.players.local_owner)
         .test_value();
     observer.engine.set_local_players([]);
     observer.snapshot = observer.engine.snapshot();

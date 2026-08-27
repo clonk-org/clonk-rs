@@ -439,7 +439,7 @@ fn install_mouse_help_target(
     description: Option<&str>,
 ) -> (ObjectId, GuiPoint) {
     render_mouse_test_app(app);
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let viewport = app.graphics.viewport_rect(owner).test_value();
     let inset_x = 24_i32.min(viewport.width as i32 / 4);
     let inset_y = 24_i32.min(viewport.height as i32 / 4);
@@ -495,7 +495,7 @@ fn install_mouse_help_target(
 
 fn inventory_region_fixture() -> (GameApp, i32, ObjectId, ObjectId, ObjectId, GuiPoint) {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.crew_cursor(owner).test_value();
     let mut landscape = Landscape::flat(480, 180);
     landscape.set_world_height(200);
@@ -535,7 +535,7 @@ fn inventory_region_fixture() -> (GameApp, i32, ObjectId, ObjectId, ObjectId, Gu
 }
 
 fn command_region_point(app: &GameApp, command: u8) -> GuiPoint {
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app
         .snapshot
         .players
@@ -581,7 +581,7 @@ fn viewport_button_point(
 
 fn command_bar_fixture(control_style: bool) -> (GameApp, i32, [(u8, GuiPoint); 4]) {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.engine
         .player_mut(owner)
         .test_value()
@@ -663,7 +663,7 @@ impl<'app> AppVirtualKeyboard<'app> {
             .snapshot()
             .players
             .into_iter()
-            .find(|player| player.id == self.app.local_owner)
+            .find(|player| player.id == self.app.players.local_owner)
             .test_value()
             .control
     }
@@ -842,7 +842,7 @@ impl PreparedRealInstalledScenario {
             // persistent-player path: GetIdle recruits the existing CLNK and
             // therefore does not create/name a new crew info. Fresh-crew
             // System-name RNG is pinned separately by Tutorial09 below.
-            app.selected_player_file = Some(PlayerFile {
+            app.players.selected_file = Some(PlayerFile {
                 info_core: Default::default(),
                 name: player_name.to_string(),
                 score: 0,
@@ -1050,7 +1050,7 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
         .snapshot()
         .players
         .into_iter()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .test_value();
     assert_eq!(
         player.control.control_style, auto_stop,
@@ -1061,7 +1061,7 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
     assert_eq!(player.score, 250);
     assert_eq!(player.total_playing_time, 1_234);
 
-    let cursor = app.engine.crew_cursor(app.local_owner).test_value();
+    let cursor = app.engine.crew_cursor(app.players.local_owner).test_value();
     app.mode = AppMode::Running;
     let mut keyboard = AppVirtualKeyboard::new(&mut app);
     for (key, held_direction) in [
@@ -1890,7 +1890,7 @@ fn install_test_classic_host_team_lobby(
         clonk_engine::TeamInfo::new(4, "Malformed negative maximum", 0x00ff_ffff)
             .with_max_players(-1),
     ];
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
         clonk_engine::InitialNetworkTeamMetadata {
             active: true,
             custom: true,
@@ -2006,7 +2006,7 @@ fn script_player_add_fixture(
             ..Default::default()
         }],
     );
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
         clonk_engine::InitialNetworkTeamMetadata {
             active: true,
             custom: true,
@@ -2659,7 +2659,7 @@ fn finish_abort_dialog(
 }
 
 fn confirm_abort_dialog(app: &mut GameApp) {
-    assert!(app.show_abort_dialog(app.local_owner));
+    assert!(app.show_abort_dialog(app.players.local_owner));
     finish_abort_dialog(
         app,
         clonk_frontend::message_dialog::MessageDialogResult::Yes,
@@ -2804,7 +2804,7 @@ fn new_running_sandbox_app_with_definitions_and_assets(
     // The lightweight fallback spawns its crew outside CreateInfoObject,
     // which normally installs C4FOW_Def_View_RangeX during player join.
     // Keep this ubiquitous fixture at the same native mouse/FoW invariant.
-    if let Some(cursor) = app.engine.crew_cursor(app.local_owner) {
+    if let Some(cursor) = app.engine.crew_cursor(app.players.local_owner) {
         let mut update = ObjectUpdate::new();
         update.plr_view_range = Some(500);
         app.engine.apply_object_update(cursor, update).test_value();
@@ -2978,14 +2978,14 @@ fn install_message_fixture(app: &mut GameApp) {
         .player_mut(7)
         .test_value()
         .set_at_client(clonk_engine::PlayerAtClient::new(7));
-    app.engine.set_local_players([app.local_owner]);
+    app.engine.set_local_players([app.players.local_owner]);
     let line_height = app.graphics.message_board_line_height();
     app.message_board.initialize(true, line_height);
     let _ = app.message_board.advance_frame(line_height, false);
 }
 
 fn add_secondary_local_player_for_mouse_option_test(app: &mut GameApp) -> i32 {
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = app.engine.next_player_number();
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
@@ -4212,7 +4212,7 @@ fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
             ..Default::default()
         });
     app.local_controls
-        .toggle_mouse(app.local_owner)
+        .toggle_mouse(app.players.local_owner)
         .test_value();
     assert_eq!(app.local_controls.mouse_owner(), None);
     app.mouse_control = false;
@@ -4403,7 +4403,7 @@ fn install_test_cursor_menu(
 
 fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, Vector2, i32) {
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.crew_cursor(owner).test_value();
     // Disabling never owes the repeller rebuild.
     let _ = app
@@ -4584,7 +4584,7 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
         object_menu_open: app.object_menu.is_some(),
         engine_menu_style: app
             .engine
-            .cursor_object_menu(app.local_owner)
+            .cursor_object_menu(app.players.local_owner)
             .map(|(_, menu)| menu.style),
         context_menu_open: app.context_menu.is_some(),
         definition_selector_open: app.definition_selector.is_some(),
@@ -4642,9 +4642,9 @@ fn route_primary_gamepad_to_local_owner(app: &mut GameApp) {
             .to_string(),
     );
     app.gamepad_bindings = GamepadBindings::from_config(&config);
-    app.local_controls.remove(app.local_owner);
+    app.local_controls.remove(app.players.local_owner);
     app.local_controls.initialize(LocalControlInit {
-        owner: app.local_owner,
+        owner: app.players.local_owner,
         preferred_set: GamepadSlot::new(0).control_set(),
         prefers_mouse: false,
         gamepads_enabled: true,

@@ -120,7 +120,7 @@ fn open_test_console_viewport(app: &mut GameApp, player: Option<i32>) -> u64 {
 }
 
 fn open_local_test_console_viewport(app: &mut GameApp) -> u64 {
-    open_test_console_viewport(app, Some(app.local_owner))
+    open_test_console_viewport(app, Some(app.players.local_owner))
 }
 
 fn runtime_console_network_fixture(
@@ -532,7 +532,7 @@ fn command_and_hash_routes_bypass_plain_script_control() {
     let (controls, messages) = commands.take_submitted_decided_controls_and_messages();
     assert!(controls.is_empty());
     runtime_assert_eq!(
-        messages => vec![MessageControlData { message_type: MESSAGE_TYPE_SOUND, player: app.local_owner, to_player: -1, message: legacy_cstring(b"Bell"), by_client: 0, }];
+        messages => vec![MessageControlData { message_type: MESSAGE_TYPE_SOUND, player: app.players.local_owner, to_player: -1, message: legacy_cstring(b"Bell"), by_client: 0, }];
     );
 }
 
@@ -1644,7 +1644,7 @@ fn input_latency_benchmark_submits_two_unmatched_releases_for_each_local_player(
     // dispatches DirectCom (src/C4Player.cpp:1541-1548). Two distinct
     // unmatched releases exercise lockstep without changing game state.
     let mut app = new_state_only_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let second_owner = owner + 1;
     let first_crew = app.snapshot.players[0].crew[0];
     let mut second_crew = app.snapshot.object(first_crew).test_value().clone();
@@ -1686,7 +1686,7 @@ fn input_latency_benchmark_submits_two_unmatched_releases_for_each_local_player(
 #[test]
 fn input_latency_benchmark_requires_a_live_local_crew() {
     let mut app = new_state_only_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.snapshot
         .players
         .iter_mut()
@@ -2158,10 +2158,10 @@ fn fresh_player_default_up_key_jumps_and_releases_like_cpp() {
     app.join_local_player().test_value();
     app.mode = AppMode::Running;
 
-    let cursor = app.engine.test_crew_cursor(app.local_owner);
+    let cursor = app.engine.test_crew_cursor(app.players.local_owner);
     runtime_assert!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("fresh player")
             .control_style(),
         "new players default to AutoStopControl like C++"
@@ -2185,7 +2185,7 @@ fn fresh_player_default_up_key_jumps_and_releases_like_cpp() {
         "S must traverse GameApp input and queue C4CMD_Jump",
     );
     runtime_assert_ne!(
-        app.engine.snapshot().players.into_iter().find(|player| player.id == app.local_owner).expect("player after S press").control.pressed_coms & (1 << clonk_engine::COM_UP) =>
+        app.engine.snapshot().players.into_iter().find(|player| player.id == app.players.local_owner).expect("player after S press").control.pressed_coms & (1 << clonk_engine::COM_UP) =>
             0,
         "the Up press must be registered before release",
     );
@@ -2200,7 +2200,7 @@ fn fresh_player_default_up_key_jumps_and_releases_like_cpp() {
 
     app.test_key(VirtualKeyCode::KeyS, ElementState::Released);
     runtime_assert_eq!(
-        app.engine.snapshot().players.into_iter().find(|player| player.id == app.local_owner).expect("player after S release").control.pressed_coms & (1 << clonk_engine::COM_UP) =>
+        app.engine.snapshot().players.into_iter().find(|player| player.id == app.players.local_owner).expect("player after S release").control.pressed_coms & (1 << clonk_engine::COM_UP) =>
             0,
         "AutoStop key-up clears the registered Up press",
     );
@@ -2765,7 +2765,7 @@ fn team_options_submit_exact_sets_and_refresh_from_echoes() {
             set_control_test_team(2, Vec::new(), 0),
         ],
     );
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
 
     app.submit_classic_lobby_team_setting(LobbyOptionKind::TeamDistribution, 4);
@@ -2774,7 +2774,7 @@ fn team_options_submit_exact_sets_and_refresh_from_echoes() {
     runtime_assert_eq!(
         sets => [clonk_network::LegacyControlSet { value_type: 3, data: 4, by_client: 0, }, clonk_network::LegacyControlSet { value_type: 4, data: 1, by_client: 0, },];
     );
-    let teams = app.network_team_assignment.as_ref().test_value().teams();
+    let teams = app.players.team_assignment.as_ref().test_value().teams();
     runtime_assert_eq!(teams.team_distribution => clonk_engine::InitialNetworkTeamDistribution::Free);
     assert!(!teams.team_colors, "menu selections wait for host echoes");
 
@@ -4050,7 +4050,7 @@ fn unconfigured_stick_and_hat_emit_no_gameplay_controls() {
     app.gamepad_bindings = GamepadBindings::from_config(&Config::new());
     app.local_controls = LocalControlRegistry::default();
     app.local_controls
-        .initialize(test_local_control_init(app.local_owner, 4, false, false));
+        .initialize(test_local_control_init(app.players.local_owner, 4, false, false));
     let slot = GamepadSlot::new(0);
 
     app.test_gamepad_events([gamepad_direction_event(
@@ -4058,7 +4058,7 @@ fn unconfigured_stick_and_hat_emit_no_gameplay_controls() {
         ControlButton::Left,
         ElementState::Pressed,
     )]);
-    runtime_assert_eq!(app.engine.player(app.local_owner).expect("control-set four player").control.pressed_coms => 0, "semantic direction alone must not restore the hardwired gameplay path");
+    runtime_assert_eq!(app.engine.player(app.players.local_owner).expect("control-set four player").control.pressed_coms => 0, "semantic direction alone must not restore the hardwired gameplay path");
 
     app.test_gamepad_events([
         gamepad_axis_event(
@@ -4075,7 +4075,7 @@ fn unconfigured_stick_and_hat_emit_no_gameplay_controls() {
         gamepad_direction_event(slot, ControlButton::Left, ElementState::Pressed),
     ]);
 
-    let pressed = app.engine.test_player(app.local_owner).control.pressed_coms;
+    let pressed = app.engine.test_player(app.players.local_owner).control.pressed_coms;
     assert_eq!(pressed, 0);
 }
 
@@ -4100,7 +4100,7 @@ fn axis_up_fires_dig_and_hat_zero_fires_configured_left() {
     app.gamepad_bindings = GamepadBindings::from_config(&config);
     app.local_controls = LocalControlRegistry::default();
     app.local_controls
-        .initialize(test_local_control_init(app.local_owner, 4, false, false));
+        .initialize(test_local_control_init(app.players.local_owner, 4, false, false));
     let slot = GamepadSlot::new(0);
 
     app.test_gamepad_events([
@@ -4118,7 +4118,7 @@ fn axis_up_fires_dig_and_hat_zero_fires_configured_left() {
         gamepad_direction_event(slot, ControlButton::Left, ElementState::Pressed),
     ]);
 
-    let pressed = app.engine.test_player(app.local_owner).control.pressed_coms;
+    let pressed = app.engine.test_player(app.players.local_owner).control.pressed_coms;
     assert_ne!(pressed & (1 << clonk_engine::COM_DIG), 0);
     assert_ne!(pressed & (1 << clonk_engine::COM_LEFT), 0);
 }
@@ -4276,7 +4276,7 @@ fn runtime_key_config_compiles_lists_modifiers_raw_joy_and_disable_codes() {
 #[test]
 fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let focus = app.engine.test_crew_cursor(owner);
     app.engine
         .replace_player_viewports(
@@ -4369,7 +4369,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     let owned_camera = owned.graphics.active_viewport_projections()[0];
     owned
         .engine
-        .test_player_mut(owned.local_owner)
+        .test_player_mut(owned.players.local_owner)
         .control
         .control_style = true;
     for (binding, key, command) in [
@@ -4396,9 +4396,9 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     ] {
         owned.bindings.rebind(binding, key);
         owned.test_key(key, ElementState::Pressed);
-        runtime_assert_ne!(owned.engine.player(owned.local_owner).expect("local player").control.pressed_coms & (1 << command) => 0);
+        runtime_assert_ne!(owned.engine.player(owned.players.local_owner).expect("local player").control.pressed_coms & (1 << command) => 0);
         owned.test_key(key, ElementState::Released);
-        runtime_assert_eq!(owned.engine.player(owned.local_owner).expect("local player").control.pressed_coms & (1 << command) => 0);
+        runtime_assert_eq!(owned.engine.player(owned.players.local_owner).expect("local player").control.pressed_coms & (1 << command) => 0);
     }
     let owned_after = owned.graphics.active_viewport_projections()[0];
     runtime_assert_eq!((owned_after.target_x, owned_after.target_y) => (owned_camera.target_x, owned_camera.target_y));
@@ -4475,7 +4475,7 @@ fn offline_negative_set_max_player_preserves_cap_and_rejects_queued_script_playe
 #[test]
 fn retargeted_primary_survives_its_original_local_player() {
     let mut app = new_lightweight_running_sandbox_app();
-    let original = app.local_owner;
+    let original = app.players.local_owner;
     let target = original + 1;
     app.engine
         .register_player(PlayerConfig::new(target, "Film target"))
@@ -4559,8 +4559,8 @@ fn console_viewport_creation_announces_itself_and_keeps_list_order() {
     app.console_mode = true;
     // Layout order 3 then 1 (C4Console-side control sets 1 and 2), so a
     // fullscreen sort would swap them and a console one must not.
-    let late_layout = app.local_owner + 1;
-    let early_layout = app.local_owner + 2;
+    let late_layout = app.players.local_owner + 1;
+    let early_layout = app.players.local_owner + 2;
     for (player, name, control_set) in [
         (late_layout, "Late layout", 1),
         (early_layout, "Early layout", 2),
@@ -4605,7 +4605,7 @@ fn console_viewport_creation_announces_itself_and_keeps_list_order() {
 fn console_viewport_render_uses_the_windows_own_extent_and_identity() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    let second = app.local_owner + 1;
+    let second = app.players.local_owner + 1;
     app.engine
         .register_player(PlayerConfig::new(second, "Second window"))
         .test_value();
@@ -7273,14 +7273,14 @@ fn player_command_submission_queues_the_open_tick_without_local_execution() {
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     let tick = app.local_control_submission_tick();
-    let crew = app.engine.test_crew_cursor(app.local_owner);
+    let crew = app.engine.test_crew_cursor(app.players.local_owner);
     let before = app
         .engine
         .test_object_snapshot(crew)
         .command_stack
         .command_names();
     let command = PlayerCommandControlData {
-        player: app.local_owner,
+        player: app.players.local_owner,
         command: CommandId::MoveTo as i32,
         x: 120,
         y: 80,
@@ -7300,7 +7300,7 @@ fn player_command_submission_queues_the_open_tick_without_local_execution() {
 #[test]
 fn player_select_submission_queues_the_open_tick_without_local_execution() {
     let mut app = new_state_only_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let first = app.engine.test_crew_cursor(owner);
     let definition = app.engine.test_object_snapshot(first).definition_id;
     let second = app.engine.spawn_test_object(
@@ -7396,7 +7396,7 @@ fn runtime_flash_storage_uses_classic_bytes_and_snapshots_placement() {
         .snapshot
         .players
         .iter_mut()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .test_value();
     player
         .viewports
@@ -7409,7 +7409,7 @@ fn runtime_flash_storage_uses_classic_bytes_and_snapshots_placement() {
     app.snapshot
         .players
         .iter_mut()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .test_value()
         .viewports
         .truncate(1);
@@ -7430,7 +7430,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
         .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
     modified_first
         .engine
-        .test_player_mut(modified_first.local_owner)
+        .test_player_mut(modified_first.players.local_owner)
         .control
         .control_style = true;
     modified_first.test_modifiers(ModifiersState::ALT);
@@ -7440,7 +7440,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
         .contains(&VirtualKeyCode::F3));
     modified_first.test_modifiers(ModifiersState::empty());
     modified_first.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    runtime_assert_eq!(modified_first.engine.player(modified_first.local_owner).expect("local player").control.pressed_coms & left_mask => 0, "AutoStop must discard a held F3 repeat");
+    runtime_assert_eq!(modified_first.engine.player(modified_first.players.local_owner).expect("local player").control.pressed_coms & left_mask => 0, "AutoStop must discard a held F3 repeat");
     assert!(modified_first.runtime_flash_message.is_none());
 
     let mut game_over = new_game_over_keyboard_app();
@@ -7449,7 +7449,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
         .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
     game_over
         .engine
-        .test_player_mut(game_over.local_owner)
+        .test_player_mut(game_over.players.local_owner)
         .control
         .control_style = true;
     game_over.test_key(VirtualKeyCode::F3, ElementState::Pressed);
@@ -7457,7 +7457,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     game_over.dismiss_game_over_dialog();
     game_over.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     runtime_assert_eq!(
-        game_over.engine.player(game_over.local_owner).expect("local player").control.pressed_coms & left_mask => 0;
+        game_over.engine.player(game_over.players.local_owner).expect("local player").control.pressed_coms & left_mask => 0;
         game_over.runtime_flash_message => global_flash;
     );
 
@@ -7467,7 +7467,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
         .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
     changed_on_release
         .engine
-        .test_player_mut(changed_on_release.local_owner)
+        .test_player_mut(changed_on_release.players.local_owner)
         .control
         .control_style = true;
     changed_on_release.test_key(VirtualKeyCode::F3, ElementState::Pressed);
@@ -7478,12 +7478,12 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
         .contains(&VirtualKeyCode::F3));
     changed_on_release
         .engine
-        .test_player_mut(changed_on_release.local_owner)
+        .test_player_mut(changed_on_release.players.local_owner)
         .control
         .pressed_coms = 0;
     changed_on_release.test_modifiers(ModifiersState::empty());
     changed_on_release.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    runtime_assert_ne!(changed_on_release.engine.player(changed_on_release.local_owner).expect("local player").control.pressed_coms & left_mask => 0);
+    runtime_assert_ne!(changed_on_release.engine.player(changed_on_release.players.local_owner).expect("local player").control.pressed_coms & left_mask => 0);
 
     let mut focus = new_running_sandbox_app();
     let sound_before = focus.test_audio_ref().options.sound_enabled;
@@ -7621,7 +7621,7 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
                 assert!(app.open_object_menu().expect("open object state"));
             }
             Layer::Observer => {
-                app.engine.remove_player(app.local_owner).test_value();
+                app.engine.remove_player(app.players.local_owner).test_value();
                 app.engine.set_local_players([]);
                 app.snapshot = app.engine.snapshot();
             }
@@ -7675,7 +7675,7 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
         rebound
             .bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
-        if let Ok(player) = rebound.engine.player_mut(rebound.local_owner) {
+        if let Ok(player) = rebound.engine.player_mut(rebound.players.local_owner) {
             player.control.control_style = true;
         }
         rebound
@@ -8333,7 +8333,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
 #[test]
 fn upper_board_display_toggle_reinitializes_geometry_synchronously() {
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let initial_strip_width = app.graphics.upper_board_text_strip_width();
@@ -8413,12 +8413,12 @@ fn custom_player_f1_binding_outranks_help_when_control_scope_is_active() {
     app.bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     app.engine
-        .test_player_mut(app.local_owner)
+        .test_player_mut(app.players.local_owner)
         .control
         .control_style = true;
     app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(!app.dialogs.help_visible);
-    runtime_assert_ne!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+    runtime_assert_ne!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     app.test_key(VirtualKeyCode::F1, ElementState::Released);
     assert!(!app.dialogs.help_visible);
 
@@ -8434,7 +8434,7 @@ fn custom_player_f1_binding_outranks_help_when_control_scope_is_active() {
 #[test]
 fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
     let mut app = new_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = add_secondary_local_player_for_mouse_option_test(&mut app);
     app.engine.test_player_mut(primary).control.control_style = false;
     app.engine.test_player_mut(secondary).control.control_style = true;
@@ -8486,18 +8486,18 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
         app.bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
         app.engine
-            .test_player_mut(app.local_owner)
+            .test_player_mut(app.players.local_owner)
             .control
             .control_style = true;
         app.test_modifiers(modifiers);
-        let pressed_coms = app.engine.test_player(app.local_owner).control.pressed_coms;
+        let pressed_coms = app.engine.test_player(app.players.local_owner).control.pressed_coms;
         let pressed_engine_keys = app.live_input.pressed_engine_keys.clone();
         assert!(app.show_startup_hint);
 
         for state in [ElementState::Pressed, ElementState::Released] {
             app.test_key(VirtualKeyCode::F1, state);
             assert!(!app.dialogs.help_visible, "modifiers {modifiers:?}");
-            runtime_assert_eq!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms => pressed_coms, "modifiers {modifiers:?}, state {state:?}");
+            runtime_assert_eq!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms => pressed_coms, "modifiers {modifiers:?}, state {state:?}");
             let mut expected_raw_keys = pressed_engine_keys.clone();
             match state {
                 ElementState::Pressed => {
@@ -8922,7 +8922,7 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
     app.apply_ingame_menu_action(MenuAction::ActivateDisplay)
         .test_value();
     app.ingame_menu
-        .get_mut(app.local_owner)
+        .get_mut(app.players.local_owner)
         .test_mut()
         .set_selection(1);
     for toggle in [
@@ -8945,7 +8945,7 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
             .test_value();
     }
 
-    runtime_assert_eq!(app.ingame_menu.get(app.local_owner).test_value().selection() => 1);
+    runtime_assert_eq!(app.ingame_menu.get(app.players.local_owner).test_value().selection() => 1);
     assert!(!app.display_flags.player_names);
     assert!(!app.display_flags.clonk_names);
     assert!(app.display_flags.clock);

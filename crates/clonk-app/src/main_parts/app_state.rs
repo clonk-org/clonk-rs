@@ -365,6 +365,41 @@ pub(crate) struct InputState {
     pub(crate) ingame_mouse_target: Option<ObjectId>,
 }
 
+/// The app's side of who is playing: the local profile, and the rosters a
+/// host reassembles around it.
+///
+/// `clonk-engine` owns the deterministic players. What is left here is the
+/// orchestration that decides which ones exist: the local owner and its
+/// profile, the infos and roster items a restart must restore rather than
+/// rejoin fresh, the host's own player ids and their resource-alternate
+/// colours, and the team assignment those joins resolve against. Restart
+/// restoration in particular is only correct when read together — an info
+/// restored without its roster item rejoins as a new player.
+#[derive(Default)]
+pub(crate) struct PlayerState {
+    pub(crate) local_owner: i32,
+    pub(crate) local_name: String,
+    pub(crate) selected_file: Option<PlayerFile>,
+    /// Native restart handoff captured at full game initialization and kept
+    /// across the next same-scenario lobby only.
+    pub(crate) restart_restore_infos: RestartRestoreInfos,
+    /// PlayerListItem runs its restore hook only on construction, not on each
+    /// later row update. Track the items already constructed in this lobby.
+    pub(crate) restart_restore_roster_items: HashSet<(i32, i32)>,
+    /// Assigned PlayerInfo identities that still belong to this host process.
+    /// Resource IDs are global and may also be referenced by a remote row, so
+    /// they cannot by themselves prove ownership of the local-only color.
+    pub(crate) host_local_info_ids: HashSet<i32>,
+    /// Process-local `C4PlayerInfo::dwAlternateColor` values for players
+    /// loaded by this host. The synchronized row intentionally omits this
+    /// field, so resource identity carries it across authoritative echoes and
+    /// later conflict-resolution passes.
+    pub(crate) host_local_alternate_colors: HashMap<i32, u32>,
+    pub(crate) team_assignment: Option<NetworkTeamAssignmentState>,
+    /// Frozen Application.ResStrTable template used by GenerateDefaultTeams.
+    pub(crate) generated_team_name_template: LegacyCString,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -980,34 +1015,18 @@ pub(crate) struct GameApp {
     /// a legacy presentation path, so retain the resolved path separately for
     /// `C4PlayerList::SynchronizeLocalFiles`.
     pub(crate) local_player_profile_paths: HashMap<i32, PathBuf>,
-    /// Native restart handoff captured at full game initialization and kept
-    /// across the next same-scenario lobby only.
-    pub(crate) restart_restore_infos: RestartRestoreInfos,
     /// `Application.NextMission` set by C4AbortGameDialog's Restart button.
     /// It deliberately survives a rejected/ignored league vote and is
     /// consumed by the next hard `QuitGame` route.
     pub(crate) abort_restart_pending: bool,
-    /// PlayerListItem runs its restore hook only on construction, not on each
-    /// later row update. Track the items already constructed in this lobby.
-    pub(crate) restart_restore_roster_items: HashSet<(i32, i32)>,
+    /// The local profile and the rosters assembled around it.
+    pub(crate) players: PlayerState,
     /// Armed on this client by the host's restart notice
     /// (`clonk_network::host_restart`). While it is armed, losing the host is a
     /// restart to follow rather than the dead host native assumes
     /// (src/C4Network2.cpp:1826-1832), so the round is torn down and the same
     /// address re-joined instead of dropping to local control.
     pub(crate) pending_host_rejoin: Option<PendingHostRejoin>,
-    /// Process-local `C4PlayerInfo::dwAlternateColor` values for players
-    /// loaded by this host. The synchronized row intentionally omits this
-    /// field, so resource identity carries it across authoritative echoes and
-    /// later conflict-resolution passes.
-    pub(crate) host_local_alternate_colors_by_resource: HashMap<i32, u32>,
-    /// Assigned PlayerInfo identities that still belong to this host process.
-    /// Resource IDs are global and may also be referenced by a remote row, so
-    /// they cannot by themselves prove ownership of the local-only color.
-    pub(crate) host_local_player_info_ids: HashSet<i32>,
-    /// Frozen Application.ResStrTable template used by GenerateDefaultTeams.
-    pub(crate) generated_team_name_template: LegacyCString,
-    pub(crate) network_team_assignment: Option<NetworkTeamAssignmentState>,
     pub(crate) admission_resources: AdmissionResourceStore,
     pub(crate) blocking_resource_wait: Option<BlockingResourceWait>,
     pub(crate) aborted_player_resource_joins: HashSet<(i32, i32)>,
@@ -1047,9 +1066,6 @@ pub(crate) struct GameApp {
     /// `CID_Synchronize` starts the record (or submission fails).
     pub(crate) runtime_record_requested: bool,
     pub(crate) control_playback: Option<ControlRecordPlayback>,
-    pub(crate) local_owner: i32,
-    pub(crate) player_name: String,
-    pub(crate) selected_player_file: Option<PlayerFile>,
     pub(crate) object_sprites: HashMap<String, DefinitionSprite>,
     pub(crate) sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     pub(crate) loading_state: Option<ScenarioLoadingState>,

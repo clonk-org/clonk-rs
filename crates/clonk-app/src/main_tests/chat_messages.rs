@@ -60,7 +60,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
         commands.take_submitted_messages() =>
         vec![MessageControlData {
             message_type: MESSAGE_TYPE_NORMAL,
-            player: running.local_owner,
+            player: running.players.local_owner,
             to_player: -1,
             message: LegacyCString::from_bytes(b"administrator message".to_vec())
                 .expect("fixture message is NUL-free"),
@@ -79,7 +79,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
 #[test]
 fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let crew = app.engine.test_crew_cursor(owner);
     let crew_position = app.engine.test_object_snapshot(crew).position;
     let mut item = test_definition("CHDG", "Chat drag item", "#strict\n");
@@ -656,7 +656,7 @@ fn missing_player_scoped_messages_are_not_drawable() {
     let viewports = [ActiveViewportProjection {
         index: 0,
         identity: None,
-        owner: app.local_owner,
+        owner: app.players.local_owner,
         is_no_owner_viewport: false,
         rect: Rect::new(0, 0, 320, 200),
         content_rect: Rect::new(0, 0, 320, 200),
@@ -716,7 +716,7 @@ fn scale_one_point_five_message_batch_carries_its_isolated_clipper() {
         kind: MessageKind::GlobalPlayer,
         lines: vec!["Fractional clip".to_string()],
         target: None,
-        player: Some(app.local_owner),
+        player: Some(app.players.local_owner),
         offset: Vector2::new(1, 1),
         color: 0xffff_ffff,
         flags: FLAG_LEFT | FLAG_TOP,
@@ -735,7 +735,7 @@ fn scale_one_point_five_message_batch_carries_its_isolated_clipper() {
         .graphics
         .active_viewport_projections()
         .into_iter()
-        .find(|viewport| viewport.owner == app.local_owner)
+        .find(|viewport| viewport.owner == app.players.local_owner)
         .test_value()
         .rect;
     let batch = plan
@@ -769,11 +769,11 @@ fn secondary_local_viewport_draws_its_player_global_message_only_there() {
         .snapshot
         .players
         .iter()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .cloned()
         .test_value();
     let mut secondary = local;
-    secondary.id = app.local_owner + 1;
+    secondary.id = app.players.local_owner + 1;
     secondary.name = "Secondary local".to_string();
     app.snapshot.players.push(secondary.clone());
     app.snapshot.hud.local_players.push(secondary.id);
@@ -899,7 +899,7 @@ fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
         .snapshot
         .players
         .iter_mut()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .test_value();
     // Model SetFoW(false) so this case exercises rounding independently
     // of the visibility-bitmap boundary.
@@ -918,7 +918,7 @@ fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
         kind: MessageKind::TargetPlayer,
         lines: vec!["Logical edge".to_string()],
         target: Some(target_id),
-        player: Some(app.local_owner),
+        player: Some(app.players.local_owner),
         offset: Vector2::new(0, shape_height / 2 + 5),
         color: 0xffff_ffff,
         flags: 0,
@@ -930,7 +930,7 @@ fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
     let viewport = ActiveViewportProjection {
         index: 0,
         identity: None,
-        owner: app.local_owner,
+        owner: app.players.local_owner,
         is_no_owner_viewport: false,
         rect: Rect::new(10, 20, 100, 100),
         // One logical border pixel at 0.4x rounds to zero output pixels.
@@ -971,7 +971,7 @@ fn offscreen_target_player_message_does_not_trigger_renderer_boundary() {
         kind: MessageKind::TargetPlayer,
         lines: vec!["Offscreen".to_string()],
         target: Some(target),
-        player: Some(app.local_owner),
+        player: Some(app.players.local_owner),
         offset: Vector2::new(1_000_000, 1_000_000),
         color: 0xffff_ffff,
         flags: 0,
@@ -1021,7 +1021,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .snapshot
         .players
         .iter_mut()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .test_value();
     player.fog_of_war = true;
     player.force_fog_of_war = true;
@@ -1037,7 +1037,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     target_object.category &= !C4D_IGNORE_FOW;
     target_object.plr_view_range = 128;
     app.snapshot.fow_players.insert(
-        app.local_owner,
+        app.players.local_owner,
         clonk_engine::FogOfWarPlayerFrame {
             view_objects: vec![target],
             view_target: None,
@@ -1051,7 +1051,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     let viewport = viewports
         .iter()
         .copied()
-        .find(|viewport| viewport.owner == app.local_owner)
+        .find(|viewport| viewport.owner == app.players.local_owner)
         .test_value();
     let anchor = app
         .target_message_position_for_viewport(&message, viewport)
@@ -1081,7 +1081,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     // the message, rather than failing the entire overlay batch.
     app.snapshot.hud.messages.clear();
     app.snapshot.fow_players.insert(
-        app.local_owner,
+        app.players.local_owner,
         clonk_engine::FogOfWarPlayerFrame {
             view_objects: Vec::new(),
             view_target: None,
@@ -1102,7 +1102,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     app.snapshot
         .players
         .iter_mut()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .test_value()
         .fog_of_war = false;
     app.snapshot
@@ -1121,7 +1121,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     main_assert_eq!(invisible => visibility_baseline);
 
     message.kind = MessageKind::TargetPlayer;
-    message.player = Some(app.local_owner);
+    message.player = Some(app.players.local_owner);
     main_assert_eq!(
         app.hud_message_drawability(&message, &app.graphics.active_viewport_projections()) =>
         HudMessageDrawability::Drawable,
@@ -1133,7 +1133,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     app.snapshot
         .players
         .iter_mut()
-        .find(|player| player.id == app.local_owner)
+        .find(|player| player.id == app.players.local_owner)
         .test_value()
         .fog_of_war = true;
     let target_object = app
@@ -1205,7 +1205,7 @@ fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport()
     app.chat.server = address;
     app.chat.client = Some(handle);
     render_mouse_test_app(&mut app);
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let chat = viewport_button_point(&app, owner, clonk_frontend::hud::ViewportButton::Chat);
     main_assert_eq!(app.ingame_viewport_region(owner, chat) => Some(IngameViewportRegion::ViewportButton(clonk_frontend::hud::ViewportButton::Chat,)));
 
@@ -1384,19 +1384,19 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
 
     app.clear_message_board_log();
     app.engine
-        .set_hostility(7, app.local_owner, true)
+        .set_hostility(7, app.players.local_owner, true)
         .test_value();
     let hostile_team =
         app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"hidden", 7));
     main_assert!(!hostile_team.displayed);
     main_assert!(app.message_board.log_history.is_empty());
     app.engine
-        .set_hostility(7, app.local_owner, false)
+        .set_hostility(7, app.players.local_owner, false)
         .test_value();
     main_assert!(app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"allied", 7,)).displayed);
 
     app.clear_message_board_log();
-    main_assert!(app.execute_message_control(message_control(MESSAGE_TYPE_PRIVATE, 7, app.local_owner, b"local", 7,)).displayed);
+    main_assert!(app.execute_message_control(message_control(MESSAGE_TYPE_PRIVATE, 7, app.players.local_owner, b"local", 7,)).displayed);
     app.clear_message_board_log();
     main_assert!(!app.execute_message_control(message_control(MESSAGE_TYPE_PRIVATE, 7, 99, b"hidden", 7,)).displayed);
     main_assert!(app.message_board.log_history.is_empty());
@@ -1410,7 +1410,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
 
     let private = parse_running_message_control(
         "/private Sender secret",
-        app.local_owner,
+        app.players.local_owner,
         false,
         &app.snapshot,
     )
@@ -1420,7 +1420,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
     main_assert_eq!(private.to_player => 7);
     main_assert_eq!(private.message.as_bytes() => b"secret");
 
-    let say = parse_running_message_control("\"hello", app.local_owner, false, &app.snapshot)
+    let say = parse_running_message_control("\"hello", app.players.local_owner, false, &app.snapshot)
         .expect("parse say")
         .test_value();
     main_assert_eq!(say.message_type => MESSAGE_TYPE_SAY);
@@ -1438,7 +1438,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
         commands.take_submitted_messages() =>
         vec![MessageControlData {
             message_type: MESSAGE_TYPE_NORMAL,
-            player: app.local_owner,
+            player: app.players.local_owner,
             to_player: -1,
             message: clonk_engine::LegacyCString::from_bytes(b"hello".to_vec())
                 .expect("fixture is NUL-free"),
@@ -1498,7 +1498,7 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
     let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
         app.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let chart = app
         .dialogs.chart
@@ -1621,7 +1621,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
         commands.take_submitted_messages() =>
         vec![MessageControlData {
             message_type: MESSAGE_TYPE_NORMAL,
-            player: app.local_owner,
+            player: app.players.local_owner,
             to_player: -1,
             message: clonk_engine::LegacyCString::from_bytes(b"first".to_vec())
                 .expect("fixture is NUL-free"),
@@ -1636,7 +1636,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
         commands.take_submitted_messages() =>
         vec![MessageControlData {
             message_type: MESSAGE_TYPE_NORMAL,
-            player: app.local_owner,
+            player: app.players.local_owner,
             to_player: -1,
             message: clonk_engine::LegacyCString::from_bytes(b"second".to_vec())
                 .expect("fixture is NUL-free"),
@@ -1713,12 +1713,12 @@ fn running_chat_exclusive_scope_blocks_rebound_tab_player_control() {
             main_assert!(app.context_menu.is_some());
         }
         app.engine
-            .test_player_mut(app.local_owner)
+            .test_player_mut(app.players.local_owner)
             .control
             .pressed_coms = 0;
         app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-        main_assert_eq!(app.engine.player(app.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+        main_assert_eq!(app.engine.player(app.players.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
         if context_open {
             app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
             app.test_key(VirtualKeyCode::Escape, ElementState::Released);

@@ -670,15 +670,15 @@ fn scenario_join_places_ready_crew_and_selects_cursor() {
 
     // C4PlayerList::GetFreeNumber (C4PlayerList.cpp:189-201): the
     // first joining player takes number 0.
-    main_assert_eq!(app.local_owner => 0, "local owner adopts the joined number");
+    main_assert_eq!(app.players.local_owner => 0, "local owner adopts the joined number");
     let snapshot = app.engine.snapshot();
     let crew: Vec<_> = snapshot
         .objects
         .iter()
-        .filter(|object| object.crew_member && object.owner == app.local_owner)
+        .filter(|object| object.crew_member && object.owner == app.players.local_owner)
         .collect();
     main_assert_eq!(crew.len() => 2, "Crew=WLKR=2 places two ready crew members");
-    let selection = snapshot.crew_selection.get(&app.local_owner).test_value();
+    let selection = snapshot.crew_selection.get(&app.players.local_owner).test_value();
     main_assert!(
         selection.cursor.is_some(),
         "cursor lands on a crew member at join"
@@ -1174,7 +1174,7 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
         "loader is selected before bind"
     );
     main_assert_eq!(staged.lobby.local_name => "Exact Host");
-    main_assert_ne!(staged.lobby.local_name => app.player_name);
+    main_assert_ne!(staged.lobby.local_name => app.players.local_name);
     let expected_title = staged.loader_screen.test_ref().state().title().to_string();
     main_assert_eq!(expected_title => staged.frontend.title, "the selected loader's pack-aware title is retained for JoinData");
     app.staged_network_host_scenario = Some(staged);
@@ -1350,10 +1350,10 @@ fn staged_host_installs_activated_participant_before_building_lobby_roster() {
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_none());
     main_assert_eq!(
-        app.host_local_alternate_colors_by_resource => expected_alternate_colors,
+        app.players.host_local_alternate_colors => expected_alternate_colors,
         "the prepared host retains its process-local AlternateColorDw sidecar"
     );
-    main_assert_eq!(app.host_local_player_info_ids.len() => 1);
+    main_assert_eq!(app.players.host_local_info_ids.len() => 1);
     let lobby = &app_classic_lobby(&app).controller;
     main_assert_eq!(lobby.players_title() => "&Players (1/1)");
     let [LobbyRosterRow::Client(client), LobbyRosterRow::Player(player)] = lobby.rows() else {
@@ -4316,7 +4316,7 @@ fn unstaged_host_retained_roster_routes_script_player_add() {
     let mut metadata = set_control_test_metadata(false, Vec::new());
     metadata.max_script_players = 1;
     metadata.script_player_names = LegacyCString::from_bytes(b"Bot".to_vec()).test_value();
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.sync_classic_lobby_roster();
 
     let (_, roster) = app.joined_lobby_layouts().test_value();
@@ -5357,18 +5357,18 @@ fn clicking_an_open_lobby_team_combo_closes_without_reopening() {
 fn classic_lobby_team_combo_rechecks_cpp_team_permissions_before_opening() {
     let mut app = new_menu_app(640, 480);
     let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
-    let metadata = some_mut(&mut app.network_team_assignment).teams_mut();
+    let metadata = some_mut(&mut app.players.team_assignment).teams_mut();
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
     request_classic_lobby_team(&mut app, 7);
     main_assert!(app.context_menu.is_none());
 
-    let metadata = some_mut(&mut app.network_team_assignment).teams_mut();
+    let metadata = some_mut(&mut app.players.team_assignment).teams_mut();
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Free;
     metadata.teams.retain(|team| team.id == 1);
     request_classic_lobby_team(&mut app, 7);
     main_assert!(app.context_menu.is_none());
 
-    some_mut(&mut app.network_team_assignment)
+    some_mut(&mut app.players.team_assignment)
         .teams_mut()
         .auto_generate_teams = true;
     request_classic_lobby_team(&mut app, 7);
@@ -9224,7 +9224,7 @@ fn team_selection_execute_queues_the_only_non_full_team() {
     // not prevent the forced choice (C4Player.cpp:159-173;
     // C4Teams.cpp:876-914).
     let mut app = new_running_sandbox_app();
-    let occupant = app.local_owner;
+    let occupant = app.players.local_owner;
     app.engine.set_teams(vec![
         clonk_engine::TeamInfo::new(1, "Full", 0x00f4_0000).with_max_players(1),
         clonk_engine::TeamInfo::new(2, "Open", 0x0000_c800),
@@ -9322,7 +9322,7 @@ fn synchronized_team_selection_and_runtime_switch_refresh_live_parameters() {
 #[test]
 fn team_switch_menu_refills_membership_and_preserves_selection_like_tick35() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     app.engine
         .player_mut(owner)
         .test_value()
@@ -9400,7 +9400,7 @@ fn team_switch_menu_refills_membership_and_preserves_selection_like_tick35() {
 #[test]
 fn team_selection_entries_cache_icon_specs_and_player_info_occupancy() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let mut definition = Definition::from_script("TICO", "Team icon", "").test_value();
     definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
@@ -9449,7 +9449,7 @@ fn team_selection_entries_cache_icon_specs_and_player_info_occupancy() {
 #[test]
 fn team_selection_participant_names_decode_native_bytes_for_presentation() {
     let mut app = new_running_sandbox_app();
-    let occupant = app.local_owner;
+    let occupant = app.players.local_owner;
     app.engine
         .player_mut(occupant)
         .test_value()
@@ -9519,7 +9519,7 @@ fn team_selection_execute_keeps_an_ambiguous_local_choice_open() {
         0x00f4_0000,
     )]);
     app.engine.set_auto_generate_teams(true);
-    let local_owner = app.local_owner;
+    let local_owner = app.players.local_owner;
     app.engine
         .set_player_team(local_owner, Some(1))
         .test_value();
@@ -9678,7 +9678,7 @@ fn client_join_publishes_selected_players_before_info_and_lobby_ack() {
     // must use Config.General.Participants directly, not this UI model.
     app.startup.player_files.clear();
     app.startup.player_models.clear();
-    app.selected_player_file = None;
+    app.players.selected_file = None;
 
     let configured_paths = [bravo, alpha];
     let cores = configured_paths
@@ -9819,7 +9819,7 @@ fn client_lobby_acknowledges_join_status_at_the_initialized_control_tick_once() 
         NetworkLobbyState::new(7, "Observer".to_string(), false),
     );
     app.startup.view = StartupView::NetworkLobby;
-    app.selected_player_file = None;
+    app.players.selected_file = None;
     for _ in 0..3 {
         app.engine.tick().test_value();
     }
@@ -9885,16 +9885,16 @@ fn later_admission_reuses_shifted_initial_hosts_persisted_alternate_color() {
             ],
         })],
     );
-    app.host_local_alternate_colors_by_resource = HashMap::from([(11, 0), (22, 0x0000_00e8)]);
-    app.host_local_player_info_ids = HashSet::from([1, 2]);
+    app.players.host_local_alternate_colors = HashMap::from([(11, 0), (22, 0x0000_00e8)]);
+    app.players.host_local_info_ids = HashSet::from([1, 2]);
     let aliased_remote = lobby_fixture!(player {
         id: 99,
         resource: Some(resource(22)),
     });
     main_assert_eq!(
         host_runtime_alternate_color(
-            &app.host_local_alternate_colors_by_resource,
-            &app.host_local_player_info_ids,
+            &app.players.host_local_alternate_colors,
+            &app.players.host_local_info_ids,
             &aliased_remote,
         ) =>
         Some(0),
@@ -10108,7 +10108,7 @@ fn delayed_admission_joins_parent_before_other_client_rebalance_follow_up() {
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&metadata));
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     for core in [&parent_resource, &other_resource] {
         app.admission_resources.register_lobby_resource(core);
         app.admission_resources.mark_complete(
@@ -10225,7 +10225,7 @@ fn host_remote_lobby_player_info_assigns_the_unique_least_used_free_team() {
             })],
         )],
     );
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
         clonk_engine::InitialNetworkTeamMetadata {
             active: true,
             custom: true,
@@ -10270,7 +10270,7 @@ fn host_remote_lobby_player_info_assigns_the_unique_least_used_free_team() {
     };
     main_assert_eq!((player.id, player.team) => (2, 2));
     main_assert_eq!((player.color, player.original_color) => (0x0000_c800, original_color));
-    let teams = some_mut(&mut app.network_team_assignment).teams_mut();
+    let teams = some_mut(&mut app.players.team_assignment).teams_mut();
     main_assert_eq!(teams.teams[0].player_ids => vec![1]);
     main_assert_eq!(teams.teams[1].player_ids => vec![2]);
 }
@@ -10286,7 +10286,7 @@ fn loading_host_with_retained_lobby_does_not_assign_a_free_team() {
         ],
     );
     metadata.custom = true;
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.network_lobby = Some(host_lobby_state());
@@ -10308,7 +10308,7 @@ fn loading_host_with_retained_lobby_does_not_assign_a_free_team() {
         panic!("expected one authoritative PlayerInfo");
     };
     main_assert_eq!(info.players[0].team => 0);
-    let teams = some(&app.network_team_assignment).teams();
+    let teams = some(&app.players.team_assignment).teams();
     main_assert!(teams.teams.iter().all(|team| team.player_ids.is_empty()));
 }
 
@@ -10365,7 +10365,7 @@ fn queued_lobby_admissions_observe_synchronously_filled_explicit_team() {
         ],
     );
     metadata.custom = true;
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.network_lobby = Some(host_lobby_state());
@@ -10413,7 +10413,7 @@ fn admission_that_requires_generated_team_generates_and_broadcasts() {
         )],
     );
     let metadata = set_control_test_metadata(true, vec![set_control_test_team(1, vec![1], 0)]);
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.network_lobby = Some(host_lobby_state());
@@ -10434,7 +10434,7 @@ fn admission_that_requires_generated_team_generates_and_broadcasts() {
         panic!("expected one generated-team admission, got {broadcasts:?}");
     };
     main_assert_eq!((admitted.players[0].id, admitted.players[0].team) => (2, 2));
-    let teams = some(&app.network_team_assignment).teams();
+    let teams = some(&app.players.team_assignment).teams();
     main_assert_eq!(teams.teams.len() => 2);
     main_assert_eq!(teams.teams[1].id => 2);
     main_assert_eq!(teams.teams[1].name.as_bytes() => b"Team 2");
@@ -10464,7 +10464,7 @@ fn joined_player_automatic_admission_updates_live_engine_before_loopback() {
                 .with_color(Some(RgbColor::new(0xf4, 0, 0))),
         )
         .test_value();
-    app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+    app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     send_added_player_infos(
@@ -10624,7 +10624,7 @@ fn synchronized_em_drop_def_executes_at_the_ready_tick() {
 #[test]
 fn message_board_query_opens_on_tick35_and_routes_ui_answer_at_ready_tick() {
     let mut app = new_synthetic_running_sandbox_app();
-    let player = app.local_owner;
+    let player = app.players.local_owner;
     app.engine
         .player_mut(player)
         .test_value()
@@ -10739,7 +10739,7 @@ fn message_board_query_opens_on_tick35_and_routes_ui_answer_at_ready_tick() {
 #[test]
 fn a_goal_or_rule_activation_runs_its_object_and_a_vanished_one_does_nothing() {
     let mut app = new_running_sandbox_app();
-    let player = app.local_owner;
+    let player = app.players.local_owner;
     for (id, name) in [("IGOL", "Integrated Goal"), ("IRUL", "Integrated Rule")] {
         let mut definition = test_definition(
             id,
@@ -11209,12 +11209,12 @@ fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
     // is not ready (src/C4Game.cpp:786-787), then executes the retrieved
     // control before game ticks (src/C4Game.cpp:797-805).
     let mut app = new_running_sandbox_app();
-    let remote_owner = app.local_owner + 1;
+    let remote_owner = app.players.local_owner + 1;
     app.engine
         .register_player(PlayerConfig::new(remote_owner, "Remote"))
         .test_value();
     app.engine
-        .player_mut(app.local_owner)
+        .player_mut(app.players.local_owner)
         .test_value()
         .control
         .control_style = true;
@@ -11231,7 +11231,7 @@ fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
         .test_value();
     main_assert_eq!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -11245,7 +11245,7 @@ fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
 
     let controls = vec![
         NetworkControl::Player {
-            owner: app.local_owner,
+            owner: app.players.local_owner,
             event: ControlEvent::Press(ControlButton::Right),
         },
         NetworkControl::Player {
@@ -11258,7 +11258,7 @@ fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
     main_assert_eq!(app.engine.frame() => initial_frame + 1);
     main_assert_ne!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -11278,7 +11278,7 @@ fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
     );
     let local_last_com = app
         .engine
-        .player(app.local_owner)
+        .player(app.players.local_owner)
         .test_value()
         .control
         .last_com;
@@ -11288,7 +11288,7 @@ fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
     main_assert_eq!(app.engine.frame() => initial_frame + 1, "a stale duplicate cannot advance simulation twice");
     main_assert_eq!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("local player")
             .control
             .last_com =>
@@ -11300,7 +11300,7 @@ fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
 #[test]
 fn synchronized_player_select_executes_at_the_ready_tick() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let first = app.engine.crew_cursor(owner).test_value();
     let definition = app.engine.object_snapshot(first).test_value().definition_id;
     let second = app
@@ -11354,7 +11354,7 @@ fn ready_tick_follow_on_uses_next_open_tick_and_clears_marker() {
         &event_tx,
         tick,
         vec![NetworkControl::Player {
-            owner: app.local_owner,
+            owner: app.players.local_owner,
             event: ControlEvent::Command {
                 command: ControlCommand::MenuClose,
                 kind: CommandKind::Press,
@@ -11367,7 +11367,7 @@ fn ready_tick_follow_on_uses_next_open_tick_and_clears_marker() {
     main_assert_eq!(
         commands.take_submitted_local() =>
         vec![(
-            app.local_owner,
+            app.players.local_owner,
             ControlEvent::ClearPressed,
             tick.saturating_add(1),
         )],

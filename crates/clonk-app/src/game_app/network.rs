@@ -29,7 +29,7 @@ impl GameApp {
         self.startup_game_search = None;
 
         let (sender, receiver) = mpsc::channel();
-        let player_name = self.player_name.clone();
+        let player_name = self.players.local_name.clone();
         let app_paths = self.app_paths.clone();
         let group_maker = self
             .configured_client_player_selection
@@ -856,8 +856,9 @@ impl GameApp {
                 }
             });
         }
-        let mut oracle =
-            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template.clone());
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+            self.players.generated_team_name_template.clone(),
+        );
         let refusal_template = self.runtime_resource_text(
             "IDS_MSG_LEAGUEJOINREFUSED",
             "League server has refused the join of player %s: %s",
@@ -911,11 +912,12 @@ impl GameApp {
     /// C4Player.cpp:794). The joined number becomes the local owner
     /// (C4PlayerList::GetFreeNumber, C4PlayerList.cpp:189-201).
     pub(crate) fn join_local_player(&mut self) -> Result<(), EngineError> {
-        if self.engine.player(self.local_owner).is_some() {
+        if self.engine.player(self.players.local_owner).is_some() {
             return Ok(());
         }
         let retained_player_info_core = self
-            .selected_player_file
+            .players
+            .selected_file
             .as_ref()
             .map(|player| player.exact_info_core());
         let (
@@ -934,13 +936,14 @@ impl GameApp {
             rounds_lost,
             total_playing_time,
         ) = self
-            .selected_player_file
+            .players
+            .selected_file
             .as_ref()
             .map(|player| {
-                let name = if self.player_name == "Player" {
+                let name = if self.players.local_name == "Player" {
                     player.name.clone()
                 } else {
-                    self.player_name.clone()
+                    self.players.local_name.clone()
                 };
                 (
                     name,
@@ -963,7 +966,7 @@ impl GameApp {
                 // The C++ new-player dialog opts fresh players into
                 // Jump'n'Run controls (C4StartupPlrSelDlg.cpp:1103-1113).
                 (
-                    self.player_name.clone(),
+                    self.players.local_name.clone(),
                     0xff,
                     0,
                     0,
@@ -1030,7 +1033,7 @@ impl GameApp {
             }
         };
         debug_assert_eq!(joined.number(), predicted_owner);
-        self.local_owner = joined.number();
+        self.players.local_owner = joined.number();
         self.mouse_control = self.local_controls.mouse_owner().is_some();
         if matches!(
             joined,
@@ -1191,7 +1194,7 @@ impl GameApp {
         };
         let preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let bounds = dialog.layout(preferred, resources).bounds;
         point.x >= bounds.x as f32
@@ -3391,7 +3394,7 @@ impl GameApp {
 
     pub(crate) fn offline_local_client_id(&self) -> i32 {
         self.engine
-            .player(self.local_owner)
+            .player(self.players.local_owner)
             .map(|player| player.at_client().get())
             .filter(|client_id| self.control_clients.contains(*client_id))
             .or_else(|| {
@@ -3423,7 +3426,9 @@ impl GameApp {
                 .as_ref()
                 .map(|selection| selection.group_maker().clone())
                 .or_else(|| {
-                    clonk_engine::LegacyCString::from_bytes(self.player_name.as_bytes().to_vec())
+                    clonk_engine::LegacyCString::from_bytes(
+                        self.players.local_name.as_bytes().to_vec(),
+                    )
                 })
                 .ok_or_else(|| "network player name contains an interior NUL".to_string())
         };
@@ -3548,11 +3553,11 @@ impl GameApp {
         }
 
         let restore_players = host_restore_player_info_entries(self.host_join_snapshot.as_ref());
-        let generated_team_name_template = self.generated_team_name_template.clone();
+        let generated_team_name_template = self.players.generated_team_name_template.clone();
         let has_or_will_have_lobby = self.has_or_will_have_network_lobby();
-        let alternate_colors = &self.host_local_alternate_colors_by_resource;
-        let local_player_info_ids = &self.host_local_player_info_ids;
-        let admission = match self.network_team_assignment.as_mut() {
+        let alternate_colors = &self.players.host_local_alternate_colors;
+        let local_player_info_ids = &self.players.host_local_info_ids;
+        let admission = match self.players.team_assignment.as_mut() {
             Some(team_assignment) => team_assignment.admit_request_with_alternate_colors(
                 &mut self.control_player_infos,
                 request,
@@ -3624,9 +3629,10 @@ impl GameApp {
         self.commit_host_player_info_admission(admission)
             .map_err(|error| error.to_string())?;
         if !admitted_local_ids.is_empty() {
-            self.host_local_alternate_colors_by_resource
+            self.players
+                .host_local_alternate_colors
                 .insert(alternate_resource_id, alternate_color);
-            self.host_local_player_info_ids.extend(admitted_local_ids);
+            self.players.host_local_info_ids.extend(admitted_local_ids);
         }
         Ok(())
     }
@@ -4195,13 +4201,13 @@ impl GameApp {
                                     by_client: 0,
                                 }),
                         );
-                        self.network_team_assignment = initial_team_metadata_from_join_snapshot(
+                        self.players.team_assignment = initial_team_metadata_from_join_snapshot(
                             &join_data.parameters.teams,
                         )
                         .map(|metadata| {
                             NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
                                 metadata,
-                                self.generated_team_name_template.clone(),
+                                self.players.generated_team_name_template.clone(),
                             )
                         });
                         seed_engine_player_info_parameters(
@@ -4487,11 +4493,11 @@ impl GameApp {
                         let restore_players =
                             host_restore_player_info_entries(self.host_join_snapshot.as_ref());
                         let generated_team_name_template =
-                            self.generated_team_name_template.clone();
+                            self.players.generated_team_name_template.clone();
                         let has_or_will_have_lobby = self.has_or_will_have_network_lobby();
-                        let alternate_colors = &self.host_local_alternate_colors_by_resource;
-                        let local_player_info_ids = &self.host_local_player_info_ids;
-                        let admission = match self.network_team_assignment.as_mut() {
+                        let alternate_colors = &self.players.host_local_alternate_colors;
+                        let local_player_info_ids = &self.players.host_local_info_ids;
+                        let admission = match self.players.team_assignment.as_mut() {
                             Some(team_assignment) => team_assignment
                                 .admit_request_with_alternate_colors(
                                     &mut self.control_player_infos,
@@ -5297,7 +5303,7 @@ impl GameApp {
         let selected_scenario = Some((scenario.identifier.clone(), scenario.title.clone()));
         self.startup_game_search = None;
         let (sender, receiver) = mpsc::channel();
-        let local_owner = self.local_owner;
+        let local_owner = self.players.local_owner;
         let voice_enabled = self.voice_chat_enabled();
         let spawn = thread::Builder::new()
             .name("lc-prepare-network-host".to_string())
@@ -5357,9 +5363,9 @@ impl GameApp {
         }
         self.prepare_network_join_game_state();
         self.startup_game_search = None;
-        let local_owner = self.local_owner;
+        let local_owner = self.players.local_owner;
         let voice_enabled = self.voice_chat_enabled();
-        let player_name = self.player_name.clone();
+        let player_name = self.players.local_name.clone();
         let app_paths = self.app_paths.clone();
         let group_maker = self
             .configured_client_player_selection
@@ -5483,7 +5489,7 @@ impl GameApp {
         };
         let mut settings = match client_settings_for_paths(
             reference.source_address,
-            self.player_name.clone(),
+            self.players.local_name.clone(),
             self.app_paths.as_ref(),
         ) {
             Ok(settings) => settings,
@@ -5542,7 +5548,7 @@ impl GameApp {
         } else {
             StartupJoinTarget::Game(settings.game_name.clone())
         };
-        let local_owner = self.local_owner;
+        let local_owner = self.players.local_owner;
         let voice_enabled = self.voice_chat_enabled();
         let spawn = spawn_startup_network_attempt("lc-startup-network", move |cancellation| {
             let mode = NetworkMode::Client(settings.clone());
@@ -6426,7 +6432,7 @@ impl GameApp {
             .iter()
             .find(|client| ClientId::try_from(client.client_id) == Ok(local_client_id))
             .map(|client| legacy_presentation_text(client.name.as_bytes()))
-            .unwrap_or_else(|| self.player_name.clone());
+            .unwrap_or_else(|| self.players.local_name.clone());
         let mut lobby = NetworkLobbyState::new(local_client_id, local_name, false)
             .with_external_chat(self.startup_irc_client_active())
             .with_preloading(
@@ -6621,7 +6627,7 @@ impl GameApp {
         let mut team_assignment =
             NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
                 prepared.runtime_team_metadata().clone(),
-                self.generated_team_name_template.clone(),
+                self.players.generated_team_name_template.clone(),
             );
         for client in &player_infos.clients {
             for team in client
@@ -6763,9 +6769,9 @@ impl GameApp {
         self.admission_resources = admission_resources;
         self.control_clients.replace_snapshot(restarted_clients);
         self.control_player_infos = restarted_player_registry;
-        self.network_team_assignment = Some(team_assignment);
-        self.host_local_alternate_colors_by_resource = fresh_alternate_colors;
-        self.host_local_player_info_ids = fresh_local_player_ids;
+        self.players.team_assignment = Some(team_assignment);
+        self.players.host_local_alternate_colors = fresh_alternate_colors;
+        self.players.host_local_info_ids = fresh_local_player_ids;
         self.network_max_players = fresh_max_players;
         self.engine
             .set_max_players(i32::try_from(fresh_max_players).unwrap_or(i32::MAX));
@@ -6913,7 +6919,7 @@ impl GameApp {
     pub(crate) fn prune_host_local_alternate_colors(&mut self) {
         let mut retained_ids = HashSet::new();
         let mut retained_resources = HashSet::new();
-        for &info_id in &self.host_local_player_info_ids {
+        for &info_id in &self.players.host_local_info_ids {
             let Some(player) = self.control_player_infos.get(info_id) else {
                 continue;
             };
@@ -6924,15 +6930,17 @@ impl GameApp {
                 continue;
             };
             if self
-                .host_local_alternate_colors_by_resource
+                .players
+                .host_local_alternate_colors
                 .contains_key(&resource_id)
             {
                 retained_ids.insert(info_id);
                 retained_resources.insert(resource_id);
             }
         }
-        self.host_local_player_info_ids = retained_ids;
-        self.host_local_alternate_colors_by_resource
+        self.players.host_local_info_ids = retained_ids;
+        self.players
+            .host_local_alternate_colors
             .retain(|resource_id, _| retained_resources.contains(resource_id));
     }
 
@@ -6974,14 +6982,15 @@ impl GameApp {
                 let restore_players =
                     host_restore_player_info_entries(self.host_join_snapshot.as_ref());
                 let teams = self
-                    .network_team_assignment
+                    .players
+                    .team_assignment
                     .as_ref()
                     .map(|assignment| assignment.teams().clone());
-                let alternate_colors = &self.host_local_alternate_colors_by_resource;
-                let local_player_info_ids = &self.host_local_player_info_ids;
+                let alternate_colors = &self.players.host_local_alternate_colors;
+                let local_player_info_ids = &self.players.host_local_info_ids;
                 let attribute_updates = {
                     let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
-                        self.generated_team_name_template.clone(),
+                        self.players.generated_team_name_template.clone(),
                     );
                     self.control_player_infos
                         .refresh_player_attributes_with_alternate_colors(
@@ -7111,8 +7120,8 @@ impl GameApp {
         } else {
             self.admission_resources.clear();
         }
-        self.host_local_alternate_colors_by_resource.clear();
-        self.host_local_player_info_ids.clear();
+        self.players.host_local_alternate_colors.clear();
+        self.players.host_local_info_ids.clear();
         self.pending_network_join_data = None;
         self.pending_round_restart_join_data = false;
         self.initial_lobby_status_ack_pending = false;
@@ -8238,7 +8247,7 @@ impl GameApp {
                 // C4PlayerList::GetFreeNumber's 0 while the projection still
                 // holds the process default.
                 if let Some(primary) = local_players.first().copied() {
-                    self.local_owner = primary;
+                    self.players.local_owner = primary;
                 }
                 if matches!(
                     joined,
@@ -8740,7 +8749,7 @@ impl GameApp {
             &self.snapshot,
             self.engine.teams(),
             self.engine.auto_generate_teams(),
-            self.local_owner,
+            self.players.local_owner,
             self.graphics.surface().width(),
             host_or_cinematic_film,
             scenario_title.clone(),
@@ -9815,7 +9824,7 @@ impl GameApp {
         )?;
         let local_players = self.local_controls.owners().collect::<Vec<_>>();
         if let Some(owner) = local_players.first().copied() {
-            self.local_owner = owner;
+            self.players.local_owner = owner;
         }
         self.engine.set_local_players(local_players);
         Ok(())
@@ -10367,7 +10376,7 @@ impl GameApp {
         );
         self.install_local_controls(rebound_local_controls);
         if let Some(owner) = local_players.first().copied() {
-            self.local_owner = owner;
+            self.players.local_owner = owner;
         }
         self.engine.set_local_players(local_players);
         self.mouse_control = self.local_controls.mouse_owner().is_some();

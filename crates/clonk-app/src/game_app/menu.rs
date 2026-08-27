@@ -485,7 +485,7 @@ impl GameApp {
     pub(crate) fn open_scoreboard_dialog(&mut self, request: ScoreboardPresentationRequest) {
         let preferred = scoreboard_preferred_rect(
             self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let layout_revision = request.layout_revision;
         self.dialogs.scoreboard = Some(request);
@@ -587,13 +587,13 @@ impl GameApp {
     pub(crate) fn menu_controls_active_for(&self, owner: i32) -> bool {
         matches!(self.mode, AppMode::Running)
             && (self.ingame_menu_belongs_to(owner)
-                || (owner == self.local_owner && self.object_menu.is_some()))
+                || (owner == self.players.local_owner && self.object_menu.is_some()))
     }
 
     /// Opens the player menu (`C4Player::ActivateMenuMain` ->
     /// `C4MainMenu::ActivateMain`, C4Player.cpp:2327 + C4MainMenu.cpp:643).
     pub(crate) fn open_ingame_menu(&mut self) -> Result<(), EngineError> {
-        self.open_ingame_menu_for_player(self.local_owner)
+        self.open_ingame_menu_for_player(self.players.local_owner)
     }
 
     pub(crate) fn open_ingame_menu_for_player(&mut self, player: i32) -> Result<(), EngineError> {
@@ -869,7 +869,7 @@ impl GameApp {
     }
 
     pub(crate) fn close_ingame_menu_by_user(&mut self) -> Result<(), EngineError> {
-        self.close_ingame_menu_by_user_for_player(self.local_owner)
+        self.close_ingame_menu_by_user_for_player(self.players.local_owner)
     }
 
     fn close_ingame_menu_by_user_for_player(&mut self, player: i32) -> Result<(), EngineError> {
@@ -901,11 +901,15 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) || self.object_menu.is_some() {
             return Ok(false);
         }
-        match ObjectMenuState::for_player(self.local_owner, &mut self.engine, &self.snapshot) {
+        match ObjectMenuState::for_player(
+            self.players.local_owner,
+            &mut self.engine,
+            &self.snapshot,
+        ) {
             Some(menu) => {
-                self.clear_local_control(self.local_owner)?;
+                self.clear_local_control(self.players.local_owner)?;
                 self.object_menu = Some(menu);
-                self.close_ingame_menu_for_player(self.local_owner);
+                self.close_ingame_menu_for_player(self.players.local_owner);
                 if self.status_text.is_empty() {
                     self.status_text = "Inventory open".to_string();
                 }
@@ -952,7 +956,7 @@ impl GameApp {
                 | ControlCommand::MenuUp
         );
 
-        let owns_object_menu = owner == self.local_owner && self.object_menu.is_some();
+        let owns_object_menu = owner == self.players.local_owner && self.object_menu.is_some();
         if menu_command && !owns_object_menu && !self.ingame_menu_belongs_to(owner) {
             return Ok(false);
         }
@@ -1190,7 +1194,7 @@ impl GameApp {
         &mut self,
         outcome: MenuOutcome,
     ) -> Result<(), EngineError> {
-        self.execute_ingame_menu_outcome_for_player(self.local_owner, outcome)
+        self.execute_ingame_menu_outcome_for_player(self.players.local_owner, outcome)
     }
 
     pub(crate) fn execute_ingame_menu_outcome_for_player(
@@ -1220,7 +1224,7 @@ impl GameApp {
         &mut self,
         action: MenuAction,
     ) -> Result<(), EngineError> {
-        self.apply_ingame_menu_action_for_player(self.local_owner, action)
+        self.apply_ingame_menu_action_for_player(self.players.local_owner, action)
     }
 
     /// `C4MainMenu::MenuCommand("Host:Kick:<id>")` (C4MainMenu.cpp:805-819).
@@ -3435,7 +3439,7 @@ impl GameApp {
                                     dialog.set_player_activation(refusal.index, false);
                                 }
                             }
-                            self.selected_player_file = self
+                            self.players.selected_file = self
                                 .startup
                                 .player_files
                                 .iter()
@@ -3730,7 +3734,7 @@ impl GameApp {
             }
         }
         if !activation_refusals.is_empty() {
-            self.selected_player_file = self
+            self.players.selected_file = self
                 .startup
                 .player_files
                 .iter()
@@ -3872,7 +3876,7 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
-        let local_owner = self.local_owner;
+        let local_owner = self.players.local_owner;
         for request in &self.snapshot.menu_requests {
             if request.owner != local_owner {
                 continue;
@@ -4211,7 +4215,7 @@ impl GameApp {
             MessageDialogContinuation::None => {}
             MessageDialogContinuation::AbortGame { .. } => match result {
                 clonk_frontend::message_dialog::MessageDialogResult::Yes => {
-                    self.restart_restore_infos = RestartRestoreInfos::default();
+                    self.players.restart_restore_infos = RestartRestoreInfos::default();
                     self.route_abort_confirmation()?;
                 }
                 clonk_frontend::message_dialog::MessageDialogResult::Restart => {
@@ -4683,10 +4687,9 @@ impl GameApp {
                 Some(RunningDialogStackEntry::RuntimeClientList) => {
                     let dialog = self.dialogs.client_list.as_ref()?;
                     let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
-                    let preferred = scoreboard_preferred_rect(
-                        self.graphics
-                            .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
-                    );
+                    let preferred = scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
+                        self.mouse_control.then_some(self.players.local_owner),
+                    ));
                     dialog.tooltip_at(point, preferred, line_height)
                 }
                 Some(RunningDialogStackEntry::Message(_))
@@ -4705,10 +4708,10 @@ impl GameApp {
                 .filter(|dialog| dialog.is_info_only())
             {
                 let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
-                let preferred = scoreboard_preferred_rect(
-                    self.graphics
-                        .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
-                );
+                let preferred =
+                    scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
+                        self.mouse_control.then_some(self.players.local_owner),
+                    ));
                 return dialog.tooltip_at(point, preferred, line_height);
             }
         }
@@ -4744,10 +4747,10 @@ impl GameApp {
             }
             if let Some(dialog) = self.dialogs.client_list.as_ref() {
                 let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
-                let preferred = scoreboard_preferred_rect(
-                    self.graphics
-                        .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
-                );
+                let preferred =
+                    scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
+                        self.mouse_control.then_some(self.players.local_owner),
+                    ));
                 if let Some(target) = dialog.tooltip_at(point, preferred, line_height) {
                     return Some(target);
                 }
@@ -4822,7 +4825,7 @@ impl GameApp {
             }
             return;
         }
-        self.restart_restore_infos = RestartRestoreInfos::default();
+        self.players.restart_restore_infos = RestartRestoreInfos::default();
         self.return_to_menu_with_dialog_restore(true, NetworkSessionTeardown::Clear);
     }
 
@@ -4855,7 +4858,7 @@ impl GameApp {
         self.abort_restart_pending = false;
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
-        self.restart_restore_roster_items.clear();
+        self.players.restart_restore_roster_items.clear();
         // Leaving the round abandons any host restart this client was going to
         // follow. `begin_pending_host_rejoin` re-arms it across this teardown
         // precisely because the default is to drop it.
@@ -4946,7 +4949,7 @@ impl GameApp {
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
             .set_fire_particles(self.display_flags.fire_particles);
-        self.engine.set_local_players([self.local_owner]);
+        self.engine.set_local_players([self.players.local_owner]);
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         self.apply_material_library();
@@ -4998,12 +5001,12 @@ impl GameApp {
             self.control_player_infos = ControlPlayerInfoRegistry::default();
             self.local_player_profile_paths.clear();
         }
-        self.network_team_assignment = None;
+        self.players.team_assignment = None;
         self.clear_blocking_resource_wait();
         if session == NetworkSessionTeardown::Clear {
             self.admission_resources.clear();
-            self.host_local_alternate_colors_by_resource.clear();
-            self.host_local_player_info_ids.clear();
+            self.players.host_local_alternate_colors.clear();
+            self.players.host_local_info_ids.clear();
         }
         self.pending_runtime_dynamic_request = None;
         self.pending_network_join_data = None;

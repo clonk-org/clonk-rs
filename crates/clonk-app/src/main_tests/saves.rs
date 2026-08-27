@@ -805,7 +805,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
     // InitGame snapshots the raw PlayerInfos before InitPlayers merges the
     // restore list (C4Game.cpp:2390-2399,2827-2850).
     main_assert_eq!(
-        app.restart_restore_infos
+        app.players.restart_restore_infos
             .players
             .get(b"Current replay player".as_slice()) =>
         Some(&RestartRestorePlayerInfo {
@@ -1693,7 +1693,7 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
     main_assert_eq!(app.startup.player_files.len() => 1);
     main_assert!(app.startup.player_files[0].render_model.activated);
     main_assert_eq!(app.startup.player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => Some(0));
-    main_assert_eq!(app.selected_player_file.as_ref().map(|player| player.name.as_str()) => Some("Created"));
+    main_assert_eq!(app.players.selected_file.as_ref().map(|player| player.name.as_str()) => Some("Created"));
     main_assert_eq!(Config::load(paths.config_file()).expect("reload config").get_in(Some("General"), "Participants") => Some(created.to_string_lossy().as_ref()));
 
     app.open_existing_startup_player_properties(0);
@@ -1761,7 +1761,7 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     let selector = app.startup.player_dialog.test_ref();
     main_assert!(selector.player_activations().is_empty());
     main_assert_eq!(selector.selected_index() => None);
-    main_assert!(app.selected_player_file.is_none());
+    main_assert!(app.players.selected_file.is_none());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(Config::load(paths.config_file()).expect("reload reconciled config").get_in(Some("General"), "Participants") => Some(""));
 
@@ -2954,7 +2954,7 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
     );
     let mut app = new_running_sandbox_app();
     app.gamepad_bindings = GamepadBindings::from_config(&config);
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = primary + 1;
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
@@ -3104,7 +3104,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     }
 
     let mut app = new_state_only_synthetic_crew_running_sandbox_app();
-    let player_number = app.local_owner;
+    let player_number = app.players.local_owner;
     let info_id = 601;
     let crew = |name: &str, filename: &str, total_playing_time: i32, in_action: bool| {
         let core = clonk_engine::CrewInfoCoreFields {
@@ -3363,7 +3363,7 @@ fn folder_live_save_material_respects_existing_directory_representation() {
 #[test]
 fn ctrlrec_control_executes_at_start_of_recorded_frame() {
     let mut app = new_running_sandbox_app();
-    let packet = recorded_right_control(app.local_owner);
+    let packet = recorded_right_control(app.players.local_owner);
     let mut writer = ControlRecordWriter::new();
     writer.record_packet(1, &packet).test_value();
     app.control_playback = Some(ControlRecordPlayback::from_bytes(&writer.finish(1)).test_value());
@@ -3373,7 +3373,7 @@ fn ctrlrec_control_executes_at_start_of_recorded_frame() {
     main_assert_eq!(app.engine.frame() => 1);
     main_assert_eq!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -3386,7 +3386,7 @@ fn ctrlrec_control_executes_at_start_of_recorded_frame() {
     main_assert_eq!(app.engine.frame() => 2);
     main_assert_ne!(
         app.engine
-            .player(app.local_owner)
+            .player(app.players.local_owner)
             .expect("local player")
             .control
             .pressed_coms
@@ -3402,7 +3402,7 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
     let replay_path = directory.path().join("TextWins.c4s");
     fs::create_dir(&replay_path).test_value();
     let mut app = new_running_sandbox_app();
-    let player = app.local_owner;
+    let player = app.players.local_owner;
     let text = format!(
         concat!(
             "[Rec]\r\n",
@@ -3507,7 +3507,7 @@ fn ctrlrec_end_finishes_the_replay_and_restores_local_control() {
 #[test]
 fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let focus = app.engine.test_crew_cursor(owner);
     app.engine
         .replace_player_viewports(
@@ -3575,7 +3575,7 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
 fn replay_film_view_retargets_only_the_existing_primary_viewport() {
     let app = new_state_only_running_sandbox_app();
     let mut snapshot = app.snapshot.clone();
-    let local_owner = app.local_owner;
+    let local_owner = app.players.local_owner;
     let local = snapshot
         .players
         .iter()
@@ -3697,7 +3697,7 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
 #[test]
 fn viewport_player_cycle_matches_film_and_observer_end_states() {
     let mut app = new_running_sandbox_app();
-    let first = app.local_owner;
+    let first = app.players.local_owner;
     let second = first + 1;
     let third = first + 2;
     for player in [second, third] {
@@ -3754,7 +3754,7 @@ fn viewport_player_cycle_matches_film_and_observer_end_states() {
 #[test]
 fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     let mut app = new_classic_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
 
     for (replay, film, overlays_visible) in [
@@ -3867,7 +3867,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
 #[test]
 fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     let mut app = new_running_sandbox_app();
-    let first = app.local_owner;
+    let first = app.players.local_owner;
     let second = first + 1;
     app.engine
         .register_player(PlayerConfig::new(second, "Second film player"))
@@ -3899,7 +3899,7 @@ fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
 #[test]
 fn set_film_view_builtin_reaches_the_real_replay_viewport() {
     let mut app = new_running_sandbox_app();
-    let local_owner = app.local_owner;
+    let local_owner = app.players.local_owner;
     let film_player = local_owner + 1;
     let focus = app
         .snapshot
@@ -3982,7 +3982,7 @@ fn assert_running_viewport_boundary(app: &mut GameApp, expected_reason: ClassicV
 #[test]
 fn every_physical_owned_viewport_requires_a_player_and_slot_before_any_pixels() {
     let mut app = new_running_sandbox_app();
-    let local_owner = app.local_owner;
+    let local_owner = app.players.local_owner;
     let missing_owner = local_owner + 99;
     let missing_viewport = app.owned_physical_viewport_state(missing_owner, true);
     app.physical_viewports.push(missing_viewport);
@@ -4016,7 +4016,7 @@ fn every_physical_owned_viewport_requires_a_player_and_slot_before_any_pixels() 
 #[test]
 fn focusless_owned_slot_renders_in_normal_cursor_mode() {
     let mut app = new_running_sandbox_app();
-    let local_owner = app.local_owner;
+    let local_owner = app.players.local_owner;
     let invalid_focus = ObjectId::new(u64::MAX);
     let valid_focus = app
         .snapshot
@@ -4086,7 +4086,7 @@ fn view_offset_and_film_view_share_one_physical_request_order() {
         [(true, Vector2::new(41, 43)), (false, Vector2::ZERO)]
     {
         let mut app = new_lightweight_running_sandbox_app();
-        let target = app.local_owner + 1;
+        let target = app.players.local_owner + 1;
         let body = if offset_after_film_view {
             format!("SetFilmView({target}); SetViewOffset({target}, 41, 43);")
         } else {
@@ -4121,7 +4121,7 @@ fn view_offset_and_film_view_share_one_physical_request_order() {
 #[test]
 fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
     let mut app = new_lightweight_running_sandbox_app();
-    let target = app.local_owner;
+    let target = app.players.local_owner;
     app.local_controls = LocalControlRegistry::default();
     app.engine.set_local_players([]);
     app.refresh_non_authoritative_physical_viewports();
@@ -4153,9 +4153,9 @@ fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
 #[test]
 fn recalculation_does_not_reapply_a_stale_scalar_film_target() {
     let mut app = new_lightweight_running_sandbox_app();
-    let lower_layout = app.local_owner + 1;
-    let high_layout_target = app.local_owner + 2;
-    let temporary = app.local_owner + 3;
+    let lower_layout = app.players.local_owner + 1;
+    let high_layout_target = app.players.local_owner + 2;
+    let temporary = app.players.local_owner + 3;
     for (player, name, control_set) in [
         (lower_layout, "Lower layout", 2),
         (high_layout_target, "High layout film", 1),
@@ -4200,7 +4200,7 @@ fn recalculation_does_not_reapply_a_stale_scalar_film_target() {
 #[test]
 fn remote_film_close_does_not_resurrect_the_original_primary() {
     let mut app = new_lightweight_running_sandbox_app();
-    let primary = app.local_owner;
+    let primary = app.players.local_owner;
     let secondary = primary + 1;
     let remote = primary + 2;
     app.engine
@@ -4237,7 +4237,7 @@ fn remote_film_close_does_not_resurrect_the_original_primary() {
 #[test]
 fn replay_film_startup_and_late_player_follow_viewport_check() {
     let mut app = new_lightweight_running_sandbox_app();
-    let first = app.local_owner;
+    let first = app.players.local_owner;
     let mut state = app.engine.capture_state();
     let mut scenario_values = serde_json::to_value(
         state
@@ -4313,7 +4313,7 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
 #[test]
 fn removing_a_remote_film_target_closes_its_physical_viewport_once() {
     let mut app = new_lightweight_running_sandbox_app();
-    let film_player = app.local_owner + 1;
+    let film_player = app.players.local_owner + 1;
     app.engine
         .register_player(PlayerConfig::new(film_player, "Film target"))
         .test_value();
@@ -4331,7 +4331,7 @@ fn removing_a_remote_film_target_closes_its_physical_viewport_once() {
 #[test]
 fn film_target_removal_recreates_the_first_player_viewport() {
     let mut app = new_lightweight_running_sandbox_app();
-    let local_player = app.local_owner;
+    let local_player = app.players.local_owner;
     let film_player = local_player + 1;
     app.engine
         .register_player(PlayerConfig::new(film_player, "Film target"))
@@ -4433,7 +4433,7 @@ fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
 #[test]
 fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let scenario = app
         .active_scenario
         .clone()
@@ -4492,7 +4492,7 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
 #[test]
 fn saved_game_skips_removed_current_player_without_deleting_objects() {
     let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
+    let owner = app.players.local_owner;
     let info_id = app.engine.test_player(owner).player_info_id();
     let object = app.engine.snapshot().objects.first().test_value().id;
     app.control_player_infos
@@ -4961,7 +4961,7 @@ fn quick_save_round_trips_state() {
         main_assert!(app.sec1_timer().expect("explicit saved-game clock pulse"), "explicit pulse consumes the tick latch");
         let saved_frame = app.snapshot.frame;
         let saved_game_time = app.snapshot.game_time;
-        let saved_player_info_id = app.engine.test_player(app.local_owner).player_info_id();
+        let saved_player_info_id = app.engine.test_player(app.players.local_owner).player_info_id();
         let saved_big_icon = ImageData::new(1, 1, vec![12, 34, 56, 255]);
         app.runtime_player_big_icons
             .insert(saved_player_info_id, saved_big_icon.clone());
