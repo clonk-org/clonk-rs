@@ -2044,12 +2044,10 @@ impl GameApp {
         }
 
         if ordered_native {
-            let render = self
-                .loader_screen
+            self.loader_screen
                 .as_ref()
                 .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?
                 .render_chrome(self.graphics.surface_mut(), config, Some(gamma));
-            render.map_err(|error| self.loader_boundary(error.to_string()))?;
 
             // C4GraphicsSystem draws the startup message-board loader before
             // C4GUI. Commit that base with the loader's dedicated native-text
@@ -2140,12 +2138,13 @@ impl GameApp {
             .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?;
         let mut surface = Surface::from_bytes(width, height, PixelFormat::Rgba8888, frame.to_vec())
             .map_err(|error| self.loader_boundary(error.to_string()))?;
-        let render = if defer_native_text {
-            loader.render_chrome(&mut surface, config, Some(gamma))
+        if defer_native_text {
+            loader.render_chrome(&mut surface, config, Some(gamma));
         } else {
-            loader.render_with_config(&mut surface, config, Some(gamma))
-        };
-        render.map_err(|error| self.loader_boundary(error.to_string()))?;
+            loader
+                .render_with_config(&mut surface, config, Some(gamma))
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+        }
         if self
             .network_start_wait
             .as_ref()
