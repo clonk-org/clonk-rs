@@ -4575,6 +4575,125 @@ fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
     main_assert_eq!(zero.engine.scoreboard_snapshot() => saved_zero.scoreboard);
 }
 
+/// `C4ScoreboardDlg` is constructed with `fViewportDlg == false`
+/// (`C4Scoreboard.cpp:292`), so `Dialog::Show`'s console arm —
+/// `if (!Application.isFullScreen && !IsViewportDialog()) CreateConsoleWindow()`
+/// (`C4GuiDialogs.cpp:659-661`) — gives it a real child window of the console,
+/// and `Dialog::Close` destroys that window again (`:677`). The port's console
+/// branch returns before any dialog layer, so the window request is what the
+/// console runner reconciles against.
+#[test]
+fn console_scoreboard_owns_a_child_window_only_while_its_dialog_is_open() {
+    let script = r#"global func ShowBoard()
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                       DoScoreboardShow(1);
+                   }"#;
+
+    // Fullscreen draws the scoreboard into the primary window, so it never
+    // asks for a child one however the dialog was opened.
+    let mut fullscreen = new_scoreboard_test_app(script);
+    call_scoreboard_function_and_update(&mut fullscreen, "ShowBoard");
+    main_assert!(fullscreen.scoreboard_dialog.is_some());
+    main_assert!(!fullscreen.console_scoreboard_window_open());
+
+    let mut console = new_scoreboard_test_app(script);
+    console.console_mode = true;
+    main_assert!(!console.console_scoreboard_window_open());
+
+    call_scoreboard_function_and_update(&mut console, "ShowBoard");
+    main_assert!(console.scoreboard_dialog.is_some());
+    main_assert!(console.console_scoreboard_window_open());
+
+    // A second script show is another ordered request, not a second window:
+    // `CreateConsoleWindow` returns early when the dialog already has one
+    // (`C4GuiDialogs.cpp:308`).
+    call_scoreboard_function_and_update(&mut console, "ShowBoard");
+    main_assert!(console.console_scoreboard_window_open());
+
+    main_assert!(console.close_scoreboard_dialog());
+    main_assert!(!console.console_scoreboard_window_open());
+}
+
+/// `ScoreboardToggle` is registered at `KEYSCOPE_Generic` (`C4Game.cpp:3427`),
+/// so Tab toggles the board in console mode too, and `DialogWinProc` forwards
+/// the dialog window's own keys to `Game.DoKeyboardInput`
+/// (`C4GuiDialogs.cpp:219-228`) — pressing it again on the scoreboard window
+/// closes it. `DoDlgShow(0, true)` is the user toggle, which leaves the
+/// reference count alone (`C4Scoreboard.cpp:239`).
+#[test]
+fn console_scoreboard_tab_toggles_the_child_window_without_moving_the_refcount() {
+    let mut app = new_scoreboard_test_app(
+        r#"global func FillBoard()
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                       SetScoreboardData(1, 1, "Ada");
+                   }"#,
+    );
+    app.console_mode = true;
+    call_scoreboard_function_and_update(&mut app, "FillBoard");
+    let refcount = app.snapshot.hud.scoreboard.show_count();
+    main_assert!(!app.console_scoreboard_window_open());
+
+    toggle_scoreboard(&mut app, ModifiersState::empty());
+    main_assert!(app.console_scoreboard_window_open());
+    main_assert_eq!(app.snapshot.hud.scoreboard.show_count() => refcount, "a user toggle passes DoDlgShow a change of zero");
+
+    toggle_scoreboard(&mut app, ModifiersState::empty());
+    main_assert!(!app.console_scoreboard_window_open());
+    main_assert_eq!(app.snapshot.hud.scoreboard.show_count() => refcount);
+}
+
+/// The console window is sized to the dialog `C4ScoreboardDlg::Update`
+/// computes and titled from the caption cell, because `Dialog::SetTitle` puts
+/// that text on the window bar instead of in a `WoodenLabel`
+/// (`C4GuiDialogs.cpp:390-395`). Live `SetScoreboardData` grows the dialog, and
+/// `Dialog::UpdateSize` resizes the window with it (`C4GuiDialogs.cpp:445-473`).
+#[test]
+fn console_scoreboard_window_takes_its_title_and_size_from_the_live_board() {
+    let mut app = new_scoreboard_test_app(
+        r#"global func ShowBoard()
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                       SetScoreboardData(1, 1, "Ada");
+                       DoScoreboardShow(1);
+                   }
+                   global func WidenBoard()
+                   {
+                       SetScoreboardData(2, 1, "Bert has a very long name indeed");
+                   }"#,
+    );
+    app.console_mode = true;
+    main_assert!(app.console_scoreboard_window_chrome().is_none());
+
+    call_scoreboard_function_and_update(&mut app, "ShowBoard");
+    let (title, width, height) = app
+        .console_scoreboard_window_chrome()
+        .test_value();
+    main_assert_eq!(title => "Scores".to_owned());
+    main_assert!(width > 0 && height > 0);
+
+    // The caption text is on the window bar, so the dialog itself reserves no
+    // title band: its whole height is the spreadsheet.
+    let surface = app.render_console_scoreboard(width, height).test_value();
+    main_assert_eq!(surface.width() => width);
+    main_assert_eq!(surface.height() => height);
+    main_assert!(surface.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
+
+    // A live data update grows the board, and the window follows it.
+    call_scoreboard_function_and_update(&mut app, "WidenBoard");
+    let (_, wider, taller) = app
+        .console_scoreboard_window_chrome()
+        .test_value();
+    main_assert!(wider > width, "an added row widens the console window");
+    main_assert!(taller > height, "an added row heightens the console window");
+
+    // Closing the dialog withdraws the window and everything it drew.
+    main_assert!(app.close_scoreboard_dialog());
+    main_assert!(app.console_scoreboard_window_chrome().is_none());
+    main_assert!(app.render_console_scoreboard(wider, taller).is_none());
+}
+
 #[test]
 fn script_scoreboard_lifecycle_uses_ordered_requests_not_final_refcount() {
     let mut empty_then_cell = new_scoreboard_test_app(

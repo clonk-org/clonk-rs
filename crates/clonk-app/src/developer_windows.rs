@@ -44,6 +44,10 @@ pub enum HostPurpose {
     /// A `C4ComponentHost::ShowDialog` editor. Modal in C++, so at most one
     /// exists and its close destroys it.
     ComponentEditor,
+    /// The `C4ScoreboardDlg` console window. `Dialog::Close` destroys it
+    /// (`C4GuiDialogs.cpp:677`), and the dialog it belongs to is deleted with
+    /// it, so this is a destroy rather than a hide.
+    Scoreboard,
 }
 
 /// One window's surface lifecycle. Implementations own the real window, pixel
@@ -262,9 +266,10 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
         destroyed
     }
 
-    /// Closes a record. Viewports and the object list are destroyed; the
-    /// toolbox is only hidden so its pages survive; the shell is never removed
-    /// by this path — a child close must not take the console down with it.
+    /// Closes a record. Viewports, the object list and the scoreboard are
+    /// destroyed; the toolbox is only hidden so its pages survive; the shell is
+    /// never removed by this path — a child close must not take the console
+    /// down with it.
     pub fn close(&mut self, id: WindowId) -> CloseOutcome {
         let Some(record) = self.records.get_mut(&id) else {
             return CloseOutcome::Unknown;
@@ -277,7 +282,8 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
             }
             HostPurpose::Viewport { .. }
             | HostPurpose::ObjectList
-            | HostPurpose::ComponentEditor => {
+            | HostPurpose::ComponentEditor
+            | HostPurpose::Scoreboard => {
                 self.records.remove(&id);
                 CloseOutcome::Destroyed
             }
@@ -530,6 +536,14 @@ mod tests {
         );
         assert_eq!(windows.close(WindowId(99)), CloseOutcome::Unknown);
         assert_eq!(windows.len(), 2);
+
+        // `Dialog::Close` destroys the scoreboard's console window and the
+        // dialog with it (`C4GuiDialogs.cpp:677`), so it closes like a
+        // viewport rather than hiding like the toolbox.
+        const SCOREBOARD: WindowId = WindowId(4);
+        windows.insert(SCOREBOARD, HostPurpose::Scoreboard, MockHost::shown());
+        assert_eq!(windows.close(SCOREBOARD), CloseOutcome::Destroyed);
+        assert!(!windows.contains(SCOREBOARD));
     }
 
     // C4DevmodeDlg.cpp:90-121 — SwitchPage shows the notebook window again;

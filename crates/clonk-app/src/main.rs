@@ -70,6 +70,7 @@ use clonk_app_netplay::prepared_host_bootstrap;
 use clonk_app_netplay::resource_path_identity;
 mod runtime_join_save;
 mod save_worker;
+mod scoreboard_window_host;
 mod settings;
 mod shell_window_host;
 mod software_window;
@@ -1182,6 +1183,17 @@ fn run() -> Result<()> {
                     &mut next_developer_window_key,
                     event_target,
                 );
+                // `C4ScoreboardDlg` is a non-viewport dialog, so `Dialog::Show`
+                // gives it a console window of its own
+                // (`C4GuiDialogs.cpp:659-661`). The console render branch draws
+                // only the shell and its message dialogs, so this window is the
+                // scoreboard's whole presentation there.
+                console_toolbox_window::reconcile_console_scoreboard_window(
+                    &mut app,
+                    &mut developer_windows,
+                    &mut next_developer_window_key,
+                    event_target,
+                );
             }
             // Every viewport window redraws with the shell and only with it, the
             // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
@@ -1236,6 +1248,17 @@ fn run() -> Result<()> {
                             &mut app,
                             &mut developer_windows,
                             &mut component_editor_modifiers,
+                        );
+                        return;
+                    }
+                    if console_toolbox_window::scoreboard_window_key(&developer_windows)
+                        == Some(key)
+                    {
+                        console_toolbox_window::handle_console_scoreboard_event(
+                            key,
+                            &event,
+                            &mut app,
+                            &mut developer_windows,
                         );
                         return;
                     }
