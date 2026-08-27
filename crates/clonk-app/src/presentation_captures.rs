@@ -218,6 +218,12 @@ impl CaptureSurface {
 pub enum CaptureMismatch {
     /// The manifest does not list the screen, so no terms exist to compare on.
     UnknownScreen { screen: String },
+    /// The caller chose a comparator that does not implement this screen's term.
+    ComparisonTerm {
+        screen: String,
+        expected: ComparisonTerm,
+        actual: ComparisonTerm,
+    },
     /// A capture is not the geometry the manifest fixes for every screen.
     Geometry {
         screen: String,
@@ -292,9 +298,17 @@ pub fn compare_capture(
     reference: &[u8],
     actual: &[u8],
 ) -> Result<(), CaptureMismatch> {
-    if !screens().iter().any(|entry| entry.id == screen) {
-        return Err(CaptureMismatch::UnknownScreen {
+    let terms = screens()
+        .iter()
+        .find(|entry| entry.id == screen)
+        .ok_or_else(|| CaptureMismatch::UnknownScreen {
             screen: screen.to_owned(),
+        })?;
+    if terms.comparison != ComparisonTerm::Pixel {
+        return Err(CaptureMismatch::ComparisonTerm {
+            screen: screen.to_owned(),
+            expected: terms.comparison,
+            actual: ComparisonTerm::Pixel,
         });
     }
 
@@ -581,6 +595,25 @@ mod tests {
                 Ok(())
             );
         }
+    }
+
+    #[test]
+    fn a_layout_screen_cannot_be_verified_by_the_pixel_comparator() {
+        assert_eq!(
+            compare_capture(
+                "startup-main",
+                CaptureSurface::Cpu,
+                1_280,
+                720,
+                &plane(9),
+                &plane(9),
+            ),
+            Err(CaptureMismatch::ComparisonTerm {
+                screen: "startup-main".to_owned(),
+                expected: ComparisonTerm::Layout,
+                actual: ComparisonTerm::Pixel,
+            })
+        );
     }
 
     /// The software renderer is the exact oracle, so nothing is forgiven there;
