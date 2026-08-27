@@ -7972,8 +7972,19 @@ fn ready_check_toast_config_uses_cpp_boolean_grammar_and_default() {
     );
 }
 
+/// `Config.Toasts.ReadyCheck` is the only condition on the toast.
+///
+/// `ReadyCheckDialog::UpdateText` builds it under
+/// `Config.Toasts.ReadyCheck && !toast && Application.ToastSystem`
+/// (`src/C4Network2.cpp:152-171`) — window focus is not part of that test.
+/// C++ keeps the two mechanisms apart: raising the window is the separate
+/// `Application.NotifyUserIfInactive()` call the same handler already makes
+/// (`src/C4Network2.cpp:1670`), which the port models as its own
+/// `ClassicLobbyAction`. Gating the toast on focus as well would mean a
+/// focused client never gets one, and so never reaches the notification's
+/// answer actions at all.
 #[test]
-fn unfocused_ready_check_queues_one_enabled_desktop_notification() {
+fn ready_check_toast_follows_the_config_flag_rather_than_window_focus() {
     fn client_app(window_active: bool, toasts_enabled: bool) -> GameApp {
         let mut app = new_menu_app(320, 200);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -8001,8 +8012,17 @@ fn unfocused_ready_check_queues_one_enabled_desktop_notification() {
     app.handle_lobby_ready_check_request(packet).test_value();
     main_assert!(app.take_desktop_notification().is_none());
 
-    for (window_active, toasts_enabled) in [(true, true), (false, false)] {
-        let mut app = client_app(window_active, toasts_enabled);
+    // A focused client is toasted too: C++ tests the config flag alone.
+    let mut focused = client_app(true, true);
+    focused.handle_lobby_ready_check_request(packet).test_value();
+    main_assert!(
+        focused.take_desktop_notification().is_some(),
+        "window focus is not one of ReadyCheckDialog::UpdateText's conditions"
+    );
+
+    // Turning the toast off is the one thing that suppresses it.
+    for window_active in [true, false] {
+        let mut app = client_app(window_active, false);
         app.handle_lobby_ready_check_request(packet).test_value();
         main_assert!(app.take_desktop_notification().is_none());
     }
