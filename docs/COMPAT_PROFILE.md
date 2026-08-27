@@ -160,6 +160,23 @@ software renderer with the one-byte cross-driver tolerance documented in
 `docs/RENDERING_PARITY.md`. Every opt-in presentation divergence is forced off
 and every first-run configuration default equals the C++ default.
 
+Whole-screen equality is promised **as pixels only where every pixel is
+oracle-authored**. A screen that renders the port's own branding or its
+super-resolved startup art is promised the same *layout* — the same controls at
+the same rects with the same captions, wrapping and ordering — and not the same
+pixels. This is not a softening to make a failing comparison pass: running it
+showed the renderer is not what fails. On `startup-main`, excluding the port's
+logo, version string and footer and the cursor the C++ F9 capture bakes in, the
+remaining 823,144 pixels are 99.93% bit-identical and 100.00% within one channel
+step, with no pixel differing by more than one — exactly the GPU term. The three
+screens that fall below 6% are exactly the three whose background is 3x
+port-authored art, and different source art cannot equal the oracle's at any
+resolution. Shipping the oracle's branding and 1x art inside the profile was the
+alternative and was not taken: both are deliberate product features, and
+clonk-org/clonk-rs#587 forbids masking port-version text or product features, so
+no mask could rescue a pixel term either. Decided in
+clonk-org/clonk-rs#1298.
+
 Held: `docs/RENDERING_PARITY.md` and the F9 reference-capture pixel-parity
 suites in `crates/clonk-frontend`.
 
@@ -169,10 +186,13 @@ complete retained-GPU device-loss recovery through the shipped event loop.
 `compat/presentation_captures.json` is the detail behind the first entry: the thirteen screens a comparison has to cover, the single
 resolution and scale every capture is taken at, the tolerances a comparison may
 apply — nothing at all for the software renderer, the documented one byte for
-GPU readback — and the regions a comparison is allowed to ignore. A screen
-counts as captured only once it names a C++ and a Rust capture, and a mask has
-to say which platform artifact it covers and what approved it, so a comparison
-cannot be quietly weakened into one that passes. `crates/clonk-app` reads that
+GPU readback — the term each screen is compared on, and the regions a comparison
+is allowed to ignore. A screen counts as captured only once it names a C++ and a
+Rust capture; a mask has to say which platform artifact it covers and what
+approved it; and a screen may sit on the weaker `layout` term only if it names a
+declared port-authored asset class, each of which states what it is and what
+approved it. So a comparison cannot be quietly weakened into one that passes,
+and "compare this screen more weakly" always has to finish the sentence. `crates/clonk-app` reads that
 file rather than a second copy of the list, and its tests fail if a screen is
 dropped, a mask hides pixels without a stated reason, or the software tolerance
 stops being exact.

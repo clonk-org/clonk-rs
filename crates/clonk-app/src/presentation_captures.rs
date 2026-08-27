@@ -31,6 +31,19 @@ pub struct CaptureScreen {
     pub description: String,
     /// `pending` until a capture pair exists, then `captured`.
     pub status: String,
+    /// Which term this screen is compared on — `pixel` or `layout`.
+    ///
+    /// A screen that renders port-authored assets cannot meet a pixel term at
+    /// any resolution, so it is compared on layout instead
+    /// (clonk-org/clonk-rs#1298). Defaults to `pixel`, so a screen has to opt
+    /// into the weaker term explicitly.
+    #[serde(default = "default_comparison")]
+    pub comparison: String,
+    /// The `port_assets` classes this screen renders, when it is on the
+    /// `layout` term. Naming them is what keeps the weaker term from being a
+    /// blanket excuse.
+    #[serde(default)]
+    pub port_assets: Vec<String>,
     /// The C++ and Rust capture pair, once there is one.
     #[serde(default)]
     pub evidence: Vec<String>,
@@ -44,7 +57,31 @@ pub struct CaptureScreen {
     pub blocker: Option<CaptureBlocker>,
 }
 
-/// A measured reason a screen's comparison cannot pass on the current terms.
+fn default_comparison() -> String {
+    "pixel".to_string()
+}
+
+/// A class of port-authored asset that puts a screen on the `layout` term.
+///
+/// Declaring these is the difference between "this screen is compared more
+/// weakly" and "this screen is compared more weakly *because* it renders the
+/// port's own logo" — the second can be argued with, the first cannot.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct PortAsset {
+    /// Stable id a screen references.
+    pub id: String,
+    /// What the asset is.
+    pub summary: String,
+    /// What approved treating it as port-authored.
+    pub authority: String,
+}
+
+/// A measured pixel result for a screen, and where the remaining work is
+/// tracked.
+///
+/// For a screen on the `layout` term the recorded result is expected rather
+/// than a defect: it is kept so the measurement is not rediscovered, and so a
+/// reader can see the renderer itself was not what failed.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct CaptureBlocker {
     /// What was measured and what explains the difference.
@@ -91,6 +128,8 @@ struct Manifest {
     screens: Vec<CaptureScreen>,
     #[serde(default)]
     masks: Vec<CaptureMask>,
+    #[serde(default)]
+    port_assets: Vec<PortAsset>,
 }
 
 fn manifest() -> &'static Manifest {
@@ -109,6 +148,11 @@ pub fn screens() -> &'static [CaptureScreen] {
 /// The regions a comparison may ignore.
 pub fn masks() -> &'static [CaptureMask] {
     &manifest().masks
+}
+
+/// The port-authored asset classes that put a screen on the `layout` term.
+pub fn port_assets() -> &'static [PortAsset] {
+    &manifest().port_assets
 }
 
 /// The geometry every capture shares.
@@ -428,6 +472,64 @@ mod tests {
                 fields, 4,
                 "mask on `{}` has region `{}`, not `x,y,width,height`",
                 mask.screen, mask.region
+            );
+        }
+    }
+
+    /// The weaker term is opt-in and has to be justified: a screen may only be
+    /// compared on layout if it names a declared port-authored asset class.
+    /// Without that, "compare this one more weakly" would be unfalsifiable
+    /// (clonk-org/clonk-rs#1298).
+    #[test]
+    fn a_layout_screen_names_the_port_assets_that_put_it_there() {
+        let declared = port_assets()
+            .iter()
+            .map(|asset| asset.id.as_str())
+            .collect::<BTreeSet<_>>();
+        for screen in screens() {
+            assert!(
+                matches!(screen.comparison.as_str(), "pixel" | "layout"),
+                "{}: unknown comparison term `{}`",
+                screen.id,
+                screen.comparison
+            );
+            if screen.comparison == "layout" {
+                assert!(
+                    !screen.port_assets.is_empty(),
+                    "{}: compared on layout without naming a port asset class",
+                    screen.id
+                );
+                for asset in &screen.port_assets {
+                    assert!(
+                        declared.contains(asset.as_str()),
+                        "{}: names undeclared port asset class `{asset}`",
+                        screen.id
+                    );
+                }
+            } else {
+                assert!(
+                    screen.port_assets.is_empty(),
+                    "{}: names port assets but is still compared on pixels",
+                    screen.id
+                );
+            }
+        }
+    }
+
+    /// Every declared class has to say what it is and what approved it, for the
+    /// same reason a mask does.
+    #[test]
+    fn every_port_asset_class_says_what_it_is_and_who_approved_it() {
+        for asset in port_assets() {
+            assert!(
+                !asset.summary.trim().is_empty(),
+                "port asset `{}` declares no summary",
+                asset.id
+            );
+            assert!(
+                asset.authority.contains("clonk-org/clonk-rs#"),
+                "port asset `{}` names no qualified authority",
+                asset.id
             );
         }
     }
