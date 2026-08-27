@@ -7091,17 +7091,11 @@ namespace wildcard
 
 } // namespace wildcard
 
-// The pure C4Strings helpers, lifted whole. They must sit at global scope so
-// each definition matches the declaration in the real C4Strings.h -- that
-// header is where the default arguments (SizeMax, ';', false) come from, and
-// SAppend calls SCopy with two arguments relying on exactly that.
-#include "c4strings_helpers.inc"
-
-// The span above stops before SInsert/SDelete; SaveScenarioSections needs both
-// to splice a section name over the `*` in `Sect*.c4g`. Same global-scope
-// reasoning: SInsert's iMaxLen default lives in C4Strings.h.
-#include "c4strings_insert_delete.inc"
-#include "c4strings_advance_space.inc"
+// The C4Strings helpers are no longer lifted: `src/C4Strings.cpp` is linked
+// whole, so every caller here reaches the real definition rather than a copy of
+// it. That is strictly more faithful than the three `.inc` spans this replaced,
+// and it is what makes linking `src/C4Group.cpp` possible at all -- the lifted
+// copies would have been duplicate symbols beside it.
 
 // C4ConfigGeneral::GetLanguageSequence, with the smallest class that lets the
 // real out-of-line definition compile.
