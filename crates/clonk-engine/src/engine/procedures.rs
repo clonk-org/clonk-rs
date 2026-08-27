@@ -1189,7 +1189,7 @@ impl Engine {
     /// `C4Shape::LineConnect` (C4Shape.cpp:273-326): move one endpoint of
     /// a wrapping line, inserting the first viable bend around the first
     /// solid pixel when the direct path to its neighbour is blocked.
-    fn line_connect_endpoint(
+    pub(crate) fn line_connect_endpoint(
         landscape: Option<&Landscape>,
         vertices: &mut Vec<ObjectVertex>,
         target: Vector2,

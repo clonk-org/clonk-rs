@@ -63,7 +63,7 @@
           "kind": "issue",
           "value": "clonk-org/clonk-rs#1243",
           "status": "pending",
-          "note": "Landscape-aware LineConnect routing and its immediate DFA_CONNECT lifecycle handoff lack oracle-backed differential coverage."
+          "note": "The `line_connect_routing` golden section now covers the landscape-aware routing itself - endpoint move, bend search, old-endpoint fallback, the C4D_MaxVertex refusal and the resulting ordered vertex list. The immediate DFA_CONNECT lifecycle handoff - the LineBreak callback trace and object status that follow a failed connect - is still only covered for the vertex-count guard path by `connect_geometry_break_removal`."
         },
         {
           "kind": "document",
