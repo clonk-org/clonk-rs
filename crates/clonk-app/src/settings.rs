@@ -1225,13 +1225,31 @@ mod tests {
     }
 
     #[test]
-    fn loader_scale_validation_accepts_fractional_and_rejects_nonpositive_or_overflow() {
+    fn loader_scale_starts_on_a_nonpositive_value_and_still_checks_overflow() {
+        // C++ compiles `Graphics.Scale` raw with no bounds
+        // (C4Config.cpp:440) and `GetScale()` is a bare `Scale / 100.0f`
+        // (C4Application.h:119); only the Options editor constrains an edit,
+        // to 100..300 (C4StartupOptionsDlg.cpp:130-131). A hand-edited zero or
+        // negative therefore starts the game natively, so it must start here
+        // too rather than failing a typed boundary. The floor is the one
+        // guard kept: a zero-area surface is not something C++ asks its
+        // driver for either.
         for percent in [0, -100] {
             let mut cfg = Config::new();
+            cfg.set_in(Some("Graphics"), "ResolutionX", "320");
+            cfg.set_in(Some("Graphics"), "ResolutionY", "200");
             cfg.set_in(Some("Graphics"), "Scale", percent.to_string());
             let mut options = DisplayOptions::default();
             options.apply_config(&cfg);
-            assert!(options.checked_loader_actual_size().is_err());
+            assert_eq!(
+                options.scale_percent, percent,
+                "the configured value is loaded raw, exactly as C++ compiles it"
+            );
+            assert_eq!(
+                options.checked_loader_actual_size(),
+                Ok((MIN_RESOLUTION, MIN_RESOLUTION)),
+                "a nonpositive scale starts at the floor instead of refusing to start"
+            );
         }
 
         let mut fractional = Config::new();
@@ -1454,15 +1472,21 @@ impl DisplayOptions {
         self.record_actual_size(physical_width, physical_height);
     }
 
+    /// The physical output size for the configured scale.
+    ///
+    /// A zero or negative `Graphics.Scale` is **not** an error. C++ compiles
+    /// the value raw with no bounds (`C4Config.cpp:440`) and `GetScale()` is a
+    /// bare `Scale / 100.0f` (`C4Application.h:119`); only the Options editor
+    /// constrains an ordinary edit, to 100..300
+    /// (`C4StartupOptionsDlg.cpp:130-131`). A hand-edited config therefore
+    /// starts the game natively, so refusing to start here was a divergence.
+    ///
+    /// What stays is the arithmetic guard: a nonpositive scale floors at
+    /// `MIN_RESOLUTION` rather than asking for a zero-area surface, and an
+    /// oversized one still fails the overflow check instead of requesting an
+    /// unbounded allocation.
     pub fn checked_loader_actual_size(&self) -> Result<(u32, u32), String> {
-        if self.scale_percent <= 0 {
-            return Err(format!(
-                "classic loader application scale must be positive, got {}%",
-                self.scale_percent
-            ));
-        }
-        let percent = u64::try_from(self.scale_percent)
-            .map_err(|_| "classic loader application scale is out of range".to_string())?;
+        let percent = u64::try_from(self.scale_percent.max(0)).unwrap_or(0);
         let scaled = |extent: u32, axis: &str| {
             u64::from(extent)
                 .checked_mul(percent)
