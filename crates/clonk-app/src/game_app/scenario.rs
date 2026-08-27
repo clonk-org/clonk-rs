@@ -882,7 +882,7 @@ impl GameApp {
         if prepared_go || !self.startup_dialog_in_use() {
             self.request_exit("a scenario failed to load with no menu to return to");
         } else if returns_to_startup {
-            if let Some(audio) = self.audio.as_ref() {
+            if let Some(audio) = self.sound.context.as_ref() {
                 audio.borrow_mut().configure_scenario(None);
             }
             self.reconstruct_music_system_at_preinit();
@@ -1835,8 +1835,8 @@ impl GameApp {
             }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
-        reconnect_audio_context(&mut engine, self.audio.as_ref());
-        if let Some(audio) = self.audio.as_ref() {
+        reconnect_audio_context(&mut engine, self.sound.context.as_ref());
+        if let Some(audio) = self.sound.context.as_ref() {
             audio.borrow_mut().clear_object_sound_instances();
         }
         engine.set_smoke_level(self.graphics_smoke_level);
@@ -1965,11 +1965,12 @@ impl GameApp {
         }
 
         let sound_samples = {
-            let mut audio = borrow_audio_context_mut(self.audio.as_ref());
+            let mut audio = borrow_audio_context_mut(self.sound.context.as_ref());
             configure_scenario_sound_samples(audio.as_deref_mut(), scenario_data, &path)
         };
         let music_tracks = self
-            .audio
+            .sound
+            .context
             .as_ref()
             .map(|audio| audio.borrow().available_music_tracks())
             .unwrap_or_default();
@@ -2563,7 +2564,7 @@ impl GameApp {
         // PlayScenarioMusic one-way enables Game.IsMusicEnabled when the
         // local RXMusic option is on, while configured-off clients retain a
         // restored or callback-enabled true value.
-        self.runtime_music_enabled |= restored_music_enabled.unwrap_or(false);
+        self.sound.runtime_music_enabled |= restored_music_enabled.unwrap_or(false);
         if replay {
             self.control_clients
                 .replace_snapshot(replay_parameter_clients);
@@ -2619,7 +2620,7 @@ impl GameApp {
         self.play_scenario_audio(&path);
         if initial_game_data.is_some() {
             let restored_music_level = self.engine.music_level();
-            if let Some(audio) = self.audio.as_ref() {
+            if let Some(audio) = self.sound.context.as_ref() {
                 audio
                     .borrow_mut()
                     .set_scenario_music_level(Some(restored_music_level));
@@ -2676,7 +2677,7 @@ impl GameApp {
         self.saves.network_recreation_progress = None;
         self.loading_state = None;
         self.engine = Engine::new();
-        reconnect_audio_context(&mut self.engine, self.audio.as_ref());
+        reconnect_audio_context(&mut self.engine, self.sound.context.as_ref());
         self.film_view_player = None;
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
@@ -2722,7 +2723,7 @@ impl GameApp {
             self.console_mode,
         );
         let spawn_definition = {
-            let mut audio = borrow_audio_context_mut(self.audio.as_ref());
+            let mut audio = borrow_audio_context_mut(self.sound.context.as_ref());
             configure_sandbox_engine(&mut self.engine, definition_load, audio.as_deref_mut())?
         };
 

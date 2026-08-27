@@ -515,12 +515,14 @@ impl GameApp {
         let mouse = player_mouse.unwrap_or(false);
         OptionFlags {
             sound: self
-                .audio
+                .sound
+                .context
                 .as_ref()
                 .map(|audio| audio.borrow().options.sound_enabled)
                 .unwrap_or(false),
             music: self
-                .audio
+                .sound
+                .context
                 .as_ref()
                 .map(|audio| audio.borrow().options.music_enabled)
                 .unwrap_or(false),
@@ -936,7 +938,7 @@ impl GameApp {
                 }
                 OptionsDlgAction::SheetChanged(sheet) => {
                     self.sync_options_gamepad_device();
-                    if sheet == OptionsSheet::Sound && self.audio.is_none() {
+                    if sheet == OptionsSheet::Sound && self.sound.context.is_none() {
                         return Err(classic_parity_engine_error(report_classic_parity_boundary(
                             ClassicParityBoundary::RuntimeAudioSystem {
                                 action: "the startup Options Audio sheet",
@@ -1430,17 +1432,17 @@ impl GameApp {
             .set_control_key_names(configured_control_key_names(&self.bindings));
 
         let reloaded_audio = AudioOptions::load(paths);
-        if self.audio.is_none() && reloaded_audio.voice_enabled {
+        if self.sound.context.is_none() && reloaded_audio.voice_enabled {
             match AudioContext::try_new_with_paths(reloaded_audio.clone(), paths) {
                 Ok(audio) => {
-                    self.audio = Some(connect_audio_context(&mut self.engine, audio));
+                    self.sound.context = Some(connect_audio_context(&mut self.engine, audio));
                 }
                 Err(error) => {
                     tracing::warn!(%error, "voice opt-in could not initialise audio");
                 }
             }
         }
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             let music_volume = reloaded_audio.music_volume_percent();
             let sound_volume = reloaded_audio.sound_volume_percent();
@@ -1689,7 +1691,7 @@ impl GameApp {
             tracing::warn!(?key, "ignoring voice capture for an unpersistable key");
             return Ok(true);
         }
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             audio.options.voice_push_to_talk = key;
         }
@@ -1858,7 +1860,7 @@ impl GameApp {
         // Recreating the dialog destroys its ControlConfigArea before the
         // replacement starts on the Program sheet.
         self.gamepads.set_options_open_slot(None);
-        let audio = borrow_audio_context(self.audio.as_ref());
+        let audio = borrow_audio_context(self.sound.context.as_ref());
         let mut dialog = clonk_frontend::startup_options_dlg::OptionsDlgState::with_all(
             load_options_program_state(
                 self.app_paths.as_ref(),
@@ -1970,7 +1972,7 @@ impl GameApp {
     pub(crate) fn persist_open_options_config(&self) -> Option<io::Result<()>> {
         let paths = self.app_paths.as_ref()?;
         let dialog = self.startup_options_dialog.as_ref()?;
-        let audio = borrow_audio_context(self.audio.as_ref());
+        let audio = borrow_audio_context(self.sound.context.as_ref());
         Some(persist_startup_options_config(
             paths,
             dialog.program(),
@@ -1985,7 +1987,7 @@ impl GameApp {
 
     pub(crate) fn apply_open_options_config(&self, config: &mut Config) -> Option<()> {
         let dialog = self.startup_options_dialog.as_ref()?;
-        let audio = borrow_audio_context(self.audio.as_ref());
+        let audio = borrow_audio_context(self.sound.context.as_ref());
         apply_startup_options_config(
             config,
             dialog.program(),

@@ -4115,13 +4115,13 @@ fn automatic_retirement_closes_viewport_and_releases_local_control() {
         .replace_player_viewports(player, Vec::new())
         .test_value();
     app.snapshot = app.engine.snapshot();
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
 
     app.engine.set_player_surrendered(player, true).test_value();
     for frame in 1..60 {
         app.test_update();
         main_assert!(app.engine.player(player).is_some(), "player retired before frame {frame}");
-        main_assert!(app.ui_sound_log.is_empty());
+        main_assert!(app.sound.ui_log.is_empty());
     }
     app.test_update();
 
@@ -4129,7 +4129,7 @@ fn automatic_retirement_closes_viewport_and_releases_local_control() {
     main_assert_eq!(app.local_controls.assignment(player) => None);
     main_assert!(!app.snapshot.hud.local_players.contains(&player));
     main_assert_eq!(
-        app.ui_sound_log
+        app.sound.ui_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
             .count() =>

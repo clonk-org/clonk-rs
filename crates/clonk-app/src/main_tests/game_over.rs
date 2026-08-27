@@ -100,10 +100,10 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
         .is_some_and(|line| line.text.contains("Unknown command: \"abort\"")));
     host.process_console_command("/starter 12junk").test_value();
     main_assert_eq!(commands.take_submitted_lobby_countdowns() => vec![clonk_network::LobbyCountdownPacket::new(-1), clonk_network::LobbyCountdownPacket::new(12),]);
-    host.ui_sound_log.clear();
+    host.sound.ui_log.clear();
     host.process_console_command("/start ").test_value();
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
-    main_assert!(host.ui_sound_log.is_empty(), "native console validation only logs the usage error");
+    main_assert!(host.sound.ui_log.is_empty(), "native console validation only logs the usage error");
     main_assert_eq!(
         host.classic_host_lobby
             .as_ref()
@@ -1709,7 +1709,7 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
     }
 
     app.begin_frontend_music_entry();
-    main_assert!(app.frontend_music_attempted_for_entry);
+    main_assert!(app.sound.frontend_attempted_for_entry);
     {
         let audio = app.test_audio_ref();
         main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
@@ -1756,7 +1756,7 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
     );
 
     app.return_to_menu();
-    main_assert!(app.frontend_music_attempted_for_entry);
+    main_assert!(app.sound.frontend_attempted_for_entry);
     main_assert!(wait_for_mixer_start(&app), "a new startup entry restarts frontend music");
 
     app.set_frontend_music_option(false).test_value();
@@ -1765,7 +1765,7 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
     app.set_frontend_music_option(true).test_value();
     main_assert!(wait_for_mixer_start(&app), "FEMusic re-enable restarts the frontend playlist");
 
-    app.runtime_music_enabled = false;
+    app.sound.runtime_music_enabled = false;
     app.play_sandbox_audio();
     main_assert_eq!(app.test_audio_ref().music_resolver.playlist => None, "game entry restores the default playlist");
 }
@@ -3473,9 +3473,9 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     app.test_render(&mut frame);
     let hovered = app.graphics.surface().pixels().to_vec();
     main_assert!(frames_differ_in_rect(&baseline, &hovered, 320, close));
-    let sounds_before_press = app.ui_sound_log.len();
+    let sounds_before_press = app.sound.ui_log.len();
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(&app.ui_sound_log[sounds_before_press..] => &["ArrowHit".to_string()]);
+    main_assert_eq!(&app.sound.ui_log[sounds_before_press..] => &["ArrowHit".to_string()]);
     app.test_render(&mut frame);
     let down = app.graphics.surface().pixels().to_vec();
     main_assert!(frames_differ_in_rect(&hovered, &down, 320, close));
@@ -3483,9 +3483,9 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     main_assert!(app.scoreboard_dialog.is_some());
 
     let outside = PhysicalPosition::new(0.0, 199.0);
-    let sounds_before_leave = app.ui_sound_log.len();
+    let sounds_before_leave = app.sound.ui_log.len();
     app.test_cursor(outside);
-    main_assert_eq!(&app.ui_sound_log[sounds_before_leave..] => &["ArrowHit".to_string()]);
+    main_assert_eq!(&app.sound.ui_log[sounds_before_leave..] => &["ArrowHit".to_string()]);
     main_assert!(app.scoreboard_close_pointer_capture);
     main_assert!(app.ingame_pointer.is_none());
     app.test_left_button(ElementState::Released);
@@ -3495,12 +3495,12 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     app.test_cursor(point);
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(outside);
-    let sounds_before_reentry = app.ui_sound_log.len();
+    let sounds_before_reentry = app.sound.ui_log.len();
     app.test_cursor(point);
-    main_assert_eq!(&app.ui_sound_log[sounds_before_reentry..] => &["ArrowHit".to_string()]);
-    let sounds_before_click = app.ui_sound_log.len();
+    main_assert_eq!(&app.sound.ui_log[sounds_before_reentry..] => &["ArrowHit".to_string()]);
+    let sounds_before_click = app.sound.ui_log.len();
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(&app.ui_sound_log[sounds_before_click..] => &["Click".to_string()]);
+    main_assert_eq!(&app.sound.ui_log[sounds_before_click..] => &["Click".to_string()]);
     main_assert!(app.scoreboard_dialog.is_none());
     main_assert!(!app.scoreboard_close_pointer_capture);
 }
@@ -4914,7 +4914,7 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
         main_assert!(app.game_over_dialog.is_none());
         main_assert_eq!(app.mode => AppMode::Running);
-        main_assert!(!app.ui_sound_log.iter().any(|sound| matches!(sound.as_str(), "ArrowHit" | "Click")));
+        main_assert!(!app.sound.ui_log.iter().any(|sound| matches!(sound.as_str(), "ArrowHit" | "Click")));
     }
 
     let mut say = new_game_over_keyboard_app();
@@ -4983,7 +4983,7 @@ fn game_over_mnemonics_use_active_language_resources() {
     main_assert_eq!(app.mode => AppMode::Running);
     main_assert!(app.game_over_dialog.is_none());
     main_assert!(app.running_chat_text().is_none());
-    main_assert!(!app.ui_sound_log.iter().any(|sound| matches!(sound.as_str(), "ArrowHit" | "Click")));
+    main_assert!(!app.sound.ui_log.iter().any(|sound| matches!(sound.as_str(), "ArrowHit" | "Click")));
 }
 
 #[test]
@@ -5008,8 +5008,8 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
     main_assert!(keyboard.game_over_dialog.is_some());
     keyboard.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert!(keyboard.game_over_dialog.is_none());
-    main_assert!(keyboard.ui_sound_log.iter().any(|sound| sound == "ArrowHit"));
-    main_assert!(keyboard.ui_sound_log.iter().any(|sound| sound == "Click"));
+    main_assert!(keyboard.sound.ui_log.iter().any(|sound| sound == "ArrowHit"));
+    main_assert!(keyboard.sound.ui_log.iter().any(|sound| sound == "Click"));
 
     let mut gamepad = new_game_over_keyboard_app();
     for _ in 0..4 {
@@ -5107,7 +5107,7 @@ fn hover_game_over_action_for_test(app: &mut GameApp, action: GameOverAction) {
 }
 
 fn assert_game_over_fixture_has_no_sound_activity(app: &GameApp) {
-    if let Some(audio) = app.audio.as_ref() {
+    if let Some(audio) = app.sound.context.as_ref() {
         let audio = audio.borrow();
         main_assert!(!audio.options.sound_enabled);
         main_assert!(!audio.options.menu_sound_enabled);
@@ -5396,7 +5396,7 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
         GuiButtonClass::Low,
         ElementState::Pressed,
     )]);
-    main_assert_eq!(cancelled.ui_sound_log.iter().filter(|sound| sound.as_str() == "ArrowHit").count() => 1);
+    main_assert_eq!(cancelled.sound.ui_log.iter().filter(|sound| sound.as_str() == "ArrowHit").count() => 1);
     cancelled.test_gamepad_events([GamepadEvent::Clear {
         slot: GamepadSlot::new(0),
     }]);
@@ -5406,7 +5406,7 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
         ElementState::Released,
     )]);
     main_assert!(cancelled.game_over_dialog.is_some());
-    main_assert!(!cancelled.ui_sound_log.iter().any(|sound| sound == "Click"));
+    main_assert!(!cancelled.sound.ui_log.iter().any(|sound| sound == "Click"));
 }
 
 #[test]
@@ -5802,13 +5802,13 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
 
     let mut sound = new_running_sandbox_app();
     let before_sound = sound
-        .audio
+        .sound.context
         .as_ref()
         .map(|audio| audio.borrow().options.sound_enabled);
     sound.test_modifiers(ModifiersState::CONTROL);
     sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     main_assert!(sound.runtime_flash_message.is_none());
-    if let (Some(before), Some(audio)) = (before_sound, sound.audio.as_ref()) {
+    if let (Some(before), Some(audio)) = (before_sound, sound.sound.context.as_ref()) {
         let audio = audio.borrow();
         main_assert_eq!(audio.options.sound_enabled => !before);
     }

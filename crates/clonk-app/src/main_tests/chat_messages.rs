@@ -1455,7 +1455,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
     let sound_enabled = app.test_audio_ref().options.sound_enabled;
     app.keyboard_modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    main_assert_eq!(app.audio.as_ref().expect("sandbox audio context").borrow().options.sound_enabled => sound_enabled);
+    main_assert_eq!(app.sound.context.as_ref().expect("sandbox audio context").borrow().options.sound_enabled => sound_enabled);
     app.keyboard_modifiers = ModifiersState::empty();
 }
 

@@ -240,8 +240,8 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
 
     let mut app = new_real_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
-    app.audio = Some(connect_audio_context(&mut app.engine, audio));
-    app.resume_frontend_music_after_fade = true;
+    app.sound.context = Some(connect_audio_context(&mut app.engine, audio));
+    app.sound.resume_frontend_after_fade = true;
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.startup_restart_diagnostics
         .add_fatal_error("fixture startup failure");
@@ -254,8 +254,8 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         final_catalog.sort();
         main_assert_eq!(final_catalog => ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]);
         main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
-        main_assert!(!app.resume_frontend_music_after_fade);
-        main_assert!(app.frontend_music_attempted_for_entry);
+        main_assert!(!app.sound.resume_frontend_after_fade);
+        main_assert!(app.sound.frontend_attempted_for_entry);
         let expected_frontend = audio
             .music_resolver
             .first_default()
@@ -274,7 +274,7 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     fs::remove_file(extras.join("Final Match.ogg")).test_value();
     fs::write(global.join("Console Only.ogg"), b"console").test_value();
     app.console_mode = true;
-    app.resume_frontend_music_after_fade = true;
+    app.sound.resume_frontend_after_fade = true;
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.startup_restart_diagnostics
         .add_fatal_error("fixture console failure");
@@ -299,7 +299,7 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
             "console failure must not run C4Startup::DoStartup again"
         );
     }
-    main_assert!(app.resume_frontend_music_after_fade);
+    main_assert!(app.sound.resume_frontend_after_fade);
 
     app.console_mode = false;
     app.classic_command_line.scenario = Some(dir.path().join("Explicit.c4s"));
@@ -1290,7 +1290,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     let mut dialog = clonk_frontend::startup_plrsel::PlrSelController::new(2);
     dialog.resize(640, 480);
     app.startup_player_dialog = Some(dialog);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
 
     let actions = app
         .startup_player_dialog
@@ -1298,7 +1298,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
         .test_value()
         .handle_key_down(KeyCode::Down);
     app.process_player_dialog_actions(actions).test_value();
-    main_assert_eq!(app.ui_sound_log => ["Command"]);
+    main_assert_eq!(app.sound.ui_log => ["Command"]);
 
     let back = clonk_frontend::startup_plrsel::plrsel_layout(640, 480).buttons[0];
     let back = GuiPoint::new((back.x + back.w / 2) as f32, (back.y + back.h / 2) as f32);
@@ -1308,7 +1308,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
         .test_value()
         .handle_pointer_down(back);
     app.process_player_dialog_actions(actions).test_value();
-    main_assert_eq!(app.ui_sound_log => ["Command", "ArrowHit"]);
+    main_assert_eq!(app.sound.ui_log => ["Command", "ArrowHit"]);
 
     let actions = app
         .startup_player_dialog
@@ -1316,7 +1316,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
         .test_value()
         .handle_pointer_up(back);
     app.process_player_dialog_actions(actions).test_value();
-    main_assert_eq!(app.ui_sound_log => ["Command", "ArrowHit", "Click"]);
+    main_assert_eq!(app.sound.ui_log => ["Command", "ArrowHit", "Click"]);
 }
 
 #[test]

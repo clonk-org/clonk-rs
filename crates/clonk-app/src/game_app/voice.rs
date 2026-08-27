@@ -2,7 +2,8 @@ use super::*;
 
 impl GameApp {
     pub(crate) fn voice_chat_enabled(&self) -> bool {
-        self.audio
+        self.sound
+            .context
             .as_ref()
             .is_some_and(|audio| audio.borrow().options.voice_enabled)
     }
@@ -51,7 +52,8 @@ impl GameApp {
     }
 
     fn voice_activation(&self) -> Option<crate::settings::VoiceActivation> {
-        self.audio
+        self.sound
+            .context
             .as_ref()
             .and_then(|audio| audio.borrow().options.voice_activation())
     }
@@ -63,14 +65,16 @@ impl GameApp {
     /// switch on mid-call. What it costs a capture that never uses it is one
     /// downmix per output frame.
     fn voice_echo_reference(&self) -> Option<clonk_audio::VoiceEchoReference> {
-        self.audio
+        self.sound
+            .context
             .as_ref()
             .map(|audio| audio.borrow().system.voice_echo_reference())
     }
 
     pub(crate) fn handle_voice_key(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
         let configured_key = self
-            .audio
+            .sound
+            .context
             .as_ref()
             .map_or(VirtualKeyCode::Backquote, |audio| {
                 audio.borrow().options.voice_push_to_talk
@@ -119,7 +123,8 @@ impl GameApp {
         }
         let echo_reference = self.voice_echo_reference();
         let input_device = self
-            .audio
+            .sound
+            .context
             .as_ref()
             .and_then(|audio| audio.borrow().options.voice_input_device.clone());
         if let Err(error) =
@@ -139,7 +144,8 @@ impl GameApp {
     fn update_voice_activated_capture(&mut self, voice_activated: bool, now: Instant) {
         let echo_reference = self.voice_echo_reference();
         let input_device = self
-            .audio
+            .sound
+            .context
             .as_ref()
             .and_then(|audio| audio.borrow().options.voice_input_device.clone());
         if !voice_activated {
@@ -171,7 +177,7 @@ impl GameApp {
     }
 
     pub(crate) fn remove_voice_playback(&self, speakers: impl IntoIterator<Item = (i32, i32)>) {
-        let Some(audio) = self.audio.as_ref() else {
+        let Some(audio) = self.sound.context.as_ref() else {
             return;
         };
         let audio = audio.borrow();
@@ -210,7 +216,7 @@ impl GameApp {
 
         // Whatever the player has set right now, handed to a capture that may
         // already be open: the stages are switched, not reopened.
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             let audio = audio.borrow();
             self.voice_chat
                 .set_processing(audio.options.voice_processing());
@@ -224,7 +230,8 @@ impl GameApp {
         // that same contract, so applying another normalization here would
         // make the upper half of the slider quieter instead of louder.
         let voice_volume = self
-            .audio
+            .sound
+            .context
             .as_ref()
             .map_or(0.0, |audio| audio.borrow().options.voice_volume);
 
@@ -246,7 +253,7 @@ impl GameApp {
                 continue;
             };
             if accepted.reset_stream {
-                if let Some(audio) = self.audio.as_ref() {
+                if let Some(audio) = self.sound.context.as_ref() {
                     let audio = audio.borrow();
                     audio.system.remove_voice_stream(accepted.stream_id);
                 }
@@ -274,7 +281,7 @@ impl GameApp {
                 self.remove_voice_playback([(client_id, player_id)]);
                 continue;
             };
-            if let Some(audio) = self.audio.as_ref() {
+            if let Some(audio) = self.sound.context.as_ref() {
                 let audio = audio.borrow();
                 let stream_id = crate::voice_chat::voice_stream_id(client_id, player_id);
                 let queued_frames = audio.system.voice_stream_stats(stream_id).queued_frames;

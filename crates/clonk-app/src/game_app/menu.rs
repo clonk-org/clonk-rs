@@ -4840,7 +4840,7 @@ impl GameApp {
         self.pending_host_rejoin = None;
         // C4Game::Clear starts the fade before tearing down game state.
         self.fade_out_game_music();
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             audio.stop_lobby_elevator();
         }
@@ -4920,7 +4920,7 @@ impl GameApp {
         // previous startup session finally replaces Game.Rank.
         self.default_rank_names = self.loaded_default_rank_names.clone();
         self.engine = Engine::new();
-        reconnect_audio_context(&mut self.engine, self.audio.as_ref());
+        reconnect_audio_context(&mut self.engine, self.sound.context.as_ref());
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
             .set_fire_particles(self.display_flags.fire_particles);
@@ -5010,9 +5010,9 @@ impl GameApp {
         self.active_definition_load = None;
         self.active_description_definition_modules.clear();
         self.loading_state = None;
-        self.runtime_music_enabled = false;
+        self.sound.runtime_music_enabled = false;
         self.reconstruct_music_system_at_preinit();
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             // Game.Clear has already requested its 2s fade above. On the next
             // C4AS_PreInit, MusicSystem.emplace() replaces the still-engaged
@@ -5023,7 +5023,7 @@ impl GameApp {
             audio.reset_sound_system_generation();
             audio.configure_scenario(None);
         }
-        self.resume_frontend_music_after_fade = false;
+        self.sound.resume_frontend_after_fade = false;
 
         self.fallback_ground = DEFAULT_GROUND_HEIGHT;
         self.scenario_label = self.menu_state.label_path();

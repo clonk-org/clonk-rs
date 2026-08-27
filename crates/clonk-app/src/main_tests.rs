@@ -108,12 +108,12 @@ impl<T, E: std::fmt::Debug> TestReference<T> for Result<T, E> {
 impl GameApp {
     #[track_caller]
     fn test_audio_ref(&self) -> std::cell::Ref<'_, AudioContext> {
-        self.audio.as_ref().test_value().borrow()
+        self.sound.context.as_ref().test_value().borrow()
     }
 
     #[track_caller]
     fn test_audio_mut(&self) -> std::cell::RefMut<'_, AudioContext> {
-        self.audio.as_ref().test_value().borrow_mut()
+        self.sound.context.as_ref().test_value().borrow_mut()
     }
 }
 
@@ -4029,7 +4029,7 @@ fn ready_tick_local_join_opens_one_viewport_with_feedback() {
     app.set_runtime_flash_message("Join clears me", RuntimeHelpCharset::Windows1252)
         .test_value();
     assert!(app.runtime_flash_message.is_some());
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     event_tx
         .send(NetworkEvent::ReadyTick {
             tick,
@@ -4067,7 +4067,8 @@ fn ready_tick_local_join_opens_one_viewport_with_feedback() {
         "owned C4Viewport::Init clears the process-global flash"
     );
     assert_eq!(
-        app.ui_sound_log
+        app.sound
+            .ui_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
             .count(),
@@ -4091,7 +4092,7 @@ fn synchronized_remote_join_has_no_local_viewport_feedback() {
     let tick = u32::try_from(app.engine.frame()).test_value();
     let info_id = 73;
     let at_client = 3;
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.control_clients.replace_snapshot([
         clonk_engine::ClientCoreControlData {
             client_id: 0,
@@ -4159,7 +4160,8 @@ fn synchronized_remote_join_has_no_local_viewport_feedback() {
         b"Remote Ren\xe9"
     );
     assert!(
-        app.ui_sound_log
+        app.sound
+            .ui_log
             .iter()
             .all(|sound| sound != "CloseViewport"),
         "a remote player never creates a viewport on this process"
@@ -4513,7 +4515,7 @@ fn new_game_over_keyboard_app() -> GameApp {
     let mut app = new_classic_running_sandbox_app();
     app.handle_game_over().test_value();
     assert!(app.game_over_dialog.is_some());
-    if let Some(audio) = app.audio.as_ref() {
+    if let Some(audio) = app.sound.context.as_ref() {
         // Isolate game-over input from InitGameFinal's intentional
         // CloseViewport feedback instance.
         audio.borrow_mut().active_channels.clear();

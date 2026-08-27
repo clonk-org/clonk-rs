@@ -2750,15 +2750,15 @@ impl GameApp {
             active_definition_load: None,
             active_description_definition_modules: Vec::new(),
             active_game_graphics: None,
-            audio,
+            sound: SoundState {
+                // Only the device is supplied here; every music latch starts
+                // clear and is armed by the first playback decision.
+                context: audio,
+                ..SoundState::default()
+            },
             voice_chat: crate::voice_chat::VoiceChatState::default(),
             #[cfg(test)]
-            ui_sound_log: Vec::new(),
-            #[cfg(test)]
             league_surrender_pre_abort_results: None,
-            runtime_music_enabled: false,
-            resume_frontend_music_after_fade: false,
-            frontend_music_attempted_for_entry: false,
             assets: assets.clone(),
             active_global_gui_failures: HashMap::new(),
             native_startup_fonts: None,
@@ -7529,7 +7529,7 @@ impl GameApp {
         }
         let viewports = self.graphics.active_viewport_projections();
         let game_running = matches!(self.mode, AppMode::Running);
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             audio
                 .borrow_mut()
                 .set_synchronous_sound_state(&viewports, game_running);
@@ -7581,7 +7581,7 @@ impl GameApp {
     fn finish_rendered_object_audibility_pass(&mut self) {
         let viewports = self.graphics.active_viewport_projections();
         let calls = self.graphics.rendered_object_audibility_calls();
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             audio.cache_rendered_object_audibility(calls, &self.snapshot, &viewports);
             audio.refresh_attached_channel_mix_after_render(&self.snapshot, &viewports);
@@ -8463,13 +8463,13 @@ impl GameApp {
         self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             // Loading a save starts a fresh native round. Rebuild the
             // SoundSystem generation before installing that round's effects.
             audio.borrow_mut().reset_sound_system_generation();
         }
         self.engine = Engine::new();
-        reconnect_audio_context(&mut self.engine, self.audio.as_ref());
+        reconnect_audio_context(&mut self.engine, self.sound.context.as_ref());
         self.film_view_player = None;
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
@@ -8526,7 +8526,7 @@ impl GameApp {
                 self.app_paths.as_ref(),
                 self.console_mode,
             );
-            let mut audio = borrow_audio_context_mut(self.audio.as_ref());
+            let mut audio = borrow_audio_context_mut(self.sound.context.as_ref());
             configure_sandbox_engine(&mut self.engine, definition_load, audio.as_deref_mut())
                 .context("failed to prepare sandbox engine for saved game")?;
             drop(audio);
@@ -8575,11 +8575,12 @@ impl GameApp {
                 self.console_mode,
             );
             let sound_samples = {
-                let mut audio = borrow_audio_context_mut(self.audio.as_ref());
+                let mut audio = borrow_audio_context_mut(self.sound.context.as_ref());
                 configure_scenario_sound_samples(audio.as_deref_mut(), &scenario_data, path)
             };
             let music_tracks = self
-                .audio
+                .sound
+                .context
                 .as_ref()
                 .map(|audio| audio.borrow().available_music_tracks())
                 .unwrap_or_default();
@@ -8908,9 +8909,9 @@ impl GameApp {
         }
         // PlayScenarioMusic one-way enables Game.IsMusicEnabled when RXMusic
         // is on; a configured-off client does not erase a restored true.
-        self.runtime_music_enabled |= restored_music_enabled;
+        self.sound.runtime_music_enabled |= restored_music_enabled;
         self.active_scenario = Some(frontend.clone());
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             // CompileRuntimeData temporarily applied Game.PlayList, but
             // PlayScenarioMusic always installs its physical DEFAULT filter
             // without changing the saved Game.PlayList string.
@@ -8925,7 +8926,7 @@ impl GameApp {
         // restored Game.iMusicLevel. Scenario configuration installs its
         // default first, so the saved level must win afterward.
         let restored_music_level = self.engine.music_level();
-        if let Some(audio) = self.audio.as_ref() {
+        if let Some(audio) = self.sound.context.as_ref() {
             audio
                 .borrow_mut()
                 .set_scenario_music_level(Some(restored_music_level));
@@ -9034,8 +9035,9 @@ impl GameApp {
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;
-        self.runtime_music_enabled = self
-            .audio
+        self.sound.runtime_music_enabled = self
+            .sound
+            .context
             .as_ref()
             .is_some_and(|audio| audio.borrow().options.music_enabled);
         self.sync_checks.clear();

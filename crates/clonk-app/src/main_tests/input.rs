@@ -3538,11 +3538,11 @@ fn portrait_selector_window_leave_forwards_captured_button_sounds() {
     app.pointer_left().test_value();
     move_cursor(&mut app, point, "re-enter selector OK while held");
     app.pointer_left().test_value();
-    main_assert_eq!(app.ui_sound_log => vec!["ArrowHit", "ArrowHit", "ArrowHit", "ArrowHit"]);
+    main_assert_eq!(app.sound.ui_log => vec!["ArrowHit", "ArrowHit", "ArrowHit", "ArrowHit"]);
 
     app.test_left_button(ElementState::Released);
     move_cursor(&mut app, point, "re-enter selector OK after outside release");
-    main_assert_eq!(app.ui_sound_log => vec!["ArrowHit", "ArrowHit", "ArrowHit", "ArrowHit"]);
+    main_assert_eq!(app.sound.ui_log => vec!["ArrowHit", "ArrowHit", "ArrowHit", "ArrowHit"]);
 }
 
 #[test]
@@ -3574,7 +3574,7 @@ fn portrait_selector_focus_loss_prevents_late_button_release() {
             .is_some(),
         "the release after focus loss must not accept and close the selector"
     );
-    main_assert_eq!(app.ui_sound_log => vec!["ArrowHit", "ArrowHit"]);
+    main_assert_eq!(app.sound.ui_log => vec!["ArrowHit", "ArrowHit"]);
 }
 
 #[test]
@@ -3872,7 +3872,7 @@ fn portrait_selector_semantics_cover_locales_sizes_and_high_dpi() {
                     )),
             );
 
-            app.ui_sound_log.clear();
+            app.sound.ui_log.clear();
             // Shift+Tab moves Grid focus back to Location. Keyboard opening
             // avoids an opening LeftUp selecting a row where this deliberately
             // oversized, edge-clamped popup overlaps its own ComboBox.
@@ -3895,7 +3895,7 @@ fn portrait_selector_semantics_cover_locales_sizes_and_high_dpi() {
                 "dismiss popup outside",
             );
             let sounds = app
-                .ui_sound_log
+                .sound.ui_log
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
@@ -3911,7 +3911,7 @@ fn portrait_selector_semantics_cover_locales_sizes_and_high_dpi() {
             app.test_key(VirtualKeyCode::End, ElementState::Pressed);
             app.test_key(VirtualKeyCode::End, ElementState::Released);
             main_assert_eq!(portrait_selector(&app, "None is keyboard-selectable").selected_item().map(|item| item.choice()) => Some(&clonk_frontend::startup_portraitsel::PortraitChoice::None));
-            app.ui_sound_log.clear();
+            app.sound.ui_log.clear();
             app.test_modifiers(ModifiersState::ALT);
             app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
             app.test_key(VirtualKeyCode::KeyA, ElementState::Released);
@@ -3926,7 +3926,7 @@ fn portrait_selector_semantics_cover_locales_sizes_and_high_dpi() {
             app.test_modifiers(ModifiersState::empty());
             main_assert!(app.startup_player_properties_dialog.is_some(), "{case}: closing selector retains parent properties dialog");
             main_assert!(app.message_dialogs.is_empty(), "{case}: semantic flow opens no error modal");
-            main_assert!(app.ui_sound_log.is_empty(), "{case}: access keys synthesize no pointer sounds");
+            main_assert!(app.sound.ui_log.is_empty(), "{case}: access keys synthesize no pointer sounds");
         }
     }
 }

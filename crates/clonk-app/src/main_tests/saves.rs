@@ -1955,10 +1955,10 @@ fn runtime_advanced_voice_opt_in_retries_a_missing_audio_context() {
 
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths);
-    app.audio = None;
+    app.sound.context = None;
     app.synchronize_advanced_options_runtime();
 
-    main_assert!(app.audio.as_ref().is_some_and(|audio| audio.borrow().options.voice_enabled), "saving Advanced Voice.Enabled must not require an application restart",);
+    main_assert!(app.sound.context.as_ref().is_some_and(|audio| audio.borrow().options.voice_enabled), "saving Advanced Voice.Enabled must not require an application restart",);
 }
 
 fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
@@ -4218,7 +4218,7 @@ fn remote_film_close_does_not_resurrect_the_original_primary() {
         .test_value();
     let _ = app.create_physical_viewport(secondary, false, true, true);
     main_assert!(app.set_physical_film_view(remote));
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
 
     app.remove_runtime_player_with_viewport_feedback(remote)
         .test_value();
@@ -4231,7 +4231,7 @@ fn remote_film_close_does_not_resurrect_the_original_primary() {
         vec![secondary],
         "the erased primary must not be regenerated from local controls"
     );
-    main_assert_eq!(app.ui_sound_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1);
+    main_assert_eq!(app.sound.ui_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1);
 }
 
 #[test]
@@ -4267,14 +4267,14 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
     app.local_controls = LocalControlRegistry::default();
     app.engine.set_local_players([]);
     app.snapshot = app.engine.snapshot();
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
 
     app.initialize_physical_viewports(false);
     main_assert_eq!(app.physical_viewports.len() => 1);
     main_assert_eq!(app.physical_viewports[0].displayed_player => first);
     main_assert!(!app.physical_viewports[0].is_no_owner_viewport);
     main_assert_eq!(
-        app.ui_sound_log
+        app.sound.ui_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
             .count() =>
@@ -4284,10 +4284,10 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
 
     app.engine.remove_player(first).test_value();
     app.snapshot = app.engine.snapshot();
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.initialize_physical_viewports(false);
     main_assert!(app.physical_viewports[0].is_no_owner_viewport);
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
 
     app.film_view_player = Some(first);
     app.sync_film_view_presentation();
@@ -4307,7 +4307,7 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
     main_assert_eq!(app.physical_viewports[0].displayed_player => first);
     main_assert!(app.physical_viewports[0].is_no_owner_viewport, "late film retarget preserves the ownerless classification");
     main_assert!(app.runtime_flash_message.is_none());
-    main_assert!(app.ui_sound_log.is_empty(), "ownerless retarget is silent");
+    main_assert!(app.sound.ui_log.is_empty(), "ownerless retarget is silent");
 }
 
 #[test]
@@ -4319,13 +4319,13 @@ fn removing_a_remote_film_target_closes_its_physical_viewport_once() {
         .test_value();
     app.film_view_player = Some(film_player);
     app.snapshot = app.engine.snapshot();
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
 
     app.remove_runtime_player_with_viewport_feedback(film_player)
         .test_value();
 
     main_assert_eq!(app.film_view_player => None);
-    main_assert_eq!(app.ui_sound_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1, "the retargeted physical viewport closes once");
+    main_assert_eq!(app.sound.ui_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1, "the retargeted physical viewport closes once");
 }
 
 #[test]
@@ -4372,7 +4372,7 @@ fn film_target_removal_recreates_the_first_player_viewport() {
     app.engine.set_replay_control(true);
     app.film_view_player = Some(film_player);
     app.snapshot = app.engine.snapshot();
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
 
     let physical_owners = app.live_local_viewport_owners_with_primary_first();
     main_assert_eq!(physical_owners => [local_player, film_player]);
@@ -4387,7 +4387,7 @@ fn film_target_removal_recreates_the_first_player_viewport() {
 
     main_assert_eq!(app.film_view_player => Some(local_player));
     main_assert_eq!(
-        app.ui_sound_log
+        app.sound.ui_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
             .count() =>
@@ -4418,14 +4418,14 @@ fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
             app.engine.capture_state(),
     );
     app.test_audio_mut().options.music_enabled = true;
-    app.runtime_music_enabled = true;
+    app.sound.runtime_music_enabled = true;
     app.set_runtime_flash_message("not serialized", RuntimeHelpCharset::Windows1252)
         .test_value();
 
     app.apply_loaded_game(save).test_value();
 
     main_assert!(app.test_audio_ref().options.music_enabled, "RXMusic remains an independent configured option");
-    main_assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
+    main_assert!(app.sound.runtime_music_enabled, "RXMusic force-enables resume");
     main_assert!(app.test_audio_ref().music_is_playing());
     main_assert!(app.runtime_flash_message.is_none());
 }
@@ -4467,7 +4467,7 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
             app.active_definition_load.clone(),
             app.focus_id,
             Some("local control restore".to_string()),
-            Some(app.runtime_music_enabled),
+            Some(app.sound.runtime_music_enabled),
             engine_state,
     );
 
@@ -4522,7 +4522,7 @@ fn saved_game_skips_removed_current_player_without_deleting_objects() {
             app.active_definition_load.clone(),
             app.focus_id,
             Some("removed player skipped".to_string()),
-            Some(app.runtime_music_enabled),
+            Some(app.sound.runtime_music_enabled),
             app.engine.capture_state(),
     );
 
