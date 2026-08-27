@@ -4512,7 +4512,7 @@ fn retargeted_primary_survives_its_original_local_player() {
         app.physical_viewports[0].preserved_offset => Vector2::new(17, 19);
     );
 
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.remove_runtime_player_with_viewport_feedback(original)
         .test_value();
     assert_eq!(app.physical_viewports.len(), 2);
@@ -4520,7 +4520,7 @@ fn retargeted_primary_survives_its_original_local_player() {
         .physical_viewports
         .iter()
         .all(|viewport| viewport.displayed_player == target));
-    assert!(app.ui_sound_log.is_empty(), "CloseViewport(A) matches none");
+    assert!(app.sound.ui_log.is_empty(), "CloseViewport(A) matches none");
 
     app.snapshot = app.engine.snapshot();
     let rendered =
@@ -4533,7 +4533,7 @@ fn retargeted_primary_survives_its_original_local_player() {
 
     app.remove_runtime_player_with_viewport_feedback(target)
         .test_value();
-    runtime_assert_eq!(app.ui_sound_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1, "closing both matching physical viewports requests one sound");
+    runtime_assert_eq!(app.sound.ui_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1, "closing both matching physical viewports requests one sound");
     assert_eq!(app.physical_viewports.len(), 1);
     assert!(app.physical_viewports[0].is_no_owner_viewport);
 }
@@ -4576,10 +4576,10 @@ fn console_viewport_creation_announces_itself_and_keeps_list_order() {
             .test_value();
     }
 
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
         .test_value();
-    runtime_assert_eq!(app.ui_sound_log => ["CloseViewport"], "the console's ownerless viewport is not silent");
+    runtime_assert_eq!(app.sound.ui_log => ["CloseViewport"], "the console's ownerless viewport is not silent");
 
     let before = app
         .physical_viewports

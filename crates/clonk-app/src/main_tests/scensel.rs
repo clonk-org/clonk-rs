@@ -2791,20 +2791,20 @@ fn scensel_typeahead_cycles_only_with_list_focus() {
     let mut app = new_menu_app(800, 600);
     app.menu_state = MenuState::new(menu, scenarios);
     app.open_scenario_browser();
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
 
     for (character, expected) in [('T', 2), ('T', 3), ('t', 0), ('T', 2)] {
-        let sound_count = app.ui_sound_log.len();
+        let sound_count = app.sound.ui_log.len();
         app.test_text_input(character);
         main_assert_eq!(app.menu_state.menu.selected_index() => Some(expected));
-        main_assert_eq!(app.ui_sound_log.len() => sound_count + 1);
-        main_assert_eq!(app.ui_sound_log.last().map(String::as_str) => Some("Command"));
+        main_assert_eq!(app.sound.ui_log.len() => sound_count + 1);
+        main_assert_eq!(app.sound.ui_log.last().map(String::as_str) => Some("Command"));
     }
 
-    let sound_count = app.ui_sound_log.len();
+    let sound_count = app.sound.ui_log.len();
     app.test_text_input('x');
     main_assert_eq!(app.menu_state.menu.selected_index() => Some(2));
-    main_assert_eq!(app.ui_sound_log.len() => sound_count);
+    main_assert_eq!(app.sound.ui_log.len() => sound_count);
 
     app.menu_state.set_search_text("");
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
@@ -2812,13 +2812,13 @@ fn scensel_typeahead_cycles_only_with_list_focus() {
     main_assert_eq!(app.menu_state.search_text() => "T");
     main_assert_eq!(app.menu_state.menu.selected_index() => Some(1));
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("scenario_2"));
-    main_assert_eq!(app.ui_sound_log.len() => sound_count);
+    main_assert_eq!(app.sound.ui_log.len() => sound_count);
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::Back);
     app.test_text_input('T');
     main_assert_eq!(app.menu_state.search_text() => "T");
     main_assert_eq!(app.menu_state.menu.selected_index() => Some(1));
-    main_assert_eq!(app.ui_sound_log.len() => sound_count);
+    main_assert_eq!(app.sound.ui_log.len() => sound_count);
 }
 
 #[test]

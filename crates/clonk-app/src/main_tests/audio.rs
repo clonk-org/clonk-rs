@@ -3727,7 +3727,7 @@ fn dragon_rock_selects_fantasy_music_never_princess_scream() {
 fn about_scrollbar_sounds_and_repeat_run_through_production_paths() {
     let mut app = new_real_classic_menu_app(320, 240);
     enter_about_licenses(&mut app);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
 
     let layout = clonk_frontend::startup_about_dlg::about_layout(320, 240);
     let text = layout.licenses.text;
@@ -3740,15 +3740,15 @@ fn about_scrollbar_sounds_and_repeat_run_through_production_paths() {
     let track = PhysicalPosition::new(f64::from(bar.x + 8), f64::from(bar.y + bar.h / 2));
     app.test_cursor(track);
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(app.ui_sound_log => vec!["Command"]);
+    main_assert_eq!(app.sound.ui_log => vec!["Command"]);
     main_assert!(app.startup_about_dialog.as_ref().is_some_and(|dialog| dialog.license_scroll_offset() > 0));
     app.test_left_button(ElementState::Released);
 
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     let bottom_arrow = PhysicalPosition::new(f64::from(bar.x + 8), f64::from(bar.y + bar.h - 1));
     app.test_cursor(bottom_arrow);
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(app.ui_sound_log => vec!["ArrowHit"]);
+    main_assert_eq!(app.sound.ui_log => vec!["ArrowHit"]);
     let before_frame = app
         .startup_about_dialog
         .as_ref()
@@ -3764,7 +3764,7 @@ fn about_scrollbar_sounds_and_repeat_run_through_production_paths() {
     main_assert!(after_frame > before_frame);
 
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ui_sound_log => vec!["ArrowHit", "ArrowHit"]);
+    main_assert_eq!(app.sound.ui_log => vec!["ArrowHit", "ArrowHit"]);
     app.test_render(&mut frame);
     main_assert_eq!(app.startup_about_dialog.as_ref().unwrap().license_scroll_offset() => after_frame);
 }
@@ -4144,7 +4144,7 @@ fn ingame_options_sound_and_music_toggles_persist_to_config_file() {
         audio.options.sound_enabled = true;
         audio.options.music_enabled = true;
     }
-    app.runtime_music_enabled = true;
+    app.sound.runtime_music_enabled = true;
 
     let user_data = tempdir();
     let repository = test_repository_root();
@@ -4190,32 +4190,32 @@ fn ingame_options_sound_and_music_toggles_persist_to_config_file() {
 fn music_toggle_tracks_actual_and_script_playback_and_missing_audio_fails_typed() {
     let mut ended = new_running_sandbox_app();
     let configured = ended.test_audio_ref().options.music_enabled;
-    ended.runtime_music_enabled = true;
+    ended.sound.runtime_music_enabled = true;
     ended.test_audio_mut().stop_music();
     let resources = ended.runtime_flash_resources().test_value().clone();
     ended.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    main_assert!(ended.runtime_music_enabled);
+    main_assert!(ended.sound.runtime_music_enabled);
     main_assert_eq!(ended.test_audio_ref().options.music_enabled => configured);
     main_assert_eq!(ended.runtime_flash_message.as_ref().expect("On flash").text => resources.music_on_off(true));
 
     let mut scripted = new_running_sandbox_app();
     scripted.snapshot.audio = vec![AudioCommand::StopMusic];
-    scripted.runtime_music_enabled = true;
+    scripted.sound.runtime_music_enabled = true;
     scripted.update_audio();
-    main_assert!(!scripted.runtime_music_enabled);
+    main_assert!(!scripted.sound.runtime_music_enabled);
     scripted.snapshot.audio = vec![AudioCommand::PlayMusic {
         name: "missing-script-track.ogg".to_string(),
         looped: false,
     }];
     scripted.update_audio();
-    main_assert!(scripted.runtime_music_enabled);
+    main_assert!(scripted.sound.runtime_music_enabled);
     main_assert!(scripted.test_audio_ref().music_is_playing(), "MusicSystem::Execute analogue starts a replacement while enabled");
     scripted.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    main_assert!(!scripted.runtime_music_enabled);
+    main_assert!(!scripted.sound.runtime_music_enabled);
 
     for modifiers in [ModifiersState::empty(), ModifiersState::CONTROL] {
         let mut missing = new_running_sandbox_app();
-        missing.audio = None;
+        missing.sound.context = None;
         missing.test_modifiers(modifiers);
         let error = missing
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -4225,7 +4225,7 @@ fn music_toggle_tracks_actual_and_script_playback_and_missing_audio_fails_typed(
     }
     let mut startup_missing = new_running_sandbox_app();
     startup_missing.return_to_menu();
-    startup_missing.audio = None;
+    startup_missing.sound.context = None;
     let error = startup_missing
         .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
         .expect_err("startup missing audio must fail typed");

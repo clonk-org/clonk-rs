@@ -2200,7 +2200,7 @@ fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
 
     app.apply_loaded_game(save).test_value();
 
-    main_assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
+    main_assert!(app.sound.runtime_music_enabled, "RXMusic force-enables resume");
     main_assert_eq!(app.engine.capture_state().play_list.as_deref() => Some("Theme*"), "Game.PlayList remains available to script and the next save");
     main_assert_eq!(app.test_audio_ref().music_resolver.playlist.as_deref() => None, "PlayScenarioMusic installs the physical DEFAULT filter");
 

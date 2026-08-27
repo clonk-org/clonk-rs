@@ -1690,7 +1690,7 @@ impl GameApp {
                 definition_executable_path: &seed.definition_executable_path,
                 definition_path: &seed.definition_path,
                 origin: &seed.scenario_origin,
-                music_enabled: self.runtime_music_enabled,
+                music_enabled: self.sound.runtime_music_enabled,
                 copied_material_group_is_file,
                 title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
                 info_component: clonk_engine::LiveC4ComponentHost::Unmodified,

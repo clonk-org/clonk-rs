@@ -3163,7 +3163,7 @@ fn client_start_and_abort_report_the_cpp_host_only_error() {
     }
     app.process_lobby_action(LobbyAction::SubmitMessage(String::new()))
         .test_value();
-    main_assert_eq!(app.ui_sound_log => ["Error"]);
+    main_assert_eq!(app.sound.ui_log => ["Error"]);
     let lobby = app.network_lobby.as_ref().test_value();
     main_assert_eq!(lobby.chat_history_index => -1);
     main_assert!(lobby.chat_edit.text.is_empty());
@@ -3746,12 +3746,12 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Released);
 
     tab_to(&mut app, LobbyControl::Exit);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
     main_assert_eq!(app.startup_view => StartupView::NetworkLobby, "KeyButtonDown only downs the button");
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "Click".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert_eq!(app.startup_view => StartupView::MainMenu);
     main_assert!(app.network_lobby.is_none());
     main_assert!(app.network.is_none());
@@ -3762,19 +3762,19 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     for stop in [LobbyControl::Exit, LobbyControl::Roster] {
         let mut app = n1_joined_client_app();
         tab_to(&mut app, stop);
-        app.ui_sound_log.clear();
+        app.sound.ui_log.clear();
         app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
         main_assert_eq!(app.startup_view => StartupView::MainMenu, "{stop:?}");
         main_assert!(app.network_lobby.is_none());
-        main_assert!(app.ui_sound_log.is_empty(), "Escape stays silent");
+        main_assert!(app.sound.ui_log.is_empty(), "Escape stays silent");
     }
 
     // Space activates other chrome stops through the shared sheet switch.
     let mut app = n1_joined_client_app();
     tab_to(&mut app, LobbyControl::ResourcesTab);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     n1_press_and_release_key(&mut app, VirtualKeyCode::Space);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "Click".to_string(), "Command".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string(), "Command".to_string()]);
     main_assert_eq!(n1_expect(&app.network_lobby, "joined lobby").active_sheet => LobbySheet::Resources);
 
     // Ready binds Space on key-down; Return reroutes to chat
@@ -3784,18 +3784,18 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     app.network_lobby.test_mut().resources_loaded = true;
 
     tab_to(&mut app, LobbyControl::Ready);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert_eq!(controller_focus(&mut app) => LobbyControl::ChatInput);
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
     main_assert!(!n1_expect(&app.network_lobby, "joined lobby").local_ready());
     main_assert!(commands.take_submitted_ready_checks().is_empty());
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
 
     tab_to(&mut app, LobbyControl::Ready);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
     main_assert!(n1_expect(&app.network_lobby, "joined lobby").local_ready());
     // OnReadyCheck publishes without a status overlay (src/C4GameLobby.cpp:329-344).
     main_assert!(
@@ -3806,12 +3806,12 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     main_assert_eq!(checks.len() => 1, "the accepted toggle submits exactly once");
     main_assert!(checks[0].data.is_ready());
     app.test_key(VirtualKeyCode::Space, ElementState::Released);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
     main_assert!(commands.take_submitted_ready_checks().is_empty());
 
     // The cooldown sounds but rejects the toggle (src/C4GameLobby.cpp:334-338).
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "ArrowHit".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "ArrowHit".to_string()]);
     main_assert!(
         n1_expect(&app.network_lobby, "joined lobby").local_ready(),
         "the cooldown keeps the accepted value"
@@ -3822,10 +3822,10 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     // Roster focus consumes confirm keys.
     let mut app = n1_joined_client_app();
     tab_to(&mut app, LobbyControl::Roster);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     n1_press_and_release_key(&mut app, VirtualKeyCode::Enter);
     main_assert_eq!(controller_focus(&mut app) => LobbyControl::Roster);
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
     main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
 
     // Focus traversal skips Ready while resources load.
@@ -3858,10 +3858,10 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
             rect.origin.y + rect.size.height / 2.0,
         ));
     }
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
     main_assert!(n1_expect(&app.network_lobby, "joined lobby").local_ready());
     main_assert_eq!(commands.take_submitted_ready_checks().len() => 1, "pointer Ready emits through the routed controller exactly once");
 }
@@ -4191,7 +4191,7 @@ fn scenario_music_safe_random_does_not_advance_the_synchronized_lcg() {
     let mut app = new_state_only_running_sandbox_app();
     let synchronized_before = app.engine.snapshot().rng;
 
-    app.runtime_music_enabled = true;
+    app.sound.runtime_music_enabled = true;
     app.play_scenario_audio(&scenario);
 
     main_assert_eq!(app.engine.snapshot().rng => synchronized_before, "the live scenario path must draw through libc SafeRandom, not Engine::LcgRng");

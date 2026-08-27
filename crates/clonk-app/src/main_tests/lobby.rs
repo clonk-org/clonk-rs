@@ -2245,7 +2245,7 @@ fn classic_host_chat_start_abort_and_readycheck_use_live_lobby_actions() {
         lobby.controller.set_chat_draft("stale");
     }
     process_lobby_chat_request(&mut app, LobbyChatRequest::Submit(String::new()));
-    main_assert_eq!(app.ui_sound_log => ["Error"]);
+    main_assert_eq!(app.sound.ui_log => ["Error"]);
     main_assert!(commands.take_submitted_messages().is_empty());
     let lobby = app_classic_lobby(&app);
     main_assert_eq!(lobby.chat_history_index => -1);
@@ -3586,34 +3586,34 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
         )
     };
     app_lobby_mut(&mut app.network_lobby).handle_panel_pointer_move(exit);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "Click".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert_eq!(app.startup_view => StartupView::MainMenu);
     main_assert!(app.network_lobby.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
 
     let mut escape = joined_app();
-    escape.ui_sound_log.clear();
+    escape.sound.ui_log.clear();
     escape.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert_eq!(escape.startup_view => StartupView::MainMenu);
     main_assert!(escape.network_lobby.is_none());
     main_assert!(escape.network.is_none());
     main_assert!(escape.network_mode.is_none());
-    main_assert!(escape.ui_sound_log.is_empty(), "Escape is silent");
+    main_assert!(escape.sound.ui_log.is_empty(), "Escape is silent");
 
     let mut hotkey = joined_app();
     hotkey.keyboard_modifiers = ModifiersState::ALT;
-    hotkey.ui_sound_log.clear();
+    hotkey.sound.ui_log.clear();
     hotkey.test_key(VirtualKeyCode::KeyX, ElementState::Pressed);
     main_assert_eq!(hotkey.startup_view => StartupView::MainMenu);
     main_assert!(hotkey.network_lobby.is_none());
     main_assert!(hotkey.network.is_none());
     main_assert!(hotkey.network_mode.is_none());
-    main_assert!(hotkey.ui_sound_log.is_empty(), "the Exit hotkey is silent");
+    main_assert!(hotkey.sound.ui_log.is_empty(), "the Exit hotkey is silent");
 }
 
 #[test]
@@ -4428,11 +4428,11 @@ fn joined_lobby_game_option_strip_routes_input() {
         Some(GameOptionButton::Record),
         "the retained strip tracks controller-routed hover for its tooltip"
     );
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "Click".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert!(app.scenario_game_options.values().record);
     main_assert!(app.startup_view_flags.record);
     main_assert_eq!(app.scenario_game_options.focused_button() => None);
@@ -4444,11 +4444,11 @@ fn joined_lobby_game_option_strip_routes_input() {
     let fair_crew_before = app.scenario_game_options.values().fair_crew;
     for locked in [GameOptionButton::League, GameOptionButton::FairCrew] {
         app.test_cursor(joined_option_center(&app, locked));
-        app.ui_sound_log.clear();
+        app.sound.ui_log.clear();
         app.last_application_left_press = None;
         app.test_left_button(ElementState::Pressed);
         app.test_left_button(ElementState::Released);
-        main_assert!(app.ui_sound_log.is_empty(), "{locked:?} is silent");
+        main_assert!(app.sound.ui_log.is_empty(), "{locked:?} is silent");
     }
     main_assert!(!app.scenario_game_options.values().lobby_is_league);
     main_assert_eq!(app.scenario_game_options.values().fair_crew => fair_crew_before);
@@ -4474,12 +4474,12 @@ fn joined_lobby_game_option_strip_routes_input() {
     // A press that drags off the enabled button pops the visual with the
     // native ArrowHit and releases without an activation.
     app.test_cursor(joined_option_center(&app, GameOptionButton::Record));
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.last_application_left_press = None;
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(joined_option_center(&app, GameOptionButton::FairCrew));
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "ArrowHit".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "ArrowHit".to_string()]);
     main_assert!(
         app.scenario_game_options.values().record,
         "an aborted click keeps the Record preference"
@@ -4495,11 +4495,11 @@ fn joined_lobby_game_option_strip_routes_input() {
     };
     focus_joined_option(&mut app, GameOptionButton::League);
     main_assert_eq!(app.scenario_game_options.focused_button() => Some(GameOptionButton::League));
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     main_assert_eq!(joined_option_controller_focus(&mut app) => LobbyControl::ChatInput, "KeyFocusDefault returns an unhandled option key to the chat edit");
     main_assert_eq!(app.scenario_game_options.focused_button() => None);
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
     app.test_key(VirtualKeyCode::Space, ElementState::Released);
     focus_joined_option(&mut app, GameOptionButton::League);
     tab(&mut app);
@@ -4507,9 +4507,9 @@ fn joined_lobby_game_option_strip_routes_input() {
     tab(&mut app);
     main_assert_eq!(joined_option_controller_focus(&mut app) => LobbyControl::GameOption(GameOptionButton::Record));
     main_assert_eq!(app.scenario_game_options.focused_button() => Some(GameOptionButton::Record));
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     tap_test_key(&mut app, VirtualKeyCode::Space);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "Click".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert!(!app.scenario_game_options.values().record);
 
     // A typed character on a focused option button refocuses the chat
@@ -4521,28 +4521,28 @@ fn joined_lobby_game_option_strip_routes_input() {
 
     // Alt hotkeys reach enabled controls silently and skip locked ones.
     app.keyboard_modifiers = ModifiersState::ALT;
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     tap_test_key(&mut app, VirtualKeyCode::KeyR);
     main_assert!(app.scenario_game_options.values().record);
-    main_assert!(app.ui_sound_log.is_empty(), "dialog hotkeys are silent");
+    main_assert!(app.sound.ui_log.is_empty(), "dialog hotkeys are silent");
     tap_test_key(&mut app, VirtualKeyCode::KeyL);
     main_assert!(!app.scenario_game_options.values().lobby_is_league);
     app.keyboard_modifiers = ModifiersState::empty();
 
     // Touch mirrors the pointer path.
     let record_point = joined_option_point(&app, GameOptionButton::Record);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.last_application_left_press = None;
     app.test_touch(TouchPhase::Started, record_point);
     app.test_touch(TouchPhase::Ended, record_point);
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "Click".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert!(!app.scenario_game_options.values().record);
     let league_point = joined_option_point(&app, GameOptionButton::League);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.last_application_left_press = None;
     app.test_touch(TouchPhase::Started, league_point);
     app.test_touch(TouchPhase::Ended, league_point);
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
 
     // Gamepad: Left/Right traverse the strip stops, Select activates the
     // focused button, and Select on a locked stop falls back to the chat
@@ -4562,7 +4562,7 @@ fn joined_lobby_game_option_strip_routes_input() {
     )
     .test_value();
     main_assert_eq!(joined_option_controller_focus(&mut app) => LobbyControl::GameOption(GameOptionButton::Record));
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.handle_gamepad_action(
         GamepadSlot::new(0),
         GamepadActionType::Select,
@@ -4575,7 +4575,7 @@ fn joined_lobby_game_option_strip_routes_input() {
         ElementState::Released,
     )
     .test_value();
-    main_assert_eq!(app.ui_sound_log => ["ArrowHit".to_string(), "Click".to_string()]);
+    main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert!(app.scenario_game_options.values().record);
     focus_joined_option(&mut app, GameOptionButton::League);
     app.handle_gamepad_action(
@@ -4606,7 +4606,7 @@ fn joined_lobby_game_option_strip_routes_input() {
     );
     let record_before = app.scenario_game_options.values().record;
     app.test_cursor(joined_option_center(&app, GameOptionButton::Record));
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.last_application_left_press = None;
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
@@ -4614,7 +4614,7 @@ fn joined_lobby_game_option_strip_routes_input() {
     tap_test_key(&mut app, VirtualKeyCode::KeyR);
     app.keyboard_modifiers = ModifiersState::empty();
     main_assert_eq!(app.scenario_game_options.values().record => record_before);
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
 }
 
 #[test]
@@ -7733,14 +7733,14 @@ fn lobby_preload_launch_failure_logs_red_without_error_sound_and_stays_retryable
         main_assert!(!lobby.preload.synchronize(true, true));
         lobby.controller.set_preload_button_state(true, true);
     }
-    let sounds_before = app.ui_sound_log.len();
+    let sounds_before = app.sound.ui_log.len();
 
     app.request_lobby_preload();
 
     let lobby = app_classic_lobby(&app);
     main_assert!(lobby.preload.eligible);
     main_assert!(lobby.preload.manual_button_present);
-    main_assert_eq!(app.ui_sound_log.len() => sounds_before);
+    main_assert_eq!(app.sound.ui_log.len() => sounds_before);
     main_assert_eq!(lobby.controller.logs().last() => Some(&LobbyLogLine {text: "Preloading error.".to_string(), color: [255, 32, 32, 255],}));
 }
 

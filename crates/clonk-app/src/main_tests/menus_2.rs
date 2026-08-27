@@ -2567,7 +2567,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
             .system
             .play_music(music, true)
             .test_value();
-        app.runtime_music_enabled = true;
+        app.sound.runtime_music_enabled = true;
     };
 
     let mut default_app = new_classic_lightweight_running_sandbox_app();

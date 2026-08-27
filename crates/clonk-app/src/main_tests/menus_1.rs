@@ -2307,7 +2307,7 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
     {
         let audio = app.test_audio_ref();
         main_assert!(!audio.system.music_is_playing(), "PreInit reconstruction hard-stops the fading game song");
-        main_assert!(!app.resume_frontend_music_after_fade);
+        main_assert!(!app.sound.resume_frontend_after_fade);
         main_assert_eq!(audio.music_fade_requests => [GAME_MUSIC_FADE_OUT_MS], "Game.Clear still requests its 2s fade before PreInit cancels it");
         let controlled = audio.controlled_music_loads.test_ref();
         main_assert_eq!(controlled.requests.len() => 1);
@@ -2334,7 +2334,7 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
     {
         let audio = app.test_audio_ref();
         main_assert!(!audio.system.music_is_playing());
-        main_assert!(!app.resume_frontend_music_after_fade);
+        main_assert!(!app.sound.resume_frontend_after_fade);
         main_assert_eq!(audio.music_fade_requests => [GAME_MUSIC_FADE_OUT_MS, GAME_MUSIC_FADE_OUT_MS], "each Game.Clear requests its fade before the next PreInit");
         main_assert!(lock_unpoisoned(&audio.music_control).most_recently_played.is_none(), "the direct-relaunch PreInit generation has no prior song identity");
         main_assert_eq!(lock_unpoisoned(&audio.music_control).scenario_level => None, "Game.Clear and the reconstructed music system discard scenario volume");
@@ -2661,7 +2661,7 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
     main_assert_eq!(app.startup_view => StartupView::About);
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
     app.show_main_menu();
 
     app.test_modifiers(ModifiersState::ALT);
@@ -2680,28 +2680,28 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert!(app.ui_sound_log.iter().any(|sound| sound == "Click"));
-    app.ui_sound_log.clear();
+    main_assert!(app.sound.ui_log.iter().any(|sound| sound == "Click"));
+    app.sound.ui_log.clear();
     app.show_main_menu();
 
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
-    main_assert!(!app.ui_sound_log.iter().any(|sound| sound == "Click"), "mnemonic dispatch must bypass the button Click sound: {:?}", app.ui_sound_log);
+    main_assert!(!app.sound.ui_log.iter().any(|sound| sound == "Click"), "mnemonic dispatch must bypass the button Click sound: {:?}", app.sound.ui_log);
 
     app.show_main_menu();
     app.open_about_dialog();
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
     main_assert_eq!(app.startup_about_dialog.as_ref().expect("About dialog").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
     main_assert_eq!(app.message_dialogs.len() => 1);
     main_assert_eq!(app.message_dialogs[0].state.caption() => "Check for Updates");
-    main_assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.sound.ui_log.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
 
@@ -3700,7 +3700,7 @@ fn options_dialog_loads_log_timestamps_from_general_config() {
 #[test]
 fn options_sound_sheet_fails_typed_before_pixels_without_audio_context() {
     let mut app = new_real_classic_menu_app(320, 200);
-    app.audio = None;
+    app.sound.context = None;
     app.open_options_menu();
 
     let mut program_frame = vec![0_u8; 320 * 200 * 4];

@@ -4734,7 +4734,7 @@ impl GameApp {
                     NetworkEvent::PeerDisconnected { client_id, reason } => {
                         if let Ok(client_id) = i32::try_from(client_id) {
                             let removed = self.voice_chat.forget_client(client_id);
-                            if let Some(audio) = self.audio.as_ref() {
+                            if let Some(audio) = self.sound.context.as_ref() {
                                 let audio = audio.borrow();
                                 for (speaker_client_id, player_id) in removed {
                                     audio.system.remove_voice_stream(
@@ -6809,7 +6809,7 @@ impl GameApp {
                 self.replace_startup_view(StartupView::NetworkLobby);
                 self.mode = AppMode::Menu;
                 self.status_text.clear();
-                if let Some(audio) = self.audio.as_ref() {
+                if let Some(audio) = self.sound.context.as_ref() {
                     let mut audio = audio.borrow_mut();
                     audio.stop_music();
                 }
@@ -7308,7 +7308,7 @@ impl GameApp {
                     definition_executable_path,
                     definition_path,
                     origin: &origin,
-                    music_enabled: self.runtime_music_enabled,
+                    music_enabled: self.sound.runtime_music_enabled,
                     copied_material_group_is_file: false,
                     // The app has no mutable C4ComponentHost counterparts yet;
                     // native Save is a no-op while these hosts are unmodified.

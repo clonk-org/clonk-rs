@@ -389,7 +389,7 @@ fn n2_saved_game(
         definition_load: app.active_definition_load.clone(),
         focus_id: app.focus_id,
         user_label: Some(user_label.to_string()),
-        runtime_music_enabled: Some(app.runtime_music_enabled),
+        runtime_music_enabled: Some(app.sound.runtime_music_enabled),
         source_save_player_infos: None,
         source_string_table: None,
         source_title_png: None,
@@ -8209,7 +8209,7 @@ fn client_direct_cpp_sync_check_desync_continues_running_round_locally() {
         audio.configure_scenario(Some(&sound_scenario));
     }
     main_assert!(app.snapshot.audio.is_empty());
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     let local_player = app.local_owner;
     let local_client = 1;
     let remote_player = 17;
@@ -8279,7 +8279,7 @@ fn client_direct_cpp_sync_check_desync_continues_running_round_locally() {
         "SyncError is eagerly decoded and played immediately"
     );
     main_assert_eq!(
-        app.ui_sound_log
+        app.sound.ui_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
             .count() =>
@@ -9224,14 +9224,14 @@ fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
     let mut app = new_classic_lightweight_running_sandbox_app();
     let player = app.local_owner;
     main_assert_eq!(
-        app.ui_sound_log
+        app.sound.ui_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
             .count() =>
         1,
         "InitGameFinal creates the initial owned viewport non-silently"
     );
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
     let tick = u32::try_from(app.engine.frame()).test_value();
@@ -9253,7 +9253,7 @@ fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
     app.test_update();
 
     main_assert!(app.engine.player(player).is_some());
-    main_assert!(app.ui_sound_log.is_empty(), "elimination retains its viewport until the later RemovePlr");
+    main_assert!(app.sound.ui_log.is_empty(), "elimination retains its viewport until the later RemovePlr");
     let remove = n2_fixture!(remove_player: player, false, 0);
     main_assert_eq!(commands.take_submitted_remove_players() => vec![(tick.saturating_add(1), remove)]);
     app.engine
@@ -9271,7 +9271,7 @@ fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
 
     main_assert!(app.engine.player(player).is_none());
     main_assert_eq!(
-        app.ui_sound_log
+        app.sound.ui_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
             .count() =>
@@ -9280,14 +9280,14 @@ fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
     );
     main_assert!(!app.snapshot.hud.local_players.contains(&player));
 
-    app.ui_sound_log.clear();
+    app.sound.ui_log.clear();
     for _ in 0..2 {
         let viewports = collect_viewport_inputs(&app.snapshot).test_value();
         main_assert_eq!(viewports.len() => 1);
         main_assert_eq!(viewports[0].owner => OWNER_NONE);
     }
     app.execute_remove_player_control(remove).test_value();
-    main_assert!(app.ui_sound_log.is_empty(), "the ownerless fallback and missing-player close are silent");
+    main_assert!(app.sound.ui_log.is_empty(), "the ownerless fallback and missing-player close are silent");
 }
 
 #[test]

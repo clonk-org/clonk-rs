@@ -136,6 +136,36 @@ pub(crate) struct ScenarioSelectorState {
     pub(crate) search_last_click: Option<Instant>,
 }
 
+/// The audio device and everything whose lifetime is tied to it.
+///
+/// The mixer is one resource with several claimants: a frontend-to-scenario
+/// fade still owns it while the scenario loads, runtime playback ownership
+/// is distinct from the persisted `RXMusic` setting, and the once-per-entry
+/// frontend guard exists so dialog navigation cannot restart a finished
+/// track. Those three latches only make sense next to the context they
+/// arbitrate over.
+///
+/// Voice chat is deliberately not here. It is presentation-only proximity
+/// audio with its own state type, and its single open-mic gate is easier to
+/// audit standing alone than folded into the mixer's lifetime.
+#[derive(Default)]
+pub(crate) struct SoundState {
+    pub(crate) context: Option<SharedAudioContext>,
+    #[cfg(test)]
+    pub(crate) ui_log: Vec<String>,
+    /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
+    /// from persisted RXMusic while a game is running.
+    pub(crate) runtime_music_enabled: bool,
+    /// A frontend-to-scenario fade still owns the mixer. Scenario-load failure
+    /// may return to Menu and wait for it; game teardown instead clears this at
+    /// the following PreInit reconstruction before entering startup.
+    pub(crate) resume_frontend_after_fade: bool,
+    /// `C4Startup::DoStartup` calls PlayFrontendMusic exactly once per startup
+    /// entry. Dialog navigation must not restart a non-looping track after it
+    /// ends; returning from a game resets this guard.
+    pub(crate) frontend_attempted_for_entry: bool,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -380,29 +410,17 @@ pub(crate) struct GameApp {
     /// C4GraphicsResource's game-local HUD, cursor and palette selection.
     /// `None` means the process-startup Graphics.c4g bundle is active.
     pub(crate) active_game_graphics: Option<GameGraphicsResources>,
-    pub(crate) audio: Option<SharedAudioContext>,
+    /// The audio device and its music lifetime.
+    pub(crate) sound: SoundState,
     /// Presentation-only proximity voice state; never serialized or passed to
     /// the deterministic engine.
     pub(crate) voice_chat: crate::voice_chat::VoiceChatState,
-    #[cfg(test)]
-    pub(crate) ui_sound_log: Vec<String>,
     #[cfg(test)]
     pub(crate) league_surrender_pre_abort_results: Option<(
         clonk_engine::RoundResultsState,
         clonk_engine::RoundResultsState,
         bool,
     )>,
-    /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
-    /// from persisted RXMusic while a game is running.
-    pub(crate) runtime_music_enabled: bool,
-    /// A frontend-to-scenario fade still owns the mixer. Scenario-load failure
-    /// may return to Menu and wait for it; game teardown instead clears this at
-    /// the following PreInit reconstruction before entering startup.
-    pub(crate) resume_frontend_music_after_fade: bool,
-    /// `C4Startup::DoStartup` calls PlayFrontendMusic exactly once per startup
-    /// entry. Dialog navigation must not restart a non-looping track after it
-    /// ends; returning from a game resets this guard.
-    pub(crate) frontend_music_attempted_for_entry: bool,
     pub(crate) assets: Arc<FrontendAssets>,
     /// Per-resource failures from resolving the active scenario's C4GUI
     /// sheet/font set. Empty means the active (or startup) bundle resolved
