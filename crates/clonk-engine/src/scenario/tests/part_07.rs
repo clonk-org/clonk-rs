@@ -1444,12 +1444,12 @@
             "the raw frozen group must not retain structured C4String handles"
         );
         let frozen = engine
-            .scenario_sections
+            .scenario_section_state.sections
             .get("next")
             .and_then(|section| section.frozen_group.clone()).test_value();
         assert!(
             engine
-                .scenario_sections
+                .scenario_section_state.sections
                 .get("next")
                 .is_some_and(|section| section.saved_objects.is_none()),
             "serializer scratch snapshots are discarded after freezing"

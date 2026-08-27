@@ -61,13 +61,13 @@ impl Engine {
             .push(AudioCommand::SetMusicLevel { level: music_level });
 
         if data.current_scenario_section.is_empty() {
-            self.current_scenario_section = "main".to_string();
-            self.last_scenario_section_flags = None;
+            self.scenario_section_state.current = "main".to_string();
+            self.scenario_section_state.last_flags = None;
         } else {
-            self.current_scenario_section = data.current_scenario_section.clone();
+            self.scenario_section_state.current = data.current_scenario_section.clone();
             // The loaded section name is save-persistent even though the
             // transient section-load flag word is not part of Game.txt.
-            self.last_scenario_section_flags = Some(0);
+            self.scenario_section_state.last_flags = Some(0);
         }
         self.resort_any_object = data.resort_any_object;
         self.next_mission = data.next_mission.clone();
@@ -562,14 +562,14 @@ impl Engine {
             .first()
             .map(|section| section.name.clone())
             .unwrap_or_else(|| "main".to_string());
-        self.scenario_section_order = sections
+        self.scenario_section_state.order = sections
             .iter()
             .skip(1)
             .rev()
             .map(|section| section.name.to_ascii_lowercase())
             .collect();
-        self.scenario_current_section_registered = false;
-        self.scenario_sections = sections
+        self.scenario_section_state.current_registered = false;
+        self.scenario_section_state.sections = sections
             .iter()
             .enumerate()
             .map(|(index, section)| {
@@ -609,8 +609,8 @@ impl Engine {
                 )
             })
             .collect();
-        self.current_scenario_section = root_section;
-        self.last_scenario_section_flags = None;
+        self.scenario_section_state.current = root_section;
+        self.scenario_section_state.last_flags = None;
     }
 
     pub(crate) fn refresh_initial_s2_section(
@@ -619,8 +619,8 @@ impl Engine {
         creator: &map_creator_s2::MapCreatorS2State,
         callbacks: &map_creator_s2::PostInitMapCallbacks,
     ) {
-        let key = self.current_scenario_section.to_ascii_lowercase();
-        if let Some(section) = self.scenario_sections.get_mut(&key) {
+        let key = self.scenario_section_state.current.to_ascii_lowercase();
+        if let Some(section) = self.scenario_section_state.sections.get_mut(&key) {
             section.landscape = Some(landscape.clone());
             section.map_creator = Some(creator.clone());
             section.post_init_map_callbacks = callbacks.clone();
@@ -629,20 +629,21 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn debug_current_scenario_section(&self) -> &str {
-        &self.current_scenario_section
+        &self.scenario_section_state.current
     }
 
     #[doc(hidden)]
     pub fn debug_current_scenario_section_exists(&self) -> bool {
-        self.scenario_current_section_registered
+        self.scenario_section_state.current_registered
             && self
-                .scenario_sections
-                .contains_key(&self.current_scenario_section.to_ascii_lowercase())
+                .scenario_section_state
+                .sections
+                .contains_key(&self.scenario_section_state.current.to_ascii_lowercase())
     }
 
     #[doc(hidden)]
     pub fn debug_last_scenario_section_flags(&self) -> Option<i32> {
-        self.last_scenario_section_flags
+        self.scenario_section_state.last_flags
     }
 
     /// The C4ObjectInfo data linked to a crew object (CreateInfoObject,

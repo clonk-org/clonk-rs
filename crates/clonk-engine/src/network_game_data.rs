@@ -264,8 +264,8 @@ impl InitialNetworkGameData {
             object_enumeration_index,
             rules,
             play_list: engine.music_playlist().to_owned(),
-            current_scenario_section: if engine.last_scenario_section_flags.is_some() {
-                engine.current_scenario_section.clone()
+            current_scenario_section: if engine.scenario_section_state.last_flags.is_some() {
+                engine.scenario_section_state.current.clone()
             } else {
                 Default::default()
             },

@@ -825,7 +825,8 @@ impl Engine {
             solid_mask_state.next_instance_sequence,
         )
         .with_scenario_sections(
-            self.scenario_sections
+            self.scenario_section_state
+                .sections
                 .values()
                 .map(|section| section.name.as_str()),
         )

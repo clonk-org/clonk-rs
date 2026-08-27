@@ -1575,7 +1575,7 @@ fn collect_live_referenced_strings(
             }
         }
     }
-    for section in engine.scenario_sections.values() {
+    for section in engine.scenario_section_state.sections.values() {
         // A departed section owns a frozen Strings.txt/Objects.txt pair.
         // Its removed objects no longer hold C4String references in the live
         // table and must not leak their private values into the root save.
@@ -3282,14 +3282,14 @@ fn serialize_scenario_sections(
     Vec<String>,
     Vec<LiveC4SaveScenarioSectionMutation>,
 ) {
-    let current = engine.current_scenario_section.to_ascii_lowercase();
-    let mut pending = Vec::with_capacity(engine.scenario_section_order.len());
-    for key in &engine.scenario_section_order {
-        let Some(section) = engine.scenario_sections.get(key) else {
+    let current = engine.scenario_section_state.current.to_ascii_lowercase();
+    let mut pending = Vec::with_capacity(engine.scenario_section_state.order.len());
+    for key in &engine.scenario_section_state.order {
+        let Some(section) = engine.scenario_section_state.sections.get(key) else {
             continue;
         };
         let group_name = format!("Sect{}.c4g", section.name);
-        if engine.scenario_current_section_registered && *key == current {
+        if engine.scenario_section_state.current_registered && *key == current {
             pending.push(PendingScenarioSectionMutation::Delete {
                 name: group_name,
                 failed_add: false,
@@ -4808,7 +4808,7 @@ mod tests {
         spec.landscape = Some(crate::Landscape::flat(2, 2));
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[spec]);
-        let section = engine.scenario_sections.get("main").unwrap();
+        let section = engine.scenario_section_state.sections.get("main").unwrap();
 
         assert!(matches!(
             freeze_scenario_section(&engine, section, true, false),
@@ -5958,7 +5958,11 @@ mod tests {
         assert!(engine
             .load_scenario_section("elsewhere", 0, Vec::new())
             .expect("first section switch succeeds"));
-        let section = engine.scenario_sections.get_mut("main").unwrap();
+        let section = engine
+            .scenario_section_state
+            .sections
+            .get_mut("main")
+            .unwrap();
         section.modified = true;
         section.objects_modified = true;
         section.saved_objects = Some(Vec::new());
@@ -5999,7 +6003,11 @@ mod tests {
             .load_scenario_section("beta", 2, Vec::new())
             .expect("first section switch succeeds"));
         for name in ["alpha", "gamma"] {
-            let section = engine.scenario_sections.get_mut(name).unwrap();
+            let section = engine
+                .scenario_section_state
+                .sections
+                .get_mut(name)
+                .unwrap();
             section.modified = true;
             section.frozen_group = Some(raw_section(&section.name));
         }
@@ -6067,7 +6075,11 @@ mod tests {
             section_spec("main", None),
             section_spec("archive", Some(source)),
         ]);
-        let section = engine.scenario_sections.get_mut("archive").unwrap();
+        let section = engine
+            .scenario_section_state
+            .sections
+            .get_mut("archive")
+            .unwrap();
         section.modified = true;
         section.objects_modified = true;
         section.saved_object_order = vec![container, content];
@@ -6110,7 +6122,11 @@ mod tests {
         spec.landscape = Some(landscape);
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[section_spec("main", None), spec]);
-        let section = engine.scenario_sections.get_mut("night").unwrap();
+        let section = engine
+            .scenario_section_state
+            .sections
+            .get_mut("night")
+            .unwrap();
         section.modified = true;
         section.landscape_modified = true;
 
@@ -6144,14 +6160,19 @@ mod tests {
             .load_scenario_section("next", 2, Vec::new())
             .expect("section switch succeeds"));
         let frozen = engine
-            .scenario_sections
+            .scenario_section_state
+            .sections
             .get("main")
             .and_then(|section| section.frozen_group.clone())
             .expect("departing main group freezes");
 
         // Prove final serialization is a byte copy, not a reconstruction
         // from the mutable retained section model.
-        let section = engine.scenario_sections.get_mut("main").unwrap();
+        let section = engine
+            .scenario_section_state
+            .sections
+            .get_mut("main")
+            .unwrap();
         section.source_group = None;
         section.saved_objects = None;
         section.initial_objects.clear();
@@ -6178,7 +6199,7 @@ mod tests {
 
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[section_spec("Cave", Some(source))]);
-        let section = engine.scenario_sections.get("cave").unwrap();
+        let section = engine.scenario_section_state.sections.get("cave").unwrap();
         let frozen = freeze_scenario_section(&engine, section, false, false).unwrap();
         let group = open_group("SectCave.c4g", frozen);
 
@@ -6204,7 +6225,7 @@ mod tests {
             section_spec("Cave", Some(root)),
             section_spec("Main", Some(named_main)),
         ]);
-        let section = engine.scenario_sections.get("main").unwrap();
+        let section = engine.scenario_section_state.sections.get("main").unwrap();
         let frozen = freeze_scenario_section(&engine, section, false, false).unwrap();
         let group = open_group("SectMain.c4g", frozen);
 
@@ -6239,7 +6260,8 @@ mod tests {
             .load_scenario_section("next", 2, Vec::new())
             .expect("section switch succeeds"));
         let frozen = engine
-            .scenario_sections
+            .scenario_section_state
+            .sections
             .get("main")
             .and_then(|section| section.frozen_group.clone())
             .expect("departing main group freezes");
@@ -6270,7 +6292,7 @@ mod tests {
 
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[section_spec("main", Some(main))]);
-        let section = engine.scenario_sections.get("main").unwrap();
+        let section = engine.scenario_section_state.sections.get("main").unwrap();
         let frozen = freeze_scenario_section(&engine, section, false, true).unwrap();
         let group = open_group("Sectmain.c4g", frozen);
 
@@ -6299,12 +6321,17 @@ mod tests {
         // While freezing a modified section, its objects temporarily
         // participate in enumeration; after it owns a frozen group they do
         // not participate in the root save again.
-        let section = engine.scenario_sections.get_mut("inactive").unwrap();
+        let section = engine
+            .scenario_section_state
+            .sections
+            .get_mut("inactive")
+            .unwrap();
         section.modified = true;
         let strings = collect_live_referenced_strings(&engine, &engine.capture_state());
         assert!(strings.iter().any(|value| value.as_ref() == "section-only"));
         engine
-            .scenario_sections
+            .scenario_section_state
+            .sections
             .get_mut("inactive")
             .unwrap()
             .frozen_group = Some(Vec::new());
