@@ -337,6 +337,22 @@ enum RuntimeListEntry<'a> {
     },
 }
 
+/// Whether this dialog can own a caption widget at all.
+///
+/// `Dialog::Show` gives a non-viewport dialog an OS child window when the
+/// application is not fullscreen (`C4GuiDialogs.cpp:659-661`), and
+/// `Dialog::SetTitle` then puts the text on that window's bar and
+/// **returns before allocating `pTitle`** (`:390-395`). A console child
+/// therefore has no caption row, no close button and no margin for them,
+/// however many times `Update` sets the title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitleWidgets {
+    /// The ordinary in-screen dialog, which owns its caption.
+    Dialog,
+    /// A console child window, which does not.
+    ConsoleWindow,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeClientListLayout {
     pub bounds: IntRect,
@@ -750,6 +766,24 @@ impl RuntimeClientListDialog {
     }
 
     pub fn layout(&self, preferred: IntRect, font_line_height: i32) -> RuntimeClientListLayout {
+        self.layout_with_title_widgets(preferred, font_line_height, TitleWidgets::Dialog)
+    }
+
+    /// The same dialog laid out for a console child window.
+    pub fn console_layout(
+        &self,
+        preferred: IntRect,
+        font_line_height: i32,
+    ) -> RuntimeClientListLayout {
+        self.layout_with_title_widgets(preferred, font_line_height, TitleWidgets::ConsoleWindow)
+    }
+
+    fn layout_with_title_widgets(
+        &self,
+        preferred: IntRect,
+        font_line_height: i32,
+        title_widgets: TitleWidgets,
+    ) -> RuntimeClientListLayout {
         let (width, height) = if self.is_static_info_only() {
             (preferred.w.max(1), preferred.h.max(1))
         } else {
@@ -764,7 +798,12 @@ impl RuntimeClientListDialog {
             width,
             height,
         );
-        let caption_height = (font_line_height + 8).max(24).min(height);
+        // No caption widget means no row for one, so every rect below starts
+        // at the top of the window instead of under a title bar.
+        let caption_height = match title_widgets {
+            TitleWidgets::Dialog => (font_line_height + 8).max(24).min(height),
+            TitleWidgets::ConsoleWindow => 0,
+        };
         let status_height = font_line_height
             .max(1)
             .min((height - caption_height).max(1));
@@ -840,13 +879,16 @@ impl RuntimeClientListDialog {
             .collect();
         let layout = RuntimeClientListLayout {
             bounds,
-            caption: Some(IntRect::new(bounds.x, bounds.y, bounds.w, caption_height)),
-            close_button: Some(IntRect::new(
-                bounds.x + bounds.w - 20,
-                bounds.y + (caption_height - 16) / 2,
-                16,
-                16,
-            )),
+            caption: matches!(title_widgets, TitleWidgets::Dialog)
+                .then(|| IntRect::new(bounds.x, bounds.y, bounds.w, caption_height)),
+            close_button: matches!(title_widgets, TitleWidgets::Dialog).then(|| {
+                IntRect::new(
+                    bounds.x + bounds.w - 20,
+                    bounds.y + (caption_height - 16) / 2,
+                    16,
+                    16,
+                )
+            }),
             options,
             option_scrollbar,
             list: IntRect::new(
@@ -3717,6 +3759,53 @@ mod tests {
                 DialogTitle::Info,
             ),
             2
+        );
+    }
+
+    /// A console child owns no caption row, and the client area starts where
+    /// the caption would have been.
+    ///
+    /// `Dialog::Show` gives a non-viewport dialog an OS child window outside
+    /// fullscreen (`C4GuiDialogs.cpp:659-661`) and `Dialog::SetTitle` returns
+    /// before allocating `pTitle` (`:390-395`), so there is no caption widget,
+    /// no close button, and no margin reserved for either. The dialog is the
+    /// same one otherwise: same bounds, same options, same list.
+    #[test]
+    fn a_console_child_layout_has_no_caption_row_and_reclaims_its_margin() {
+        let dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        let preferred = IntRect::new(0, 0, 400, 300);
+        let line_height = 12;
+
+        let windowed = dialog.layout(preferred, line_height);
+        let console = dialog.console_layout(preferred, line_height);
+
+        assert!(windowed.caption.is_some());
+        assert!(windowed.close_button.is_some());
+        assert_eq!(console.caption, None, "no caption widget to lay out");
+        assert_eq!(console.close_button, None, "and none to close it with");
+
+        assert_eq!(
+            console.bounds, windowed.bounds,
+            "the window itself is unchanged; only its contents move up"
+        );
+        let reclaimed = windowed.options.y - console.options.y;
+        assert!(
+            reclaimed > 0,
+            "the options row starts higher without a caption above it: {reclaimed}"
+        );
+        assert_eq!(
+            console.list.y - console.options.y,
+            windowed.list.y - windowed.options.y,
+            "everything below keeps its spacing"
+        );
+        assert!(
+            console.list.h > windowed.list.h,
+            "and the list gets the reclaimed height"
         );
     }
 
