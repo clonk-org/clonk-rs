@@ -2,6 +2,18 @@
 xtask = "run --package xtask --bin xtask --"
 dev-check = "run --package xtask --bin xtask -- dev-check"
 
+# Rust 1.98 enables these style lints for established lockstep and rendering
+# code. Keep the toolchain update behavior-neutral; migrate the mechanical
+# suggestions separately, where their remainder and mutation semantics can be
+# reviewed in focused changes.
+[build]
+rustflags = [
+    "-A", "clippy::chunks_exact_to_as_chunks",
+    "-A", "clippy::drain_collect",
+    "-A", "clippy::manual_isolate_lowest_one",
+    "-A", "clippy::manual_slice_fill",
+]
+
 # Rust 1.97's bundled Mach-O LLD emits invalid unwind metadata for some large
 # test binaries on this workspace. The shim keeps Apple Clang's correct system
 # linker and selects its debug-build fast path only for debug/test outputs.

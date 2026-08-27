@@ -892,8 +892,8 @@ impl IrcClientState {
             5 => {
                 while parameters.is_some_and(|remaining| !remaining.is_empty()) {
                     let token = extract_parameter(&mut parameters);
-                    let (parameter, value) = split_once_byte(&token, b'=')
-                        .map_or((token.as_slice(), &[][..]), |parts| parts);
+                    let (parameter, value) =
+                        split_once_byte(&token, b'=').unwrap_or((token.as_slice(), &[][..]));
                     if irc_eq(parameter, b"PREFIX") {
                         self.prefixes = value.to_vec();
                     }
@@ -956,8 +956,7 @@ impl IrcClientState {
                     .map_or((remaining, &[][..]), |end| {
                         (&remaining[..end], &remaining[end + 1..])
                     });
-                let (tag, data) =
-                    split_once_byte(ctcp, b' ').map_or((ctcp, &[][..]), |parts| parts);
+                let (tag, data) = split_once_byte(ctcp, b' ').unwrap_or((ctcp, &[][..]));
                 let sender_nick = sender
                     .split(|byte| *byte == b'!')
                     .next()

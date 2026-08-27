@@ -101,7 +101,7 @@ jobs:
         timeout-minutes: 10
         run: scripts/install-apt-packages.sh libasound2-dev libudev-dev
 
-      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
         with:
           components: clippy, rustfmt
 
@@ -371,7 +371,7 @@ jobs:
             apt_pid=$!
           fi
 
-          required='rustc 1.97.1 '
+          required='rustc 1.98.0 '
           exact=false
           if command -v rustup >/dev/null; then
             while read -r toolchain _; do
@@ -410,7 +410,7 @@ jobs:
 
       - name: Install exact Rust toolchain
         if: steps.preinstalled-rust.outputs.exact != 'true'
-        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
@@ -482,7 +482,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
 
       - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
         if: matrix.nextest

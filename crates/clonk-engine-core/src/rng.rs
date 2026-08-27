@@ -150,11 +150,10 @@ impl rand_core::TryRng for LcgRng {
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
-        let mut chunks = dest.chunks_exact_mut(4);
-        for chunk in &mut chunks {
+        let (chunks, tail) = dest.as_chunks_mut::<4>();
+        for chunk in chunks {
             chunk.copy_from_slice(&self.try_next_u32()?.to_le_bytes());
         }
-        let tail = chunks.into_remainder();
         if !tail.is_empty() {
             let bytes = self.try_next_u32()?.to_le_bytes();
             tail.copy_from_slice(&bytes[..tail.len()]);
