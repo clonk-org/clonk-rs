@@ -5827,8 +5827,14 @@ impl GameApp {
                 self.loader_error = None;
             }
             Err(error) => {
+                // Same two native lines as the initial launch, from the join
+                // path's caller (src/C4Game.cpp:370-380).
                 tracing::error!(%error, "classic startup loader reinitialization failed");
-                self.loader_error = Some(error.to_string());
+                tracing::error!(
+                    "{}",
+                    self.runtime_resource_text("IDS_PRC_ERRLOADER", LOADER_INIT_FAILURE_TEXT)
+                );
+                self.loader_error = Some(LoaderScreenFailure::NativeInit(error.to_string()));
             }
         }
     }

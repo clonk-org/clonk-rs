@@ -655,7 +655,8 @@ pub(crate) struct GameApp {
     pub(crate) taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress<
         Box<dyn clonk_platform::taskbar_progress::TaskbarProgressSink>,
     >,
-    pub(crate) loader_error: Option<String>,
+    /// Why no `loader_screen` is installed, when one was attempted.
+    pub(crate) loader_error: Option<LoaderScreenFailure>,
     pub(crate) loader_render_config: Option<LoaderRenderConfig>,
     pub(crate) loader_render_error: Option<String>,
     pub(crate) loader_gamma: Option<clonk_graphics::GammaRamp>,
@@ -3143,6 +3144,37 @@ pub(crate) fn c4_message_target_position(
         (target.position.x, target.position.y)
     };
     Vector2::new(x + offset.x, y + offset.y - shape_height / 2 - 5)
+}
+
+/// Shipped English for `IDS_PRC_ERRLOADER`, used when the language table
+/// cannot be read (`planet/System.c4g/LanguageUS.txt:1227`).
+pub(crate) const LOADER_INIT_FAILURE_TEXT: &str = "Error initializing loader screen.";
+
+/// Why the classic loader screen is missing.
+///
+/// C++ separates these two and so must the port. `C4LoaderScreen::Init`
+/// returning false is an ordinary fatal the native engine also produces: it
+/// logs its own reason, and the caller logs `IDS_PRC_ERRLOADER` and stops
+/// (`src/C4Application.cpp:241-247`; `src/C4Game.cpp:370-380`). Reporting that
+/// as a parity boundary would claim the port has not implemented a loader
+/// screen, when in fact it refused exactly where C++ refuses.
+#[derive(Debug)]
+pub(crate) enum LoaderScreenFailure {
+    /// `Init` failed for a reason C++ has too — no loader matched the
+    /// specification, or `Graphics.c4g` would not open.
+    NativeInit(String),
+    /// There is no install root to search. `Config.AtExePath` always yields one
+    /// natively (`src/C4LoaderScreen.cpp:61`), so this is a port-only state,
+    /// reached by path-less fixtures, and stays a parity boundary.
+    NoInstallPath(String),
+}
+
+impl LoaderScreenFailure {
+    pub(crate) fn detail(&self) -> &str {
+        match self {
+            Self::NativeInit(detail) | Self::NoInstallPath(detail) => detail,
+        }
+    }
 }
 
 pub(crate) fn report_classic_parity_boundary(

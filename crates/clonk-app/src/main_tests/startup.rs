@@ -3020,6 +3020,31 @@ fn assetless_loading_mode_fails_instead_of_drawing_generic_loader() {
 }
 
 #[test]
+fn a_failed_native_loader_init_is_an_ordinary_fatal_not_a_parity_boundary() {
+    // C4LoaderScreen::Init logs its own reason and returns false; the caller
+    // then logs IDS_PRC_ERRLOADER and stops (src/C4Application.cpp:241-247;
+    // src/C4Game.cpp:370-380). C++ refusing is not the port lacking a feature,
+    // so this must not claim the loader screen is unimplemented -- unlike the
+    // path-less case above, which C++ cannot reach at all.
+    let mut app = new_menu_app(320, 200);
+    app.mode = AppMode::Loading;
+    app.loader_error = Some(LoaderScreenFailure::NativeInit(
+        "No loaders found for loader specification: A.png/A.bmp/A.jpg/A.jpeg".to_string(),
+    ));
+    let mut frame = vec![0_u8; 320 * 200 * 4];
+    let error = app
+        .render(&mut frame)
+        .expect_err("a failed loader init still stops the game");
+    main_assert!(
+        error.downcast_ref::<ClassicParityBoundary>().is_none(),
+        "a failure C++ also produces is not a parity boundary: {error}"
+    );
+    let reported = error.to_string();
+    main_assert!(reported.contains("Error initializing loader screen."));
+    main_assert!(reported.contains("No loaders found for loader specification:"));
+}
+
+#[test]
 fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
     // A left lobby unwinds through C4Application::QuitGame, which re-enters
     // PreInit; PreInit re-runs InitLoaderScreen(C4CFN_StartupBackgroundMain)
@@ -3330,6 +3355,38 @@ fn loader_selector_repeats_explicit_extension_passes_and_cpp_wildcards() {
     main_assert!(classic_wildcard_match(b"*.*", b"extensionless"));
     main_assert_eq!(loader_patterns("LoaderTrailing.").expect("patterns").png => "LoaderTrailing..png");
     main_assert!(loader_patterns("Loader\0Hidden").is_err());
+}
+
+#[test]
+fn loader_exhaustion_reports_the_native_four_pattern_diagnostic() {
+    // C4LoaderScreen::Init logs its own reason before returning false, and the
+    // pattern list it prints is png/bmp/jpg/jpeg -- deliberately not the order
+    // any of the three search passes uses (src/C4LoaderScreen.cpp:83-86).
+    let directory = tempdir();
+    let group = Group::open(directory.path()).test_value();
+    let graphics = group.clone();
+    let error = select_loader_source(&[group], &graphics, "MissingLoader", |_| 0)
+        .err()
+        .expect("an empty group exhausts every loader pass");
+    main_assert_eq!(
+        format!("{error}") =>
+        "No loaders found for loader specification: \
+         MissingLoader.png/MissingLoader.bmp/MissingLoader.jpg/MissingLoader.jpeg"
+    );
+
+    // An empty specification becomes "Loader*" before the extensions are
+    // defaulted, so the reported patterns are the wildcards (:36-37).
+    let directory = tempdir();
+    let group = Group::open(directory.path()).test_value();
+    let graphics = group.clone();
+    let error = select_loader_source(&[group], &graphics, "", |_| 0)
+        .err()
+        .expect("an empty group exhausts the wildcard passes too");
+    main_assert_eq!(
+        format!("{error}") =>
+        "No loaders found for loader specification: \
+         Loader*.png/Loader*.bmp/Loader*.jpg/Loader*.jpeg"
+    );
 }
 
 #[test]
