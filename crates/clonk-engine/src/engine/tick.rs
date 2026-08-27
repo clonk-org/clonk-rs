@@ -1168,7 +1168,6 @@ impl Engine {
             }
 
             dbg_stage(self.rng.trace_index, &self.objects[idx], "POSTMOVE");
-            self.update_sector_for_index(idx);
             // Script effect timers execute HERE in C++ — pEffects->Execute
             // follows ExecAction and ExecMovement inside C4Object::Execute
             // (C4Object.cpp:1069-1090): an action set by a timer callback
@@ -1697,8 +1696,8 @@ impl Engine {
                 // Real C4Script mutates state synchronously through host
                 // calls. Only the synthetic snapshot-fixture Step callback
                 // returns a CommandBatch, so do not manufacture and fold an
-                // empty one for every real-content object. Preserve the one
-                // native tail operation that used to ride in that fold.
+                // empty one for every real-content object. Preserve the
+                // velocity clamp that used to ride in that fold.
                 let native_float_bounds = self.uses_native_float_bounds(
                     idx,
                     self.object_physical_without_fair_fill(idx).float,
@@ -1713,7 +1712,6 @@ impl Engine {
                 if !matches!(procedure, ActionProcedure::Flight) && !native_float {
                     object.clamp_velocity(&self.physics);
                 }
-                self.update_sector_for_index(idx);
             }
 
             if !self.objects[idx].pending_action_events.is_empty() {
@@ -3281,6 +3279,18 @@ impl Engine {
                     || update.rotation.is_some()
                     || update.construction.is_some()
             });
+        let sector_changed = destroy_object
+            || object_update.as_ref().is_some_and(|update| {
+                // These are the staged host operations that call UpdatePos
+                // in C++; a callback completion by itself does not
+                // (oracle-src-pinned src/C4Object.cpp:1069-1103).
+                update.change_def.is_some()
+                    || update.position.is_some()
+                    || update.rotation.is_some()
+                    || update.construction.is_some()
+                    || update.status.is_some()
+                    || update.base_graphics.is_some()
+            });
         let mut change_def_reinsert = object_update
             .as_ref()
             .is_some_and(|update| update.change_def_reinsert);
@@ -3372,7 +3382,9 @@ impl Engine {
             }
         }
         self.apply_info_update(object_id, info_rank_update, info_link_update);
-        self.update_sector_for_index(index);
+        if sector_changed {
+            self.update_sector_for_index(index);
+        }
 
         if energy_died {
             // C4Object::DoEnergy kills synchronously when a nonzero
@@ -3413,7 +3425,15 @@ impl Engine {
         }
 
         let mut effect_solid_mask_changed = false;
-        if !effect_events.is_empty() {
+        let sector_state_before_effects = (!effect_events.is_empty()).then(|| {
+            let object = &self.objects[index];
+            (
+                object.destroyed,
+                object.state.status,
+                self.object_shape_rect(object),
+            )
+        });
+        if sector_state_before_effects.is_some() {
             let previous_container = self.objects[index].state.container;
             let definition = self
                 .definitions
@@ -3531,7 +3551,17 @@ impl Engine {
                 ));
             }
         }
-        self.update_sector_for_index(index);
+        if sector_state_before_effects.is_some_and(|previous| {
+            let object = &self.objects[index];
+            previous
+                != (
+                    object.destroyed,
+                    object.state.status,
+                    self.object_shape_rect(object),
+                )
+        }) {
+            self.update_sector_for_index(index);
+        }
 
         for (previous, new, host_executed) in container_changes {
             if destroy_object && new.is_none() {
