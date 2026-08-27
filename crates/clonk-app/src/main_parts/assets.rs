@@ -3619,12 +3619,14 @@ pub(crate) fn loaded_game_gui_registrations(
 
 pub(crate) fn main_graphics_group(paths: &AppPaths) -> Result<Group> {
     let path = paths.planet_dir().join("Graphics.c4g");
-    Group::open(&path).with_context(|| {
-        format!(
-            "failed to open classic graphics group at {}",
-            path.display()
-        )
-    })
+    // C4LoaderScreen::Init reports a graphics group it cannot open as
+    // IDS_PRC_NOGFXFILE, whose two arguments are C4CFN_Graphics -- the group's
+    // own name, not the resolved path -- and the C4Group error
+    // (src/C4LoaderScreen.cpp:61-66). The path stays out of the message for
+    // the same reason it does natively: it is the install layout, not the
+    // failure.
+    Group::open(&path)
+        .map_err(|error| anyhow::anyhow!("Error at graphics file Graphics.c4g: {error}"))
 }
 
 fn classic_loader_language_prefix(
@@ -5334,6 +5336,13 @@ pub(crate) fn build_startup_loader(
     assets: &FrontendAssets,
 ) -> Result<ClassicLoaderSetup> {
     validate_classic_loader_graphics_config(paths)?;
+    // C4LoaderScreen::Init opens Graphics.c4g only when the GroupSet pass found
+    // no loader (src/C4LoaderScreen.cpp:59-67); this opens it unconditionally
+    // because the loader's GUI resources are read from it below. That is not a
+    // reachable divergence: natively those same resources come from
+    // Game.GraphicsResource, which has already opened the group and failed the
+    // game before Init runs, so neither engine reaches a loader screen with an
+    // unopenable Graphics.c4g.
     let graphics = main_graphics_group(paths)?;
     let registrations = startup_loader_registrations(paths)?;
     validate_classic_loader_font(paths, None, &registrations)?;
