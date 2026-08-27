@@ -3356,6 +3356,20 @@ impl GameApp {
                 }
             }
         }
+        // The debug block, registered after the message board and before the
+        // speed pair (C4Game.cpp:3385-3389). A refused toggle still belongs
+        // here: the native callback returns false only after flashing why, so
+        // the refusal is the behaviour, not a reason to skip the registration.
+        for (name, key) in [
+            ("DbgModeToggle", RuntimeDebugKey::Mode),
+            ("DbgShowVtxToggle", RuntimeDebugKey::Vertices),
+            ("DbgShowActionToggle", RuntimeDebugKey::ActionCycle),
+            ("DbgShowSolidMaskToggle", RuntimeDebugKey::SolidMask),
+        ] {
+            if matches(name) {
+                return Some(RuntimeCustomGamepadAction::Debug(key));
+            }
+        }
         if matches("GameSpeedUp") {
             return Some(RuntimeCustomGamepadAction::SpeedUp);
         }
@@ -3652,6 +3666,12 @@ impl GameApp {
                     .active_gamma_ramp(&self.snapshot.environment.gamma);
                 self.pending_screenshots
                     .push_back(ScreenshotRequest { kind, gamma });
+            }
+            RuntimeCustomGamepadAction::Debug(key) => {
+                // The keyboard route ignores this same result: a denied toggle
+                // has already set its refusal flash, and the native callback
+                // returning false only means the key walk continues.
+                let _ = self.handle_runtime_debug_key(key)?;
             }
             RuntimeCustomGamepadAction::ToggleChat => self.toggle_external_irc_dialog()?,
             RuntimeCustomGamepadAction::Help => {
