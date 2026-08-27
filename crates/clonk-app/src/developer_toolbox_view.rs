@@ -19,11 +19,13 @@
 use clonk_engine::developer_landscape::ToolTextureEntry;
 use clonk_engine::developer_tools::{LandscapeMode, Tool, GRADE_MAX, GRADE_MIN};
 use clonk_frontend::classic_gui::IntRect;
+pub(crate) use clonk_frontend::developer_chrome::PaneScroll as LineScroll;
 use clonk_frontend::developer_chrome::{
     contains, draw_fitted_text, draw_raised, draw_sunken, fill, CONTROL_BACKGROUND, CONTROL_TEXT,
     DISABLED_TEXT, MID_EDGE, SELECTED_BACKGROUND, SELECTED_TEXT, SMALL_FONT_SIZE,
     WINDOW_BACKGROUND,
 };
+use clonk_frontend::developer_chrome::{pane_scroll_bar_arrows, pane_scroll_bar_at, PaneScrollBar};
 use clonk_frontend::GuiPoint;
 use clonk_graphics::{Surface, TextFont};
 
@@ -664,42 +666,6 @@ fn grade_at(rect: IntRect, y: i32) -> i32 {
     GRADE_MAX - offset * (GRADE_MAX - GRADE_MIN) / travel
 }
 
-/// A retained first-visible-line, for a pane whose content is replaced wholesale.
-///
-/// `C4PropertyDlg::Update` reads `EM_GETFIRSTVISIBLELINE`, replaces the text
-/// and scrolls back to it (`C4PropertyDlg.cpp:257-262`). It runs on every
-/// Tick35 and every selection change, so the position has to survive the
-/// replacement or the pane snaps to the top several times a second.
-///
-/// The line is kept **unclamped**: an object with less to say does not throw
-/// away where the user was, so re-selecting a longer one comes back to it.
-/// That is the same property the Win32 edit control has, where `EM_LINESCROLL`
-/// clamps the scroll without changing what a later, longer text can reach.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct LineScroll {
-    first: usize,
-}
-
-impl LineScroll {
-    /// The first visible line for the content as it stands now.
-    pub(crate) fn window(&self, lines: usize, capacity: usize) -> usize {
-        self.first.min(Self::last_top(lines, capacity))
-    }
-
-    /// Scroll by whole lines, as a wheel notch or a bar arrow does.
-    pub(crate) fn scroll_by(&mut self, delta: i32, lines: usize, capacity: usize) {
-        let last = Self::last_top(lines, capacity);
-        let current = i64::try_from(self.first.min(last)).unwrap_or(i64::MAX);
-        let target = current.saturating_add(i64::from(delta)).max(0);
-        self.first = usize::try_from(target).unwrap_or(usize::MAX).min(last);
-    }
-
-    /// The highest first line that still fills the view.
-    fn last_top(lines: usize, capacity: usize) -> usize {
-        lines.saturating_sub(capacity)
-    }
-}
-
 /// How many lines the output box shows at this page height.
 pub(crate) fn property_output_capacity(height: u32) -> usize {
     let layout = property_page_layout(1, height);
@@ -728,6 +694,8 @@ pub(crate) enum PropertyPageAction {
 pub(crate) struct PropertyPageLayout {
     /// `IDC_EDITOUTPUT`, the read-only text box.
     pub(crate) output: IntRect,
+    /// The scrolled window's vertical bar, beside the box.
+    pub(crate) scroll_track: IntRect,
     /// `IDC_BUTTONRELOADDEF`.
     pub(crate) reload: IntRect,
 }
@@ -759,10 +727,43 @@ pub(crate) fn property_page_layout(width: u32, height: u32) -> PropertyPageLayou
         button_height,
     );
     let output_height = (content.h - button_height - NARROW_GAP).max(1);
+    // The bar takes a column off the right of the box rather than floating
+    // over it, so no text is ever drawn under a thumb.
+    let bar_width = PANE_BAR_THICKNESS.min(content.w - 1).max(0);
     PropertyPageLayout {
-        output: IntRect::new(content.x, content.y, content.w, output_height),
+        output: IntRect::new(
+            content.x,
+            content.y,
+            (content.w - bar_width).max(1),
+            output_height,
+        ),
+        scroll_track: IntRect::new(
+            content.x + content.w - bar_width,
+            content.y,
+            bar_width,
+            output_height,
+        ),
         reload,
     }
+}
+
+/// Wide enough to hit, narrow enough not to eat a small pane.
+pub(crate) const PANE_BAR_THICKNESS: i32 = 10;
+
+/// The property output's bar for the content as it currently stands.
+pub(crate) fn property_output_bar(
+    extent: (u32, u32),
+    lines: usize,
+    scroll: LineScroll,
+) -> Option<PaneScrollBar> {
+    let layout = property_page_layout(extent.0, extent.1);
+    let capacity = property_output_capacity(extent.1);
+    pane_scroll_bar_at(
+        layout.scroll_track,
+        lines,
+        capacity,
+        scroll.window(lines, capacity),
+    )
 }
 
 /// Which control a click lands on, if any.
@@ -773,6 +774,17 @@ pub(crate) fn property_page_hit(
     let layout = property_page_layout(extent.0, extent.1);
     contains(layout.reload, GuiPoint::new(point.0 as f32, point.1 as f32))
         .then_some(PropertyPageAction::ReloadDef)
+}
+
+/// Draw one pane's scroll bar, in the same flat chrome the panes use.
+pub(crate) fn draw_pane_scroll_bar(surface: &mut Surface, bar: &PaneScrollBar) {
+    draw_sunken(surface, bar.track, CONTROL_BACKGROUND);
+    // The arrows go under the thumb, so a thumb that has slid over one still
+    // reads as the thumb.
+    for arrow in pane_scroll_bar_arrows(bar) {
+        fill(surface, arrow, MID_EDGE);
+    }
+    draw_raised(surface, bar.thumb, WINDOW_BACKGROUND);
 }
 
 /// The property page: `C4PropertyDlg`'s read-only text box (`IDC_EDITOUTPUT`)
@@ -808,6 +820,13 @@ pub(crate) fn render_property_page(
             SMALL_FONT_SIZE,
             3,
         );
+    }
+    if let Some(bar) = property_output_bar(
+        (surface.width(), surface.height()),
+        text.lines().count(),
+        scroll,
+    ) {
+        draw_pane_scroll_bar(surface, &bar);
     }
     draw_raised(surface, layout.reload, WINDOW_BACKGROUND);
     draw_fitted_text(

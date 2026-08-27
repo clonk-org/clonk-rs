@@ -2765,6 +2765,7 @@ impl GameApp {
             developer_tools: Default::default(),
             developer_tools_open_combo: None,
             developer_object_list_scroll: Default::default(),
+            developer_pane_scroll_drag: None,
             developer_object_list_cursor: None,
             developer_object_list_anchor: None,
             developer_object_tree_expansion: Default::default(),
