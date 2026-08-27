@@ -7255,6 +7255,101 @@ inline std::vector<std::string> run(const Case &c)
 
 } // namespace c4group_sort
 
+
+namespace c4group_rewrite
+{
+
+// `C4Group::Save`/`Close` rewrite a packed group by streaming every entry back
+// out through `AppendEntry2StdFile` (src/C4Group.cpp:907-1050,1090+). An entry
+// the caller never touched must come back byte-for-byte, including a *child*
+// group entry that was only ever stored, never opened — that is the case this
+// section exists to pin, because a rewrite that re-packed such a child would
+// change bytes no caller asked to change.
+
+struct EntryCore
+{
+	std::string name;
+	int32_t size;
+	int32_t child;
+	uint32_t time;
+	unsigned int crc;
+};
+
+// The whole file, so an unmodified child can be compared as bytes rather than
+// as a summary of itself.
+inline std::string read_file_bytes(const char *path)
+{
+	CStdFile file;
+	if (!file.Open(path)) return {};
+	std::string bytes;
+	char buffer[4096];
+	// `CStdFile::Read` reports false when it cannot fill the buffer, which is
+	// the normal end of any file that is not a multiple of the buffer size. The
+	// bytes it *did* read are still in `read`, so the count drives the loop and
+	// the boolean is ignored.
+	for (;;)
+	{
+		size_t read = 0;
+		file.Read(buffer, sizeof(buffer), &read);
+		if (read == 0) break;
+		bytes.append(buffer, read);
+		if (read < sizeof(buffer)) break;
+	}
+	file.Close();
+	return bytes;
+}
+
+// One entry's stored bytes, read through a fresh open so the search cursor is
+// never shared with an enumeration.
+inline std::string extract_entry_bytes(const char *group_path, const char *entry)
+{
+	C4Group group;
+	if (!group.Open(group_path)) return {};
+	size_t size = 0;
+	if (!group.AccessEntry(entry, &size))
+	{
+		group.Close();
+		return {};
+	}
+	std::string bytes(size, '\0');
+	const bool read = size == 0 || group.Read(bytes.data(), size);
+	group.Close();
+	return read ? bytes : std::string{};
+}
+
+// Only the publicly readable core. `Packed`, `HasCRC` and `Executable` live on
+// the protected `C4GroupEntry`, and reaching past the access specifier to read
+// them would make this section depend on internals no caller can see.
+//
+// The enumeration runs first and the per-entry queries second on purpose:
+// `EntryTime` and `EntryCRC32` search for their entry by name, which moves the
+// same cursor `FindNextEntry` is walking, so interleaving them truncates the
+// listing.
+inline std::vector<EntryCore> entry_cores(C4Group &group)
+{
+	std::vector<std::pair<std::string, std::pair<int32_t, int32_t>>> found_entries;
+	group.ResetSearch();
+	char found[_MAX_FNAME + 1];
+	size_t size = 0;
+	bool child = false;
+	while (group.FindNextEntry("*", found, &size, &child))
+		found_entries.emplace_back(found,
+			std::make_pair(static_cast<int32_t>(size), child ? 1 : 0));
+
+	std::vector<EntryCore> cores;
+	for (const auto &entry : found_entries)
+		cores.push_back(EntryCore{
+			entry.first,
+			entry.second.first,
+			entry.second.second,
+			group.EntryTime(entry.first.c_str()),
+			group.EntryCRC32(entry.first.c_str()),
+		});
+	return cores;
+}
+
+} // namespace c4group_rewrite
+
 // The C4Strings helpers are no longer lifted: `src/C4Strings.cpp` is linked
 // whole, so every caller here reaches the real definition rather than a copy of
 // it. That is strictly more faithful than the three `.inc` spans this replaced,
@@ -14059,6 +14154,129 @@ int main()
                         printf("%c", ch);
                 }
                 printf("\"");
+            }
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // 22b. A packed group's rewrite must not disturb an entry the caller never
+    //      touched. `C4Group::Save`/`Close` stream every entry back out through
+    //      `AppendEntry2StdFile` (src/C4Group.cpp:907-1050,1090+), so a stored
+    //      *child group* that was only ever added — never opened, never
+    //      modified — has to come back byte-for-byte, with its child flag,
+    //      packed flag, time, CRC state and executable bit intact.
+    arr_begin("c4group_raw_child_rewrite");
+    {
+        using namespace c4group_rewrite;
+
+        struct Case
+        {
+            const char *name;
+            // Whether the rewrite is reached through Save(true) or Close().
+            bool save_reopen;
+            // Whether the sibling entry is replaced before the rewrite, so the
+            // group is actually dirty.
+            bool modify_sibling;
+            // Whether the child itself is replaced, which *is* a modification
+            // and must materialize.
+            bool modify_child;
+        };
+        const Case cases[] = {
+            {"close_rewrite_preserves_untouched_child", false, true, false},
+            {"save_reopen_preserves_untouched_child", true, true, false},
+            {"clean_close_preserves_untouched_child", false, false, false},
+            {"modified_child_is_replaced", false, false, true},
+        };
+
+        for (const auto &c : cases)
+        {
+            sep();
+            const char *child_path = "RawChild.c4g";
+            const char *parent_path = "RawParent.c4g";
+            EraseFile(child_path);
+            EraseFile(parent_path);
+
+            // A real packed child, built and closed on its own so the parent
+            // only ever stores its bytes.
+            {
+                C4Group child;
+                child.Open(child_path, true);
+                static char payload[] = "child-payload";
+                child.Add("Inside.txt", payload, sizeof(payload) - 1, false, false, 1000, false);
+                child.Close();
+            }
+            const std::string standalone = read_file_bytes(child_path);
+
+            {
+                C4Group parent;
+                parent.Open(parent_path, true);
+                static char sibling[] = "sibling-v1";
+                parent.Add("Sibling.txt", sibling, sizeof(sibling) - 1, false, false, 2000, false);
+                // The child goes in as bytes with a pinned time. `Add(file,
+                // addAs)` would stamp the disk file's mtime instead, which
+                // would put a wall-clock value in the golden and stop it
+                // reproducing.
+                parent.Add(child_path, const_cast<char *>(standalone.data()), standalone.size(),
+                           true, false, 3000, false);
+                parent.Close();
+            }
+
+            // The baseline is the child *as the parent stores it*, not the
+            // standalone file: packing may differ, and the claim under test is
+            // that a rewrite leaves the stored bytes alone.
+            const std::string child_bytes = extract_entry_bytes(parent_path, child_path);
+
+            std::vector<EntryCore> cores;
+            bool child_preserved = false;
+            {
+                C4Group parent;
+                parent.Open(parent_path);
+                if (c.modify_sibling)
+                {
+                    static char sibling[] = "sibling-v2-longer";
+                    parent.Add("Sibling.txt", sibling, sizeof(sibling) - 1, false, false, 3000,
+                               false);
+                }
+                if (c.modify_child)
+                {
+                    static char replacement[] = "replaced-child";
+                    parent.Add(child_path, replacement, sizeof(replacement) - 1, true, false, 4000,
+                               false);
+                }
+                if (c.save_reopen)
+                    parent.Save(true);
+                else
+                    parent.Close();
+                if (c.save_reopen) parent.Close();
+            }
+
+            // Reopen and read the child back out, so the comparison is against
+            // what the rewritten container actually holds.
+            {
+                C4Group parent;
+                parent.Open(parent_path);
+                cores = entry_cores(parent);
+                parent.Close();
+            }
+            const std::string rewritten = extract_entry_bytes(parent_path, child_path);
+            child_preserved = !rewritten.empty() && rewritten == child_bytes;
+
+            EraseFile(child_path);
+            EraseFile(parent_path);
+
+            printf("{\"name\":\"%s\",\"save_reopen\":%d,\"modify_sibling\":%d,"
+                   "\"modify_child\":%d,\"child_bytes_preserved\":%d,\"entries\":[",
+                   c.name, c.save_reopen ? 1 : 0, c.modify_sibling ? 1 : 0,
+                   c.modify_child ? 1 : 0, child_preserved ? 1 : 0);
+            for (size_t i = 0; i < cores.size(); ++i)
+            {
+                const EntryCore &core = cores[i];
+                printf("%s{\"name\":\"%s\",\"size\":%d,\"child\":%d,"
+                       "\"time\":%u,\"crc\":%u}",
+                       i ? "," : "", core.name.c_str(), core.size, core.child,
+                       core.time, core.crc);
             }
             printf("]}");
         }
