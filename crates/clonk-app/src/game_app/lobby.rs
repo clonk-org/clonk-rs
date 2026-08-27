@@ -3380,6 +3380,31 @@ impl GameApp {
     /// `Closed` outcome carries no answer: the body-click activation both C++
     /// platforms disagree about resolves the prompt and broadcasts nothing.
     pub(crate) fn poll_lobby_ready_check_notification(&mut self) -> Result<(), EngineError> {
+        // A body click asks for the window without answering, so this runs
+        // before the outcome check and does not depend on one.
+        // `Application.NotifyUserIfInactive` is C++'s only attention request
+        // and it is `pWindow->FlashWindow()` (`StdApp.h:283-288`); the port
+        // raises rather than flashes, because it is answering a click that
+        // already said "come back to the game".
+        if self
+            .lobby_ready_check_continuation
+            .as_ref()
+            .is_some_and(crate::ready_check_notification::ReadyCheckContinuation::take_attention)
+        {
+            self.pending_window_attention = true;
+            // `Screen::ShowDialog` puts a shown dialog on top of the stack;
+            // the port's equivalent is the end of `message_dialogs`, so a
+            // raise is a move to the back rather than a re-show.
+            if let Some(index) = self.message_dialogs.iter().position(|dialog| {
+                matches!(
+                    &dialog.continuation,
+                    MessageDialogContinuation::LobbyReadyCheck { .. }
+                )
+            }) {
+                let dialog = self.message_dialogs.remove(index);
+                self.message_dialogs.push(dialog);
+            }
+        }
         let Some(outcome) = self
             .lobby_ready_check_continuation
             .as_ref()

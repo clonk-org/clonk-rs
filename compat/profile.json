@@ -312,6 +312,20 @@
       "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
     },
     {
+      "id": "ctrl-ready-check-toast-body",
+      "area": "control",
+      "summary": "Clicking the ready-check notification body answers neither yes nor no: the port raises the window and leaves the prompt open and answerable. C++ has no single behaviour to revert to, because its two toast backends disagree \u2014 libnotify registers the reserved \"default\" action against Activated(), which is Close(true) and broadcasts C4PacketReadyCheck::Ready, while a WinRT body click still carries IToastActivatedEventArgs and so reaches OnAction(\"\"), which is Close(action == IDS_DLG_YES) and broadcasts NotReady. The same gesture therefore submits opposite answers on the two platforms. The buttons themselves are unaffected and answer exactly as they do natively; only the body click differs, and it submits nothing.",
+      "cited_in": [
+        "crates/clonk-app/src/ready_check_notification.rs:50",
+        "crates/clonk-app/src/game_app/lobby.rs:3382"
+      ],
+      "cpp_reference": "C4Network2.cpp:185-193; C4ToastLibNotify.cpp:45; C4ToastWinRT.cpp:113-121",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "clonk-org/clonk-rs#1210"
+    },
+    {
       "id": "transport-definition-transfer-limit",
       "area": "transport",
       "summary": "Network.MaxLoadFileSize defaults to 256 MiB in normal mode rather than C++'s 100 MiB so large classic definition families remain transferable; the LegacyClonk profile restores 100 MiB, and any explicitly configured host limit wins in either profile.",

@@ -1560,6 +1560,11 @@ fn run() -> Result<()> {
                     if app.take_user_attention_request() {
                         window.request_user_attention(Some(UserAttentionType::Informational));
                     }
+                    // A notification body click already said "come back to the
+                    // game", so this raises rather than asking to be noticed.
+                    if std::mem::take(&mut app.pending_window_attention) {
+                        window.focus_window();
+                    }
                     deliver_desktop_notifications(
                         &mut app,
                         |id, notification| {
@@ -2832,6 +2837,7 @@ impl GameApp {
             pending_local_lobby_countdown_echoes: VecDeque::new(),
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
             ready_check_toasts_enabled: load_ready_check_toasts_enabled(paths),
+            pending_window_attention: false,
             pending_desktop_notifications: VecDeque::new(),
             pending_desktop_notification_dismissals: VecDeque::new(),
             live_ready_check_notification: None,

@@ -48,9 +48,17 @@ impl NotificationActions {
 /// What the user did with a shown notification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NotificationActivation {
-    /// The notification body was clicked without choosing an action. Both
-    /// platforms report this separately from the buttons, and it means "the
-    /// user came back to the game", not "yes".
+    /// The notification body was clicked without choosing an action.
+    ///
+    /// It means "the user came back to the game", and the port takes that
+    /// literally: it raises the window and leaves the question open. C++ has
+    /// no single behaviour to mirror — libnotify routes the body through
+    /// `Activated()`, which is `Close(true)` (`C4ToastLibNotify.cpp:45`,
+    /// `C4Network2.cpp:185-188`), while a WinRT body click still carries
+    /// `IToastActivatedEventArgs` and so takes `OnAction("")`, which is
+    /// `Close(false)` (`C4ToastWinRT.cpp:113-121`, `C4Network2.cpp:190-193`).
+    /// The same gesture therefore broadcasts Ready on one platform and
+    /// NotReady on the other; answering neither is the port's own choice.
     Default,
     Chosen(NotificationAction),
 }
@@ -194,6 +202,10 @@ pub(crate) struct ReadyCheckContinuation {
     claimed: Arc<AtomicBool>,
     outcome: Arc<Mutex<Option<ReadyCheckOutcome>>>,
     shown: Arc<Mutex<Option<NotificationId>>>,
+    /// A pending "bring the game forward", set by a body click and consumed by
+    /// the app's poll. Separate from `outcome` because it is not an answer and
+    /// must not end the prompt.
+    attention: Arc<AtomicBool>,
 }
 
 impl ReadyCheckContinuation {
@@ -202,6 +214,7 @@ impl ReadyCheckContinuation {
             claimed: Arc::new(AtomicBool::new(false)),
             outcome: Arc::new(Mutex::new(None)),
             shown: Arc::new(Mutex::new(None)),
+            attention: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -261,8 +274,14 @@ impl ReadyCheckContinuation {
         self.claim(ReadyCheckOutcome::Answered(ready), sink)
     }
 
-    /// A notification activation arrived. `Default` closes without answering,
-    /// matching what the platforms mean by clicking the body.
+    /// A notification activation arrived. Returns whether this call resolved
+    /// the prompt, which a body click never does.
+    ///
+    /// The buttons answer and close. The body asks for the window and leaves
+    /// the prompt exactly as it was — toast still up, dialog still open and
+    /// still answerable — so a user who clicks the toast to *look* at the game
+    /// does not lose the question by doing so. A body click after the prompt
+    /// resolved requests nothing: there is no dialog left to raise.
     pub(crate) fn activate(
         &self,
         activation: NotificationActivation,
@@ -275,9 +294,22 @@ impl ReadyCheckContinuation {
             NotificationActivation::Chosen(NotificationAction::No) => {
                 ReadyCheckOutcome::Answered(false)
             }
-            NotificationActivation::Default => ReadyCheckOutcome::Closed,
+            NotificationActivation::Default => {
+                if !self.resolved() {
+                    self.attention.store(true, Ordering::Release);
+                }
+                return false;
+            }
         };
         self.claim(outcome, sink)
+    }
+
+    /// Takes the pending "bring the game forward" request, if one is pending.
+    ///
+    /// Consuming it here rather than leaving a flag set means one body click
+    /// raises the window once, however many polls run before the next one.
+    pub(crate) fn take_attention(&self) -> bool {
+        self.attention.swap(false, Ordering::AcqRel)
     }
 
     /// The dialog closed, the countdown expired, or the lobby tore down. Any
@@ -402,14 +434,26 @@ mod tests {
             Some(ReadyCheckOutcome::Answered(false))
         );
 
-        // Clicking the body is "come back to the game", not "yes": it closes
-        // without submitting an answer.
+        // Clicking the body is "come back to the game". It asks for the
+        // window, leaves the toast up and leaves the question open, so the
+        // dialog it raises is still answerable.
         let sink = FakeSink::default();
         let continuation = ReadyCheckContinuation::new();
         continuation.show(&sink, &labels);
-        assert!(continuation.activate(NotificationActivation::Default, &sink));
-        assert_eq!(continuation.outcome(), Some(ReadyCheckOutcome::Closed));
-        assert_eq!(sink.hidden(), vec![NotificationId(1)]);
+        assert!(!continuation.activate(NotificationActivation::Default, &sink));
+        assert_eq!(continuation.outcome(), None);
+        assert!(sink.hidden().is_empty(), "the prompt is still live");
+        assert!(continuation.take_attention(), "the window was asked for");
+        assert!(
+            !continuation.take_attention(),
+            "one body click is one raise"
+        );
+
+        // A body click after the prompt resolved is inert: there is no dialog
+        // left to raise, so nothing is requested.
+        assert!(continuation.answer(true, &sink));
+        assert!(!continuation.activate(NotificationActivation::Default, &sink));
+        assert!(!continuation.take_attention());
 
         // The in-window dialog answering hides the toast...
         let sink = FakeSink::default();
