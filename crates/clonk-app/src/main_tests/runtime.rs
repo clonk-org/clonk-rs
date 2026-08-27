@@ -88,7 +88,7 @@ fn tap_runtime_key(app: &mut GameApp, key: VirtualKeyCode) {
 }
 
 fn startup_player_focus(app: &GameApp) -> clonk_frontend::startup_plrsel::PlrSelControl {
-    app.startup_player_dialog
+    app.startup.player_dialog
         .as_ref()
         .expect("player dialog")
         .focused_control()
@@ -98,7 +98,7 @@ fn selected_options_control_set(
     app: &GameApp,
     device: clonk_frontend::startup_options_controls::ControlDevice,
 ) -> usize {
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_ref()
         .unwrap()
         .controls()
@@ -516,7 +516,7 @@ fn console_open_real_scenario_reaches_running() {
         thread::sleep(Duration::from_millis(2));
     }
     runtime_assert_eq!(app.active_scenario.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(scenario_path.as_path()));
-    assert!(app.startup_dialog_fade.is_none());
+    assert!(app.startup.dialog_fade.is_none());
     reset_cached_app_paths();
 }
 
@@ -2087,7 +2087,7 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
         thread::sleep(Duration::from_millis(2));
     }
     assert!(matches!(app.mode, AppMode::Menu));
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    assert_eq!(app.startup.view, StartupView::MainMenu);
     assert!(app.loading_state.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
@@ -2960,7 +2960,7 @@ fn player_shift_tab_wraps_and_continues_backwards() {
     let mut app = new_classic_menu_app(640, 480);
     let mut dialog = PlrSelController::new(1);
     dialog.resize(640, 480);
-    app.startup_player_dialog = Some(dialog);
+    app.startup.player_dialog = Some(dialog);
     app.replace_startup_view(StartupView::PlayerSelection);
     app.test_modifiers(ModifiersState::SHIFT);
 
@@ -2981,7 +2981,7 @@ fn player_shift_tab_covers_back_list_and_crew_edges() {
     let mut app = new_classic_menu_app(640, 480);
     let mut dialog = PlrSelController::new(1);
     dialog.resize(640, 480);
-    app.startup_player_dialog = Some(dialog);
+    app.startup.player_dialog = Some(dialog);
     app.replace_startup_view(StartupView::PlayerSelection);
 
     runtime_assert_eq!(startup_player_focus(&app) => PlrSelControl::PlayerList);
@@ -3006,7 +3006,7 @@ fn player_shift_tab_covers_back_list_and_crew_edges() {
 fn player_typeahead_and_apps_route_through_selected_row() {
     let player = |name: &str| runtime_fixture!(player_selection: name.to_string(), String::new());
     let mut app = new_classic_menu_app(640, 480);
-    app.startup_player_models = ["Thomas", "Ada", "tina", "Tori"]
+    app.startup.player_models = ["Thomas", "Ada", "tina", "Tori"]
         .map(player)
         .into_iter()
         .collect();
@@ -3014,16 +3014,16 @@ fn player_typeahead_and_apps_route_through_selected_row() {
 
     for (character, expected) in [('T', 2), ('T', 3), ('t', 0)] {
         app.test_text_input(character);
-        runtime_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").selected_index() => Some(expected));
+        runtime_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").selected_index() => Some(expected));
     }
     app.test_text_input('T');
     let (selected, anchor) = app
-        .startup_player_dialog
+        .startup.player_dialog
         .test_ref()
         .keyboard_context_target()
         .test_value();
     assert_eq!(selected, 2);
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_pointer_position(Some(GuiPoint::new(639.0, 479.0)));
 
@@ -3145,7 +3145,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
     let selector = app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .test_value();
@@ -3157,7 +3157,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
 
     for _ in 0..6 {
         let actions = app
-            .startup_player_properties_dialog
+            .startup.player_properties_dialog
             .test_mut()
             .controller
             .handle_key_down(KeyCode::Tab);
@@ -3179,7 +3179,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         ),
     ] {
         let actions = app
-            .startup_player_properties_dialog
+            .startup.player_properties_dialog
             .test_mut()
             .controller
             .handle_key_down(key);
@@ -3189,13 +3189,13 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         );
     }
     let actions = app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Enter);
     app.process_startup_player_properties_actions(actions);
     let selector = app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
         .test_value();
@@ -3212,7 +3212,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
     );
 
     let actions = app
-        .startup_player_properties_dialog
+        .startup.player_properties_dialog
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
@@ -3238,7 +3238,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
     runtime_assert_eq!(
-        app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).expect("selector reopens at the persisted location").current_location_index() =>
+        app.startup.player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).expect("selector reopens at the persisted location").current_location_index() =>
             0,
         "C++ keeps the close-time config row in memory even when disk persistence fails \
              (`C4FileSelDlg.cpp:575-580`)",
@@ -3250,7 +3250,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
 fn player_new_properties_enter_f2_and_insert_open_the_modal() {
     let mut app = new_real_classic_menu_app(640, 480);
     let model = runtime_fixture!(player_selection: "Entry Player".to_string(), "entry".to_string());
-    app.startup_player_files.push(StartupPlayerFile {
+    app.startup.player_files.push(StartupPlayerFile {
         path: PathBuf::from("Entry Player.c4p"),
         file_name: "Entry Player.c4p".to_string(),
         player_file: PlayerFile {
@@ -3259,7 +3259,7 @@ fn player_new_properties_enter_f2_and_insert_open_the_modal() {
         },
         render_model: model.clone(),
     });
-    app.startup_player_models.push(model);
+    app.startup.player_models.push(model);
     app.open_player_selection_dialog();
 
     app.process_player_dialog_actions(vec![
@@ -3267,24 +3267,24 @@ fn player_new_properties_enter_f2_and_insert_open_the_modal() {
     ])
     .test_value();
     runtime_assert!(
-        matches!(app.startup_player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New));
+        matches!(app.startup.player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New));
     );
     let mut frame = vec![0; 640 * 480 * 4];
     app.test_render(&mut frame);
-    app.startup_player_properties_dialog = None;
+    app.startup.player_properties_dialog = None;
 
     for key in [VirtualKeyCode::Enter, VirtualKeyCode::F2] {
         app.test_key(key, ElementState::Pressed);
         runtime_assert!(
-            matches!(app.startup_player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 }));
+            matches!(app.startup.player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 }));
         );
-        app.startup_player_properties_dialog = None;
+        app.startup.player_properties_dialog = None;
         app.test_key(key, ElementState::Released);
     }
 
     app.test_key(VirtualKeyCode::Insert, ElementState::Pressed);
     runtime_assert!(
-        matches!(app.startup_player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New));
+        matches!(app.startup.player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New));
     );
 }
 
@@ -3312,7 +3312,7 @@ fn options_program_focus_traverses_every_control_without_a_boundary() {
             ElementState::Pressed,
         )
         .unwrap_or_else(|error| panic!("focus {target:?}: {error}"));
-        runtime_assert_eq!(app.startup_options_dialog.as_ref().expect("options state").focused_program_control() => Some(target));
+        runtime_assert_eq!(app.startup.options_dialog.as_ref().expect("options state").focused_program_control() => Some(target));
     }
 
     app.handle_gamepad_direction(
@@ -3321,14 +3321,14 @@ fn options_program_focus_traverses_every_control_without_a_boundary() {
         ElementState::Pressed,
     )
     .test_value();
-    runtime_assert_eq!(app.startup_options_dialog.as_ref().unwrap().focused_program_control() => None);
+    runtime_assert_eq!(app.startup.options_dialog.as_ref().unwrap().focused_program_control() => None);
     app.handle_gamepad_direction(
         GamepadSlot::new(0),
         ControlButton::Left,
         ElementState::Pressed,
     )
     .test_value();
-    runtime_assert_eq!(app.startup_options_dialog.as_ref().unwrap().focused_program_control() => Some(OptionsProgramFocusTarget::AdvancedButton));
+    runtime_assert_eq!(app.startup.options_dialog.as_ref().unwrap().focused_program_control() => Some(OptionsProgramFocusTarget::AdvancedButton));
 }
 
 #[test]
@@ -3469,7 +3469,7 @@ fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
     let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
     wait_for_menu(&mut app);
     app.open_options_menu();
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_mut()
         .test_value()
         .program_mut()
@@ -3502,7 +3502,7 @@ fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
     assert_eq!(reset.get_in(Some("Graphics"), "Scale"), None);
     assert!(app.configuration_reset_requested);
     assert!(app.take_exit_request());
-    assert_eq!(app.startup_view, StartupView::Options);
+    assert_eq!(app.startup.view, StartupView::Options);
 }
 
 #[test]
@@ -3523,7 +3523,7 @@ fn options_ctrl_tab_traverses_all_six_live_sheets_without_a_boundary() {
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("open {expected:?}: {error}"));
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-        runtime_assert_eq!(app.startup_options_dialog.as_ref().expect("options dialog").active_sheet() => expected);
+        runtime_assert_eq!(app.startup.options_dialog.as_ref().expect("options dialog").active_sheet() => expected);
     }
 }
 
@@ -3540,7 +3540,7 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
         3,
         app.config.gamepad_gui_control,
     );
-    let dialog = app.startup_options_dialog.test_mut();
+    let dialog = app.startup.options_dialog.test_mut();
     *dialog.controls_mut() = controls;
     dialog.restore_sheet(OptionsSheet::Keyboard);
 
@@ -3560,7 +3560,7 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
     app.test_key(VirtualKeyCode::Digit1, ElementState::Pressed);
     runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 3);
 
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_mut()
         .test_value()
         .restore_sheet(OptionsSheet::Gamepad);
@@ -3590,7 +3590,7 @@ fn options_control_set_hotkeys_do_not_leak_through_modals() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
-    let dialog = app.startup_options_dialog.test_mut();
+    let dialog = app.startup.options_dialog.test_mut();
     dialog.restore_sheet(OptionsSheet::Keyboard);
     assert!(dialog.controls_mut().select_set(ControlDevice::Keyboard, 3));
     app.test_modifiers(ModifiersState::ALT);
@@ -3619,7 +3619,7 @@ fn options_close_reports_disk_write_failure() {
     ))))
     .test_value();
 
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    assert_eq!(app.startup.view, StartupView::MainMenu);
     let error = app.message_dialogs.last().test_value();
     runtime_assert_eq!(
         error.state.caption() => "Configuration error";
@@ -3647,7 +3647,7 @@ fn options_language_loads_real_de_and_selection_reloads_and_persists() {
     wait_for_menu(&mut app);
     app.open_options_menu();
 
-    let program = app.startup_options_dialog.test_ref().program();
+    let program = app.startup.options_dialog.test_ref().program();
     runtime_assert_eq!(
         program.language_text => "DE - Deutsch";
         program.language_info => "Original-Sprachpaket von RedWolf Design.";
@@ -3684,7 +3684,7 @@ fn options_language_loads_real_de_and_selection_reloads_and_persists() {
     })
     .test_value();
 
-    let program = app.startup_options_dialog.test_ref().program();
+    let program = app.startup.options_dialog.test_ref().program();
     runtime_assert_eq!(
         program.language => "US";
         program.language_text => "US - English";
@@ -3743,15 +3743,15 @@ fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
                 .handle_key(key, ElementState::Released)
                 .unwrap_or_else(|error| panic!("modified {key:?} up: {error}"));
         }
-        assert_eq!(checkbox.startup_view, StartupView::Options);
-        runtime_assert_eq!(checkbox.startup_options_dialog.as_ref().expect("Options model").active_sheet() => OptionsSheet::Sound, "modified Up/Down must not switch sheets");
+        assert_eq!(checkbox.startup.view, StartupView::Options);
+        runtime_assert_eq!(checkbox.startup.options_dialog.as_ref().expect("Options model").active_sheet() => OptionsSheet::Sound, "modified Up/Down must not switch sheets");
     }
 
     checkbox.test_modifiers(ModifiersState::empty());
     tap_runtime_key(&mut checkbox, VirtualKeyCode::Tab);
     tap_runtime_key(&mut checkbox, VirtualKeyCode::Tab);
-    runtime_assert_eq!(checkbox.startup_options_dialog.as_ref().expect("Options model").focused_sound_checkbox() => Some(SoundCheckboxId::FrontendSoundEffects));
-    let before_checkbox = checkbox.startup_options_dialog.test_ref().sound().clone();
+    runtime_assert_eq!(checkbox.startup.options_dialog.as_ref().expect("Options model").focused_sound_checkbox() => Some(SoundCheckboxId::FrontendSoundEffects));
+    let before_checkbox = checkbox.startup.options_dialog.test_ref().sound().clone();
     for modifiers in modifier_masks {
         checkbox.test_modifiers(modifiers);
         for key in [
@@ -3767,13 +3767,13 @@ fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
                 .handle_key(key, ElementState::Released)
                 .unwrap_or_else(|error| panic!("modified {key:?} up: {error}"));
         }
-        assert_eq!(checkbox.startup_view, StartupView::Options);
-        runtime_assert_eq!(checkbox.startup_options_dialog.as_ref().expect("Options model").sound() => &before_checkbox, "modified Space must not toggle the focused checkbox");
+        assert_eq!(checkbox.startup.view, StartupView::Options);
+        runtime_assert_eq!(checkbox.startup.options_dialog.as_ref().expect("Options model").sound() => &before_checkbox, "modified Space must not toggle the focused checkbox");
     }
 
     checkbox.test_modifiers(ModifiersState::SUPER);
     checkbox.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    runtime_assert_ne!(checkbox.startup_options_dialog.as_ref().expect("Options model").sound() => &before_checkbox);
+    runtime_assert_ne!(checkbox.startup.options_dialog.as_ref().expect("Options model").sound() => &before_checkbox);
 
     let mut back = new_running_sandbox_app();
     back.return_to_menu();
@@ -3795,7 +3795,7 @@ fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
             back.handle_key(key, ElementState::Released)
                 .unwrap_or_else(|error| panic!("modified Back {key:?} up: {error}"));
         }
-        runtime_assert_eq!(back.startup_view => StartupView::Options, "modified Enter/Space must not activate Back");
+        runtime_assert_eq!(back.startup.view => StartupView::Options, "modified Enter/Space must not activate Back");
     }
 }
 
@@ -4000,7 +4000,7 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
     assert!(ada.exists());
-    assert_eq!(app.startup_player_files.len(), 1);
+    assert_eq!(app.startup.player_files.len(), 1);
 
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::DeletePlayer(0),
@@ -4010,10 +4010,10 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
         .test_value();
     assert!(!ada.exists());
     assert!(app.message_dialogs.is_empty());
-    assert!(app.startup_player_files.is_empty());
-    assert!(app.startup_player_models.is_empty());
+    assert!(app.startup.player_files.is_empty());
+    assert!(app.startup.player_models.is_empty());
     runtime_assert_eq!(
-        app.startup_player_dialog.as_ref().expect("player controller").selected_index() => None;
+        app.startup.player_dialog.as_ref().expect("player controller").selected_index() => None;
         Config::load(paths.config_file()).expect("reload player config").get_in(Some("General"), "Participants") => Some("");
     );
 
@@ -4040,7 +4040,7 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
         failure.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK;
         failure.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR;
     );
-    assert!(app.startup_player_files.is_empty());
+    assert!(app.startup.player_files.is_empty());
     reset_cached_app_paths();
 }
 

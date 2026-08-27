@@ -97,7 +97,7 @@ fn n1_repository_paths() -> (tempfile::TempDir, EnvGuard, AppPaths) {
 
 fn n1_joined_client_app() -> GameApp {
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     let (network, _events) = NetworkManager::test_stub_for_client_id(7);
     app.network = Some(network);
@@ -108,7 +108,7 @@ fn n1_joined_client_app() -> GameApp {
 
 fn n1_joined_client_app_with_commands() -> (GameApp, network::TestNetworkCommands) {
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     let (network, _events, commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(network);
@@ -237,27 +237,27 @@ fn n1_select_empty_startup_view(app: &mut GameApp, view: StartupView) {
     // Exhaustive arms make a future StartupView addition update the all-root
     // regressions rather than silently escaping the audit.
     match view {
-        StartupView::MainMenu => app.startup_view = StartupView::MainMenu,
-        StartupView::ScenarioBrowser => app.startup_view = StartupView::ScenarioBrowser,
+        StartupView::MainMenu => app.startup.view = StartupView::MainMenu,
+        StartupView::ScenarioBrowser => app.startup.view = StartupView::ScenarioBrowser,
         StartupView::NetworkLobby => {
-            app.startup_view = StartupView::NetworkLobby;
+            app.startup.view = StartupView::NetworkLobby;
             app.classic_host_lobby = None;
         }
         StartupView::NetworkGame => {
-            app.startup_view = StartupView::NetworkGame;
+            app.startup.view = StartupView::NetworkGame;
             app.startup_network_dialog = None;
         }
         StartupView::Options => {
-            app.startup_view = StartupView::Options;
-            app.startup_options_dialog = None;
+            app.startup.view = StartupView::Options;
+            app.startup.options_dialog = None;
         }
         StartupView::About => {
-            app.startup_view = StartupView::About;
-            app.startup_about_dialog = None;
+            app.startup.view = StartupView::About;
+            app.startup.about_dialog = None;
         }
         StartupView::PlayerSelection => {
-            app.startup_view = StartupView::PlayerSelection;
-            app.startup_player_dialog = None;
+            app.startup.view = StartupView::PlayerSelection;
+            app.startup.player_dialog = None;
         }
     }
 }
@@ -1922,7 +1922,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     })
     .test_value();
 
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert!(app.definition_selector.is_none());
     main_assert!(app.staged_network_host_scenario.is_none());
@@ -1935,7 +1935,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     main_assert_eq!(dialog.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.definition_selector.is_none());
 }
 
@@ -2053,7 +2053,7 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     main_assert!(app.definition_selector.is_none());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.handle_menu_input(|_| start()).test_value();
     main_assert!(app.message_dialogs.is_empty());
@@ -2293,7 +2293,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         n1_gamepad_button(GuiButtonClass::High, ElementState::Released),
     ]);
     main_assert!(app.definition_selector.is_none());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.open_definition_selector(scenario.clone()).test_value();
     app.test_cursor(PhysicalPosition::new(10.0, 10.0));
@@ -2306,7 +2306,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     main_assert!(app.definition_selector_pointer_capture);
     app.test_left_button(ElementState::Released);
     main_assert!(!app.definition_selector_pointer_capture);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.open_definition_selector(scenario.clone()).test_value();
     app.test_touch(TouchPhase::Started, GuiPoint::new(10.0, 10.0));
@@ -2452,7 +2452,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
         clonk_frontend::startup_netdlg::NetDlgAction::CreateGame,
     ])
     .test_value();
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.scenario_game_options.context() => GameOptionContext::NetworkHostSelector);
     main_assert!(app.network.is_none());
@@ -2477,7 +2477,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     app.scensel_do_back().test_value();
     main_assert_eq!(app.menu_state.stack.len() => 2);
     main_assert_eq!(app.menu_state.book_caption() => "Outer Folder");
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.open_definition_selector(target.clone()).test_value();
     main_assert_eq!(app.pending_definition_selection.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
@@ -2491,13 +2491,13 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     ])
     .test_value();
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.scensel_do_back().test_value();
     main_assert_eq!(app.menu_state.stack.len() => 1);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     app.scensel_do_back().test_value();
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(n1_expect(&app.startup_network_dialog, "same retained NetDlg").join_address() => "remembered.example:11112");
     main_assert!(app.startup_network_connection.is_none());
 
@@ -2513,7 +2513,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     ])
     .test_value();
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.startup_network_connection.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_lobby.is_none());
@@ -2651,7 +2651,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     let (sender, receiver) = mpsc::channel();
     app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost, None, None)
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_transition_active());
     let join_before = app
         .startup_network_dialog
@@ -2664,7 +2664,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
         clonk_frontend::startup_netdlg::NetDlgAction::CreateGame,
     ])
     .test_value();
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(n1_expect(&app.startup_network_dialog, "same transition NetDlg").join_address() => join_before);
     let reported_host_error = "host preparation failed: initial host resources could not be published: failed to publish System resource /missing/planet/System.c4g: host C4Group could not be read: No such file or directory (os error 2)";
     sender
@@ -2675,10 +2675,10 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     app.poll_startup_network_connection().test_value();
     main_assert!(!app.startup_network_transition_active());
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost));
-    main_assert_eq!(app.startup_scenario_back_dialog => None);
+    main_assert_eq!(app.startup.scenario_back_dialog => None);
     assert_startup_error_log(
         &app,
         &format!("Unable to start network session: {reported_host_error}"),
@@ -2729,9 +2729,9 @@ fn unstaged_host_connection_returns_to_host_selector_with_error_log() {
         StartupNetworkPurpose::StagedHost,
     ));
     app.poll_startup_network_connection().test_value();
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
-    main_assert_ne!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_ne!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network_lobby.is_none());
     main_assert!(app.network.is_none(), "headless listener must be dropped");
     main_assert!(app.network_mode.is_none());
@@ -2772,7 +2772,7 @@ fn failed_host_staging_returns_to_host_selector_with_error_log() {
     // Failed OpenGame reconstructs the startup dialog and Error Log without
     // terminating (src/C4Application.cpp:373-405,438-450; src/C4Startup.cpp:274-307).
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost));
     main_assert!(app.staged_network_host_scenario.is_none());
@@ -2855,7 +2855,7 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
     persist_config_value(&paths, "General", "LanguageEx", "DE").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     main_assert!(
-        !app.startup_player_models
+        !app.startup.player_models
             .iter()
             .any(|player| player.activated),
         "regression requires a raw participant omitted by discovery"
@@ -3154,7 +3154,7 @@ fn classic_host_regular_scenario_never_warns_about_restore_rows() {
 #[test]
 fn client_start_and_abort_report_the_cpp_host_only_error() {
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
 
     if let Some(lobby) = app.network_lobby.as_mut() {
@@ -3495,7 +3495,7 @@ fn client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
         let (network, _events) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(network);
         app.network_mode = Some(NetworkMode::Client(client_network_settings()));
-        app.startup_view = StartupView::NetworkLobby;
+        app.startup.view = StartupView::NetworkLobby;
         app.last_startup_dialog = StartupDialog::NetworkGame;
         app.mode = AppMode::Loading;
         app.show_reached_network_start_wait().test_value();
@@ -3507,7 +3507,7 @@ fn client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
         }
 
         main_assert!(matches!(app.mode, AppMode::Menu));
-        main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+        main_assert_eq!(app.startup.view => StartupView::NetworkGame);
         main_assert!(app.network.is_none());
         main_assert!(app.network_mode.is_none());
         main_assert!(app.network_start_wait.is_none());
@@ -3527,7 +3527,7 @@ fn client_host_timeout_during_final_init_aborts_startup() {
         message_client(0, b"Oracle Host"),
         message_client(7, b"Client"),
     ]);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.last_startup_dialog = StartupDialog::NetworkGame;
     app.mode = AppMode::Loading;
     let (_sender, receiver) = mpsc::channel();
@@ -3560,7 +3560,7 @@ fn client_host_timeout_during_final_init_aborts_startup() {
     app.test_network_events();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
@@ -3636,7 +3636,7 @@ fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
 #[test]
 fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     let mut app = new_menu_app(640, 480);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
@@ -3749,10 +3749,10 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     app.sound.ui_log.clear();
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby, "KeyButtonDown only downs the button");
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby, "KeyButtonDown only downs the button");
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.network_lobby.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
@@ -3764,7 +3764,7 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         tab_to(&mut app, stop);
         app.sound.ui_log.clear();
         app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-        main_assert_eq!(app.startup_view => StartupView::MainMenu, "{stop:?}");
+        main_assert_eq!(app.startup.view => StartupView::MainMenu, "{stop:?}");
         main_assert!(app.network_lobby.is_none());
         main_assert!(app.sound.ui_log.is_empty(), "Escape stays silent");
     }
@@ -3826,7 +3826,7 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     n1_press_and_release_key(&mut app, VirtualKeyCode::Enter);
     main_assert_eq!(controller_focus(&mut app) => LobbyControl::Roster);
     main_assert!(app.sound.ui_log.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::NetworkLobby);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
 
     // Focus traversal skips Ready while resources load.
     let mut app = n1_joined_client_app();
@@ -4406,7 +4406,7 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
     let overflow = player_model("Overflow", true);
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
-    app.startup_player_files.push(StartupPlayerFile {
+    app.startup.player_files.push(StartupPlayerFile {
         path: PathBuf::from("A"),
         file_name: "A".to_string(),
         player_file: PlayerFile {
@@ -4415,19 +4415,19 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
         },
         render_model: alpha.clone(),
     });
-    app.startup_player_models.push(alpha);
+    app.startup.player_models.push(alpha);
     for index in 1..19 {
         let model = player_model(&format!("Inactive {index}"), false);
-        app.startup_player_files.push(StartupPlayerFile {
+        app.startup.player_files.push(StartupPlayerFile {
             path: PathBuf::from(format!("Inactive{index}.c4p")),
             file_name: format!("Inactive{index}.c4p"),
             player_file: PlayerFile::default(),
             render_model: model.clone(),
         });
-        app.startup_player_models.push(model);
+        app.startup.player_models.push(model);
     }
-    let overflow_index = app.startup_player_files.len();
-    app.startup_player_files.push(StartupPlayerFile {
+    let overflow_index = app.startup.player_files.len();
+    app.startup.player_files.push(StartupPlayerFile {
         path: PathBuf::from("Overflow.c4p"),
         file_name: "b".repeat(1023),
         player_file: PlayerFile {
@@ -4436,24 +4436,24 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
         },
         render_model: overflow.clone(),
     });
-    app.startup_player_models.push(overflow);
+    app.startup.player_models.push(overflow);
     app.selected_player_file = Some(PlayerFile {
         name: "Overflow".to_string(),
         ..PlayerFile::default()
     });
     app.open_player_selection_dialog();
     main_assert!(
-        !app.startup_player_files[overflow_index]
+        !app.startup.player_files[overflow_index]
             .render_model
             .activated
     );
-    main_assert!(!app.startup_player_models[overflow_index].activated);
+    main_assert!(!app.startup.player_models[overflow_index].activated);
     main_assert_eq!(app.selected_player_file.as_ref().map(|player| player.name.as_str()) => Some("Alpha"));
     main_assert_eq!(app.message_dialogs.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     let (actions, scroll_before) = {
-        let dialog = app.startup_player_dialog.test_mut();
+        let dialog = app.startup.player_dialog.test_mut();
         dialog.set_selected_index(Some(overflow_index));
         let scroll_before = dialog.list_scroll_offset();
         main_assert!(scroll_before > 0, "fixture must exercise a scrolled list");
@@ -4465,12 +4465,12 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
     app.process_player_dialog_actions(actions).test_value();
 
     main_assert!(
-        !app.startup_player_files[overflow_index]
+        !app.startup.player_files[overflow_index]
             .render_model
             .activated
     );
-    main_assert!(!app.startup_player_models[overflow_index].activated);
-    let dialog = app.startup_player_dialog.test_ref();
+    main_assert!(!app.startup.player_models[overflow_index].activated);
+    let dialog = app.startup.player_dialog.test_ref();
     main_assert_eq!(dialog.is_player_activated(overflow_index) => Some(false));
     main_assert_eq!(dialog.selected_index() => Some(overflow_index));
     main_assert_eq!(dialog.list_scroll_offset() => scroll_before);
@@ -4643,7 +4643,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
         pixels: vec![1],
         retained: None,
     };
-    app.startup_dialog_fade = Some(StartupDialogFade {
+    app.startup.dialog_fade = Some(StartupDialogFade {
         outgoing: None,
         incoming: StartupDialog::MainMenu,
         step: 0,
@@ -4664,7 +4664,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
     main_assert_eq!(app.startup_active_gamma() => clonk_graphics::GammaRamp::identity());
     main_assert!(app.menu_backdrop_cache.key.is_none());
     main_assert!(app.menu_backdrop_cache.pixels.is_empty());
-    main_assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup.dialog_fade.is_none());
 
     fs::write(
         paths.config_file(),
@@ -4693,7 +4693,7 @@ fn options_program_font_combos_accept_native_alt_open_bindings() {
             ElementState::Pressed,
         )
         .test_value();
-        main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().focused_program_control() => Some(expected));
+        main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().focused_program_control() => Some(expected));
     }
 
     app.test_modifiers(ModifiersState::ALT);
@@ -4709,7 +4709,7 @@ fn options_program_font_combos_accept_native_alt_open_bindings() {
         ElementState::Pressed,
     )
     .test_value();
-    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().focused_program_control() => Some(OptionsProgramFocusTarget::FontSizeCombo));
+    main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().focused_program_control() => Some(OptionsProgramFocusTarget::FontSizeCombo));
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     main_assert!(app.context_menu.is_some());
@@ -5434,7 +5434,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
 #[test]
 fn all_graphical_modes_produce_retained_scenes() {
     let mut menu = new_real_menu_app(320, 200);
-    menu.startup_dialog_fade = None;
+    menu.startup.dialog_fade = None;
     menu.graphics.set_runtime_sprite_filtering(1.0, false);
     menu.configure_native_startup_fonts(1.0, false);
     let menu_presentation = retained_test_presentation(&menu);
@@ -5488,7 +5488,7 @@ fn all_graphical_modes_produce_retained_scenes() {
 #[test]
 fn scale_native_text_keeps_logical_physical_painter_order() {
     let mut app = new_real_menu_app(320, 200);
-    app.startup_dialog_fade = None;
+    app.startup.dialog_fade = None;
     app.graphics.set_runtime_sprite_filtering(2.0, false);
     app.configure_native_startup_fonts(2.0, false);
     let presentation = GpuPresentation {

@@ -485,7 +485,7 @@ impl GameApp {
         &mut self,
         command: ScenselSearchContextCommand,
     ) -> Result<(), EngineError> {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+        if self.mode != AppMode::Menu || self.startup.view != StartupView::ScenarioBrowser {
             tracing::error!(?command, "stale scenario search context command");
             return Ok(());
         }
@@ -707,7 +707,7 @@ impl GameApp {
     pub(crate) fn close_scenario_browser(&mut self) {
         self.menu_state.abort_renaming();
         self.scensel.rename_pointer_focus = None;
-        match self.startup_scenario_back_dialog.take() {
+        match self.startup.scenario_back_dialog.take() {
             Some(StartupDialog::MainMenu) => {
                 // `SDID_Back` reuses the retained Main dialog, so the
                 // remembered ID remains the selector until a later explicit
@@ -755,7 +755,7 @@ impl GameApp {
         self.cancel_scenario_selector_discovery();
         self.menu_state.abort_renaming();
         self.close_context_menu_silently();
-        self.startup_player_properties_dialog = None;
+        self.startup.player_properties_dialog = None;
         self.game_option_input_dialog = None;
         self.league_signup_dialog = None;
         self.cancelled_league_signup_continuation = None;
@@ -767,7 +767,7 @@ impl GameApp {
         self.game_option_pointer_capture = false;
         self.game_option_consumed_keys.clear();
         self.scensel.mode = selector_mode;
-        self.startup_scenario_back_dialog = Some(match selector_mode {
+        self.startup.scenario_back_dialog = Some(match selector_mode {
             ScenarioSelectorMode::Local => StartupDialog::MainMenu,
             ScenarioSelectorMode::NetworkHost => StartupDialog::NetworkGame,
         });
@@ -775,8 +775,8 @@ impl GameApp {
         // the option buttons share (src/C4StartupNetDlg.cpp:838-845), so the
         // rebuilt control shows this session's values, not the file's.
         let values = self.scenario_game_option_values();
-        self.startup_view_flags.fair_crew = values.fair_crew;
-        self.startup_view_flags.record = values.record;
+        self.startup.view_flags.fair_crew = values.fair_crew;
+        self.startup.view_flags.record = values.record;
         self.recording_enabled = values.record && self.recordings_dir.is_some();
         self.scenario_game_options =
             GameOptionButtons::new(selector_mode.game_option_context(), values);

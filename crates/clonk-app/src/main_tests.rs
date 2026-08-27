@@ -914,14 +914,15 @@ fn wait_for_menu_impl(app: &mut GameApp, dismiss_first_player_dialog: bool) {
     if app.app_paths.is_none() && app.loader_error.is_some() {
         app.boot_loading = None;
         app.mode = AppMode::Menu;
-        app.startup_dialog_fade = None;
+        app.startup.dialog_fade = None;
         return;
     }
     for _ in 0..480 {
         if matches!(app.mode, AppMode::Menu) {
             if dismiss_first_player_dialog
                 && app
-                    .startup_player_properties_dialog
+                    .startup
+                    .player_properties_dialog
                     .as_ref()
                     .is_some_and(|pending| {
                         matches!(
@@ -934,7 +935,7 @@ fn wait_for_menu_impl(app: &mut GameApp, dismiss_first_player_dialog: bool) {
                     clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
                 ]);
             }
-            app.startup_dialog_fade = None;
+            app.startup.dialog_fade = None;
             return;
         }
         app.update().test_value();
@@ -1805,7 +1806,7 @@ fn published_definition_wire_names(prepared: &PreparedHostBootstrap) -> Vec<Vec<
 }
 
 fn install_test_classic_host_lobby(app: &mut GameApp) {
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.classic_host_lobby = Some(ClassicHostLobbyState {
         controller: ClassicGameLobby::new(
             LobbyRole::Host,
@@ -2484,7 +2485,7 @@ fn enter_about_licenses(app: &mut GameApp) {
     app.handle_mouse_button(ElementState::Pressed).test_value();
     app.handle_mouse_button(ElementState::Released).test_value();
     assert_eq!(
-        app.startup_about_dialog.as_ref().unwrap().current_page(),
+        app.startup.about_dialog.as_ref().unwrap().current_page(),
         clonk_frontend::startup_about_dlg::AboutPage::Licenses
     );
 }
@@ -2605,13 +2606,13 @@ fn running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
 
 fn assert_l038_browser_return(app: &GameApp, selector_mode: ScenarioSelectorMode) {
     assert!(matches!(app.mode, AppMode::Menu));
-    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+    assert_eq!(app.startup.view, StartupView::ScenarioBrowser);
     assert_eq!(app.scensel.mode, selector_mode);
     assert_eq!(
         app.last_startup_dialog,
         StartupDialog::ScenarioBrowser(selector_mode)
     );
-    assert_eq!(app.startup_scenario_back_dialog, None);
+    assert_eq!(app.startup.scenario_back_dialog, None);
     assert_eq!(
         app.menu_state.stack.len(),
         1,
@@ -2633,7 +2634,7 @@ fn attach_l040_network_dialog(app: &mut GameApp) {
     );
     dialog.set_text_font(&app.assets.clonk_fonts.as_deref().test_value().text);
     dialog.resize(800, 600);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(dialog);
     app.startup_game_search = None;
 }
@@ -3171,7 +3172,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         NetworkLobbyState::new(7, "Observer".to_string(), false)
             .with_preloading(false, LobbyLabels::default()),
     );
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     let resource = |resource_type: clonk_network::HostResourceType, id, name: &[u8]| {
         clonk_engine::NetworkResourceCore {
             resource_type: resource_type as u8,
@@ -4555,7 +4556,7 @@ struct RuntimeGlobalUiSnapshot {
 fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
     RuntimeGlobalUiSnapshot {
         mode: app.mode,
-        startup_view: app.startup_view,
+        startup_view: app.startup.view,
         exit_requested: app.exit_requested,
         status_text: app.status_text.clone(),
         message_dialogs: app

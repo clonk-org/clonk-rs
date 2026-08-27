@@ -1319,7 +1319,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     .test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.loading_state.is_none());
     main_assert!(app.definition_selector.is_none());
     main_assert!(app.status_text.is_empty());
@@ -1344,7 +1344,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     main_assert!(app.message_dialogs[0].state.has_pointer_hover());
     app.test_left_button(ElementState::Released);
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.status_text.is_empty());
 
     app.handle_menu_input(|_| {
@@ -1372,7 +1372,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     main_assert!(app.message_dialogs[0].state.has_pointer_hover());
     app.test_left_button(ElementState::Released);
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.loading_state.is_none());
     main_assert!(app.definition_selector.is_none());
     main_assert!(app.status_text.is_empty());
@@ -1663,7 +1663,7 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
         );
     app.open_player_selection_dialog();
     app.open_new_startup_player_properties();
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .test_mut()
         .controller
         .set_name("");
@@ -1671,11 +1671,11 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
     main_assert_eq!(app.message_dialogs.last().expect("empty-name modal").state.message() => "You must specify a player name!");
-    main_assert!(app.startup_player_properties_dialog.as_ref().is_some_and(|pending| pending.controller.validation_error().is_none()));
-    main_assert!(app.startup_player_files.is_empty());
+    main_assert!(app.startup.player_properties_dialog.as_ref().is_some_and(|pending| pending.controller.validation_error().is_none()));
+    main_assert!(app.startup.player_files.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .test_mut()
         .controller
         .set_name("Created");
@@ -1689,15 +1689,15 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
     main_assert!(created_group.read_file("Player.txt").is_ok());
     main_assert!(created_group.read_file("Portrait.png").is_ok());
     main_assert!(created_group.read_file("BigIcon.png").is_ok());
-    main_assert!(app.startup_player_properties_dialog.is_none());
-    main_assert_eq!(app.startup_player_files.len() => 1);
-    main_assert!(app.startup_player_files[0].render_model.activated);
-    main_assert_eq!(app.startup_player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => Some(0));
+    main_assert!(app.startup.player_properties_dialog.is_none());
+    main_assert_eq!(app.startup.player_files.len() => 1);
+    main_assert!(app.startup.player_files[0].render_model.activated);
+    main_assert_eq!(app.startup.player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => Some(0));
     main_assert_eq!(app.selected_player_file.as_ref().map(|player| player.name.as_str()) => Some("Created"));
     main_assert_eq!(Config::load(paths.config_file()).expect("reload config").get_in(Some("General"), "Participants") => Some(created.to_string_lossy().as_ref()));
 
     app.open_existing_startup_player_properties(0);
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .test_mut()
         .controller
         .set_name("Renamed");
@@ -1707,8 +1707,8 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
     let renamed = player_root.join("Renamed.c4p");
     main_assert!(!created.exists());
     main_assert!(renamed.is_file());
-    main_assert_eq!(app.startup_player_files[0].player_file.name => "Renamed");
-    main_assert!(app.startup_player_files[0].render_model.activated);
+    main_assert_eq!(app.startup.player_files[0].player_file.name => "Renamed");
+    main_assert!(app.startup.player_files[0].render_model.activated);
     main_assert_eq!(
         Config::load(paths.config_file())
             .expect("reload renamed config")
@@ -1727,18 +1727,18 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     let user_data = tempdir();
     let (_guard, paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
-    app.startup_player_properties_dialog = None;
+    app.startup.player_properties_dialog = None;
 
     let old = player_root.join("Old.c4p");
     fs::create_dir(&old).test_value();
     fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").test_value();
     persist_config_value(&paths, "General", "Participants", old.to_string_lossy()).test_value();
     app.refresh_startup_player_list();
-    main_assert_eq!(app.startup_player_files.len() => 1);
-    main_assert!(app.startup_player_files[0].render_model.activated);
+    main_assert_eq!(app.startup.player_files.len() => 1);
+    main_assert!(app.startup.player_files[0].render_model.activated);
 
     app.open_existing_startup_player_properties(0);
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .test_mut()
         .controller
         .set_name("Renamed");
@@ -1755,10 +1755,10 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     let renamed = player_root.join("Renamed.c4p");
     main_assert!(!old.exists());
     main_assert!(renamed.is_file(), "rename completed before group-open failed");
-    main_assert!(app.startup_player_properties_dialog.is_none(), "the properties form closes before the screen-owned error dialog");
-    main_assert!(app.startup_player_files.is_empty());
-    main_assert!(app.startup_player_models.is_empty());
-    let selector = app.startup_player_dialog.test_ref();
+    main_assert!(app.startup.player_properties_dialog.is_none(), "the properties form closes before the screen-owned error dialog");
+    main_assert!(app.startup.player_files.is_empty());
+    main_assert!(app.startup.player_models.is_empty());
+    let selector = app.startup.player_dialog.test_ref();
     main_assert!(selector.player_activations().is_empty());
     main_assert_eq!(selector.selected_index() => None);
     main_assert!(app.selected_player_file.is_none());
@@ -1777,9 +1777,9 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
-    main_assert!(app.startup_player_properties_dialog.is_none());
-    main_assert!(app.startup_player_files.is_empty());
-    main_assert_eq!(app.startup_player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => None);
+    main_assert!(app.startup.player_properties_dialog.is_none());
+    main_assert!(app.startup.player_files.is_empty());
+    main_assert_eq!(app.startup.player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => None);
 }
 
 #[test]
@@ -1789,7 +1789,7 @@ fn startup_player_properties_save_failure_modal_names_step_and_path() {
     let user_data = tempdir();
     let (_guard, paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
-    app.startup_player_properties_dialog = None;
+    app.startup.player_properties_dialog = None;
 
     let old = player_root.join("Old.c4p");
     fs::create_dir(&old).test_value();
@@ -1797,7 +1797,7 @@ fn startup_player_properties_save_failure_modal_names_step_and_path() {
     persist_config_value(&paths, "General", "Participants", old.to_string_lossy()).test_value();
     app.refresh_startup_player_list();
     app.open_existing_startup_player_properties(0);
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .test_mut()
         .controller
         .set_name("Renamed");
@@ -2073,7 +2073,7 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
         StartupView::Options,
         StartupView::About,
     ] {
-        app.startup_view = view;
+        app.startup.view = view;
         app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
         app.test_key(VirtualKeyCode::F9, ElementState::Released);
         main_assert_eq!(
@@ -2392,13 +2392,13 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     let warning = app.message_dialogs.last().test_value();
     main_assert_eq!(warning.state.buttons() => MessageDialogButtons::OK_CANCEL);
     main_assert_eq!(warning.state.focused_button() => Some(MessageDialogButton::Cancel), "the dangerous action defaults to Cancel");
-    main_assert!(app.startup_options_advanced_dialog.is_none());
+    main_assert!(app.startup.options_advanced_dialog.is_none());
     app.finish_message_dialog(MessageDialogResult::Cancel)
         .test_value();
     main_assert_eq!(fs::read(paths.config_file()).expect("config after warning cancel") => before_warning);
 
     {
-        let options = app.startup_options_dialog.test_mut();
+        let options = app.startup.options_dialog.test_mut();
         options.restore_sheet(OptionsSheet::Network);
         options
             .network_mut()
@@ -2414,7 +2414,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         before_editor_open,
         "opening Advanced must not persist or rewrite Options configuration"
     );
-    let controller = &app.startup_options_advanced_dialog.test_ref().controller;
+    let controller = &app.startup.options_advanced_dialog.test_ref().controller;
     main_assert_eq!(controller.labels().caption => "Erweiterte Einstellungen");
     main_assert_eq!(controller.labels().save => "&Speichern");
     main_assert_eq!(controller.labels().cancel => "Abbrechen");
@@ -2458,10 +2458,10 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(app.startup_options_advanced_dialog.is_some());
+    main_assert!(app.startup.options_advanced_dialog.is_some());
     app.test_key(VirtualKeyCode::KeyS, ElementState::Pressed);
     app.test_modifiers(ModifiersState::empty());
-    main_assert!(app.startup_options_advanced_dialog.is_none());
+    main_assert!(app.startup.options_advanced_dialog.is_none());
     main_assert_eq!(
         Config::load(paths.config_file())
             .expect("config after Alt+S normalization")
@@ -2469,7 +2469,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         Some("0"),
         "Advanced Save canonicalizes existing typed values even when untouched"
     );
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("Options recreated after Alt+S").active_sheet() => OptionsSheet::Network);
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("Options recreated after Alt+S").active_sheet() => OptionsSheet::Network);
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
         .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
@@ -2500,10 +2500,10 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         false,
     )
     .test_value();
-    main_assert!(app.startup_options_advanced_dialog.is_some());
+    main_assert!(app.startup.options_advanced_dialog.is_some());
 
     {
-        let controller = &mut app.startup_options_advanced_dialog.test_mut().controller;
+        let controller = &mut app.startup.options_advanced_dialog.test_mut().controller;
         while controller.focus()
             != clonk_frontend::startup_options_advanced::AdvancedConfigFocus::Save
         {
@@ -2537,7 +2537,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         true,
     )
     .test_value();
-    main_assert!(app.startup_options_advanced_dialog.is_some());
+    main_assert!(app.startup.options_advanced_dialog.is_some());
 
     app.process_sourced_gamepad_event_batch(
         [
@@ -2555,15 +2555,15 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         true,
     )
     .test_value();
-    main_assert!(app.startup_options_advanced_dialog.is_none());
-    main_assert_eq!(app.startup_view => StartupView::Options);
-    main_assert!(app.startup_options_dialog.is_some());
+    main_assert!(app.startup.options_advanced_dialog.is_none());
+    main_assert_eq!(app.startup.view => StartupView::Options);
+    main_assert!(app.startup.options_dialog.is_some());
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
         .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
 
-    let controller = &mut app.startup_options_advanced_dialog.test_mut().controller;
+    let controller = &mut app.startup.options_advanced_dialog.test_mut().controller;
     main_assert!(controller.set_value("General", "Name", AdvancedConfigValue::Text("New name".to_string()),));
     main_assert!(controller.set_value("General", "FPS", AdvancedConfigValue::Bool(true)));
     main_assert!(controller.set_value("General", "Record", AdvancedConfigValue::Bool(true),));
@@ -2578,17 +2578,17 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
         .test_value();
 
-    main_assert!(app.startup_options_advanced_dialog.is_none());
-    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert!(app.startup.options_advanced_dialog.is_none());
+    main_assert_eq!(app.startup.view => StartupView::Options);
     main_assert_eq!(app.graphics_smoke_level => 321);
     main_assert_eq!(app.config.mission_access.snapshot() => "Secret;Beta");
     main_assert!(!app.config.show_folder_maps);
-    main_assert!(app.startup_view_flags.record);
+    main_assert!(app.startup.view_flags.record);
     main_assert_eq!(app.recording_enabled => app.recordings_dir.is_some());
-    main_assert!(app.startup_view_flags.fair_crew);
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("recreated Options dialog").active_sheet() => OptionsSheet::Network);
+    main_assert!(app.startup.view_flags.fair_crew);
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("recreated Options dialog").active_sheet() => OptionsSheet::Network);
     main_assert!(
-        !app.startup_options_dialog
+        !app.startup.options_dialog
             .as_ref()
             .expect("recreated Options dialog")
             .sound()
@@ -2632,7 +2632,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         "normal Options persistence must not undo the advanced binding"
     );
     let options_before_cancel = {
-        let options = app.startup_options_dialog.test_mut();
+        let options = app.startup.options_dialog.test_mut();
         options.network_mut().set_text(
             NetworkTextField::LocalName,
             "Keep this unsaved edit".to_string(),
@@ -2646,7 +2646,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         .test_value();
     main_assert_eq!(fs::read(paths.config_file()).expect("config after cancel-path open") => before_cancel);
     main_assert!(app
-        .startup_options_advanced_dialog
+        .startup.options_advanced_dialog
         .as_mut()
         .expect("cancel-path editor")
         .controller
@@ -2656,7 +2656,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
             AdvancedConfigValue::Text("Discard me".to_string()),
         ));
     let cancel = app
-        .startup_options_advanced_dialog
+        .startup.options_advanced_dialog
         .test_ref()
         .controller
         .layout()
@@ -2667,8 +2667,8 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     );
     app.test_touch(TouchPhase::Started, cancel_point);
     app.test_touch(TouchPhase::Ended, cancel_point);
-    main_assert!(app.startup_options_advanced_dialog.is_none());
-    let options_after_cancel = app.startup_options_dialog.test_ref();
+    main_assert!(app.startup.options_advanced_dialog.is_none());
+    let options_after_cancel = app.startup.options_dialog.test_ref();
     main_assert_eq!(options_after_cancel as *const _ as usize => options_before_cancel);
     main_assert_eq!(options_after_cancel.active_sheet() => OptionsSheet::Network);
     main_assert_eq!(options_after_cancel.network().local_name => "Keep this unsaved edit");
@@ -2682,12 +2682,12 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     fs::create_dir(paths.config_file()).test_value();
     app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
         .test_value();
-    main_assert!(app.startup_options_advanced_dialog.is_some(), "a failed Save keeps the draft editor open");
+    main_assert!(app.startup.options_advanced_dialog.is_some(), "a failed Save keeps the draft editor open");
     main_assert_eq!(app.message_dialogs.last().expect("advanced save error dialog").state.caption() => "Fehler");
     main_assert!(app.status_text.is_empty());
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.startup_options_advanced_dialog.is_some());
+    main_assert!(app.startup.options_advanced_dialog.is_some());
     fs::remove_dir(paths.config_file()).test_value();
     reset_cached_app_paths();
 }
@@ -2851,7 +2851,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     app.test_cursor(point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert!(!app.startup_options_dialog.as_ref().expect("options dialog").program().show_log_timestamps, "checkbox toggles before the dialog closes");
+    main_assert!(!app.startup.options_dialog.as_ref().expect("options dialog").program().show_log_timestamps, "checkbox toggles before the dialog closes");
     main_assert_eq!(
         Config::load(paths.config_file())
             .expect("config before close")
@@ -2862,14 +2862,14 @@ fn options_dialog_saves_log_timestamps_when_closed() {
 
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    main_assert!(app.startup_options_dialog.as_ref().expect("options dialog").sound().frontend_sound_effects, "Ctrl+F3 leaves the classic checkbox visually stale");
+    main_assert!(app.startup.options_dialog.as_ref().expect("options dialog").sound().frontend_sound_effects, "Ctrl+F3 leaves the classic checkbox visually stale");
     main_assert!(!app.test_audio_ref().options.menu_sound_enabled, "live audio configuration remains authoritative");
     app.test_modifiers(ModifiersState::empty());
 
     {
         use clonk_frontend::startup_options_graphics::GraphicsDisplayMode;
         use clonk_frontend::startup_options_network::NetworkPortId;
-        let dialog = app.startup_options_dialog.as_mut().test_value();
+        let dialog = app.startup.options_dialog.as_mut().test_value();
         dialog
             .graphics_mut()
             .set_display_mode(GraphicsDisplayMode::Window);
@@ -2881,7 +2881,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         dialog.network_mut().nick = "Same Name".to_string();
         dialog.network_mut().hide_no_official_league_notice = true;
     }
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_mut()
         .test_value()
         .restore_sheet(clonk_frontend::startup_options_dlg::OptionsSheet::Sound);
@@ -2912,7 +2912,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     let config = Config::load(paths.config_file()).test_value();
     main_assert_eq!(config.get_in(Some("General"), "ShowLogTimestamps") => Some("0"));
     main_assert_eq!(config.get_in(Some("Sound"), "Sound") => Some("false"));

@@ -107,19 +107,19 @@ impl GameApp {
     /// startup input.
     pub(crate) fn joined_network_lobby_active(&self) -> bool {
         self.mode == AppMode::Menu
-            && self.startup_view == StartupView::NetworkLobby
+            && self.startup.view == StartupView::NetworkLobby
             && self.classic_host_lobby.is_none()
             && self.network_lobby.is_some()
     }
 
     pub(crate) fn classic_host_lobby_active(&self) -> bool {
         self.mode == AppMode::Menu
-            && self.startup_view == StartupView::NetworkLobby
+            && self.startup.view == StartupView::NetworkLobby
             && self.classic_host_lobby.is_some()
     }
 
     pub(crate) fn note_classic_lobby_non_pointer_input(&mut self) {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkLobby {
+        if self.mode != AppMode::Menu || self.startup.view != StartupView::NetworkLobby {
             return;
         }
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
@@ -158,7 +158,7 @@ impl GameApp {
     pub(crate) fn acknowledge_initial_lobby_status_if_ready(&mut self) {
         if !self.initial_lobby_status_ack_pending
             || self.network_lobby.is_none()
-            || self.startup_view != StartupView::NetworkLobby
+            || self.startup.view != StartupView::NetworkLobby
         {
             return;
         }
@@ -2386,7 +2386,7 @@ impl GameApp {
             return Ok(false);
         }
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::NetworkLobby
+            || self.startup.view != StartupView::NetworkLobby
             || !self.message_dialogs.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
@@ -2496,7 +2496,7 @@ impl GameApp {
             return Ok(false);
         }
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::NetworkLobby
+            || self.startup.view != StartupView::NetworkLobby
             || !self.message_dialogs.is_empty()
             || self.game_over_dialog.is_some()
             || self.context_menu.is_some()
@@ -3531,7 +3531,7 @@ impl GameApp {
             |view| lobby_chat_scroll_caret_in_view(view, &layout, &fonts.text),
             |submission| {
                 self.process_lobby_action(LobbyAction::SubmitMessage(submission))?;
-                Ok(self.startup_view == StartupView::NetworkLobby
+                Ok(self.startup.view == StartupView::NetworkLobby
                     && self
                         .network_lobby
                         .as_ref()
@@ -3544,7 +3544,7 @@ impl GameApp {
         if completed_lines && self.chat.lobby_drag_anchor.is_some() {
             self.chat.lobby_drag_anchor = Some(0);
         }
-        let still_active = self.startup_view == StartupView::NetworkLobby
+        let still_active = self.startup.view == StartupView::NetworkLobby
             && self
                 .network_lobby
                 .as_ref()
@@ -3570,7 +3570,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::NetworkLobby
+            || self.startup.view != StartupView::NetworkLobby
             || self.network_lobby.is_none()
         {
             return Ok(false);
@@ -3709,7 +3709,7 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.startup_view != StartupView::NetworkLobby
+        if self.startup.view != StartupView::NetworkLobby
             || self.classic_host_lobby_active()
             || self.network_lobby.is_none()
         {
@@ -4058,7 +4058,7 @@ impl GameApp {
     }
 
     pub(crate) fn cancel_classic_lobby_interaction(&mut self) -> bool {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkLobby {
+        if self.mode != AppMode::Menu || self.startup.view != StartupView::NetworkLobby {
             return false;
         }
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
@@ -4080,7 +4080,7 @@ impl GameApp {
     }
 
     pub(crate) fn classic_lobby_pointer_left(&mut self) -> bool {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkLobby {
+        if self.mode != AppMode::Menu || self.startup.view != StartupView::NetworkLobby {
             return false;
         }
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
@@ -5345,7 +5345,7 @@ impl GameApp {
                 text: message.clone(),
                 color,
             });
-        } else if self.startup_view == StartupView::NetworkLobby {
+        } else if self.startup.view == StartupView::NetworkLobby {
             if let Some(lobby) = self.network_lobby.as_mut() {
                 lobby.push_log(LobbyLogLine {
                     text: message,
@@ -5783,7 +5783,7 @@ impl GameApp {
             .as_ref()
             .map(|lobby| lobby.controller.chat_edit_view().clone())
             .or_else(|| {
-                (self.startup_view == StartupView::NetworkLobby)
+                (self.startup.view == StartupView::NetworkLobby)
                     .then(|| {
                         self.network_lobby
                             .as_ref()
@@ -5796,7 +5796,7 @@ impl GameApp {
     pub(crate) fn install_active_lobby_chat_view(&mut self, view: LobbyChatEditView) {
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.set_chat_edit_view(view);
-        } else if self.startup_view == StartupView::NetworkLobby {
+        } else if self.startup.view == StartupView::NetworkLobby {
             if let Some(lobby) = self.network_lobby.as_mut() {
                 lobby.chat_edit = view.clone();
                 lobby.controller.set_chat_edit_view(view);
@@ -5930,7 +5930,7 @@ impl GameApp {
                 Ok(if host {
                     self.classic_host_lobby_active()
                 } else {
-                    self.startup_view == StartupView::NetworkLobby
+                    self.startup.view == StartupView::NetworkLobby
                         && self
                             .network_lobby
                             .as_ref()
@@ -5949,7 +5949,7 @@ impl GameApp {
         let still_active = if host {
             self.classic_host_lobby_active()
         } else {
-            self.startup_view == StartupView::NetworkLobby
+            self.startup.view == StartupView::NetworkLobby
                 && self
                     .network_lobby
                     .as_ref()
@@ -6090,7 +6090,7 @@ impl GameApp {
                     self.chat.lobby_drag_anchor = Some(0);
                 }
                 if !self.classic_host_lobby_active()
-                    && self.startup_view == StartupView::NetworkLobby
+                    && self.startup.view == StartupView::NetworkLobby
                     && self.network_lobby.is_some()
                 {
                     return self.process_lobby_action(LobbyAction::SubmitMessage(text));
@@ -7348,7 +7348,7 @@ impl GameApp {
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
-        self.startup_player_properties_dialog = None;
+        self.startup.player_properties_dialog = None;
     }
 
     pub(crate) fn tick_network_lobby_countdown(&mut self) -> bool {
@@ -7600,7 +7600,7 @@ impl GameApp {
                 }
             }
             GameOptionAction::RecordPreferenceChanged(enabled) => {
-                self.startup_view_flags.record = enabled;
+                self.startup.view_flags.record = enabled;
                 self.recording_enabled = enabled && self.recordings_dir.is_some();
                 self.persist_game_option_value("General", "Record", i32::from(enabled).to_string());
             }

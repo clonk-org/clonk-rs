@@ -134,19 +134,20 @@ impl GameApp {
             self.process_network_dialog_actions(actions)?;
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             let mut encoded = [0_u8; 4];
             let text = character.encode_utf8(&mut encoded);
-            if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+            if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                 pending.controller.handle_text_input(text);
             }
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             let mut encoded = [0_u8; 4];
             let text = character.encode_utf8(&mut encoded);
             let actions = self
-                .startup_player_properties_dialog
+                .startup
+                .player_properties_dialog
                 .as_mut()
                 .map(|pending| pending.controller.handle_text_input(text))
                 .unwrap_or_default();
@@ -202,7 +203,7 @@ impl GameApp {
                 .unwrap_or_default();
             return self.process_classic_lobby_actions(actions);
         }
-        if self.startup_view == StartupView::NetworkLobby {
+        if self.startup.view == StartupView::NetworkLobby {
             let mut encoded = [0_u8; 4];
             let text = character.encode_utf8(&mut encoded).to_string();
             let actions = self
@@ -215,7 +216,7 @@ impl GameApp {
                 .unwrap_or_default();
             return self.process_joined_lobby_controller_actions(actions);
         }
-        if self.startup_view == StartupView::ScenarioBrowser
+        if self.startup.view == StartupView::ScenarioBrowser
             && self.menu_state.rename_edit.is_some()
         {
             let mut encoded = [0_u8; 4];
@@ -224,7 +225,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.startup_view == StartupView::ScenarioBrowser && self.menu_state.search_focused() {
+        if self.startup.view == StartupView::ScenarioBrowser && self.menu_state.search_focused() {
             let mut encoded = [0_u8; 4];
             if self
                 .menu_state
@@ -234,31 +235,33 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.startup_view == StartupView::ScenarioBrowser {
+        if self.startup.view == StartupView::ScenarioBrowser {
             if self.scensel.discovery.is_some() {
                 return Ok(());
             }
             self.handle_menu_input(|menu| menu.select_list_character(character))?;
             return Ok(());
         }
-        if self.startup_view == StartupView::PlayerSelection && self.startup_crew_rename.is_some() {
+        if self.startup.view == StartupView::PlayerSelection && self.startup.crew_rename.is_some() {
             let mut encoded = [0_u8; 4];
-            if let Some(rename) = self.startup_crew_rename.as_mut() {
+            if let Some(rename) = self.startup.crew_rename.as_mut() {
                 rename.edit.insert_text(character.encode_utf8(&mut encoded));
             }
             return Ok(());
         }
-        if self.startup_view == StartupView::PlayerSelection {
-            let actions = match self.startup_player_dialog.as_mut() {
+        if self.startup.view == StartupView::PlayerSelection {
+            let actions = match self.startup.player_dialog.as_mut() {
                 Some(dialog) if dialog.is_crew_mode() => dialog.handle_character(
                     character,
-                    self.startup_crew_models
+                    self.startup
+                        .crew_models
                         .iter()
                         .map(|crew| crew.name.as_str()),
                 ),
                 Some(dialog) => dialog.handle_character(
                     character,
-                    self.startup_player_models
+                    self.startup
+                        .player_models
                         .iter()
                         .map(|player| player.name.as_str()),
                 ),
@@ -269,7 +272,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.startup_view != StartupView::NetworkGame {
+        if self.startup.view != StartupView::NetworkGame {
             return Ok(());
         }
         let mut encoded = [0_u8; 4];
@@ -479,7 +482,7 @@ impl GameApp {
             });
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -487,12 +490,13 @@ impl GameApp {
                 }
             };
             let _ = self
-                .startup_options_advanced_dialog
+                .startup
+                .options_advanced_dialog
                 .as_mut()
                 .is_some_and(|pending| pending.controller.handle_wheel(native_delta));
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -500,7 +504,8 @@ impl GameApp {
                 }
             };
             let _ = self
-                .startup_player_properties_dialog
+                .startup
+                .player_properties_dialog
                 .as_mut()
                 .is_some_and(|pending| pending.controller.handle_wheel(native_delta));
             return Ok(());
@@ -620,7 +625,7 @@ impl GameApp {
             return self.handle_classic_lobby_wheel(amount);
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::NetworkLobby
+            && self.startup.view == StartupView::NetworkLobby
             && self.network_lobby.is_some()
         {
             let amount = match delta {
@@ -696,7 +701,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::PlayerSelection {
+        if self.mode == AppMode::Menu && self.startup.view == StartupView::PlayerSelection {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -708,7 +713,7 @@ impl GameApp {
             }
             let mut actions = Vec::new();
             let mut scrolled = false;
-            if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            if let Some(dialog) = self.startup.player_dialog.as_mut() {
                 if let Some(point) = dialog.pointer_position() {
                     let before = dialog.list_scroll_offset();
                     actions = dialog.handle_wheel(point, native_delta);
@@ -721,7 +726,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame {
+        if self.mode == AppMode::Menu && self.startup.view == StartupView::NetworkGame {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -743,7 +748,7 @@ impl GameApp {
             self.process_network_dialog_actions(actions)?;
             return Ok(());
         }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::About {
+        if self.mode == AppMode::Menu && self.startup.view == StartupView::About {
             let delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -757,7 +762,7 @@ impl GameApp {
             let actions = fonts
                 .as_deref()
                 .and_then(|fonts| {
-                    self.startup_about_dialog.as_mut().and_then(|dialog| {
+                    self.startup.about_dialog.as_mut().and_then(|dialog| {
                         dialog
                             .pointer_position()
                             .map(|point| dialog.handle_wheel(point, delta, fonts))
@@ -767,7 +772,7 @@ impl GameApp {
             self.process_about_dialog_actions(actions)?;
             return Ok(());
         }
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+        if self.mode != AppMode::Menu || self.startup.view != StartupView::ScenarioBrowser {
             return Ok(());
         }
         if self.scensel.discovery.is_some() {
@@ -883,7 +888,7 @@ impl GameApp {
         };
 
         let embedded_network_chat =
-            self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame;
+            self.mode == AppMode::Menu && self.startup.view == StartupView::NetworkGame;
         if !self.chat.external_dialog_visible && !embedded_network_chat {
             return Ok(false);
         }
@@ -2124,7 +2129,7 @@ impl GameApp {
                 // toggle, which changes FEMusic but leaves the retained
                 // checkbox stale.
                 if self.startup_options_dialog_is_active() {
-                    if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                    if let Some(dialog) = self.startup.options_dialog.as_mut() {
                         dialog.sync_frontend_music_from_f3(enabled);
                     }
                 }
@@ -3980,7 +3985,7 @@ impl GameApp {
         }
         if !message_dialog_was_open
             && self.mode == AppMode::Menu
-            && self.startup_view == StartupView::NetworkGame
+            && self.startup.view == StartupView::NetworkGame
             && key == VirtualKeyCode::F4
             && self.keyboard_modifiers == ModifiersState::CONTROL
             && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
@@ -4002,7 +4007,7 @@ impl GameApp {
         if self.handle_network_start_wait_key(key, state)? {
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             let modifiers = self.keyboard_modifiers;
             let ctrl = modifiers.control_key();
             let shift = modifiers.shift_key();
@@ -4014,14 +4019,15 @@ impl GameApp {
             let actions = if state == ElementState::Pressed && hotkey_modifiers {
                 context_menu_hotkey(key)
                     .and_then(|character| {
-                        self.startup_options_advanced_dialog
+                        self.startup
+                            .options_advanced_dialog
                             .as_mut()
                             .map(|pending| pending.controller.handle_hotkey(character))
                     })
                     .unwrap_or_default()
             } else if key == VirtualKeyCode::Tab {
                 if state == ElementState::Pressed {
-                    if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                    if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                         if edit_modifiers && ctrl {
                             pending.controller.select_relative_section(shift);
                         } else if edit_modifiers && !ctrl {
@@ -4038,7 +4044,7 @@ impl GameApp {
                     } else {
                         -10
                     };
-                    if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                    if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                         pending.controller.handle_integer_page_step(delta);
                     }
                 }
@@ -4047,7 +4053,7 @@ impl GameApp {
                 && state == ElementState::Pressed
                 && key == VirtualKeyCode::Backspace
             {
-                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                     pending
                         .controller
                         .handle_backspace_with_modifiers(ctrl, shift);
@@ -4057,7 +4063,7 @@ impl GameApp {
                 && state == ElementState::Pressed
                 && key == VirtualKeyCode::Delete
             {
-                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                     pending.controller.handle_delete(ctrl, shift);
                 }
                 Vec::new()
@@ -4079,13 +4085,13 @@ impl GameApp {
                     VirtualKeyCode::End => RenameEditCursorOperation::End,
                     _ => unreachable!(),
                 };
-                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                     pending.controller.move_edit_cursor(operation, ctrl, shift);
                 }
                 Vec::new()
             } else if state == ElementState::Pressed && control_only && key == VirtualKeyCode::KeyA
             {
-                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                     pending.controller.select_all_edit_text();
                 }
                 Vec::new()
@@ -4094,7 +4100,8 @@ impl GameApp {
                 && matches!(key, VirtualKeyCode::KeyC | VirtualKeyCode::KeyX)
             {
                 let selected = self
-                    .startup_options_advanced_dialog
+                    .startup
+                    .options_advanced_dialog
                     .as_ref()
                     .and_then(|pending| pending.controller.selected_edit_text())
                     .map(str::to_string);
@@ -4103,7 +4110,7 @@ impl GameApp {
                         .and_then(|mut clipboard| clipboard.set_text(selected))
                     {
                         Ok(()) if key == VirtualKeyCode::KeyX => {
-                            if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                            if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                                 pending.controller.delete_edit_selection();
                             }
                         }
@@ -4118,7 +4125,7 @@ impl GameApp {
             {
                 match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
                     Ok(text) => {
-                        if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                        if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                             pending.controller.handle_text_input(&text);
                         }
                     }
@@ -4128,7 +4135,8 @@ impl GameApp {
                 }
                 Vec::new()
             } else if let Some(gui_key) = unmodified.then(|| map_key_code(key)).flatten() {
-                self.startup_options_advanced_dialog
+                self.startup
+                    .options_advanced_dialog
                     .as_mut()
                     .map(|pending| match state {
                         ElementState::Pressed => pending.controller.handle_key_down(gui_key),
@@ -4141,7 +4149,7 @@ impl GameApp {
             self.process_options_advanced_actions(actions)?;
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             let c4_modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             if state == ElementState::Pressed
@@ -4149,7 +4157,8 @@ impl GameApp {
                 && key == VirtualKeyCode::F5
             {
                 let location = self
-                    .startup_player_properties_dialog
+                    .startup
+                    .player_properties_dialog
                     .as_ref()
                     .and_then(|pending| pending.controller.portrait_selector())
                     .filter(|selector| !selector.is_location_popup_open())
@@ -4175,7 +4184,8 @@ impl GameApp {
                 .then(|| context_menu_hotkey(key))
                 .flatten()
                 .and_then(|character| {
-                    self.startup_player_properties_dialog
+                    self.startup
+                        .player_properties_dialog
                         .as_mut()
                         .and_then(|pending| {
                             let selector_owns_hotkey = pending
@@ -4191,7 +4201,7 @@ impl GameApp {
                 && (c4_modifiers.is_empty() || c4_modifiers == ModifiersState::SHIFT);
             let alt_control_binding = c4_modifiers == ModifiersState::ALT
                 && gui_key.is_some_and(|gui_key| {
-                    self.startup_player_properties_dialog
+                    self.startup.player_properties_dialog
                         .as_ref()
                         .and_then(|pending| pending.controller.portrait_selector())
                         .is_some_and(|selector| {
@@ -4213,14 +4223,15 @@ impl GameApp {
                 && c4_modifiers.is_empty()
                 && matches!(key, VirtualKeyCode::Backspace | VirtualKeyCode::Delete)
             {
-                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
                     pending.controller.delete_name_char();
                 }
                 Vec::new()
             } else if let Some(actions) = portrait_hotkey_actions {
                 actions
             } else if exact_tab {
-                self.startup_player_properties_dialog
+                self.startup
+                    .player_properties_dialog
                     .as_mut()
                     .map(|pending| match state {
                         ElementState::Pressed => {
@@ -4233,7 +4244,8 @@ impl GameApp {
                     })
                     .unwrap_or_default()
             } else if c4_modifiers.is_empty() || alt_control_binding {
-                self.startup_player_properties_dialog
+                self.startup
+                    .player_properties_dialog
                     .as_mut()
                     .zip(gui_key)
                     .map(|(pending, gui_key)| match state {
@@ -4440,7 +4452,7 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::NetworkLobby
+            && self.startup.view == StartupView::NetworkLobby
             && self.network_lobby.is_some()
             && key == VirtualKeyCode::ContextMenu
             && self.keyboard_modifiers.is_empty()
@@ -4451,7 +4463,7 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::NetworkLobby
+            && self.startup.view == StartupView::NetworkLobby
             && self.network_lobby.is_some()
             && self.handle_joined_lobby_roster_key(key, state)?
         {
@@ -4483,12 +4495,12 @@ impl GameApp {
                 if self.handle_network_edit_key(key, state)? {
                     return Ok(());
                 }
-                if self.startup_view == StartupView::PlayerSelection
+                if self.startup.view == StartupView::PlayerSelection
                     && self.handle_startup_crew_rename_key(key, state)?
                 {
                     return Ok(());
                 }
-                if self.startup_view == StartupView::ScenarioBrowser {
+                if self.startup.view == StartupView::ScenarioBrowser {
                     if self.handle_scenario_rename_key(key, state)? {
                         return Ok(());
                     }
@@ -4728,7 +4740,7 @@ impl GameApp {
                     let no_shortcut_modifiers = (self.keyboard_modifiers
                         & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT))
                         .is_empty();
-                    if self.startup_view == StartupView::NetworkGame
+                    if self.startup.view == StartupView::NetworkGame
                         && key == VirtualKeyCode::F5
                         && no_shortcut_modifiers
                     {
@@ -4737,14 +4749,14 @@ impl GameApp {
                         ])?;
                         return Ok(());
                     }
-                    if self.startup_view == StartupView::PlayerSelection && no_shortcut_modifiers {
+                    if self.startup.view == StartupView::PlayerSelection && no_shortcut_modifiers {
                         if key == VirtualKeyCode::ContextMenu
                             && self.open_startup_player_context_menu(true)?
                         {
                             return Ok(());
                         }
                         let actions = self
-                            .startup_player_dialog
+                            .startup.player_dialog
                             .as_ref()
                             .map(|dialog| match key {
                                 VirtualKeyCode::Insert if !dialog.is_crew_mode() => {
@@ -4779,7 +4791,7 @@ impl GameApp {
                 // priority within its own dialog scope
                 // (C4StartupMainDlg.cpp:95-100). `SwitchToEditor` returning
                 // false leaves the key unconsumed.
-                if self.startup_view == StartupView::MainMenu
+                if self.startup.view == StartupView::MainMenu
                     && state == ElementState::Pressed
                     && key == VirtualKeyCode::F6
                     && (self.keyboard_modifiers
@@ -4793,7 +4805,7 @@ impl GameApp {
                     if self.handle_startup_dialog_key(gui_key, state)? {
                         return Ok(());
                     }
-                    match self.startup_view {
+                    match self.startup.view {
                         StartupView::ScenarioBrowser => match state {
                             ElementState::Pressed => match gui_key {
                                 // Dialog escape returns to the main screen
@@ -5416,7 +5428,7 @@ impl GameApp {
             let game_over_active = self.game_over_dialog_is_active();
             let screen_gamepad_open = gamepad_gui_control && gamepad == 0;
             let options_input_scope =
-                self.mode == AppMode::Menu && self.startup_view == StartupView::Options;
+                self.mode == AppMode::Menu && self.startup.view == StartupView::Options;
             let options_gamepad_open =
                 options_input_scope && self.gamepads.options_open_slot() == Some(source_slot);
             let eligible_gamepad_gui = screen_gamepad_open;
@@ -5490,13 +5502,13 @@ impl GameApp {
                 ClusterOwner::Definition
             } else if self.game_option_input_dialog.is_some() {
                 ClusterOwner::Input
-            } else if self.startup_player_properties_dialog.is_some() {
+            } else if self.startup.player_properties_dialog.is_some() {
                 if eligible_gamepad_gui {
                     ClusterOwner::Properties
                 } else {
                     ClusterOwner::Suppressed
                 }
-            } else if self.startup_options_advanced_dialog.is_some() {
+            } else if self.startup.options_advanced_dialog.is_some() {
                 if eligible_gamepad_gui {
                     ClusterOwner::Advanced
                 } else {
@@ -5505,7 +5517,7 @@ impl GameApp {
             } else if game_over_active {
                 ClusterOwner::GameOver
             } else if self.startup_dialog_fade_active()
-                && self.startup_player_properties_dialog.is_none()
+                && self.startup.player_properties_dialog.is_none()
             {
                 ClusterOwner::Suppressed
             } else {
@@ -5618,7 +5630,7 @@ impl GameApp {
                                     ClusterOwner::Input
                                 } else if self.league_signup_dialog.is_some() {
                                     ClusterOwner::LeagueSignup
-                                } else if self.startup_player_properties_dialog.is_some() {
+                                } else if self.startup.player_properties_dialog.is_some() {
                                     if eligible_gamepad_gui {
                                         ClusterOwner::Properties
                                     } else {
@@ -5627,7 +5639,7 @@ impl GameApp {
                                 } else if self.game_over_dialog_is_active() {
                                     ClusterOwner::GameOver
                                 } else if (self.startup_dialog_fade_active()
-                                    && self.startup_player_properties_dialog.is_none())
+                                    && self.startup.player_properties_dialog.is_none())
                                     || self.chat.external_dialog_visible
                                 {
                                     ClusterOwner::Suppressed
@@ -5765,19 +5777,19 @@ impl GameApp {
                                 continue;
                             }
                             let scenario_rename_active = self.mode == AppMode::Menu
-                                && self.startup_view == StartupView::ScenarioBrowser
+                                && self.startup.view == StartupView::ScenarioBrowser
                                 && self.menu_state.rename_edit.is_some();
                             let crew_rename_active = self.mode == AppMode::Menu
-                                && self.startup_view == StartupView::PlayerSelection
-                                && self.startup_crew_rename.is_some();
+                                && self.startup.view == StartupView::PlayerSelection
+                                && self.startup.crew_rename.is_some();
                             let rename_active = scenario_rename_active || crew_rename_active;
                             let rename_owns_raw_gui_button = eligible_gamepad_gui && rename_active;
                             let scenario_rename_owns_raw_gui_button =
                                 eligible_gamepad_gui && scenario_rename_active;
                             let options_owns_raw_gui_button = eligible_gamepad_gui
                                 && self.mode == AppMode::Menu
-                                && self.startup_view == StartupView::Options
-                                && self.startup_options_advanced_dialog.is_none();
+                                && self.startup.view == StartupView::Options
+                                && self.startup.options_advanced_dialog.is_none();
                             match event {
                                 GamepadEvent::GuiButton {
                                     class: GuiButtonClass::High,
@@ -5805,7 +5817,7 @@ impl GameApp {
                                 } if !eligible_gamepad_gui
                                     && self.mode == AppMode::Menu
                                     && matches!(
-                                        self.startup_view,
+                                        self.startup.view,
                                         StartupView::NetworkGame
                                             | StartupView::PlayerSelection
                                             | StartupView::Options
@@ -5858,7 +5870,8 @@ impl GameApp {
                                     ..
                                 } if options_owns_raw_gui_button => {
                                     let actions = self
-                                        .startup_options_dialog
+                                        .startup
+                                        .options_dialog
                                         .as_mut()
                                         .map(|dialog| match state {
                                             ElementState::Pressed => {
@@ -5880,7 +5893,8 @@ impl GameApp {
                                     ..
                                 } if options_owns_raw_gui_button => {
                                     let actions = if state == ElementState::Pressed {
-                                        self.startup_options_dialog
+                                        self.startup
+                                            .options_dialog
                                             .as_mut()
                                             .map(|dialog| dialog.handle_gamepad_high_down())
                                             .unwrap_or_default()
@@ -6209,23 +6223,24 @@ impl GameApp {
                     if let Some(wait) = self.network_start_wait.as_mut() {
                         wait.controller.cancel_interaction();
                     }
-                } else if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                } else if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                     pending.controller.cancel_interaction();
-                } else if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                } else if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
                     let actions = pending.controller.cancel_interaction();
                     self.process_startup_player_properties_actions(actions);
                 } else if self.mode == AppMode::Menu
-                    && self.startup_view == StartupView::NetworkLobby
+                    && self.startup.view == StartupView::NetworkLobby
                     && (self.classic_host_lobby.is_some() || self.network_lobby.is_some())
                 {
                     self.cancel_classic_lobby_interaction();
                 } else if self.mode == AppMode::Menu
-                    && self.startup_view == StartupView::ScenarioBrowser
+                    && self.startup.view == StartupView::ScenarioBrowser
                 {
                     self.scenario_game_options.cancel_interaction();
-                } else if self.mode == AppMode::Menu && self.startup_view == StartupView::Options {
+                } else if self.mode == AppMode::Menu && self.startup.view == StartupView::Options {
                     let actions = self
-                        .startup_options_dialog
+                        .startup
+                        .options_dialog
                         .as_mut()
                         .map(|dialog| dialog.handle_pointer_left())
                         .unwrap_or_default();
@@ -6260,13 +6275,14 @@ impl GameApp {
                         })
                         .unwrap_or_default();
                     self.process_network_start_wait_actions(actions)?;
-                } else if self.startup_options_advanced_dialog.is_some() {
+                } else if self.startup.options_advanced_dialog.is_some() {
                     let key = match class {
                         GuiButtonClass::Low => KeyCode::Space,
                         GuiButtonClass::High => KeyCode::Escape,
                     };
                     let actions = self
-                        .startup_options_advanced_dialog
+                        .startup
+                        .options_advanced_dialog
                         .as_mut()
                         .map(|pending| match state {
                             ElementState::Pressed => pending.controller.handle_key_down(key),
@@ -6274,9 +6290,10 @@ impl GameApp {
                         })
                         .unwrap_or_default();
                     self.process_options_advanced_actions(actions)?;
-                } else if self.startup_player_properties_dialog.is_some() {
+                } else if self.startup.player_properties_dialog.is_some() {
                     let actions = self
-                        .startup_player_properties_dialog
+                        .startup
+                        .player_properties_dialog
                         .as_mut()
                         .map(|pending| match (class, state) {
                             (GuiButtonClass::Low, ElementState::Pressed) => {
@@ -6332,7 +6349,7 @@ impl GameApp {
                 ) {
                     if self.gamepad_bindings.rebind_raw(target.set, id, raw_key) {
                         let label = self.gamepad_bindings.key_label_for_set(target.set, id);
-                        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                        if let Some(dialog) = self.startup.options_dialog.as_mut() {
                             dialog.controls_mut().set_label(target, label);
                         }
                         self.finish_message_dialog(
@@ -6348,8 +6365,8 @@ impl GameApp {
                 .network_start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
-            || self.startup_options_advanced_dialog.is_some()
-            || self.startup_player_properties_dialog.is_some()
+            || self.startup.options_advanced_dialog.is_some()
+            || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
             || self.game_over_dialog_is_active() && self.running_chat_controller().is_none()
             || !matches!(self.mode, AppMode::Running)
@@ -6432,7 +6449,7 @@ impl GameApp {
                         button.index(),
                     ) {
                         let label = self.gamepad_bindings.key_label_for_set(target.set, id);
-                        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                        if let Some(dialog) = self.startup.options_dialog.as_mut() {
                             dialog.controls_mut().set_label(target, label);
                         }
                         self.finish_message_dialog(
@@ -6453,10 +6470,10 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -6536,9 +6553,9 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             if state == ElementState::Pressed {
-                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
                     match button {
                         ControlButton::Left => pending.controller.handle_focus_step(true),
                         ControlButton::Right => pending.controller.handle_focus_step(false),
@@ -6561,7 +6578,7 @@ impl GameApp {
             self.process_options_advanced_actions(Vec::new())?;
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             let key = match button {
                 ControlButton::Left => KeyCode::Left,
                 ControlButton::Right => KeyCode::Right,
@@ -6569,7 +6586,8 @@ impl GameApp {
                 ControlButton::Down => KeyCode::Down,
             };
             let actions = self
-                .startup_player_properties_dialog
+                .startup
+                .player_properties_dialog
                 .as_mut()
                 .map(|pending| match state {
                     ElementState::Pressed => pending.controller.handle_gamepad_direction(key),
@@ -6625,8 +6643,8 @@ impl GameApp {
             }
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::PlayerSelection
-            && self.startup_crew_rename.is_some()
+            && self.startup.view == StartupView::PlayerSelection
+            && self.startup.crew_rename.is_some()
         {
             if state == ElementState::Pressed
                 && matches!(button, ControlButton::Left | ControlButton::Right)
@@ -6635,7 +6653,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+        if self.mode == AppMode::Menu && self.startup.view == StartupView::ScenarioBrowser {
             if self.menu_state.rename_edit.is_some() {
                 if state == ElementState::Pressed
                     && matches!(button, ControlButton::Left | ControlButton::Right)
@@ -6680,7 +6698,7 @@ impl GameApp {
         if self.mode == AppMode::Menu
             && matches!(button, ControlButton::Left | ControlButton::Right)
             && matches!(
-                self.startup_view,
+                self.startup.view,
                 StartupView::NetworkGame
                     | StartupView::PlayerSelection
                     | StartupView::Options
@@ -6689,7 +6707,7 @@ impl GameApp {
         {
             if state == ElementState::Pressed {
                 let backwards = button == ControlButton::Left;
-                match self.startup_view {
+                match self.startup.view {
                     StartupView::NetworkGame => {
                         let actions = self
                             .startup_network_dialog
@@ -6700,7 +6718,8 @@ impl GameApp {
                     }
                     StartupView::PlayerSelection => {
                         let actions = self
-                            .startup_player_dialog
+                            .startup
+                            .player_dialog
                             .as_mut()
                             .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
                             .unwrap_or_default();
@@ -6708,7 +6727,8 @@ impl GameApp {
                     }
                     StartupView::Options => {
                         let actions = self
-                            .startup_options_dialog
+                            .startup
+                            .options_dialog
                             .as_mut()
                             .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
                             .unwrap_or_default();
@@ -6716,7 +6736,8 @@ impl GameApp {
                     }
                     StartupView::About => {
                         let actions = self
-                            .startup_about_dialog
+                            .startup
+                            .about_dialog
                             .as_mut()
                             .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
                             .unwrap_or_default();
@@ -6733,7 +6754,7 @@ impl GameApp {
                     if self.handle_startup_dialog_key(key, state)? {
                         return Ok(());
                     }
-                    match self.startup_view {
+                    match self.startup.view {
                         StartupView::ScenarioBrowser => match (state, key) {
                             _ if self.menu_state.current_map().is_some()
                                 && state == ElementState::Pressed
@@ -6848,7 +6869,7 @@ impl GameApp {
                 state,
             });
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             let key = match action {
                 GamepadActionType::Select => Some(KeyCode::Space),
                 GamepadActionType::Cancel => Some(KeyCode::Escape),
@@ -6856,7 +6877,8 @@ impl GameApp {
             };
             let actions = key
                 .and_then(|key| {
-                    self.startup_options_advanced_dialog
+                    self.startup
+                        .options_advanced_dialog
                         .as_mut()
                         .map(|pending| match state {
                             ElementState::Pressed => pending.controller.handle_key_down(key),
@@ -6867,9 +6889,10 @@ impl GameApp {
             self.process_options_advanced_actions(actions)?;
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             let actions = self
-                .startup_player_properties_dialog
+                .startup
+                .player_properties_dialog
                 .as_mut()
                 .map(|pending| match (action, state) {
                     (GamepadActionType::Select, ElementState::Pressed) => {
@@ -6898,7 +6921,7 @@ impl GameApp {
             return self.handle_classic_lobby_gamepad_action(action, state);
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::ScenarioBrowser
+            && self.startup.view == StartupView::ScenarioBrowser
             && self.menu_state.rename_edit.is_some()
         {
             // RenameEdit and Dialog bind the physical AnyHigh/AnyLow inputs,
@@ -6907,7 +6930,7 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::ScenarioBrowser
+            && self.startup.view == StartupView::ScenarioBrowser
             && self.scensel.discovery.is_some()
             && action == GamepadActionType::Select
         {
@@ -6916,7 +6939,7 @@ impl GameApp {
         match action {
             GamepadActionType::Select => match self.mode {
                 AppMode::Menu => {
-                    if self.startup_view == StartupView::ScenarioBrowser
+                    if self.startup.view == StartupView::ScenarioBrowser
                         && self.scenario_game_options.focused_button().is_some()
                     {
                         self.menu_state
@@ -6935,7 +6958,7 @@ impl GameApp {
                             return Ok(());
                         }
                     }
-                    if self.startup_view == StartupView::ScenarioBrowser
+                    if self.startup.view == StartupView::ScenarioBrowser
                         && self.menu_state.definition_checkbox_focused
                     {
                         if state == ElementState::Pressed
@@ -6945,7 +6968,7 @@ impl GameApp {
                         }
                         return Ok(());
                     }
-                    if self.startup_view == StartupView::ScenarioBrowser {
+                    if self.startup.view == StartupView::ScenarioBrowser {
                         match self.menu_state.dialog_focus() {
                             ScenselDialogFocus::Back => {
                                 if state == ElementState::Pressed {
@@ -6963,7 +6986,7 @@ impl GameApp {
                     if self.handle_startup_dialog_key(KeyCode::Enter, state)? {
                         return Ok(());
                     }
-                    match self.startup_view {
+                    match self.startup.view {
                         StartupView::ScenarioBrowser => match state {
                             ElementState::Pressed if self.menu_state.current_map().is_some() => {
                                 self.start_selected_map_scenario_from_ui()?
@@ -7439,10 +7462,11 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             let font = self.assets.clonk_fonts.as_deref().map(|fonts| &fonts.text);
             let actions = self
-                .startup_options_advanced_dialog
+                .startup
+                .options_advanced_dialog
                 .as_mut()
                 .map(|pending| match font {
                     Some(font) => pending
@@ -7455,10 +7479,11 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             let left_down = self.primary_pointer_left_down;
             let actions = self
-                .startup_player_properties_dialog
+                .startup
+                .player_properties_dialog
                 .as_mut()
                 .map(|pending| {
                     pending
@@ -7541,7 +7566,7 @@ impl GameApp {
                     self.pointer_left_unchecked();
                     return Ok(());
                 }
-                match self.startup_view {
+                match self.startup.view {
                     StartupView::ScenarioBrowser => {
                         self.menu_state.set_pointer_position(Some(point));
                         let actions = self.scenario_game_options.handle_pointer_move(point);
@@ -7576,11 +7601,12 @@ impl GameApp {
                     }
                     StartupView::PlayerSelection => {
                         if self
-                            .startup_crew_rename
+                            .startup
+                            .crew_rename
                             .as_ref()
                             .is_some_and(|rename| rename.edit.is_dragging())
                         {
-                            if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                            if let Some(dialog) = self.startup.player_dialog.as_mut() {
                                 dialog.set_pointer_position(Some(point));
                             }
                         }
@@ -7588,7 +7614,8 @@ impl GameApp {
                             return Ok(());
                         }
                         let actions = self
-                            .startup_player_dialog
+                            .startup
+                            .player_dialog
                             .as_mut()
                             .map(|dialog| dialog.handle_pointer_move(point))
                             .unwrap_or_default();
@@ -7628,7 +7655,8 @@ impl GameApp {
                     }
                     StartupView::Options => {
                         let actions = self
-                            .startup_options_dialog
+                            .startup
+                            .options_dialog
                             .as_mut()
                             .map(|dialog| dialog.handle_pointer_move(point))
                             .unwrap_or_default();
@@ -7638,7 +7666,8 @@ impl GameApp {
                     StartupView::About => {
                         let left_down = self.primary_pointer_left_down;
                         let actions = self
-                            .startup_about_dialog
+                            .startup
+                            .about_dialog
                             .as_mut()
                             .map(|dialog| {
                                 dialog.handle_pointer_move_with_left_down(point, left_down)
@@ -7740,7 +7769,7 @@ impl GameApp {
         if self.mode != AppMode::Running
             || !self.window_active
             || !self.message_dialogs.is_empty()
-            || self.startup_player_properties_dialog.is_some()
+            || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
             || self.context_menu.is_some()
             || self.game_option_input_dialog.is_some()
@@ -7772,7 +7801,7 @@ impl GameApp {
             && self.window_active
             && self.ingame_mouse_controls_owner(pointer.owner)
             && self.message_dialogs.is_empty()
-            && self.startup_player_properties_dialog.is_none()
+            && self.startup.player_properties_dialog.is_none()
             && self.definition_selector.is_none()
             && self.context_menu.is_none()
             && self.game_option_input_dialog.is_none()
@@ -7884,7 +7913,7 @@ impl GameApp {
             || self.mode != AppMode::Running
             || !self.window_active
             || !self.message_dialogs.is_empty()
-            || self.startup_player_properties_dialog.is_some()
+            || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
             || self.context_menu.is_some()
             || self.game_option_input_dialog.is_some()
@@ -9287,18 +9316,20 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             if button_state == ElementState::Pressed {
                 let point = self
-                    .startup_player_properties_dialog
+                    .startup
+                    .player_properties_dialog
                     .as_ref()
                     .and_then(|pending| pending.controller.pointer_position());
                 let actions = point
                     .and_then(|point| {
-                        self.startup_player_properties_dialog
+                        self.startup
+                            .player_properties_dialog
                             .as_mut()
                             .map(|pending| pending.controller.handle_pointer_right_down(point))
                     })
@@ -9411,7 +9442,7 @@ impl GameApp {
             return self.handle_classic_lobby_secondary_button(button_state);
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::NetworkLobby
+            && self.startup.view == StartupView::NetworkLobby
             && self.network_lobby.is_some()
         {
             return self.handle_network_lobby_secondary_button(button_state);
@@ -9419,7 +9450,7 @@ impl GameApp {
         match self.mode {
             AppMode::Menu => {
                 if button_state == ElementState::Pressed {
-                    match self.startup_view {
+                    match self.startup.view {
                         StartupView::MainMenu => {
                             self.open_startup_participants_context_menu()?;
                         }
@@ -9427,9 +9458,10 @@ impl GameApp {
                             self.open_scenario_search_context_menu(false)?;
                         }
                         StartupView::PlayerSelection => {
-                            if self.startup_crew_rename.is_some() {
+                            if self.startup.crew_rename.is_some() {
                                 let point = self
-                                    .startup_player_dialog
+                                    .startup
+                                    .player_dialog
                                     .as_ref()
                                     .and_then(|dialog| dialog.pointer_position());
                                 if let Some(point) = point.filter(|point| {
@@ -9608,10 +9640,10 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -9715,7 +9747,7 @@ impl GameApp {
         if self.startup_dialog_fade_active() {
             return Ok(());
         }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame {
+        if self.mode == AppMode::Menu && self.startup.view == StartupView::NetworkGame {
             if button_state == ElementState::Pressed {
                 let primary = primary_clipboard_text();
                 let fonts = self.assets.clonk_fonts.clone();
@@ -9737,7 +9769,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+        if self.mode == AppMode::Menu && self.startup.view == StartupView::ScenarioBrowser {
             if button_state == ElementState::Pressed {
                 if let Some(point) = self.menu_state.pointer_position() {
                     if self.scensel_search_char_pos(point, true).is_some() {
@@ -9753,12 +9785,13 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::PlayerSelection
-            && self.startup_crew_rename.is_some()
+            && self.startup.view == StartupView::PlayerSelection
+            && self.startup.crew_rename.is_some()
         {
             if button_state == ElementState::Pressed {
                 let point = self
-                    .startup_player_dialog
+                    .startup
+                    .player_dialog
                     .as_ref()
                     .and_then(|dialog| dialog.pointer_position());
                 if let Some(point) = point {
@@ -9772,7 +9805,7 @@ impl GameApp {
             return self.handle_classic_lobby_middle_button(button_state);
         }
         if self.mode == AppMode::Menu
-            && self.startup_view == StartupView::NetworkLobby
+            && self.startup.view == StartupView::NetworkLobby
             && self.network_lobby.is_some()
         {
             return self.handle_network_lobby_middle_button(button_state);
@@ -10852,15 +10885,17 @@ impl GameApp {
             self.process_network_start_wait_actions(actions)?;
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             let font = self.assets.clonk_fonts.as_deref().map(|fonts| &fonts.text);
             let point = self
-                .startup_options_advanced_dialog
+                .startup
+                .options_advanced_dialog
                 .as_ref()
                 .and_then(|pending| pending.controller.pointer_position());
             let actions = point
                 .and_then(|point| {
-                    self.startup_options_advanced_dialog
+                    self.startup
+                        .options_advanced_dialog
                         .as_mut()
                         .map(|pending| match (button_state, font) {
                             (ElementState::Pressed, Some(font)) => pending
@@ -10881,14 +10916,16 @@ impl GameApp {
             self.process_options_advanced_actions(actions)?;
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             let point = self
-                .startup_player_properties_dialog
+                .startup
+                .player_properties_dialog
                 .as_ref()
                 .and_then(|pending| pending.controller.pointer_position());
             let actions = point
                 .and_then(|point| {
-                    self.startup_player_properties_dialog
+                    self.startup
+                        .player_properties_dialog
                         .as_mut()
                         .map(|pending| match button_state {
                             ElementState::Pressed if left_double_click => {
@@ -11013,7 +11050,7 @@ impl GameApp {
                     }
                     return Ok(());
                 }
-                match self.startup_view {
+                match self.startup.view {
                     StartupView::NetworkGame => {
                         let Some(fonts) = self.assets.clonk_fonts.clone() else {
                             return Ok(());
@@ -11129,22 +11166,24 @@ impl GameApp {
                     }
                     StartupView::PlayerSelection => {
                         let point = self
-                            .startup_player_dialog
+                            .startup
+                            .player_dialog
                             .as_ref()
                             .and_then(|dialog| dialog.pointer_position());
                         let mut restore_rename_focus = None;
-                        if self.startup_crew_rename.is_some() {
+                        if self.startup.crew_rename.is_some() {
                             match (button_state, point) {
                                 (ElementState::Pressed, Some(point)) => {
                                     if self.handle_startup_crew_rename_pointer_down(point) {
                                         return Ok(());
                                     }
-                                    if let Some(rename) = self.startup_crew_rename.as_mut() {
+                                    if let Some(rename) = self.startup.crew_rename.as_mut() {
                                         rename.last_click = None;
                                         rename.ignore_pointer_up = false;
                                     }
                                     restore_rename_focus = self
-                                        .startup_player_dialog
+                                        .startup
+                                        .player_dialog
                                         .as_ref()
                                         .map(|dialog| dialog.focused_control());
                                 }
@@ -11157,14 +11196,15 @@ impl GameApp {
                             }
                         }
                         let scrollbar_captured = self
-                            .startup_player_dialog
+                            .startup
+                            .player_dialog
                             .as_ref()
                             .is_some_and(|dialog| dialog.scrollbar_pointer_captured());
                         let clicked_row = if scrollbar_captured {
                             None
                         } else {
                             point.and_then(|point| {
-                                let dialog = self.startup_player_dialog.as_ref()?;
+                                let dialog = self.startup.player_dialog.as_ref()?;
                                 let layout = dialog.layout();
                                 let in_name_column = point.x
                                     >= (layout.list_client.x + layout.item_height) as f32
@@ -11188,7 +11228,8 @@ impl GameApp {
                             false
                         };
                         let mut actions = self
-                            .startup_player_dialog
+                            .startup
+                            .player_dialog
                             .as_mut()
                             .and_then(|dialog| {
                                 point.map(|point| match button_state {
@@ -11199,7 +11240,8 @@ impl GameApp {
                             .unwrap_or_default();
                         if is_double {
                             actions.extend(
-                                self.startup_player_dialog
+                                self.startup
+                                    .player_dialog
                                     .as_mut()
                                     .and_then(|dialog| {
                                         point.map(|point| dialog.handle_pointer_double_click(point))
@@ -11373,7 +11415,8 @@ impl GameApp {
                     }
                     StartupView::Options => {
                         let actions = self
-                            .startup_options_dialog
+                            .startup
+                            .options_dialog
                             .as_mut()
                             .and_then(|dialog| {
                                 dialog.pointer_position().map(|point| match button_state {
@@ -11387,7 +11430,8 @@ impl GameApp {
                     }
                     StartupView::About => {
                         let actions = self
-                            .startup_about_dialog
+                            .startup
+                            .about_dialog
                             .as_mut()
                             .and_then(|dialog| {
                                 dialog.pointer_position().map(|point| match button_state {
@@ -11777,10 +11821,11 @@ impl GameApp {
             self.process_network_start_wait_actions(actions)?;
             return Ok(());
         }
-        if self.startup_options_advanced_dialog.is_some() {
+        if self.startup.options_advanced_dialog.is_some() {
             let font = self.assets.clonk_fonts.as_deref().map(|fonts| &fonts.text);
             let actions = self
-                .startup_options_advanced_dialog
+                .startup
+                .options_advanced_dialog
                 .as_mut()
                 .map(|pending| match phase {
                     TouchPhase::Started => match font {
@@ -11810,9 +11855,10 @@ impl GameApp {
             self.process_options_advanced_actions(actions)?;
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() {
+        if self.startup.player_properties_dialog.is_some() {
             let actions = self
-                .startup_player_properties_dialog
+                .startup
+                .player_properties_dialog
                 .as_mut()
                 .map(|pending| match phase {
                     TouchPhase::Started if left_double_click => {
@@ -12105,7 +12151,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        match self.startup_view {
+        match self.startup.view {
             StartupView::NetworkGame => {
                 let fonts = self.assets.clonk_fonts.clone();
                 let actions = fonts
@@ -12135,18 +12181,19 @@ impl GameApp {
             }
             StartupView::PlayerSelection => {
                 let mut restore_rename_focus = None;
-                if self.startup_crew_rename.is_some() {
+                if self.startup.crew_rename.is_some() {
                     match phase {
                         TouchPhase::Started => {
                             if self.handle_startup_crew_rename_pointer_down(position) {
                                 return Ok(());
                             }
-                            if let Some(rename) = self.startup_crew_rename.as_mut() {
+                            if let Some(rename) = self.startup.crew_rename.as_mut() {
                                 rename.last_click = None;
                                 rename.ignore_pointer_up = false;
                             }
                             restore_rename_focus = self
-                                .startup_player_dialog
+                                .startup
+                                .player_dialog
                                 .as_ref()
                                 .map(|dialog| dialog.focused_control());
                         }
@@ -12162,7 +12209,7 @@ impl GameApp {
                             return Ok(());
                         }
                         TouchPhase::Cancelled => {
-                            if let Some(rename) = self.startup_crew_rename.as_mut() {
+                            if let Some(rename) = self.startup.crew_rename.as_mut() {
                                 rename.edit.cancel_pointer_selection();
                                 rename.ignore_pointer_up = false;
                             }
@@ -12173,7 +12220,8 @@ impl GameApp {
                     }
                 }
                 let actions = self
-                    .startup_player_dialog
+                    .startup
+                    .player_dialog
                     .as_mut()
                     .map(|dialog| match phase {
                         TouchPhase::Started => dialog.handle_pointer_down(position),
@@ -12373,7 +12421,8 @@ impl GameApp {
             }
             StartupView::Options => {
                 let actions = self
-                    .startup_options_dialog
+                    .startup
+                    .options_dialog
                     .as_mut()
                     .map(|dialog| match phase {
                         TouchPhase::Started => dialog.handle_pointer_down(position),
@@ -12390,7 +12439,8 @@ impl GameApp {
             }
             StartupView::About => {
                 let actions = self
-                    .startup_about_dialog
+                    .startup
+                    .about_dialog
                     .as_mut()
                     .map(|dialog| match phase {
                         TouchPhase::Started => dialog.handle_pointer_down(position),
@@ -12470,11 +12520,11 @@ impl GameApp {
             self.play_network_start_wait_sounds();
             return;
         }
-        if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+        if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
             pending.controller.cancel_interaction();
             return;
         }
-        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+        if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
             let actions = pending.controller.pointer_left();
             self.process_startup_player_properties_actions(actions);
             return;
@@ -12520,7 +12570,7 @@ impl GameApp {
             return;
         }
         match self.mode {
-            AppMode::Menu => match self.startup_view {
+            AppMode::Menu => match self.startup.view {
                 StartupView::NetworkGame => {
                     if let Some(dialog) = self.startup_network_dialog.as_mut() {
                         dialog.pointer_left();
@@ -12529,7 +12579,7 @@ impl GameApp {
                     self.netdlg_join_edit_last_click = None;
                 }
                 StartupView::PlayerSelection => {
-                    if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                    if let Some(dialog) = self.startup.player_dialog.as_mut() {
                         dialog.pointer_left();
                     }
                 }
@@ -12552,7 +12602,7 @@ impl GameApp {
                 }
                 StartupView::Options => {
                     let sounds = self
-                        .startup_options_dialog
+                        .startup.options_dialog
                         .as_mut()
                         .map(|dialog| dialog.handle_pointer_left())
                         .unwrap_or_default()
@@ -12577,7 +12627,7 @@ impl GameApp {
                     }
                 }
                 StartupView::About => {
-                    if let Some(dialog) = self.startup_about_dialog.as_mut() {
+                    if let Some(dialog) = self.startup.about_dialog.as_mut() {
                         dialog.pointer_left();
                     }
                 }
@@ -12614,7 +12664,7 @@ impl GameApp {
         }
         if self.mode != AppMode::Menu
             || !matches!(
-                self.startup_view,
+                self.startup.view,
                 StartupView::ScenarioBrowser | StartupView::NetworkLobby
             )
         {
@@ -12845,7 +12895,7 @@ impl GameApp {
         let mut dialog = clonk_frontend::startup_netdlg::NetDlgController::new(
             clonk_frontend::startup_netdlg::NetDlgConfig {
                 masterserver_signup,
-                record: self.startup_view_flags.record,
+                record: self.startup.view_flags.record,
             },
             metrics,
         );

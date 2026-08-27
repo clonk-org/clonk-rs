@@ -2493,7 +2493,7 @@ fn startup_fade_modulates_retained_draws_and_text_like_cpp() {
     main_assert_eq!(faded_batch(u8::MAX) => (source, source), "C4GUI disables modulation at the fully visible endpoint");
 
     let mut app = new_real_menu_app(320, 200);
-    app.startup_dialog_fade = None;
+    app.startup.dialog_fade = None;
     app.graphics.set_runtime_sprite_filtering(1.0, false);
     app.configure_native_startup_fonts(1.0, false);
     app.handle_main_menu_activation(MainMenuItem::About)
@@ -3224,7 +3224,7 @@ fn scale_fifty_options_close_and_rejected_test_preserve_raw_value() {
 
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.open_options_menu();
-    let graphics = app.startup_options_dialog.test_ref().graphics();
+    let graphics = app.startup.options_dialog.test_ref().graphics();
     main_assert_eq!(graphics.applied_scale_percent => 50);
     main_assert_eq!(graphics.proposed_scale_percent => 100);
 
@@ -3235,7 +3235,7 @@ fn scale_fifty_options_close_and_rejected_test_preserve_raw_value() {
     app.finish_message_dialog(MessageDialogResult::No)
         .test_value();
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 50, false)));
-    let graphics = app.startup_options_dialog.test_ref().graphics();
+    let graphics = app.startup.options_dialog.test_ref().graphics();
     main_assert_eq!(graphics.applied_scale_percent => 50);
     main_assert_eq!(graphics.proposed_scale_percent => 100);
 
@@ -3263,7 +3263,7 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
     app.apply_options_font_selection(None, Some(16))
         .test_value();
 
-    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().program().font_size => "16");
+    main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().program().font_size => "16");
     main_assert_eq!(app.assets.clonk_fonts.as_ref().unwrap().text.line_height => 25);
     main_assert_eq!(app.assets.options_book_fonts.as_ref().unwrap().book.line_height => 25);
     main_assert_eq!(app.assets.book_fonts.as_ref().unwrap().text.line_height => 25);
@@ -3278,7 +3278,7 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
     let error = app.message_dialogs.last().test_value();
     main_assert_eq!(error.state.message() => "Error initializing fonts");
     main_assert_eq!(error.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
-    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().program().font_size => "16");
+    main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().program().font_size => "16");
     main_assert_eq!(app.assets.clonk_fonts.as_ref().unwrap().text.line_height => 25);
     main_assert_eq!(fs::read(paths.config_file()).unwrap() => before_failure);
 
@@ -3291,7 +3291,7 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
     main_assert_eq!(restarted.assets.book_fonts.as_ref().unwrap().text.line_height => 25);
     main_assert_eq!(restarted.assets.plrsel_book_fonts.as_ref().unwrap().text.line_height => 25);
     restarted.open_player_selection_dialog();
-    let player_layout = restarted.startup_player_dialog.test_ref().layout();
+    let player_layout = restarted.startup.player_dialog.test_ref().layout();
     main_assert_eq!(player_layout.item_height => 29);
     main_assert_eq!(
         player_layout =>
@@ -3303,14 +3303,14 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
         )
     );
     restarted.open_options_menu();
-    main_assert_eq!(restarted.startup_options_dialog.as_ref().unwrap().program().font_size => "16");
+    main_assert_eq!(restarted.startup.options_dialog.as_ref().unwrap().program().font_size => "16");
 
     fs::remove_file(paths.config_file()).test_value();
     fs::create_dir(paths.config_file()).test_value();
     restarted
         .apply_options_font_selection(None, Some(18))
         .test_value();
-    main_assert_eq!(restarted.startup_options_dialog.as_ref().unwrap().program().font_size => "16");
+    main_assert_eq!(restarted.startup.options_dialog.as_ref().unwrap().program().font_size => "16");
     main_assert_eq!(restarted.assets.clonk_fonts.as_ref().unwrap().text.line_height => 25);
     main_assert_eq!(restarted.message_dialogs.last().expect("font persistence error").state.message() => "Error initializing fonts");
 }
@@ -3350,7 +3350,7 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
     .test_value();
 
     main_assert_eq!(app.message_dialogs.len() => dialog_count);
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("reopened Options").program().font_face => "Mock System Face");
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("reopened Options").program().font_face => "Mock System Face");
     let config = Config::load(paths.config_file()).test_value();
     main_assert_eq!(config.get_in(Some("General"), "FontName") => Some("Mock System Face"));
     main_assert!(!Arc::ptr_eq(app.assets.clonk_fonts.as_ref().unwrap(), &prior_gui));
@@ -3371,7 +3371,7 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
     )
     .test_value();
     main_assert_eq!(app.message_dialogs.len() => dialog_count + 1);
-    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().program().font_face => "Mock System Face");
+    main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().program().font_face => "Mock System Face");
     main_assert!(Arc::ptr_eq(app.assets.clonk_fonts.as_ref().unwrap(), &selected_gui));
     main_assert_eq!(fs::read(paths.config_file()).unwrap() => before_failure);
 }
@@ -3392,7 +3392,7 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
         .set_input_text("225");
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(app.game_option_input_dialog.is_none());
-    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 225);
+    main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 225);
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 225, false)));
     main_assert!(app.message_dialogs.last().is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
     main_assert!(matches!(
@@ -3412,9 +3412,9 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     }
     main_assert!(app.message_dialogs.is_empty());
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 100, false)));
-    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 100);
+    main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 100);
 
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_mut()
         .test_value()
         .graphics_mut()
@@ -3430,9 +3430,9 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     app.finish_message_dialog(MessageDialogResult::Yes)
         .test_value();
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 175, true)));
-    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().graphics().applied_scale_percent => 175);
+    main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().applied_scale_percent => 175);
 
-    app.startup_options_dialog
+    app.startup.options_dialog
         .as_mut()
         .test_value()
         .graphics_mut()
@@ -5025,7 +5025,7 @@ fn the_presentation_path_never_reaches_the_simulation() {
 #[test]
 fn native_menu_text_baseline_is_one_bound_draw_per_glyph() {
     let mut app = new_real_menu_app(640, 480);
-    app.startup_dialog_fade = None;
+    app.startup.dialog_fade = None;
     app.graphics.set_runtime_sprite_filtering(1.0, false);
     app.configure_native_startup_fonts(1.0, false);
     app.handle_main_menu_activation(MainMenuItem::About)

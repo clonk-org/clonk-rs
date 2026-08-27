@@ -399,7 +399,7 @@ fn n2_saved_game(
 
 fn n2_install_startup_player(app: &mut GameApp, player_path: &Path) -> PlayerFile {
     let player_file = PlayerFile::load_from_path(player_path).test_value();
-    app.startup_player_files.push(StartupPlayerFile {
+    app.startup.player_files.push(StartupPlayerFile {
         path: player_path.to_path_buf(),
         file_name: player_path
             .file_name()
@@ -528,7 +528,7 @@ fn push_to_talk_key_falls_through_in_an_offline_menu() {
 #[test]
 fn push_to_talk_opens_capture_in_a_network_lobby() {
     let mut app = new_menu_app(320, 200);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
     app.control_clients.register(7, false, true);
     let (manager, _events, mut voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
@@ -1525,7 +1525,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
     app.open_options_menu();
     {
         let network = app
-            .startup_options_dialog
+            .startup.options_dialog
             .as_mut()
             .test_value()
             .network_mut();
@@ -1534,7 +1534,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
     }
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.startup.view => StartupView::Options);
     let tcp_error = app.message_dialogs.last().test_value();
     main_assert_eq!(tcp_error.state.caption() => "Configuration error");
     main_assert_eq!(tcp_error.state.message() => "TCP port and reference port must be set to different values between 1 and 65535!");
@@ -1544,7 +1544,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
 
     {
         let network = app
-            .startup_options_dialog
+            .startup.options_dialog
             .as_mut()
             .test_value()
             .network_mut();
@@ -1554,7 +1554,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
     }
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.startup.view => StartupView::Options);
     let udp_error = app.message_dialogs.last().test_value();
     main_assert_eq!(udp_error.state.caption() => "Configuration error");
     main_assert_eq!(udp_error.state.message() => "UDP port and discovery port must be set to different values between 1 and 65535!");
@@ -1575,7 +1575,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
         .handle_hotkey('D');
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.startup_options_dialog.as_ref().unwrap().network().hide_no_official_league_notice);
+    main_assert!(app.startup.options_dialog.as_ref().unwrap().network().hide_no_official_league_notice);
     app.process_options_dialog_actions(vec![OptionsDlgAction::NetworkCheckboxChanged {
         id: NetworkCheckboxId::UseAlternateServer,
         checked: true,
@@ -1600,14 +1600,14 @@ fn network_create_selects_a_scenario_before_binding_a_host() {
     ])
     .test_value();
 
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert!(app.startup_network_connection.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_game_advertiser.is_none());
 
     app.scensel_do_back().test_value();
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
 }
 
 #[test]
@@ -1731,7 +1731,7 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
     fs::write(paths.config_file(), config).test_value();
     let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     main_assert_eq!(
-        app.startup_player_files
+        app.startup.player_files
             .iter()
             .map(|player| player.path.as_path())
             .collect::<Vec<_>>() =>
@@ -2425,7 +2425,7 @@ fn network_diagnostics_are_visible_in_a_joined_client_lobby() {
     // check (src/C4Network2.cpp:483-487;
     // src/C4Log.cpp:227-239; src/C4GameLobby.cpp:738-753).
     let mut app = new_menu_app(320, 200);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     let (manager, events) = NetworkManager::test_stub_for_client_id(7);
@@ -2555,7 +2555,7 @@ fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
     // with the error flag retained (src/C4Network2.cpp:475-510;
     // src/C4Game.cpp:408-411; src/C4Application.cpp:373-400,438-449).
     let mut app = new_real_classic_menu_app(320, 200);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     let (manager, events) = NetworkManager::test_stub_for_client_id(7);
@@ -2568,7 +2568,7 @@ fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
     app.test_network_events();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
@@ -2625,7 +2625,7 @@ fn prepared_network_loading_failure_clears_session_before_restoring_startup() {
     // (src/C4Application.cpp:373-400,442-451;
     // src/C4Game.cpp:452-477).
     let mut app = new_real_classic_menu_app(320, 200);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.mode = AppMode::Loading;
     app.network_lobby = None;
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
@@ -2647,7 +2647,7 @@ fn prepared_network_loading_failure_clears_session_before_restoring_startup() {
     .test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_lobby.is_none());
@@ -2687,7 +2687,7 @@ fn post_go_client_preparation_failure_clears_session_and_presents_startup_error(
     let dir = tempdir();
     let mut app = new_real_classic_menu_app(320, 200);
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Client);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.mode = AppMode::Loading;
     app.network_lobby = None;
     let snapshot = clonk_network::HostConfig::default()
@@ -2703,7 +2703,7 @@ fn post_go_client_preparation_failure_clears_session_and_presents_startup_error(
     app.prepare_client_network_scenario_if_ready().test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_lobby.is_none());
@@ -2811,7 +2811,7 @@ fn back_history_and_fresh_app_match_native_dialog_memory() {
     let mut backed_out = new_menu_app(640, 480);
     backed_out.open_scenario_browser();
     backed_out.scensel_do_back().test_value();
-    main_assert_eq!(backed_out.startup_view => StartupView::MainMenu);
+    main_assert_eq!(backed_out.startup.view => StartupView::MainMenu);
     main_assert_eq!(backed_out.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::Local));
     backed_out
         .start_sandbox_scenario(FrontendScenario::fallback())
@@ -2819,7 +2819,7 @@ fn back_history_and_fresh_app_match_native_dialog_memory() {
     confirm_abort_dialog(&mut backed_out);
     assert_l038_browser_return(&backed_out, ScenarioSelectorMode::Local);
     backed_out.scensel_do_back().test_value();
-    main_assert_eq!(backed_out.startup_view => StartupView::MainMenu);
+    main_assert_eq!(backed_out.startup.view => StartupView::MainMenu);
     main_assert_eq!(backed_out.last_startup_dialog => StartupDialog::MainMenu);
 
     let mut previous_session = running_browser_sandbox(ScenarioSelectorMode::Local);
@@ -2828,7 +2828,7 @@ fn back_history_and_fresh_app_match_native_dialog_memory() {
     drop(previous_session);
 
     let mut fresh = new_menu_app(640, 480);
-    main_assert_eq!(fresh.startup_view => StartupView::MainMenu);
+    main_assert_eq!(fresh.startup.view => StartupView::MainMenu);
     main_assert_eq!(fresh.last_startup_dialog => StartupDialog::MainMenu);
     fresh
         .start_sandbox_scenario(FrontendScenario::fallback())
@@ -2836,7 +2836,7 @@ fn back_history_and_fresh_app_match_native_dialog_memory() {
     fresh
         .handle_game_over_action(GameOverAction::End)
         .test_value();
-    main_assert_eq!(fresh.startup_view => StartupView::MainMenu);
+    main_assert_eq!(fresh.startup.view => StartupView::MainMenu);
     main_assert_eq!(fresh.last_startup_dialog => StartupDialog::MainMenu);
 }
 
@@ -2854,7 +2854,7 @@ fn immediate_relaunch_retains_destination_without_background_discovery() {
     main_assert_eq!(app.last_startup_dialog => StartupDialog::NetworkGame);
     main_assert!(app.startup_game_search.is_none(), "restart must not leave startup discovery behind the new round");
     confirm_abort_dialog(&mut app);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::NetworkGame);
 }
 
@@ -2965,13 +2965,13 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
     main_assert_eq!(modal.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Cancel));
     main_assert_eq!(modal.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
     main_assert!(app.status_text.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(!app.take_exit_request());
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
 
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::SearchError {
         source: Some(clonk_network::ReferenceQuerySource::Masterserver),
@@ -3072,7 +3072,7 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
     app.poll_startup_network_connection().test_value();
 
     main_assert!(app.startup_network_connection.is_none());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(app.startup_network_dialog.as_ref().expect("fresh network dialog").join_address() => "");
     assert_startup_error_log(
         &app,
@@ -3153,7 +3153,7 @@ fn escape_aborts_inflight_join_and_keeps_network_dialog() {
     main_assert!(app.pending_network_join.is_none());
     main_assert!(app.message_dialogs.is_empty());
     main_assert!(app.status_text.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
     main_assert!(app.message_dialog_consumed_keys.contains(&VirtualKeyCode::Escape));
     main_assert!(sender.send(Err(NetworkStartError::Other("stale result".to_string()))).is_err());
@@ -3161,7 +3161,7 @@ fn escape_aborts_inflight_join_and_keeps_network_dialog() {
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     app.poll_startup_network_connection().test_value();
     main_assert!(app.message_dialog_consumed_keys.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.status_text.is_empty());
 }
 
@@ -3198,7 +3198,7 @@ fn cancel_button_aborts_inflight_join() {
 
     main_assert!(app.startup_network_connection.is_none());
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(sender.send(Err(NetworkStartError::Other("stale result".to_string()))).is_err());
 }
 
@@ -3904,7 +3904,7 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
             .collect(),
     );
     main_assert!(controller.list_max_scroll() > 60);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(controller);
     app.startup_game_search = None;
 
@@ -3983,7 +3983,7 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
 
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_connection.is_none());
     main_assert_eq!(app.message_dialogs.len() => 1);
     let dialog = &app.message_dialogs[0].state;
@@ -4003,7 +4003,7 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     app.test_cursor(back_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(app.message_dialogs.len() => 1);
 
     let mut frame = vec![0_u8; 1280 * 720 * 4];
@@ -4013,7 +4013,7 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     main_assert_eq!(app.message_dialogs.len() => 1, "Return must show the button-down frame before activation");
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_connection.is_none());
     reset_cached_app_paths();
 }
@@ -4162,7 +4162,7 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     app.test_left_button(ElementState::Released);
 
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Released);
 
     let list = PhysicalPosition::new(
@@ -4182,18 +4182,18 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         app.test_modifiers(modifiers);
         app.test_key(key, ElementState::Pressed);
         app.test_key(key, ElementState::Released);
-        main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+        main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     }
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
 }
 
 #[test]
 fn network_direct_query_ids_preserve_selection_across_out_of_order_results() {
     let mut app = new_classic_menu_app(800, 600);
     let dialog = n2_netdlg(800, 600);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(dialog);
     app.startup_direct_reference_queries = vec![
         StartupDirectReferenceQuery {
@@ -4260,7 +4260,7 @@ fn network_version_mismatch_defers_to_runtime_join_policy() {
     dialog.set_games(vec![GameApp::startup_network_reference_row(&reference)]);
     main_assert!(dialog.handle_key_down(KeyCode::Down).is_empty());
     let actions = dialog.handle_key_down(KeyCode::Enter);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(dialog);
     app.startup_game_references = vec![reference];
 
@@ -4305,7 +4305,7 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
     dialog.set_games(vec![GameApp::startup_network_reference_row(&reference)]);
     main_assert!(dialog.handle_key_down(KeyCode::Down).is_empty());
     let actions = dialog.handle_key_down(KeyCode::Enter);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(dialog);
     app.startup_game_references = vec![reference];
 
@@ -4353,7 +4353,7 @@ fn network_row_double_click_joins_another_cpp_build() {
     let layout = clonk_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics);
     let mut dialog = n2_netdlg(640, 480);
     dialog.set_games(vec![GameApp::startup_network_reference_row(&reference)]);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(dialog);
     app.startup_game_references = vec![reference];
     app.startup_game_search = None;
@@ -4467,7 +4467,7 @@ fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
     // (oracle-src-pinned src/C4StartupNetDlg.cpp:737-738,752,1116-1120).
     let mut app = new_classic_menu_app(800, 600);
     let network_dialog = n2_netdlg(800, 600);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(network_dialog);
     app.startup_game_search = Some(
         clonk_network::StartupGameSearch::start(clonk_network::NetworkGameSearchConfig {
@@ -4519,7 +4519,7 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
     // round trip, so the search it owns has to come back with it.
     let mut app = new_classic_menu_app(800, 600);
     let network_dialog = n2_netdlg(800, 600);
-    app.startup_view = StartupView::NetworkGame;
+    app.startup.view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(network_dialog);
     app.startup_game_search = Some(
         clonk_network::StartupGameSearch::start(clonk_network::NetworkGameSearchConfig {
@@ -4610,7 +4610,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
     app.poll_startup_network_connection().test_value();
     main_assert!(app.pending_network_join.is_none());
     main_assert!(app.game_option_input_dialog.is_none());
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     assert_startup_error_log(&app, "Unable to start network session: join denied");
 }
 
@@ -4700,7 +4700,7 @@ fn startup_dialog_fade_preserves_ordered_native_text_at_scaled_output() {
             frame_ten = Some(output);
         }
     }
-    main_assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup.dialog_fade.is_none());
     let (_, settled, _) = render_ordered_test_frame(&mut app, scale, 480, 300);
     main_assert_eq!(frame_ten.expect("scaled frame ten") => settled, "scaled frame ten must already use the settled native-text path");
 }
@@ -10248,7 +10248,7 @@ fn an_armed_rejoin_survives_the_hosts_rebind_window_and_then_gives_up() {
     app.poll_startup_network_connection().test_value();
 
     main_assert!(app.pending_host_rejoin.is_none(), "the rejoin stops at the window the host named");
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
 }
 
 #[test]
@@ -10351,7 +10351,7 @@ fn a_client_waiting_in_the_lobby_also_follows_an_announced_restart() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     app.mode = AppMode::Menu;
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     app.control_clients.register(0, true, false);
     app.control_clients.register(local_client, true, false);
 
@@ -10682,7 +10682,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     // 766-777). DoLobby deletes MainDlg before running mode, so this
     // cache exists only in the joined lobby (src/C4Network2.cpp:493-515).
     let mut app = new_menu_app(320, 200);
-    app.startup_view = StartupView::NetworkLobby;
+    app.startup.view = StartupView::NetworkLobby;
     let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
     manager.set_test_lobby_client_telemetry(clonk_network::RuntimeLobbyClientTelemetry {
         connections: vec![clonk_network::RuntimeNetworkConnection {

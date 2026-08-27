@@ -363,7 +363,7 @@ fn about_chrome_uses_runtime_resource_strings() {
     }
     app.open_about_dialog();
     main_assert_eq!(
-        app.startup_about_dialog
+        app.startup.about_dialog
             .as_ref()
             .expect("about dialog")
             .labels()
@@ -390,7 +390,7 @@ fn about_chrome_uses_runtime_resource_strings() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     app.test_key(VirtualKeyCode::KeyL, ElementState::Pressed);
-    main_assert_eq!(app.startup_about_dialog.as_ref().expect("about dialog").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
+    main_assert_eq!(app.startup.about_dialog.as_ref().expect("about dialog").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
 }
 
 /// `C4StartupOptionsDlg`'s constructor resolves every caption, label, button
@@ -453,7 +453,7 @@ fn startup_options_visible_labels_follow_runtime_resources() {
             .insert(key.to_string(), value.to_string());
     }
     app.open_options_menu();
-    let labels = app.startup_options_dialog.test_ref().labels().clone();
+    let labels = app.startup.options_dialog.test_ref().labels().clone();
 
     // The caption drops its mnemonic marker like every FullscreenDialog title.
     main_assert_eq!(labels.title => "Einstellungen");
@@ -480,7 +480,7 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     // what C4ResStrTable itself yields.
     app.startup_tooltip_resources.remove("IDS_CTL_LANGUAGE");
     app.open_options_menu();
-    main_assert_eq!(app.startup_options_dialog.as_ref().expect("options dialog").labels().language => "Language");
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("options dialog").labels().language => "Language");
 
     // KeySelDialog uses the same localized action name as the control button
     // (`C4StartupOptionsDlg.cpp:160-177`).
@@ -607,7 +607,7 @@ fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
     app.open_player_selection_dialog();
     let player_layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
     main_assert_eq!(app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)) => Some(StartupTooltip::text("Spielerauswahl")));
-    let player_dialog = app.startup_player_dialog.test_mut();
+    let player_dialog = app.startup.player_dialog.test_mut();
     player_dialog.set_player_count(1);
     main_assert!(player_dialog.enter_crew_mode(0, "Ada", vec![true]));
     main_assert_eq!(app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)) => Some(StartupTooltip::text("Mannschaft: Ada")));
@@ -902,11 +902,11 @@ fn missing_startup_models_precede_status_and_leave_pixels_untouched() {
     ];
 
     for (view, missing) in cases {
-        app.startup_view = view;
+        app.startup.view = view;
         app.startup_network_dialog = None;
-        app.startup_player_dialog = None;
-        app.startup_options_dialog = None;
-        app.startup_about_dialog = None;
+        app.startup.player_dialog = None;
+        app.startup.options_dialog = None;
+        app.startup.about_dialog = None;
         app.status_text = "model boundary wins".to_string();
         let expected = ClassicParityBoundary::StartupModel { view, missing };
         let mut frame = vec![0x7c; 320 * 200 * 4];
@@ -1198,8 +1198,8 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
         clonk_frontend::startup_about_dlg::AboutDlgAction::CheckForUpdates,
     ])
     .test_value();
-    main_assert_eq!(app.startup_view => StartupView::About);
-    main_assert!(app.startup_about_dialog.is_some());
+    main_assert_eq!(app.startup.view => StartupView::About);
+    main_assert!(app.startup.about_dialog.is_some());
     main_assert!(app.update_check.is_some(), "the check must be in flight");
     let wait = app.message_dialogs.last().test_value();
     main_assert_eq!(wait.state.caption() => "Check for Updates");
@@ -1212,7 +1212,7 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
     main_assert!(app.update_check.is_none(), "closing the wait dialog abandons the check");
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.view => StartupView::About);
 
     for key in [VirtualKeyCode::Enter, VirtualKeyCode::Space] {
         let mut app = new_classic_menu_app(640, 480);
@@ -1225,11 +1225,11 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
         main_assert!(app.message_dialogs.is_empty());
         app.test_key(key, ElementState::Released);
         main_assert_eq!(app.message_dialogs.len() => 1);
-        main_assert_eq!(app.startup_view => StartupView::About);
+        main_assert_eq!(app.startup.view => StartupView::About);
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
             .test_value();
         main_assert!(app.message_dialogs.is_empty());
-        main_assert_eq!(app.startup_view => StartupView::About);
+        main_assert_eq!(app.startup.view => StartupView::About);
     }
 }
 
@@ -1246,7 +1246,7 @@ fn about_shift_tab_reverses_buttons_and_license_tabs() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Space, ElementState::Released);
-    main_assert_eq!(app.startup_about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Licenses);
+    main_assert_eq!(app.startup.about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Licenses);
 
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
@@ -1267,8 +1267,8 @@ fn about_shift_tab_reverses_buttons_and_license_tabs() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert_eq!(app.startup_about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Credits);
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Credits);
+    main_assert_eq!(app.startup.view => StartupView::About);
 }
 
 #[test]
@@ -1280,8 +1280,8 @@ fn unsupported_startup_actions_fail_before_status_or_domain_mutation() {
         clonk_frontend::startup_plrsel::PlrSelAction::NewPlayer,
     ])
     .test_value();
-    main_assert!(app.startup_player_properties_dialog.is_some());
-    app.startup_player_properties_dialog = None;
+    main_assert!(app.startup.player_properties_dialog.is_some());
+    app.startup.player_properties_dialog = None;
 }
 
 #[test]
@@ -1289,11 +1289,11 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     let mut app = new_classic_menu_app(640, 480);
     let mut dialog = clonk_frontend::startup_plrsel::PlrSelController::new(2);
     dialog.resize(640, 480);
-    app.startup_player_dialog = Some(dialog);
+    app.startup.player_dialog = Some(dialog);
     app.sound.ui_log.clear();
 
     let actions = app
-        .startup_player_dialog
+        .startup.player_dialog
         .as_mut()
         .test_value()
         .handle_key_down(KeyCode::Down);
@@ -1303,7 +1303,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     let back = clonk_frontend::startup_plrsel::plrsel_layout(640, 480).buttons[0];
     let back = GuiPoint::new((back.x + back.w / 2) as f32, (back.y + back.h / 2) as f32);
     let actions = app
-        .startup_player_dialog
+        .startup.player_dialog
         .as_mut()
         .test_value()
         .handle_pointer_down(back);
@@ -1311,7 +1311,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     main_assert_eq!(app.sound.ui_log => ["Command", "ArrowHit"]);
 
     let actions = app
-        .startup_player_dialog
+        .startup.player_dialog
         .as_mut()
         .test_value()
         .handle_pointer_up(back);
@@ -1352,28 +1352,28 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
             0,
     );
     let mut app = new_classic_menu_app(640, 480);
-    app.startup_player_files.push(startup_fixture!(
+    app.startup.player_files.push(startup_fixture!(
         startup_player:
             player_path.clone(),
             "Ada.c4p".to_string(),
             player_file,
             player_model.clone(),
     ));
-    app.startup_player_models.push(player_model);
+    app.startup.player_models.push(player_model);
     app.open_player_selection_dialog();
 
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
     ])
     .test_value();
-    let controller = app.startup_player_dialog.test_ref();
+    let controller = app.startup.player_dialog.test_ref();
     main_assert!(controller.is_crew_mode());
     main_assert_eq!(controller.dialog_title() => "Crew: Ada");
     main_assert_eq!(controller.selected_index() => Some(0));
-    main_assert_eq!(app.startup_crew_models.iter().map(|crew| crew.name.as_str()).collect::<Vec<_>>() => ["High", "Low"]);
+    main_assert_eq!(app.startup.crew_models.iter().map(|crew| crew.name.as_str()).collect::<Vec<_>>() => ["High", "Low"]);
     main_assert!(app.message_dialogs.is_empty());
 
-    let selected_crew_file = app.startup_crew_files[0].file_name.clone();
+    let selected_crew_file = app.startup.crew_files[0].file_name.clone();
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::CrewParticipationChanged {
             index: 0,
@@ -1407,7 +1407,7 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     main_assert_eq!(persisted.death_message => "Farewell");
 
     let layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
-    app.startup_player_dialog
+    app.startup.player_dialog
         .test_mut()
         .set_pointer_position(Some(GuiPoint::new(
             (layout.list_client.x + layout.item_height * 2) as f32,
@@ -1421,7 +1421,7 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
         clonk_frontend::startup_plrsel::PlrSelAction::LeaveCrew,
     ])
     .test_value();
-    let controller = app.startup_player_dialog.test_ref();
+    let controller = app.startup.player_dialog.test_ref();
     main_assert!(!controller.is_crew_mode());
     main_assert_eq!(controller.selected_index() => Some(0));
 
@@ -1431,7 +1431,7 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
         clonk_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
     ])
     .test_value();
-    let controller = app.startup_player_dialog.test_ref();
+    let controller = app.startup.player_dialog.test_ref();
     main_assert!(!controller.is_crew_mode());
     main_assert_eq!(controller.selected_index() => Some(0));
     main_assert_eq!(app.message_dialogs.len() => 1);
@@ -1556,26 +1556,26 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     )
     .test_value();
     wait_for_menu_preserving_first_player_dialog(&mut app);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(matches!(
-        app.startup_player_properties_dialog
+        app.startup.player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New)
     ));
-    main_assert!(app.startup_player_properties_dialog.as_ref().is_some_and(|pending| matches!(&pending.origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer)));
+    main_assert!(app.startup.player_properties_dialog.as_ref().is_some_and(|pending| matches!(&pending.origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer)));
 
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
     ]);
-    main_assert!(app.startup_player_properties_dialog.is_none());
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert!(app.startup.player_properties_dialog.is_none());
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
+    main_assert_eq!(app.startup.view => StartupView::PlayerSelection);
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
         .test_value();
-    main_assert!(app.startup_player_properties_dialog.is_some());
+    main_assert!(app.startup.player_properties_dialog.is_some());
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
     ]);
@@ -1583,10 +1583,10 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     let broken = player_root.join("Broken.C4P");
     fs::write(&broken, b"not a player group").test_value();
     app.show_main_menu();
-    main_assert!(app.startup_player_properties_dialog.is_none(), "the native scan matches names without opening player groups");
+    main_assert!(app.startup.player_properties_dialog.is_none(), "the native scan matches names without opening player groups");
     fs::remove_file(&broken).test_value();
     app.show_main_menu();
-    main_assert!(app.startup_player_properties_dialog.as_ref().is_some_and(|pending| matches!(&pending.origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer)));
+    main_assert!(app.startup.player_properties_dialog.as_ref().is_some_and(|pending| matches!(&pending.origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer)));
 
     let raced = player_root.join("Racer.c4p");
     fs::create_dir_all(&raced).test_value();
@@ -1599,7 +1599,7 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     raced_config.set_in(Some("General"), "Participants", raced.to_string_lossy());
     raced_config.save(paths.config_file()).test_value();
 
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .test_mut()
         .controller
         .set_name("First");
@@ -1608,16 +1608,16 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     ]);
     let created = player_root.join("First.c4p");
     main_assert!(created.is_file());
-    main_assert!(app.startup_player_properties_dialog.is_none());
-    main_assert_eq!(app.startup_player_files.len() => 2);
-    main_assert!(app.startup_player_files.iter().any(|player| {
+    main_assert!(app.startup.player_properties_dialog.is_none());
+    main_assert_eq!(app.startup.player_files.len() => 2);
+    main_assert!(app.startup.player_files.iter().any(|player| {
         player
             .file_name
             .eq_ignore_ascii_case(created.to_string_lossy().as_ref())
             && player.render_model.activated
     }));
     main_assert!(
-        app.startup_player_files.iter().any(|player| {
+        app.startup.player_files.iter().any(|player| {
             player
                 .file_name
                 .eq_ignore_ascii_case(raced.to_string_lossy().as_ref())
@@ -1642,27 +1642,27 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     );
 
     app.show_main_menu();
-    main_assert!(app.startup_player_properties_dialog.is_none(), "a visible player prevents another forced dialog");
+    main_assert!(app.startup.player_properties_dialog.is_none(), "a visible player prevents another forced dialog");
     app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
         .test_value();
     fs::remove_dir_all(&raced).test_value();
     app.delete_startup_player_and_refresh(&created).test_value();
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
-    main_assert!(app.startup_player_properties_dialog.is_some(), "every main-menu show rechecks the physical player directory");
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
+    main_assert!(app.startup.player_properties_dialog.is_some(), "every main-menu show rechecks the physical player directory");
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
     ]);
-    main_assert!(app.startup_player_properties_dialog.is_none());
+    main_assert!(app.startup.player_properties_dialog.is_none());
     app.handle_main_menu_activation(MainMenuItem::Options)
         .test_value();
-    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.startup.view => StartupView::Options);
     reset_cached_app_paths();
 }
 
 fn set_distinct_player_properties_fields(app: &mut GameApp, name: &str) -> (PlayerFile, String) {
-    let controller = &mut app.startup_player_properties_dialog.test_mut().controller;
+    let controller = &mut app.startup.player_properties_dialog.test_mut().controller;
     controller.set_name(name);
     controller.set_comment("Retained validation comment");
     let player = controller.player_mut();
@@ -1695,7 +1695,7 @@ fn assert_player_properties_validation_modal(
     main_assert_eq!(modal.state.icon() => MessageDialogIcon::ERROR);
     main_assert_eq!(modal.state.size() => MessageDialogSize::Regular);
     main_assert!(matches!(modal.continuation, MessageDialogContinuation::None));
-    let form = app.startup_player_properties_dialog.test_ref();
+    let form = app.startup.player_properties_dialog.test_ref();
     main_assert_eq!(form.controller.player() => expected_player);
     main_assert_eq!(form.controller.comment() => expected_comment);
     main_assert_eq!(form.controller.validation_error() => None);
@@ -1722,7 +1722,7 @@ fn startup_player_properties_empty_name_shows_modal_message_dialog() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
-    let form = app.startup_player_properties_dialog.as_ref().test_value();
+    let form = app.startup.player_properties_dialog.as_ref().test_value();
     main_assert_eq!(form.controller.player() => &expected_player);
     main_assert_eq!(form.controller.comment() => expected_comment);
 }
@@ -1748,11 +1748,11 @@ fn startup_player_properties_duplicate_name_shows_modal_message_dialog() {
         &expected_comment,
     );
     main_assert!(occupied.is_dir());
-    main_assert!(app.startup_player_files.is_empty());
+    main_assert!(app.startup.player_files.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
-    let form = app.startup_player_properties_dialog.as_ref().test_value();
+    let form = app.startup.player_properties_dialog.as_ref().test_value();
     main_assert_eq!(form.controller.player() => &expected_player);
     main_assert_eq!(form.controller.comment() => expected_comment);
 }
@@ -1766,17 +1766,17 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
     let user_data = tempdir();
     let (_guard, paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
-    app.startup_player_properties_dialog = None;
+    app.startup.player_properties_dialog = None;
 
     let old = player_root.join("Old.c4p");
     fs::create_dir(&old).test_value();
     fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").test_value();
     persist_config_value(&paths, "General", "Participants", old.to_string_lossy()).test_value();
     app.refresh_startup_player_list();
-    main_assert_eq!(app.startup_player_files.len() => 1);
+    main_assert_eq!(app.startup.player_files.len() => 1);
 
     app.open_existing_startup_player_properties(0);
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .test_mut()
         .controller
         .set_name("Renamed");
@@ -1790,8 +1790,8 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
 
     main_assert!(!old.exists());
     main_assert!(!player_root.join("Renamed.c4p").exists());
-    main_assert!(app.startup_player_properties_dialog.is_none(), "the properties form closes before the screen-owned error dialog");
-    main_assert!(app.startup_player_files.is_empty());
+    main_assert!(app.startup.player_properties_dialog.is_none(), "the properties form closes before the screen-owned error dialog");
+    main_assert!(app.startup.player_files.is_empty());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(Config::load(paths.config_file()).expect("reload reconciled config").get_in(Some("General"), "Participants") => Some(""));
 
@@ -1806,7 +1806,7 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
     main_assert!(app.message_dialogs.is_empty());
-    main_assert_eq!(app.startup_player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => None);
+    main_assert_eq!(app.startup.player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => None);
 }
 
 #[test]
@@ -1818,7 +1818,7 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
     let user_data = tempdir();
     let (_guard, _paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
-    app.startup_player_properties_dialog
+    app.startup.player_properties_dialog
         .test_mut()
         .controller
         .set_name("Fresh");
@@ -1831,8 +1831,8 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
 
-    main_assert!(app.startup_player_properties_dialog.is_none(), "the creation form closes before the screen-owned error dialog");
-    main_assert!(app.startup_player_files.is_empty());
+    main_assert!(app.startup.player_properties_dialog.is_none(), "the creation form closes before the screen-owned error dialog");
+    main_assert!(app.startup.player_files.is_empty());
     main_assert!(app.status_text.is_empty());
 
     let modal = app.message_dialogs.last().test_value();
@@ -1859,7 +1859,7 @@ fn about_routes_wheel_to_credits_and_license_textwindows() {
         f64::from(scripting.y + 9),
     ));
     credits.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert_eq!(credits.startup_about_dialog.as_ref().and_then(|dialog| dialog.credit_scroll_offset(2)) => Some(28));
+    main_assert_eq!(credits.startup.about_dialog.as_ref().and_then(|dialog| dialog.credit_scroll_offset(2)) => Some(28));
 
     let mut licenses = new_classic_menu_app(320, 240);
     enter_about_licenses(&mut licenses);
@@ -1870,7 +1870,7 @@ fn about_routes_wheel_to_credits_and_license_textwindows() {
         f64::from(text.y + 10),
     ));
     licenses.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert!(licenses.startup_about_dialog.as_ref().is_some_and(|dialog| dialog.license_scroll_offset() > 0));
+    main_assert!(licenses.startup.about_dialog.as_ref().is_some_and(|dialog| dialog.license_scroll_offset() > 0));
 }
 
 #[test]
@@ -1901,14 +1901,14 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
             0,
             0,
     );
-    app.startup_player_files.push(startup_fixture!(
+    app.startup.player_files.push(startup_fixture!(
         startup_player:
             PathBuf::from("Shortcut Player.c4p"),
             "Shortcut Player.c4p".to_string(),
             PlayerFile::default(),
             shortcut_model.clone(),
     ));
-    app.startup_player_models.push(shortcut_model);
+    app.startup.player_models.push(shortcut_model);
     app.open_player_selection_dialog();
     for (modifiers, key) in [
         (ModifiersState::ALT, VirtualKeyCode::Insert),
@@ -1924,7 +1924,7 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
     app.keyboard_modifiers = ModifiersState::SUPER;
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     main_assert!(matches!(
-        app.startup_player_properties_dialog
+        app.startup.player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
@@ -3140,7 +3140,7 @@ fn missing_explicit_definition_during_scenario_start_returns_to_startup() {
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert!(!app.take_exit_request());
     main_assert!(app.loader_screen.is_some());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert!(
         app.message_dialogs
@@ -3187,7 +3187,7 @@ fn missing_explicit_definition_under_definition_path_returns_to_startup() {
     );
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert!(!app.take_exit_request());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(
         app.message_dialogs
             .iter()
@@ -3565,7 +3565,7 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
     use clonk_frontend::startup_plrsel::{plrsel_layout, PlrSelController, PlrSelPlayer};
 
     let mut app = new_real_classic_menu_app(640, 480);
-    app.startup_player_models = (0..20)
+    app.startup.player_models = (0..20)
         .map(|index| PlrSelPlayer {
             name: format!("Player {index:02}"),
             activated: false,
@@ -3580,11 +3580,11 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
             comment: String::new(),
         })
         .collect();
-    let mut controller = PlrSelController::new(app.startup_player_models.len());
+    let mut controller = PlrSelController::new(app.startup.player_models.len());
     controller.resize(640, 480);
     main_assert_eq!(controller.list_max_scroll() => 300);
-    app.startup_view = StartupView::PlayerSelection;
-    app.startup_player_dialog = Some(controller);
+    app.startup.view = StartupView::PlayerSelection;
+    app.startup.player_dialog = Some(controller);
 
     let layout = plrsel_layout(640, 480);
     app.test_cursor(PhysicalPosition::new(
@@ -3592,9 +3592,9 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
         f64::from(layout.list_viewport.y + 4),
     ));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").list_scroll_offset() => 60);
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").list_scroll_offset() => 60);
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").list_scroll_offset() => 0);
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").list_scroll_offset() => 0);
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_scrollbar.x + 8),
@@ -3603,14 +3603,14 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
     app.test_left_button(ElementState::Pressed);
     let mut frame = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut frame);
-    let first = app.startup_player_dialog.test_ref().list_scroll_offset();
+    let first = app.startup.player_dialog.test_ref().list_scroll_offset();
     app.test_render(&mut frame);
-    let second = app.startup_player_dialog.test_ref().list_scroll_offset();
+    let second = app.startup.player_dialog.test_ref().list_scroll_offset();
     main_assert_eq!((first, second) => (1, 3));
 
     app.test_left_button(ElementState::Released);
     app.test_render(&mut frame);
-    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").list_scroll_offset() => second);
+    main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").list_scroll_offset() => second);
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_scrollbar.x + 8),
@@ -3628,7 +3628,7 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.plrsel_last_click.map(|(index, _)| index) => Some(0), "the first genuine row click must remain a single click");
-    main_assert!(app.startup_player_properties_dialog.is_none());
+    main_assert!(app.startup.player_properties_dialog.is_none());
 }
 
 #[test]
@@ -3663,23 +3663,23 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
 
     app.handle_main_menu_activation(MainMenuItem::About)
         .test_value();
-    let fade = app.startup_dialog_fade.test_ref();
+    let fade = app.startup.dialog_fade.test_ref();
     main_assert_eq!(fade.outgoing => Some(StartupDialog::MainMenu));
     main_assert_eq!(fade.incoming => StartupDialog::About);
     main_assert_eq!(fade.step => 0);
     let fade_underlay = fade.underlay.clone();
     let fade_outgoing = fade.outgoing_frame.clone().test_value();
     app.test_update();
-    main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => 0);
+    main_assert_eq!(app.startup.dialog_fade.as_ref().unwrap().step => 0);
 
     let mut presented = Vec::new();
     for expected_step in 1..=STARTUP_DIALOG_FADE_STEPS {
         let mut frame = vec![0xa5; 320 * 200 * 4];
         main_assert!(app.render(&mut frame).expect("present fade frame"));
         if expected_step < STARTUP_DIALOG_FADE_STEPS {
-            main_assert_eq!(app.startup_dialog_fade.as_ref().map(|fade| fade.step) => Some(expected_step));
+            main_assert_eq!(app.startup.dialog_fade.as_ref().map(|fade| fade.step) => Some(expected_step));
         } else {
-            main_assert!(app.startup_dialog_fade.is_none());
+            main_assert!(app.startup.dialog_fade.is_none());
         }
         presented.push(frame);
     }
@@ -3721,21 +3721,21 @@ fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
         GamepadActionType::Cancel,
         ElementState::Pressed,
     )]);
-    main_assert_eq!(app.startup_view => StartupView::About);
-    main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => 0);
+    main_assert_eq!(app.startup.view => StartupView::About);
+    main_assert_eq!(app.startup.dialog_fade.as_ref().unwrap().step => 0);
 
     for expected_step in 1..=9 {
         app.test_render(&mut frame);
-        main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => expected_step);
+        main_assert_eq!(app.startup.dialog_fade.as_ref().unwrap().step => expected_step);
     }
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.view => StartupView::About);
 
     app.test_render(&mut frame);
-    main_assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup.dialog_fade.is_none());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
-    let reverse = app.startup_dialog_fade.test_ref();
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
+    let reverse = app.startup.dialog_fade.test_ref();
     main_assert_eq!(reverse.outgoing => Some(StartupDialog::About));
     main_assert_eq!(reverse.incoming => StartupDialog::MainMenu);
     main_assert_eq!(reverse.step => 0);
@@ -3743,13 +3743,13 @@ fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
     let mut ninth = None;
     for expected_step in 1..=9 {
         app.test_render(&mut frame);
-        main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => expected_step);
+        main_assert_eq!(app.startup.dialog_fade.as_ref().unwrap().step => expected_step);
         if expected_step == 9 {
             ninth = Some(frame.clone());
         }
     }
     app.test_render(&mut frame);
-    main_assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup.dialog_fade.is_none());
     let frame_ten = frame.clone();
     let mut settled = vec![0_u8; frame.len()];
     app.test_render(&mut settled);
@@ -3765,21 +3765,21 @@ fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
         clonk_frontend::startup_options_dlg::OptionsDlgAction::Back,
     ])
     .test_value();
-    let back = app.startup_dialog_fade.test_ref();
+    let back = app.startup.dialog_fade.test_ref();
     main_assert_eq!(back.outgoing => Some(StartupDialog::Options));
     main_assert_eq!(back.incoming => StartupDialog::MainMenu);
     main_assert_eq!(back.step => 0);
     for _ in 0..STARTUP_DIALOG_FADE_STEPS {
         app.test_render(&mut frame);
     }
-    main_assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup.dialog_fade.is_none());
 }
 
 #[test]
 fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
     let mut app = new_real_classic_menu_app(320, 200);
     app.begin_startup_dialog_fade_in();
-    let fade = app.startup_dialog_fade.test_ref();
+    let fade = app.startup.dialog_fade.test_ref();
     main_assert_eq!(fade.outgoing => None);
     main_assert_eq!(fade.incoming => StartupDialog::MainMenu);
 
@@ -3788,10 +3788,10 @@ fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     for expected_step in 1..STARTUP_DIALOG_FADE_STEPS {
         app.test_render(&mut frame);
-        main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => expected_step);
+        main_assert_eq!(app.startup.dialog_fade.as_ref().unwrap().step => expected_step);
     }
     app.test_render(&mut frame);
-    main_assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup.dialog_fade.is_none());
 
     let mut modal_app = new_real_classic_menu_app(320, 200);
     modal_app.open_new_startup_player_properties_from(
@@ -3804,7 +3804,7 @@ fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
     let frame_ten = frame.clone();
     modal_app.test_render(&mut frame);
     main_assert_eq!(frame_ten => frame, "first-player modal remains visible after fade");
-    main_assert!(modal_app.startup_player_properties_dialog.is_some());
+    main_assert!(modal_app.startup.player_properties_dialog.is_some());
 }
 
 #[test]
@@ -3818,7 +3818,7 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     main_assert_eq!(app.mode => AppMode::Loading);
     app.mode = AppMode::Menu;
     app.show_main_menu();
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
 
     app.graphics.set_runtime_sprite_filtering(3.0, false);
     app.configure_native_startup_fonts(3.0, false);
@@ -4098,7 +4098,7 @@ fn activate_new_player_reoffers_an_eliminated_startup_file() {
     ));
     let player_file = PlayerFile::load_from_path(player_path).test_value();
     let mut app = new_running_sandbox_app();
-    app.startup_player_files.push(startup_fixture!(
+    app.startup.player_files.push(startup_fixture!(
     startup_player:
         player_path.to_path_buf(),
         "embedded_player.c4p".to_string(),
@@ -4184,7 +4184,7 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
     });
 
     let mut app = new_running_sandbox_app();
-    app.startup_player_files = players;
+    app.startup.player_files = players;
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
 
@@ -4319,7 +4319,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         main_assert!(!matches!(app.mode, AppMode::Running), "{label}");
         let options_was_active = app.startup_options_dialog_is_active();
         let before_visual_music = app
-            .startup_options_dialog
+            .startup.options_dialog
             .as_ref()
             .map(|dialog| dialog.sound().frontend_music);
         let before_music = app.test_audio_ref().options.menu_music_enabled;
@@ -4330,7 +4330,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         main_assert_eq!(app.test_audio_ref().options.menu_music_enabled => !before_music, "{label}");
         if let Some(before_visual_music) = before_visual_music {
             main_assert_eq!(
-                app.startup_options_dialog
+                app.startup.options_dialog
                     .as_ref()
                     .expect("retained options dialog")
                     .sound()
@@ -4349,7 +4349,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
 
         let before_sound = app.test_audio_ref().options.menu_sound_enabled;
         let before_visual_sound = app
-            .startup_options_dialog
+            .startup.options_dialog
             .as_ref()
             .map(|dialog| dialog.sound().frontend_sound_effects);
         app.handle_modifiers_changed(ModifiersState::CONTROL)
@@ -4359,7 +4359,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         main_assert_eq!(app.test_audio_ref().options.menu_sound_enabled => !before_sound, "{label}");
         if let Some(before_visual_sound) = before_visual_sound {
             main_assert_eq!(
-                app.startup_options_dialog
+                app.startup.options_dialog
                     .as_ref()
                     .expect("retained options dialog")
                     .sound()
@@ -4378,7 +4378,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             StartupView::MainMenu => app.show_main_menu(),
             StartupView::ScenarioBrowser => app.open_scenario_browser(),
             StartupView::NetworkLobby => {
-                app.startup_view = StartupView::NetworkLobby;
+                app.startup.view = StartupView::NetworkLobby;
                 app.classic_host_lobby = None;
             }
             StartupView::NetworkGame => app.open_network_game_dialog(),
@@ -4409,7 +4409,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         } else {
             enter_unported_startup_subscreen(&mut options, ClassicStartupSubscreen::Options(sheet));
         }
-        main_assert_eq!(options.startup_options_dialog.as_ref().expect("retained Options model").active_sheet() => sheet);
+        main_assert_eq!(options.startup.options_dialog.as_ref().expect("retained Options model").active_sheet() => sheet);
         exercise(&mut options, &format!("retained Options {sheet:?} sheet"));
     }
 
@@ -4776,7 +4776,7 @@ fn classic_startup_argument_selects_initial_cpp_view() {
     let view = |screen: &str| {
         let mut app = new_real_classic_menu_app(640, 480);
         app.apply_classic_startup_screen(screen);
-        (app.startup_view, app.scensel.mode)
+        (app.startup.view, app.scensel.mode)
     };
 
     main_assert_eq!(view("main").0 => StartupView::MainMenu);
@@ -4810,12 +4810,12 @@ fn classic_startup_argument_selects_initial_cpp_view() {
     // no overlay of its own.
     let mut app = new_real_classic_menu_app(640, 480);
     app.open_about_dialog();
-    let remembered = app.startup_view;
+    let remembered = app.startup.view;
     app.apply_classic_startup_screen("nonsense");
-    main_assert_eq!(app.startup_view => remembered);
+    main_assert_eq!(app.startup.view => remembered);
     main_assert!(app.message_dialogs.is_empty());
     app.apply_classic_startup_screen("");
-    main_assert_eq!(app.startup_view => remembered);
+    main_assert_eq!(app.startup.view => remembered);
 }
 
 /// `C4StartupMainDlg` binds bare F6 to `SwitchToEditor`
@@ -4839,7 +4839,7 @@ fn startup_f6_launches_editor_when_available() {
     app.show_main_menu();
     main_assert_eq!(app.classic_editor_executable() => None);
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.pending_editor_launch.is_none());
     main_assert!(!app.exit_requested);
 
@@ -4858,7 +4858,7 @@ fn startup_f6_launches_editor_when_available() {
         main_assert!(app.pending_editor_launch.is_none());
         main_assert!(!app.exit_requested);
     }
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
 
     // A modified F6 is not the classic binding and must not reach it.
     let mut app = new_menu_app_with_paths(640, 480, &paths);
@@ -4873,7 +4873,7 @@ fn startup_f6_launches_editor_when_available() {
     app.open_about_dialog();
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     main_assert!(app.pending_editor_launch.is_none());
-    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup.view => StartupView::About);
 }
 
 #[test]

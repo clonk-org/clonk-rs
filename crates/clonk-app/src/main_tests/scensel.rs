@@ -606,11 +606,11 @@ fn scensel_touch_uses_live_search_and_classic_back_bounds() {
     tap(&mut app, back);
     main_assert_eq!(app.menu_state.stack.len() => 1);
     tap(&mut app, back);
-    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup.view => StartupView::NetworkGame);
 
     app.open_scenario_browser();
     tap(&mut app, back);
-    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.startup.view => StartupView::MainMenu);
     reset_cached_app_paths();
 }
 
@@ -1123,7 +1123,7 @@ fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {
     app.menu_state.search_edit.blink_ticks = 7;
     app.menu_state.search_edit.dragging = true;
     app.menu_state.set_pointer_position(Some(start));
-    app.startup_dialog_fade = None;
+    app.startup.dialog_fade = None;
     app.handle_other_mouse_button(ElementState::Pressed)
         .test_value();
     main_assert_eq!(app.menu_state.search_text().len() => SEARCH_EDIT_MAX_BYTES);
@@ -1222,13 +1222,13 @@ fn scensel_search_plain_arrows_move_the_caret_without_navigating() {
         .map(|entry| entry.identifier.clone());
 
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.menu_state.stack.len() => 1);
     main_assert_eq!(app.menu_state.search_edit.caret() => 3);
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.clone()) => selected);
 
     app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.menu_state.stack.len() => 1);
     main_assert_eq!(app.menu_state.search_edit.caret() => 4);
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.clone()) => selected);
@@ -1909,7 +1909,7 @@ fn scensel_rename_abort_paths_do_not_mutate_and_focus_loss_commits() {
         gamepad_action_event(slot, GamepadActionType::MenuToggle, ElementState::Pressed),
     ]);
     main_assert!(app.menu_state.rename_edit.is_none());
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(old_path.exists());
     main_assert!(!new_path.exists());
 
@@ -3084,7 +3084,7 @@ fn folder_map_disabled_opens_a_normal_book_without_inspecting_the_marker() {
     main_assert_eq!(app.menu_state.visible_entries().len() => 1);
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some(alpha.identifier.as_str()));
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     let mut invalid_map_app = new_menu_app(640, 480);
     open_map_test_folder(&mut invalid_map_app, folder);

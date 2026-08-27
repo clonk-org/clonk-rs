@@ -3741,7 +3741,7 @@ fn about_scrollbar_sounds_and_repeat_run_through_production_paths() {
     app.test_cursor(track);
     app.test_left_button(ElementState::Pressed);
     main_assert_eq!(app.sound.ui_log => vec!["Command"]);
-    main_assert!(app.startup_about_dialog.as_ref().is_some_and(|dialog| dialog.license_scroll_offset() > 0));
+    main_assert!(app.startup.about_dialog.as_ref().is_some_and(|dialog| dialog.license_scroll_offset() > 0));
     app.test_left_button(ElementState::Released);
 
     app.sound.ui_log.clear();
@@ -3750,14 +3750,14 @@ fn about_scrollbar_sounds_and_repeat_run_through_production_paths() {
     app.test_left_button(ElementState::Pressed);
     main_assert_eq!(app.sound.ui_log => vec!["ArrowHit"]);
     let before_frame = app
-        .startup_about_dialog
+        .startup.about_dialog
         .as_ref()
         .test_value()
         .license_scroll_offset();
     let mut frame = vec![0_u8; 320 * 240 * 4];
     app.test_render(&mut frame);
     let after_frame = app
-        .startup_about_dialog
+        .startup.about_dialog
         .as_ref()
         .test_value()
         .license_scroll_offset();
@@ -3766,7 +3766,7 @@ fn about_scrollbar_sounds_and_repeat_run_through_production_paths() {
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.sound.ui_log => vec!["ArrowHit", "ArrowHit"]);
     app.test_render(&mut frame);
-    main_assert_eq!(app.startup_about_dialog.as_ref().unwrap().license_scroll_offset() => after_frame);
+    main_assert_eq!(app.startup.about_dialog.as_ref().unwrap().license_scroll_offset() => after_frame);
 }
 
 #[test]
@@ -3831,7 +3831,7 @@ fn options_sound_sheet_seeds_from_live_audio_and_applies_typed_actions() {
     }
     app.open_options_menu();
     main_assert_eq!(
-        app.startup_options_dialog
+        app.startup.options_dialog
             .as_ref()
             .expect("options dialog")
             .sound() =>
@@ -3888,11 +3888,11 @@ fn options_sound_modifier_tabs_and_raw_gamepad_buttons_keep_classic_ownership() 
     );
     keyboard.test_modifiers(ModifiersState::empty());
     keyboard.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    main_assert_eq!(keyboard.startup_options_dialog.as_ref().expect("options dialog").focused_sound_checkbox() => Some(SoundCheckboxId::FrontendMusic));
+    main_assert_eq!(keyboard.startup.options_dialog.as_ref().expect("options dialog").focused_sound_checkbox() => Some(SoundCheckboxId::FrontendMusic));
     keyboard.test_key(VirtualKeyCode::Tab, ElementState::Released);
     keyboard.test_modifiers(ModifiersState::SHIFT);
     keyboard.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    main_assert_eq!(keyboard.startup_options_dialog.as_ref().expect("options dialog").focused_sound_checkbox() => None);
+    main_assert_eq!(keyboard.startup.options_dialog.as_ref().expect("options dialog").focused_sound_checkbox() => None);
 
     keyboard.test_modifiers(ModifiersState::empty());
     keyboard.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
@@ -3900,7 +3900,7 @@ fn options_sound_modifier_tabs_and_raw_gamepad_buttons_keep_classic_ownership() 
     keyboard.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     main_assert_eq!(
         keyboard
-            .startup_options_dialog
+            .startup.options_dialog
             .as_ref()
             .expect("options dialog")
             .focused_sound_checkbox() =>
@@ -3909,7 +3909,7 @@ fn options_sound_modifier_tabs_and_raw_gamepad_buttons_keep_classic_ownership() 
     );
     keyboard.test_modifiers(ModifiersState::CONTROL | ModifiersState::SHIFT);
     keyboard.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    main_assert_eq!(keyboard.startup_options_dialog.as_ref().expect("options dialog").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Graphics);
+    main_assert_eq!(keyboard.startup.options_dialog.as_ref().expect("options dialog").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Graphics);
 
     let mut gamepad = new_running_sandbox_app();
     gamepad.return_to_menu();
@@ -3929,7 +3929,7 @@ fn options_sound_modifier_tabs_and_raw_gamepad_buttons_keep_classic_ownership() 
             ElementState::Pressed,
         ),
     ]);
-    main_assert_eq!(gamepad.startup_options_dialog.as_ref().expect("options dialog").focused_sound_checkbox() => Some(SoundCheckboxId::FrontendSoundEffects));
+    main_assert_eq!(gamepad.startup.options_dialog.as_ref().expect("options dialog").focused_sound_checkbox() => Some(SoundCheckboxId::FrontendSoundEffects));
     main_assert!(!gamepad.test_audio_ref().options.menu_sound_enabled);
     gamepad.test_gamepad_events([
         gamepad_gui_button_event(
@@ -3978,7 +3978,7 @@ fn options_sound_modifier_tabs_and_raw_gamepad_buttons_keep_classic_ownership() 
             ElementState::Released,
         ),
     ]);
-    main_assert_eq!(back.startup_view => StartupView::MainMenu);
+    main_assert_eq!(back.startup.view => StartupView::MainMenu);
 }
 
 #[test]

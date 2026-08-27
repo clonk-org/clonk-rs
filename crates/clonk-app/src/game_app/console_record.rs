@@ -81,7 +81,7 @@ impl GameApp {
             // `show_main_menu` owns the complete native network teardown for
             // a lobby. Async console startup can be between lobby views, so
             // select that teardown path before clearing the round.
-            self.startup_view = StartupView::NetworkLobby;
+            self.startup.view = StartupView::NetworkLobby;
         }
         // Components belong to the scenario that was open. C++ never has to
         // clear them — `Game.Script`/`Title`/`Info` are cleared with the whole

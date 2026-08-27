@@ -210,6 +210,45 @@ pub(crate) struct ConfigState {
     pub(crate) gamepad_gui_control: bool,
 }
 
+/// The startup screens: which one is showing, the controller behind it, and
+/// the models it was built from.
+///
+/// `C4Startup` keeps one dialog alive at a time and fades between them, so
+/// the view, the fade in flight, the back-target a scenario entry pushed,
+/// and the per-screen controllers are one navigation state. The player and
+/// crew vectors sit here too because they are what the selection screen was
+/// built from: rebuilding the models without the files they came from is
+/// the inconsistency this grouping makes visible.
+pub(crate) struct StartupDialogState {
+    pub(crate) player_dialog: Option<clonk_frontend::startup_plrsel::PlrSelController>,
+    pub(crate) player_properties_dialog: Option<PendingStartupPlayerProperties>,
+    /// Process-local C4Config state set after the first stock extraction
+    /// attempt, independently of whether the config file can be saved.
+    pub(crate) user_portraits_written: bool,
+    /// Process-local C4Config row remembered when the selector closes.
+    pub(crate) last_portrait_folder_index: Option<usize>,
+    pub(crate) player_files: Vec<StartupPlayerFile>,
+    pub(crate) player_models: Vec<clonk_frontend::startup_plrsel::PlrSelPlayer>,
+    pub(crate) crew_files: Vec<StartupCrewFile>,
+    pub(crate) crew_models: Vec<clonk_frontend::startup_plrsel::PlrSelCrew>,
+    pub(crate) crew_player_index: Option<usize>,
+    /// Inline `CallbackRenameEdit` projected over the active crew row.
+    pub(crate) crew_rename: Option<StartupCrewRenameState>,
+    pub(crate) options_dialog: Option<clonk_frontend::startup_options_dlg::OptionsDlgState>,
+    pub(crate) options_advanced_dialog: Option<PendingOptionsAdvancedDialog>,
+    pub(crate) about_dialog: Option<clonk_frontend::startup_about_dlg::AboutDlgState>,
+    pub(crate) view: StartupView,
+    /// C4Startup::SwitchDialog's paired FadeOut/FadeIn. The outgoing pixels
+    /// are frozen because opening the replacement mutates or destroys several
+    /// startup controllers before the next presentation.
+    pub(crate) dialog_fade: Option<StartupDialogFade>,
+    /// The one retained dialog that native `SDID_Back` may reuse. A dialog
+    /// rebuilt by `DoStartup` after a round has no such history, so Back from
+    /// that fresh selector goes to Main instead of inventing a NetDlg.
+    pub(crate) scenario_back_dialog: Option<StartupDialog>,
+    pub(crate) view_flags: StartupViewFlags,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -310,6 +349,8 @@ pub(crate) struct GameApp {
     /// dialog. Target lookup remains view-specific, but input ownership and
     /// the 500ms stillness delay are global.
     pub(crate) startup_tooltip: ClassicTooltipTracker,
+    /// Which startup screen is showing and what built it.
+    pub(crate) startup: StartupDialogState,
     pub(crate) startup_network_dialog: Option<clonk_frontend::startup_netdlg::NetDlgController>,
     /// IRC and every chat surface, which share one transport lifetime.
     pub(crate) chat: ChatState,
@@ -350,37 +391,10 @@ pub(crate) struct GameApp {
     /// of optional listener I/O and is retained as the next InitLocal rebuild
     /// template when advertising could not bind.
     pub(crate) advertised_game_reference: Option<clonk_network::HostGameReference>,
-    pub(crate) startup_player_dialog: Option<clonk_frontend::startup_plrsel::PlrSelController>,
-    pub(crate) startup_player_properties_dialog: Option<PendingStartupPlayerProperties>,
-    /// Process-local C4Config state set after the first stock extraction
-    /// attempt, independently of whether the config file can be saved.
-    pub(crate) startup_user_portraits_written: bool,
-    /// Process-local C4Config row remembered when the selector closes.
-    pub(crate) startup_last_portrait_folder_index: Option<usize>,
-    pub(crate) startup_player_files: Vec<StartupPlayerFile>,
-    pub(crate) startup_player_models: Vec<clonk_frontend::startup_plrsel::PlrSelPlayer>,
-    pub(crate) startup_crew_files: Vec<StartupCrewFile>,
-    pub(crate) startup_crew_models: Vec<clonk_frontend::startup_plrsel::PlrSelCrew>,
-    pub(crate) startup_crew_player_index: Option<usize>,
-    /// Inline `CallbackRenameEdit` projected over the active crew row.
-    pub(crate) startup_crew_rename: Option<StartupCrewRenameState>,
-    pub(crate) startup_options_dialog: Option<clonk_frontend::startup_options_dlg::OptionsDlgState>,
-    pub(crate) startup_options_advanced_dialog: Option<PendingOptionsAdvancedDialog>,
-    pub(crate) startup_about_dialog: Option<clonk_frontend::startup_about_dlg::AboutDlgState>,
-    pub(crate) startup_view: StartupView,
-    /// C4Startup::SwitchDialog's paired FadeOut/FadeIn. The outgoing pixels
-    /// are frozen because opening the replacement mutates or destroys several
-    /// startup controllers before the next presentation.
-    pub(crate) startup_dialog_fade: Option<StartupDialogFade>,
     /// Process-local `C4Startup::eLastDlgID`. The network lobby and staged
     /// loader are game states rather than startup dialogs, so they must not
     /// displace the dialog reopened after the round ends.
     pub(crate) last_startup_dialog: StartupDialog,
-    /// The one retained dialog that native `SDID_Back` may reuse. A dialog
-    /// rebuilt by `DoStartup` after a round has no such history, so Back from
-    /// that fresh selector goes to Main instead of inventing a NetDlg.
-    pub(crate) startup_scenario_back_dialog: Option<StartupDialog>,
-    pub(crate) startup_view_flags: StartupViewFlags,
     pub(crate) scenario_game_options: GameOptionButtons,
     pub(crate) object_menu: Option<ObjectMenuState>,
     pub(crate) ingame_menu: PlayerIngameMenus,
