@@ -3573,6 +3573,72 @@ impl GameApp {
         true
     }
 
+    /// Apply one clicked row under the live modifiers.
+    ///
+    /// `GTK_SELECTION_MULTIPLE` (`C4ObjectListDlg.cpp:777-778`) is what gives
+    /// Ctrl and Shift meaning: plain replaces, Ctrl toggles the one row,
+    /// Shift covers the anchor through it, and Ctrl+Shift adds that range to
+    /// what is already selected.
+    ///
+    /// Whatever the gesture, the writeback is in **tree-path order** —
+    /// `OnSelectionChanged` reads `gtk_tree_selection_get_selected_rows`, and
+    /// that is ordered by path, not by when each row was clicked.
+    fn select_developer_object_list_row(
+        &mut self,
+        rows: &[crate::developer_object_list_view::ObjectListRow],
+        object: clonk_engine::ObjectId,
+    ) {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let control = self.keyboard_modifiers.control_key();
+        let shift = self.keyboard_modifiers.shift_key();
+        if !control && !shift {
+            self.developer_object_list_anchor = Some(object);
+            self.developer_selection
+                .replace(SelectionWriter::ObjectTree, object);
+            return;
+        }
+
+        let selected = self.developer_selection.objects().to_vec();
+        let wanted: Vec<clonk_engine::ObjectId> = if shift {
+            // The anchor stays put, so a second Shift-click re-covers from the
+            // same place rather than from the last row reached.
+            let anchor = self.developer_object_list_anchor.unwrap_or(object);
+            let index_of = |id| rows.iter().position(|row| row.id == id);
+            let (Some(from), Some(to)) = (index_of(anchor), index_of(object)) else {
+                self.developer_object_list_anchor = Some(object);
+                self.developer_selection
+                    .replace(SelectionWriter::ObjectTree, object);
+                return;
+            };
+            let (low, high) = if from <= to { (from, to) } else { (to, from) };
+            let range = &rows[low..=high];
+            rows.iter()
+                .filter(|row| {
+                    range.iter().any(|in_range| in_range.id == row.id)
+                        // Ctrl+Shift adds to the selection; Shift alone
+                        // replaces it.
+                        || (control && selected.contains(&row.id))
+                })
+                .map(|row| row.id)
+                .collect()
+        } else {
+            self.developer_object_list_anchor = Some(object);
+            rows.iter()
+                .filter(|row| {
+                    if row.id == object {
+                        !selected.contains(&object)
+                    } else {
+                        selected.contains(&row.id)
+                    }
+                })
+                .map(|row| row.id)
+                .collect()
+        };
+        self.developer_selection
+            .select_frame(SelectionWriter::ObjectTree, wanted);
+    }
+
     /// Select every visible row between the anchor and the cursor.
     fn extend_developer_object_list_selection(
         &mut self,
@@ -3813,9 +3879,7 @@ impl GameApp {
                 // A click sets the cursor as well: GTK's `set_cursor` is what
                 // a button press on a row performs.
                 self.developer_object_list_cursor = Some(object);
-                self.developer_object_list_anchor = Some(object);
-                self.developer_selection
-                    .replace(SelectionWriter::ObjectTree, object);
+                self.select_developer_object_list_row(&rows, object);
             }
             // The expander column consumes its own click: `GtkTreeView` opens
             // or closes the row and the selection does not follow.

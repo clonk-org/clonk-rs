@@ -221,6 +221,14 @@ pub(crate) fn handle_developer_object_list_event(
                 windows.request_redraw(key);
             }
         }
+        // Ctrl and Shift decide what a click on a row means, and the shell
+        // never sees these messages, so this window has to track them itself.
+        Event::WindowEvent {
+            event: WindowEvent::ModifiersChanged(modifiers),
+            ..
+        } => {
+            app.keyboard_modifiers = modifiers.state();
+        }
         // The tree view has focus while its window does, so GTK's own key
         // handling applies: the cursor walks the visible rows, Left/Right work
         // the disclosure, and Ctrl/Shift separate the cursor from the

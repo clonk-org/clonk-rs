@@ -5803,6 +5803,109 @@ fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane()
     ));
 }
 
+/// The pointer selects the way a `GTK_SELECTION_MULTIPLE` tree does.
+///
+/// `gtk_tree_selection_set_mode(selection, GTK_SELECTION_MULTIPLE)`
+/// (`C4ObjectListDlg.cpp:777-778`) is what makes Ctrl and Shift mean anything
+/// here, and `OnSelectionChanged` writes back
+/// `gtk_tree_selection_get_selected_rows`, which is in **tree-path order** —
+/// so the order the edit cursor receives is the order the rows are drawn in,
+/// whatever order they were clicked.
+#[test]
+fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
+    use clonk_engine::developer_selection::SelectionWriter;
+
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    let definition = app
+        .snapshot
+        .objects
+        .first()
+        .test_value()
+        .definition_id
+        .clone();
+    for _ in 0..4 {
+        app.engine
+            .spawn_test_object(clonk_engine::SpawnConfig::new(definition.clone()));
+    }
+    app.snapshot = app.engine.snapshot();
+
+    let extent = (200u32, 240u32);
+    let rows = app.developer_object_list_rows_for_test();
+    runtime_assert!(rows.len() >= 5);
+    let click = |app: &mut GameApp, index: usize| {
+        let rect =
+            crate::developer_object_list_view::object_list_row_rect_for_test(index, extent.0);
+        app.developer_object_list_click((rect.x + rect.w - 4, rect.y + rect.h / 2), extent);
+    };
+
+    // Plain click replaces.
+    app.keyboard_modifiers = ModifiersState::empty();
+    click(&mut app, 3);
+    runtime_assert_eq!(app.developer_selection.objects() => &[rows[3].id]);
+
+    // Ctrl-click adds — and the writeback is in path order, not click order.
+    app.keyboard_modifiers = ModifiersState::CONTROL;
+    click(&mut app, 1);
+    runtime_assert_eq!(
+        app.developer_selection.objects() => &[rows[1].id, rows[3].id],
+        "the earlier row comes first however late it was clicked",
+    );
+
+    // Ctrl-clicking a selected row takes it out again.
+    click(&mut app, 3);
+    runtime_assert_eq!(app.developer_selection.objects() => &[rows[1].id]);
+
+    // Shift-click covers the anchor through the clicked row, replacing. The
+    // anchor is row 3: a Ctrl-click *sets* it, so an extension afterwards
+    // starts from the row that was Ctrl-clicked and not from the first one.
+    app.keyboard_modifiers = ModifiersState::SHIFT;
+    click(&mut app, 4);
+    runtime_assert_eq!(
+        app.developer_selection.objects() => &[rows[3].id, rows[4].id]
+    );
+    // A second Shift-click extends from that same anchor rather than from the
+    // row the last one reached.
+    click(&mut app, 2);
+    runtime_assert_eq!(
+        app.developer_selection.objects() => &[rows[2].id, rows[3].id]
+    );
+
+    // Ctrl+Shift adds the range to what is already selected.
+    app.keyboard_modifiers = ModifiersState::empty();
+    click(&mut app, 4);
+    app.keyboard_modifiers = ModifiersState::CONTROL;
+    click(&mut app, 0);
+    runtime_assert_eq!(
+        app.developer_selection.objects() => &[rows[0].id, rows[4].id]
+    );
+    app.keyboard_modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    click(&mut app, 2);
+    runtime_assert_eq!(
+        app.developer_selection.objects() =>
+        &[rows[0].id, rows[1].id, rows[2].id, rows[4].id],
+        "the range joins the selection instead of replacing it",
+    );
+
+    // A live mutation keeps every still-valid id, in the same order.
+    let survivors = app.developer_selection.objects().to_vec();
+    app.engine
+        .spawn_test_object(clonk_engine::SpawnConfig::new(definition.clone()));
+    app.snapshot = app.engine.snapshot();
+    let _ = app.render_developer_object_list(extent.0, extent.1);
+    runtime_assert_eq!(
+        app.developer_selection.objects() => survivors.as_slice(),
+        "a spawned object disturbs no existing selection",
+    );
+
+    // Empty space clears, as `gtk_tree_selection_get_selected_rows` returning
+    // nothing does.
+    app.keyboard_modifiers = ModifiersState::empty();
+    app.developer_object_list_click((10, extent.1 as i32 - 4), extent);
+    runtime_assert!(app.developer_selection.objects().is_empty());
+    let _ = SelectionWriter::ObjectTree;
+}
+
 /// The keyboard cursor is separate from the selection, as GTK's is.
 ///
 /// `gtk_tree_selection_set_mode(selection, GTK_SELECTION_MULTIPLE)`
