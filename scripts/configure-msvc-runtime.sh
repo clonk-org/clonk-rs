@@ -8,7 +8,7 @@ set -euo pipefail
 : "${RUNNER_TEMP:?GitHub Actions runner temp directory is required}"
 
 rustc_info=$(rustc -vV)
-grep -Fqx 'release: 1.97.1' <<<"$rustc_info"
+grep -Fqx 'release: 1.98.0' <<<"$rustc_info"
 grep -Fqx 'LLVM version: 22.1.6' <<<"$rustc_info"
 
 cargo_target=x86_64-pc-windows-msvc
@@ -24,7 +24,7 @@ mkdir -p "$thinlto_cache"
 # rust-cache hashes every installed rustup toolchain. Hosted runner images can
 # carry different unrelated toolchains, so retain only the compiler that owns
 # this build before the workflow computes its cache identity.
-expected_toolchain=1.97.1-x86_64-pc-windows-msvc
+expected_toolchain=1.98.0-x86_64-pc-windows-msvc
 while IFS= read -r installed; do
     if [[ "$installed" != "$expected_toolchain" ]]; then
         rustup toolchain uninstall "$installed"

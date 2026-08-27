@@ -91,7 +91,7 @@ following the window.
 
 Run and passing on:
 
-- **Linux / X11 under Xvfb** — `aarch64`, Debian-based `rust:1.97.1` container,
+- **Linux / X11 under Xvfb** — `aarch64`, Debian-based `rust:1.98.0` container,
   no GPU present.
 - **macOS** — an ordinary desktop session.
 

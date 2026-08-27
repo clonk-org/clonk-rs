@@ -8,7 +8,7 @@ scenario or replay checks:
 git submodule update --init --recursive
 ```
 
-The workspace and CI pin Rust 1.97.1; CI pins cargo-nextest 0.9.91. Rustup
+The workspace and CI pin Rust 1.98.0; CI pins cargo-nextest 0.9.91. Rustup
 selects the checked-in toolchain automatically, which keeps local and CI
 diagnostics comparable. Repository script tests require Python 3.11 or newer.
 
@@ -99,7 +99,7 @@ cargo run --profile play -p clonk-app
 On Apple Silicon macOS, Cargo invokes Apple Clang and the system linker through
 the checked-in `.cargo/macos-system-clang` shim. Debug and test outputs use
 Apple ld's build-time-oriented `-O0` layout; the `play` and `release` profiles
-retain the normal linker layout. Rust 1.97.1's bundled Mach-O LLD does not
+retain the normal linker layout. Rust 1.98.0's bundled Mach-O LLD does not
 preserve panic unwinding for every workspace test binary, so do not override
 the checked-in linker. Other targets continue using their platform default.
 
