@@ -3025,6 +3025,34 @@ fn an_unopenable_graphics_group_reports_the_native_two_argument_diagnostic() {
 }
 
 #[test]
+fn a_missing_loader_is_reported_before_a_broken_font() {
+    // Init seeks the loader and loads the background before it touches fonts:
+    // InitFonts is the step *after* fctBackground.Load
+    // (src/C4LoaderScreen.cpp:88-96). With both broken, the loader exhaustion
+    // is therefore the failure C++ reports, and the font never gets a chance
+    // to fail.
+    let _lock = env_lock().lock();
+    let root = tempdir();
+    // The GUI root without the loader copy: Graphics.c4g opens, but holds no
+    // LoaderGoldmine1.
+    install_global_gui_test_root(root.path(), None);
+    let user = root.path().join("user");
+    let (_guard, paths) = isolated_test_app_paths(root.path(), user.as_path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nFontName=\nFontSize=14\n").test_value();
+
+    let assets = FrontendAssets::load(Some(&paths));
+    let error = build_startup_loader(&paths, &assets)
+        .err()
+        .expect("neither a loader nor a usable font is available");
+    let reported = format!("{error:#}");
+    main_assert!(
+        reported.contains("No loaders found for loader specification:"),
+        "the loader search runs before fonts, so its failure is the reported one: {reported}"
+    );
+}
+
+#[test]
 fn assetless_loading_mode_fails_instead_of_drawing_generic_loader() {
     let mut app = new_menu_app(320, 200);
     app.mode = AppMode::Loading;

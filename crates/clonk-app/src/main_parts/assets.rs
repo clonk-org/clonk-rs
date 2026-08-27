@@ -2655,6 +2655,21 @@ pub(crate) fn resolve_classic_font_bundle(
     )
 }
 
+/// Shipped English for `IDS_ERR_INITFONTS`
+/// (`planet/System.c4g/LanguageUS.txt:612`).
+const FONT_INIT_FAILURE_TEXT: &str = "Error initializing fonts";
+
+/// C4FontLoader::InitFont rejects an empty font name before it consults
+/// FontDefs at all, logging IDS_ERR_INITFONTS and returning false
+/// (`src/C4Fonts.cpp:176-183`). "Endeavour" is the default for a *missing*
+/// `FontName` key (`src/C4Config.cpp:390`), not for a configured empty one, so
+/// an empty request must fail here rather than reach the catalog and report a
+/// missing mapping.
+fn reject_empty_classic_font_request(request: &str) -> Result<()> {
+    anyhow::ensure!(!request.is_empty(), "{FONT_INIT_FAILURE_TEXT}");
+    Ok(())
+}
+
 fn resolve_classic_font_bundle_for_request(
     paths: &AppPaths,
     request: &str,
@@ -2680,6 +2695,7 @@ pub(crate) fn resolve_classic_font_bundle_for_request_with_system_fonts(
     graphics_registrations: &[LoaderGroupRegistration],
     system_fonts: &dyn system_fonts::SystemFontProvider,
 ) -> Result<ClassicFontBundle> {
+    reject_empty_classic_font_request(request)?;
     let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
     let graphics = main_graphics_group(paths)?;
     let build = |role, apply_definition, shadow| {
@@ -2766,6 +2782,7 @@ pub(crate) fn resolve_classic_startup_font_bundle_for_request_with_system_fonts(
 ) -> Result<ClassicStartupFontBundle> {
     use clonk_graphics::clonk_font::ClonkFontRole;
 
+    reject_empty_classic_font_request(request)?;
     let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
     let graphics = main_graphics_group(paths)?;
     let build = |role| {
@@ -5345,13 +5362,17 @@ pub(crate) fn build_startup_loader(
     // unopenable Graphics.c4g.
     let graphics = main_graphics_group(paths)?;
     let registrations = startup_loader_registrations(paths)?;
-    validate_classic_loader_font(paths, None, &registrations)?;
     validate_loader_graphics_font_sources(&registrations)?;
     let tier = highest_loader_tier(&registrations)?;
     let selected = select_loader_with_safe_random(&tier, &graphics, STARTUP_LOADER_SPECIFICATION)?;
     let selected_filename = selected.presentation_filename();
     let selection = LoaderSelection::startup(selected_filename)?;
     let background = decode_selected_loader(&selected)?;
+    // InitFonts is the step after fctBackground.Load, not before the seek
+    // (src/C4LoaderScreen.cpp:88-96), so a font that cannot initialize must not
+    // pre-empt the loader search: with both broken, C++ reports the missing
+    // loader.
+    validate_classic_loader_font(paths, None, &registrations)?;
     let resources = classic_loader_resources(assets, &registrations, &graphics)?;
     let screen = LoaderScreen::new(
         selection,
