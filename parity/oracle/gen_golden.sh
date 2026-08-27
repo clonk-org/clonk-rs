@@ -1790,5 +1790,8 @@ cxx="${CXX:-clang++}"
   -lz \
   -o "$gen/oracle"
 
-"$gen/oracle" > "$out"
+# Run from the disposable `.gen` directory: the c4group section writes real
+# fixture files, and it cleans up after itself, but anything a future section
+# leaks lands here rather than in the checkout. Both paths are absolute.
+(cd "$gen" && ./oracle) > "$out"
 echo "wrote $out ($(wc -c < "$out") bytes) from $oracle_revision ($oracle_commit)"

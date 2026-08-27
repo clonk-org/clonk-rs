@@ -7158,6 +7158,12 @@ inline std::vector<std::string> run(const Case &c)
 	grp.ResetSearch();
 	char found[_MAX_FNAME + 1];
 	while (grp.FindNextEntry("*", found)) order.emplace_back(found);
+
+	// The fixture is a real file on disk. Leave none behind: the generator runs
+	// from a repository checkout, and a stray `Unlisted.dat` there reads as
+	// untracked content rather than as oracle scratch.
+	grp.Close();
+	EraseFile(c.group_filename);
 	return order;
 }
 
