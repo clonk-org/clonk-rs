@@ -1352,6 +1352,41 @@ fn retained_gpu_artifact_fingerprints_the_device_adapter_fields() {
 }
 
 #[test]
+fn presentation_benchmark_separates_the_present_from_the_raster_it_follows() {
+    // The graphics pass is timed from its start through `present()`, so a
+    // single number cannot say whether a slow frame was composition or the
+    // platform copy. The software presenter makes the difference the whole
+    // question: `SoftwarePresenter::present` copies the CPU frame into the
+    // window buffer, where the retained GPU path hands off a texture.
+    let base = Instant::now();
+    let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+    runtime_assert_eq!(benchmark.poll(true, base, 0) => None);
+    let measuring = base + PRESENTATION_BENCHMARK_WARMUP;
+    runtime_assert_eq!(benchmark.poll(true, measuring, 0) => None);
+
+    for (graphics, present) in [(20, 8), (30, 10), (40, 12)] {
+        benchmark.record_successful_presentation(
+            measuring + Duration::from_millis(graphics),
+            Duration::from_millis(graphics),
+            Duration::from_millis(present),
+            true,
+            PresentationPath::Cpu,
+        );
+    }
+
+    let report = benchmark
+        .poll(true, measuring + Duration::from_secs(3), 0)
+        .test_value();
+    runtime_assert_eq!(
+        report.present_p50 => Duration::from_millis(10);
+        report.present_max => Duration::from_millis(12);
+        // Raster is what the pass cost before the copy, per sample.
+        report.raster_p50 => Duration::from_millis(20);
+        report.raster_max => Duration::from_millis(28);
+    );
+}
+
+#[test]
 fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
     let base = Instant::now();
     let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
@@ -1360,6 +1395,7 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
     benchmark.record_successful_presentation(
         base,
         Duration::from_millis(100),
+        Duration::from_micros(200),
         true,
         PresentationPath::RetainedGpu,
     );
@@ -1373,12 +1409,14 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
     benchmark.record_successful_presentation(
         base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(10),
         Duration::from_millis(10),
+        Duration::from_micros(200),
         true,
         PresentationPath::RetainedGpu,
     );
     benchmark.record_successful_presentation(
         base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(20),
         Duration::from_millis(20),
+        Duration::from_micros(200),
         false,
         PresentationPath::Cpu,
     );
@@ -1406,7 +1444,7 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
         report.graphics_p99 => Duration::from_millis(20);
         report.graphics_samples => vec![Duration::from_millis(10), Duration::from_millis(20)];
         report.machine_line() =>
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]";
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 max_present_ms=0.200000 present_p50_ms=0.200000 present_p95_ms=0.200000 present_p99_ms=0.200000 max_raster_ms=19.800000 raster_p50_ms=9.800000 raster_p95_ms=19.800000 raster_p99_ms=19.800000 graphics_pass_samples_ns=[10000000,20000000]";
         benchmark.poll(true, base + Duration::from_secs(10), 999) => None;
     );
 }
@@ -1446,6 +1484,7 @@ fn runtime_benchmark_window_does_not_require_a_visible_surface() {
     benchmark.record_successful_presentation(
         deadline,
         Duration::from_millis(10),
+        Duration::from_micros(200),
         true,
         PresentationPath::RetainedGpu,
     );
@@ -1472,12 +1511,14 @@ fn presentation_benchmark_retains_raw_gpu_profiles_only_inside_its_half_open_win
     benchmark.record_successful_retained_gpu_presentation(
         started,
         Duration::from_nanos(11),
+        Duration::from_nanos(3),
         true,
         profile,
     );
     benchmark.record_successful_retained_gpu_presentation(
         deadline,
         Duration::from_nanos(13),
+        Duration::from_nanos(3),
         true,
         profile,
     );

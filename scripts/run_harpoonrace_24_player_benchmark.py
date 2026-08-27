@@ -96,6 +96,17 @@ FLOAT_METRICS = {
     "graphics_pass_p50_ms",
     "graphics_pass_p95_ms",
     "graphics_pass_p99_ms",
+    # The platform copy/present, split out of the graphics pass it is timed
+    # inside, and the composition that precedes it. Required, so a binary that
+    # predates the split is rejected rather than silently reported without it.
+    "max_present_ms",
+    "present_p50_ms",
+    "present_p95_ms",
+    "present_p99_ms",
+    "max_raster_ms",
+    "raster_p50_ms",
+    "raster_p95_ms",
+    "raster_p99_ms",
 }
 REQUIRED_METRICS = INTEGER_METRICS | FLOAT_METRICS | {
     "graphics_pass_samples_ns"

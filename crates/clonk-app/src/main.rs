@@ -1718,12 +1718,19 @@ fn run() -> Result<()> {
                                 return;
                             }
                         }
-                        let fallback_to_cpu = match present_retained_gpu_frame_profiled(
+                        // Timed on its own, not just inside the graphics
+                        // pass: the pass covers composition *and* the platform
+                        // copy/present, and only the split says which one a
+                        // slow frame spent its time in.
+                        let present_started = Instant::now();
+                        let present_result = present_retained_gpu_frame_profiled(
                             &mut app,
                             pixels,
                             presenter,
                             retained_gpu_renderer,
-                        ) {
+                        );
+                        let present_duration = present_started.elapsed();
+                        let fallback_to_cpu = match present_result {
                             Ok(RetainedGpuProfiledOutcome::Presented(profile)) => {
                                 surface_rebuild.note_presented();
                                 let presented_terminal_loader =
@@ -1755,6 +1762,7 @@ fn run() -> Result<()> {
                                     benchmark.record_successful_retained_gpu_presentation(
                                         completed_at,
                                         graphics_duration,
+                                        present_duration,
                                         true,
                                         profile,
                                     );
@@ -1964,7 +1972,13 @@ fn run() -> Result<()> {
                             gamma.apply_to_rgba_bytes(pixels.frame_mut());
                         }
                     }
-                    match pixels.present().map(retained_gpu_present_outcome) {
+                    // The software presenter copies the whole CPU frame into
+                    // the window buffer here, so this is the destination cost
+                    // the graphics pass would otherwise hide.
+                    let present_started = Instant::now();
+                    let present_result = pixels.present().map(retained_gpu_present_outcome);
+                    let present_duration = present_started.elapsed();
+                    match present_result {
                         Ok(RetainedGpuPresentOutcome::Presented) => {
                             surface_rebuild.note_presented();
                             let presented_terminal_loader =
@@ -2008,6 +2022,7 @@ fn run() -> Result<()> {
                                 benchmark.record_successful_presentation(
                                     completed_at,
                                     graphics_duration,
+                                    present_duration,
                                     refreshed,
                                     PresentationPath::Cpu,
                                 );

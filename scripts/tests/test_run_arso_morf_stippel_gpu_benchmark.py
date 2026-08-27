@@ -316,6 +316,8 @@ class NativeCadenceTests(unittest.TestCase):
         "max_graphics_pass_ms=9.000000 graphics_pass_sample_count=3 "
         "graphics_pass_p50_ms=7.000000 graphics_pass_p95_ms=9.000000 "
         "graphics_pass_p99_ms=9.000000 "
+"max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
+        "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
         "graphics_pass_samples_ns=[5000000, 7000000, 9000000]"
     )
     CONTEXT_LINE = (
@@ -478,7 +480,11 @@ class NativeCadenceTests(unittest.TestCase):
             .replace("refreshed_frames=3", "refreshed_frames=0")
             .replace("graphics_pass_sample_count=3", "graphics_pass_sample_count=0")
             .replace(
+"max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
+                "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
                 "graphics_pass_samples_ns=[5000000, 7000000, 9000000]",
+"max_present_ms=0.100000 present_p50_ms=0.100000 present_p95_ms=0.100000 present_p99_ms=0.100000 "
+                "max_raster_ms=0.900000 raster_p50_ms=0.900000 raster_p95_ms=0.900000 raster_p99_ms=0.900000 "
                 "graphics_pass_samples_ns=[]",
             )
         )
