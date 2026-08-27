@@ -1881,7 +1881,18 @@ fn run() -> Result<()> {
                     if pixels.buffer_extent().0 != physical_width
                         || pixels.buffer_extent().1 != physical_height
                     {
-                        if let Err(error) = pixels.resize_buffer(physical_width, physical_height) {
+                        // Setup cost, not an ordinary frame: timed and counted
+                        // apart so it cannot hide inside a steady-state
+                        // distribution and read as the presenter being slow.
+                        let reallocation_started = Instant::now();
+                        let reallocated = pixels.resize_buffer(physical_width, physical_height);
+                        if let Some(benchmark) = presentation_benchmark.as_mut() {
+                            benchmark.record_surface_reallocation(
+                                reallocation_started,
+                                reallocation_started.elapsed(),
+                            );
+                        }
+                        if let Err(error) = reallocated {
                             tracing::error!(%error, "failed to restore CPU presentation buffer");
                             event_target.exit();
                             return;

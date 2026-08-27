@@ -874,6 +874,12 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
         frame_p95: Duration::ZERO,
         frame_p99: Duration::ZERO,
         frame_samples: Vec::new(),
+        surface_reallocations: 0,
+        reallocation_max: Duration::ZERO,
+        reallocation_p50: Duration::ZERO,
+        reallocation_p95: Duration::ZERO,
+        reallocation_p99: Duration::ZERO,
+        reallocation_samples: Vec::new(),
         retained_gpu_profiles: Vec::new(),
         gpu_timestamp_frames: Vec::new(),
     };

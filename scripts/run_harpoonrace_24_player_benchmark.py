@@ -87,6 +87,7 @@ INTEGER_METRICS = {
     "automatic_graphics_skips",
     "graphics_pass_sample_count",
     "frame_sample_count",
+    "surface_reallocations",
 }
 FLOAT_METRICS = {
     "elapsed_seconds",
@@ -119,6 +120,12 @@ FLOAT_METRICS = {
     "frame_p50_ms",
     "frame_p95_ms",
     "frame_p99_ms",
+    # Buffer reallocation is setup cost, reported apart from the steady-state
+    # frames so a window that contained one is visible rather than absorbed.
+    "max_reallocation_ms",
+    "reallocation_p50_ms",
+    "reallocation_p95_ms",
+    "reallocation_p99_ms",
 }
 REQUIRED_METRICS = INTEGER_METRICS | FLOAT_METRICS | {
     "graphics_pass_samples_ns"

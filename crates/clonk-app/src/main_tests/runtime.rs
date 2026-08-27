@@ -1354,6 +1354,43 @@ fn retained_gpu_artifact_fingerprints_the_device_adapter_fields() {
 }
 
 #[test]
+fn presentation_benchmark_keeps_surface_reallocations_out_of_the_frame_samples() {
+    // Reallocating the presentation buffer is setup cost, not an ordinary
+    // frame, and it is exactly the cost that would otherwise hide inside a
+    // steady-state distribution and be read as the presenter being slow. It is
+    // counted and timed on its own so a report can show a measurement window
+    // that contained none.
+    let base = Instant::now();
+    let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+    runtime_assert_eq!(benchmark.poll(true, base, 0) => None);
+    let measuring = base + PRESENTATION_BENCHMARK_WARMUP;
+    runtime_assert_eq!(benchmark.poll(true, measuring, 0) => None);
+
+    benchmark.record_frame_pass(
+        measuring,
+        Duration::from_millis(4),
+        Duration::from_millis(16),
+    );
+    benchmark.record_surface_reallocation(measuring, Duration::from_millis(120));
+    benchmark.record_frame_pass(
+        measuring,
+        Duration::from_millis(4),
+        Duration::from_millis(16),
+    );
+
+    let report = benchmark
+        .poll(true, measuring + Duration::from_secs(3), 0)
+        .test_value();
+    runtime_assert_eq!(
+        report.surface_reallocations => 1;
+        report.reallocation_max => Duration::from_millis(120);
+        // The two ordinary frames are the whole frame distribution.
+        report.frame_samples.len() => 2;
+        report.frame_max => Duration::from_millis(16);
+    );
+}
+
+#[test]
 fn presentation_benchmark_records_simulation_and_complete_frame_distributions() {
     // A presenter's budget is only readable against the frame it has to fit
     // inside, and against the simulation sharing that frame. Both are per
@@ -1485,7 +1522,7 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
         report.graphics_p99 => Duration::from_millis(20);
         report.graphics_samples => vec![Duration::from_millis(10), Duration::from_millis(20)];
         report.machine_line() =>
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 max_present_ms=0.200000 present_p50_ms=0.200000 present_p95_ms=0.200000 present_p99_ms=0.200000 max_raster_ms=19.800000 raster_p50_ms=9.800000 raster_p95_ms=19.800000 raster_p99_ms=19.800000 max_simulation_ms=0.000000 simulation_p50_ms=0.000000 simulation_p95_ms=0.000000 simulation_p99_ms=0.000000 max_frame_ms=0.000000 frame_p50_ms=0.000000 frame_p95_ms=0.000000 frame_p99_ms=0.000000 frame_sample_count=0 graphics_pass_samples_ns=[10000000,20000000]";
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 max_present_ms=0.200000 present_p50_ms=0.200000 present_p95_ms=0.200000 present_p99_ms=0.200000 max_raster_ms=19.800000 raster_p50_ms=9.800000 raster_p95_ms=19.800000 raster_p99_ms=19.800000 max_simulation_ms=0.000000 simulation_p50_ms=0.000000 simulation_p95_ms=0.000000 simulation_p99_ms=0.000000 max_frame_ms=0.000000 frame_p50_ms=0.000000 frame_p95_ms=0.000000 frame_p99_ms=0.000000 frame_sample_count=0 surface_reallocations=0 max_reallocation_ms=0.000000 reallocation_p50_ms=0.000000 reallocation_p95_ms=0.000000 reallocation_p99_ms=0.000000 graphics_pass_samples_ns=[10000000,20000000]";
         benchmark.poll(true, base + Duration::from_secs(10), 999) => None;
     );
 }
