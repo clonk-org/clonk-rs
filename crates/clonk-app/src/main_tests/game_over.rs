@@ -4228,7 +4228,8 @@ fn scoreboard_release_clears_an_occluded_f4_button_capture() {
         .runtime_client_list
         .test_ref()
         .layout(preferred, line_height)
-        .close_button;
+        .close_button
+        .expect("an ordinary dialog owns its title widgets");
     app.test_cursor(PhysicalPosition::new(
         f64::from(close.x + close.w / 2),
         f64::from(close.y + close.h / 2),

@@ -1440,8 +1440,8 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     );
     let runtime_layout = runtime.layout(preferred, line_height);
     let runtime_title = GuiPoint::new(
-        (runtime_layout.caption.x + 8) as f32,
-        (runtime_layout.caption.y + runtime_layout.caption.h / 2) as f32,
+        (runtime_layout.caption.expect("an ordinary dialog owns its title widgets").x + 8) as f32,
+        (runtime_layout.caption.expect("an ordinary dialog owns its title widgets").y + runtime_layout.caption.expect("an ordinary dialog owns its title widgets").h / 2) as f32,
     );
     main_assert!(runtime.handle_pointer_move(runtime_title, preferred, line_height));
     app.mode = AppMode::Running;
@@ -1452,8 +1452,8 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         StartupTooltip::text("Network clients"),
     );
     let runtime_close = GuiPoint::new(
-        (runtime_layout.close_button.x + 1) as f32,
-        (runtime_layout.close_button.y + 1) as f32,
+        (runtime_layout.close_button.expect("an ordinary dialog owns its title widgets").x + 1) as f32,
+        (runtime_layout.close_button.expect("an ordinary dialog owns its title widgets").y + 1) as f32,
     );
     main_assert!(app.runtime_client_list.as_mut().expect("runtime list").handle_pointer_move(runtime_close, preferred, line_height));
     assert_delayed_target(
@@ -1493,8 +1493,8 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         .test_ref()
         .layout(preferred, line_height);
     let resize_drag_start = GuiPoint::new(
-        (dragged_layout.caption.x + 8) as f32,
-        (dragged_layout.caption.y + dragged_layout.caption.h / 2) as f32,
+        (dragged_layout.caption.expect("an ordinary dialog owns its title widgets").x + 8) as f32,
+        (dragged_layout.caption.expect("an ordinary dialog owns its title widgets").y + dragged_layout.caption.expect("an ordinary dialog owns its title widgets").h / 2) as f32,
     );
     main_assert!(app.runtime_client_list.as_mut().expect("runtime list").handle_pointer_down(resize_drag_start, preferred, line_height));
     main_assert!(app
@@ -1536,8 +1536,8 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         RuntimeClientListDialog::new_info("Client information", row.client_id, Some(row));
     let info_layout = info.info_layout(preferred, line_height).test_value();
     let info_title = GuiPoint::new(
-        (info_layout.caption.x + 8) as f32,
-        (info_layout.caption.y + info_layout.caption.h / 2) as f32,
+        (info_layout.caption.expect("an ordinary dialog owns its title widgets").x + 8) as f32,
+        (info_layout.caption.expect("an ordinary dialog owns its title widgets").y + info_layout.caption.expect("an ordinary dialog owns its title widgets").h / 2) as f32,
     );
     main_assert!(info.handle_pointer_move(info_title, preferred, line_height));
     app.mode = AppMode::Menu;
@@ -1548,8 +1548,8 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         StartupTooltip::text("Client information"),
     );
     let info_close = GuiPoint::new(
-        (info_layout.close_button.x + 1) as f32,
-        (info_layout.close_button.y + 1) as f32,
+        (info_layout.close_button.expect("an ordinary dialog owns its title widgets").x + 1) as f32,
+        (info_layout.close_button.expect("an ordinary dialog owns its title widgets").y + 1) as f32,
     );
     main_assert!(app.runtime_client_list.as_mut().expect("client info").handle_pointer_move(info_close, preferred, line_height));
     assert_delayed_target(
