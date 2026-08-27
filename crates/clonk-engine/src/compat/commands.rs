@@ -894,61 +894,59 @@ pub(crate) fn set_transfer_zone(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|value| parse_object_reference_argument(value, "SetTransferZone", "object"))
         .transpose()?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetTransferZone requires an active engine context")
-        })?;
+    try_with_host_context_mut(
+        "SetTransferZone requires an active engine context",
+        |context| {
+            let owner = match explicit_object.flatten() {
+                Some(id) => id,
+                None => context
+                    .object_context()
+                    .map(|ctx| ctx.id())
+                    .ok_or_else(|| {
+                        RuntimeError::new(
+                            "SetTransferZone requires an object argument or active object context",
+                        )
+                    })?,
+            };
 
-        let owner = match explicit_object.flatten() {
-            Some(id) => id,
-            None => context
+            // pObj->x/y off the LIVE object (C4Script.cpp:3154): the executing
+            // scope resolves the object even while its own Initialize runs
+            // before the world snapshot knows it (C4Object::Init fires the
+            // callbacks on the constructed object, C4Object.cpp:215+ — the
+            // WZKP homebase placed at player join).
+            let position = context
                 .object_context()
-                .map(|ctx| ctx.id())
+                .filter(|object| object.id() == owner)
+                .map(|object| object.effective_position())
+                .or_else(|| {
+                    context
+                        .get_world_object(owner)
+                        .map(|object| object.position())
+                })
                 .ok_or_else(|| {
-                    RuntimeError::new(
-                        "SetTransferZone requires an object argument or active object context",
-                    )
-                })?,
-        };
+                    RuntimeError::new(format!(
+                        "SetTransferZone: object {} not found in current engine context",
+                        owner
+                    ))
+                })?;
 
-        // pObj->x/y off the LIVE object (C4Script.cpp:3154): the executing
-        // scope resolves the object even while its own Initialize runs
-        // before the world snapshot knows it (C4Object::Init fires the
-        // callbacks on the constructed object, C4Object.cpp:215+ — the
-        // WZKP homebase placed at player join).
-        let position = context
-            .object_context()
-            .filter(|object| object.id() == owner)
-            .map(|object| object.effective_position())
-            .or_else(|| {
-                context
-                    .get_world_object(owner)
-                    .map(|object| object.position())
-            })
-            .ok_or_else(|| {
-                RuntimeError::new(format!(
-                    "SetTransferZone: object {} not found in current engine context",
-                    owner
-                ))
-            })?;
+            if width == 0 || height == 0 {
+                context.register_transfer_zone_command(TransferZoneCommand::clear(owner));
+                return Ok(Value::Bool(true));
+            }
 
-        if width == 0 || height == 0 {
-            context.register_transfer_zone_command(TransferZoneCommand::clear(owner));
-            return Ok(Value::Bool(true));
-        }
-
-        let abs_x = position.x.saturating_add(x);
-        let abs_y = position.y.saturating_add(y);
-        let rect = TransferZoneRect {
-            x: abs_x,
-            y: abs_y,
-            width,
-            height,
-        };
-        context.register_transfer_zone_command(TransferZoneCommand::set(owner, rect));
-        Ok(Value::Bool(true))
-    })
+            let abs_x = position.x.saturating_add(x);
+            let abs_y = position.y.saturating_add(y);
+            let rect = TransferZoneRect {
+                x: abs_x,
+                y: abs_y,
+                width,
+                height,
+            };
+            context.register_transfer_zone_command(TransferZoneCommand::set(owner, rect));
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 /// The post-pixel evaluate loop of C4Landscape::BlastFree. Object creation
@@ -1026,18 +1024,17 @@ pub(crate) fn process_preview_blast_reactions(
                             .collect::<Vec<_>>(),
                     )
                 })?;
-                HOST_CONTEXT.with(|cell| {
-                    let mut borrow = cell.borrow_mut();
-                    let context = borrow.as_mut().ok_or_else(|| {
-                        RuntimeError::new("BlastFree requires an active engine context")
-                    })?;
-                    context.register_landscape_operation(LandscapeOperation::CastPxs {
-                        material,
-                        position: center,
-                        velocities,
-                    });
-                    Ok::<_, RuntimeError>(())
-                })?;
+                try_with_host_context_mut(
+                    "BlastFree requires an active engine context",
+                    |context| {
+                        context.register_landscape_operation(LandscapeOperation::CastPxs {
+                            material,
+                            position: center,
+                            velocities,
+                        });
+                        Ok::<_, RuntimeError>(())
+                    },
+                )?;
             }
         }
     }

@@ -5361,172 +5361,172 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(definition) = definition.as_ref() else {
             continue;
         };
-        let target = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let context = borrow.as_mut().ok_or_else(|| {
-                RuntimeError::new("CastObjects requires an active engine context")
-            })?;
-            if context.world.definition_known(definition) == Some(false) {
-                return Ok(None);
-            }
+        let target = try_with_host_context_mut(
+            "CastObjects requires an active engine context",
+            |context| {
+                if context.world.definition_known(definition) == Some(false) {
+                    return Ok(None);
+                }
 
-            let metadata = context
-                .definition_metadata(definition)
-                .cloned()
-                .unwrap_or_else(|| DefinitionMetadata {
-                    category: context
-                        .definition_category(definition)
-                        .unwrap_or(DEFAULT_CATEGORY),
-                    ocf_base: ocf::NORMAL,
-                    ..Default::default()
-                });
-            // C4Object::Init discards sampled rotation/rdir for definitions
-            // without Rotateable, after the synced draws already happened.
-            let (rotation, rdir) = if metadata.rotateable == 0 {
-                (0, C4Fixed::ZERO)
-            } else {
-                (sampled_rotation, sampled_rdir)
-            };
-            let fixed_velocity = FixedVec2::new(xdir, ydir);
-            let initial_controller = if controller > OWNER_NONE {
-                controller
-            } else {
-                owner
-            };
-            // Init reads pCreator->pLayer for every object; an earlier
-            // synchronous callback may have changed the creator's layer.
-            let creator_layer = creator.and_then(|id| context.object_layer(id));
-            let creator_layer_cache = creator
-                .map(|id| context.object_layer_compiler_cache(id))
-                .unwrap_or(0);
-            let raw_position = Vector2::new(
-                base_position.x.saturating_add(x_offset),
-                base_position.y.saturating_add(y_offset),
-            );
-            let position = Vector2::new(
-                raw_position.x,
-                crate::docon_initial_center_y(
+                let metadata = context
+                    .definition_metadata(definition)
+                    .cloned()
+                    .unwrap_or_else(|| DefinitionMetadata {
+                        category: context
+                            .definition_category(definition)
+                            .unwrap_or(DEFAULT_CATEGORY),
+                        ocf_base: ocf::NORMAL,
+                        ..Default::default()
+                    });
+                // C4Object::Init discards sampled rotation/rdir for definitions
+                // without Rotateable, after the synced draws already happened.
+                let (rotation, rdir) = if metadata.rotateable == 0 {
+                    (0, C4Fixed::ZERO)
+                } else {
+                    (sampled_rotation, sampled_rdir)
+                };
+                let fixed_velocity = FixedVec2::new(xdir, ydir);
+                let initial_controller = if controller > OWNER_NONE {
+                    controller
+                } else {
+                    owner
+                };
+                // Init reads pCreator->pLayer for every object; an earlier
+                // synchronous callback may have changed the creator's layer.
+                let creator_layer = creator.and_then(|id| context.object_layer(id));
+                let creator_layer_cache = creator
+                    .map(|id| context.object_layer_compiler_cache(id))
+                    .unwrap_or(0);
+                let raw_position = Vector2::new(
+                    base_position.x.saturating_add(x_offset),
+                    base_position.y.saturating_add(y_offset),
+                );
+                let position = Vector2::new(
+                    raw_position.x,
+                    crate::docon_initial_center_y(
+                        metadata.shape,
+                        metadata.stretch_growth,
+                        metadata.line,
+                        crate::FULL_CON,
+                        raw_position.y,
+                    ),
+                );
+                let id = context.allocate_object_id();
+                let mut spawn = SpawnConfig::new(definition.clone())
+                    .with_position(position)
+                    .with_fixed_velocity(fixed_velocity)
+                    .with_rotation(rotation)
+                    .with_rotation_velocity(rdir)
+                    .with_owner(owner)
+                    .with_controller(controller)
+                    .with_category(metadata.category)
+                    .with_id(id);
+                if let Some(layer) = creator_layer {
+                    spawn = spawn.with_layer(layer);
+                }
+                spawn.compiler_cache.layer = creator_layer_cache;
+                // NewObject callbacks run below while this host call is live.
+                spawn.initialized = true;
+                spawn.position_adjusted = true;
+                if position.y != raw_position.y {
+                    spawn.fixed_position =
+                        Some(FixedVec2::from_ints(raw_position.x, raw_position.y));
+                }
+
+                let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
+                let preview_ocf = ocf::compute(
+                    metadata.ocf_base,
+                    metadata.crew_member,
+                    initial_alive,
+                    ObjectStatus::Normal,
+                    false,
+                    0,
+                    metadata.category,
+                );
+                let preview_velocity = Vector2::new(fixed_velocity.int_x(), fixed_velocity.int_y());
+                let preview = HostWorldObject::with_category(
+                    id,
+                    definition.clone(),
+                    ObjectStatus::Normal,
+                    "Idle",
+                    None,
+                    None,
+                    None,
+                    owner,
+                    metadata.category,
+                    if initial_alive {
+                        metadata.physical.energy
+                    } else {
+                        0
+                    },
+                    0,
+                    0,
+                    raw_position,
+                    preview_velocity,
+                    rotation,
+                    metadata.vertices.clone(),
+                    0,
+                    0,
+                    0,
+                    None,
+                )
+                .with_compiler_fields(
+                    0,
+                    0,
+                    -1,
+                    crate::ObjectCompilerCache {
+                        layer: creator_layer_cache,
+                        ..crate::ObjectCompilerCache::default()
+                    },
+                )
+                .with_rotation_velocity(rdir)
+                .with_alive(initial_alive)
+                .with_ocf(preview_ocf)
+                .with_full_state(Rc::new({
+                    let mut state = crate::preview_spawn_state_with_components(
+                        raw_position,
+                        owner,
+                        initial_controller,
+                        metadata.category,
+                        0,
+                        metadata.contact_density(),
+                        metadata.vertices.clone(),
+                        metadata.components.as_slice(),
+                    );
+                    state.velocity = preview_velocity;
+                    state.script_fixed_velocity = Some(fixed_velocity);
+                    state.script_rotation_velocity = Some(rdir);
+                    state.rotation = rotation;
+                    state.alive = initial_alive;
+                    state.energy = if initial_alive {
+                        metadata.physical.energy
+                    } else {
+                        0
+                    };
+                    state.crew_member = metadata.crew_member;
+                    state.layer = creator_layer;
+                    state.blit_mode = metadata.blit_mode;
+                    state.mobile = metadata.category != crate::CATEGORY_STATIC_BACK
+                        && (fixed_velocity != FixedVec2::ZERO || rdir.is_nonzero());
+                    state
+                }));
+                context.register_spawn(spawn, preview);
+                // Seed exact fixed dirs into the pending object's live scope so
+                // its synchronous callbacks observe the Init values.
+                if context.ensure_object_scope(id) {
+                    if let Some(scope) = context.object_scope_mut(id) {
+                        scope.current_fixed_velocity = fixed_velocity;
+                        scope.pending_update.rotation_velocity = Some(rdir);
+                    }
+                }
+                Ok(Some((
+                    id,
                     metadata.shape,
                     metadata.stretch_growth,
                     metadata.line,
-                    crate::FULL_CON,
-                    raw_position.y,
-                ),
-            );
-            let id = context.allocate_object_id();
-            let mut spawn = SpawnConfig::new(definition.clone())
-                .with_position(position)
-                .with_fixed_velocity(fixed_velocity)
-                .with_rotation(rotation)
-                .with_rotation_velocity(rdir)
-                .with_owner(owner)
-                .with_controller(controller)
-                .with_category(metadata.category)
-                .with_id(id);
-            if let Some(layer) = creator_layer {
-                spawn = spawn.with_layer(layer);
-            }
-            spawn.compiler_cache.layer = creator_layer_cache;
-            // NewObject callbacks run below while this host call is live.
-            spawn.initialized = true;
-            spawn.position_adjusted = true;
-            if position.y != raw_position.y {
-                spawn.fixed_position = Some(FixedVec2::from_ints(raw_position.x, raw_position.y));
-            }
-
-            let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
-            let preview_ocf = ocf::compute(
-                metadata.ocf_base,
-                metadata.crew_member,
-                initial_alive,
-                ObjectStatus::Normal,
-                false,
-                0,
-                metadata.category,
-            );
-            let preview_velocity = Vector2::new(fixed_velocity.int_x(), fixed_velocity.int_y());
-            let preview = HostWorldObject::with_category(
-                id,
-                definition.clone(),
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                owner,
-                metadata.category,
-                if initial_alive {
-                    metadata.physical.energy
-                } else {
-                    0
-                },
-                0,
-                0,
-                raw_position,
-                preview_velocity,
-                rotation,
-                metadata.vertices.clone(),
-                0,
-                0,
-                0,
-                None,
-            )
-            .with_compiler_fields(
-                0,
-                0,
-                -1,
-                crate::ObjectCompilerCache {
-                    layer: creator_layer_cache,
-                    ..crate::ObjectCompilerCache::default()
-                },
-            )
-            .with_rotation_velocity(rdir)
-            .with_alive(initial_alive)
-            .with_ocf(preview_ocf)
-            .with_full_state(Rc::new({
-                let mut state = crate::preview_spawn_state_with_components(
-                    raw_position,
-                    owner,
-                    initial_controller,
-                    metadata.category,
-                    0,
-                    metadata.contact_density(),
-                    metadata.vertices.clone(),
-                    metadata.components.as_slice(),
-                );
-                state.velocity = preview_velocity;
-                state.script_fixed_velocity = Some(fixed_velocity);
-                state.script_rotation_velocity = Some(rdir);
-                state.rotation = rotation;
-                state.alive = initial_alive;
-                state.energy = if initial_alive {
-                    metadata.physical.energy
-                } else {
-                    0
-                };
-                state.crew_member = metadata.crew_member;
-                state.layer = creator_layer;
-                state.blit_mode = metadata.blit_mode;
-                state.mobile = metadata.category != crate::CATEGORY_STATIC_BACK
-                    && (fixed_velocity != FixedVec2::ZERO || rdir.is_nonzero());
-                state
-            }));
-            context.register_spawn(spawn, preview);
-            // Seed exact fixed dirs into the pending object's live scope so
-            // its synchronous callbacks observe the Init values.
-            if context.ensure_object_scope(id) {
-                if let Some(scope) = context.object_scope_mut(id) {
-                    scope.current_fixed_velocity = fixed_velocity;
-                    scope.pending_update.rotation_velocity = Some(rdir);
-                }
-            }
-            Ok(Some((
-                id,
-                metadata.shape,
-                metadata.stretch_growth,
-                metadata.line,
-            )))
-        })?;
+                )))
+            },
+        )?;
         let Some((target, shape, stretch_growth, line)) = target else {
             continue;
         };
@@ -6082,119 +6082,118 @@ pub(crate) fn place_vegetation(args: &[Value]) -> Result<Value, RuntimeError> {
         "growth",
     )?;
 
-    let registration = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("PlaceVegetation requires an active engine context")
-        })?;
-        let Some(metadata) = context.definition_metadata(&definition).cloned() else {
-            // C4Id2Def failure happens before the first Random draw
-            // (C4Game.cpp:2985-2986).
-            return Ok(None);
-        };
-        let base = context
-            .object_context()
-            .map(ObjectScopeContext::effective_position)
-            .unwrap_or(Vector2::ZERO);
-        let area_x = base.x.wrapping_add(x);
-        let area_y = base.y.wrapping_add(y);
+    let registration = try_with_host_context_mut(
+        "PlaceVegetation requires an active engine context",
+        |context| {
+            let Some(metadata) = context.definition_metadata(&definition).cloned() else {
+                // C4Id2Def failure happens before the first Random draw
+                // (C4Game.cpp:2985-2986).
+                return Ok(None);
+            };
+            let base = context
+                .object_context()
+                .map(ObjectScopeContext::effective_position)
+                .unwrap_or(Vector2::ZERO);
+            let area_x = base.x.wrapping_add(x);
+            let area_y = base.y.wrapping_add(y);
 
-        let mut growth = requested_growth;
-        if growth <= 0 {
-            growth = FULL_CON;
-            if metadata.growth != 0 && draw_context_random(3)? == 0 {
-                growth = draw_context_random(FULL_CON)?.wrapping_add(1);
+            let mut growth = requested_growth;
+            if growth <= 0 {
+                growth = FULL_CON;
+                if metadata.growth != 0 && draw_context_random(3)? == 0 {
+                    growth = draw_context_random(FULL_CON)?.wrapping_add(1);
+                }
             }
-        }
 
-        let (shape_width, shape_height) = metadata
-            .shape
-            .map(|shape| (shape.width, shape.height))
-            .unwrap_or((0, 0));
-        let Some(landscape) = context.landscape_ref() else {
-            return Ok(None);
-        };
-        let bottom = match metadata.placement {
-            // C4D_Place_Surface (C4Game.cpp:2998-3024).
-            0 => {
-                let mut found = None;
-                for _ in 0..20 {
-                    let tx = area_x.wrapping_add(draw_context_random(width)?);
-                    let mut ty = area_y.wrapping_add(draw_context_random(height)?);
-                    while ty > 0 && landscape.is_ift_at(tx, ty) {
-                        ty -= 1;
+            let (shape_width, shape_height) = metadata
+                .shape
+                .map(|shape| (shape.width, shape.height))
+                .unwrap_or((0, 0));
+            let Some(landscape) = context.landscape_ref() else {
+                return Ok(None);
+            };
+            let bottom = match metadata.placement {
+                // C4D_Place_Surface (C4Game.cpp:2998-3024).
+                0 => {
+                    let mut found = None;
+                    for _ in 0..20 {
+                        let tx = area_x.wrapping_add(draw_context_random(width)?);
+                        let mut ty = area_y.wrapping_add(draw_context_random(height)?);
+                        while ty > 0 && landscape.is_ift_at(tx, ty) {
+                            ty -= 1;
+                        }
+                        let Some(ty) = landscape.above_semi_solid(tx, ty) else {
+                            continue;
+                        };
+                        if !(50..=landscape.estimated_height() - 50).contains(&ty) {
+                            continue;
+                        }
+                        if landscape.is_semi_solid_at(tx, ty - shape_height)
+                            || landscape.is_semi_solid_at(tx, ty - shape_height / 2)
+                            || landscape
+                                .is_semi_solid_at(tx - shape_width / 2, ty - shape_height * 2 / 3)
+                            || landscape
+                                .is_semi_solid_at(tx + shape_width / 2, ty - shape_height * 2 / 3)
+                        {
+                            continue;
+                        }
+                        let soil_y = ty.wrapping_add(3);
+                        let is_soil = landscape
+                            .border_material_at(tx, soil_y)
+                            .and_then(|material| {
+                                context
+                                    .world
+                                    .materials()
+                                    .and_then(|materials| materials.get_by_id(material))
+                            })
+                            .and_then(|material| material.definition().int("Soil"))
+                            .is_some_and(|soil| soil != 0);
+                        if !is_soil {
+                            continue;
+                        }
+                        if metadata.growth == 0 {
+                            growth = FULL_CON;
+                        }
+                        found = Some(Vector2::new(tx, soil_y.wrapping_add(5)));
+                        break;
                     }
-                    let Some(ty) = landscape.above_semi_solid(tx, ty) else {
-                        continue;
+                    let Some(found) = found else {
+                        return Ok(None);
                     };
-                    if !(50..=landscape.estimated_height() - 50).contains(&ty) {
-                        continue;
-                    }
-                    if landscape.is_semi_solid_at(tx, ty - shape_height)
-                        || landscape.is_semi_solid_at(tx, ty - shape_height / 2)
-                        || landscape
-                            .is_semi_solid_at(tx - shape_width / 2, ty - shape_height * 2 / 3)
-                        || landscape
-                            .is_semi_solid_at(tx + shape_width / 2, ty - shape_height * 2 / 3)
-                    {
-                        continue;
-                    }
-                    let soil_y = ty.wrapping_add(3);
-                    let is_soil = landscape
-                        .border_material_at(tx, soil_y)
-                        .and_then(|material| {
-                            context
-                                .world
-                                .materials()
-                                .and_then(|materials| materials.get_by_id(material))
-                        })
-                        .and_then(|material| material.definition().int("Soil"))
-                        .is_some_and(|soil| soil != 0);
-                    if !is_soil {
-                        continue;
-                    }
-                    if metadata.growth == 0 {
-                        growth = FULL_CON;
-                    }
-                    found = Some(Vector2::new(tx, soil_y.wrapping_add(5)));
-                    break;
+                    found
                 }
-                let Some(found) = found else {
-                    return Ok(None);
-                };
-                found
-            }
-            // C4D_Place_Liquid (C4Game.cpp:3027-3039).
-            1 => {
-                let mut tx = area_x.wrapping_add(draw_context_random(width)?);
-                let mut ty = area_y.wrapping_add(draw_context_random(height)?);
-                if !placement_find_surface_liquid(
-                    landscape,
-                    &mut tx,
-                    &mut ty,
-                    shape_width,
-                    shape_height,
-                ) && !placement_find_liquid(
-                    landscape,
-                    &mut tx,
-                    &mut ty,
-                    shape_width,
-                    shape_height,
-                ) {
-                    return Ok(None);
+                // C4D_Place_Liquid (C4Game.cpp:3027-3039).
+                1 => {
+                    let mut tx = area_x.wrapping_add(draw_context_random(width)?);
+                    let mut ty = area_y.wrapping_add(draw_context_random(height)?);
+                    if !placement_find_surface_liquid(
+                        landscape,
+                        &mut tx,
+                        &mut ty,
+                        shape_width,
+                        shape_height,
+                    ) && !placement_find_liquid(
+                        landscape,
+                        &mut tx,
+                        &mut ty,
+                        shape_width,
+                        shape_height,
+                    ) {
+                        return Ok(None);
+                    }
+                    let Some(ty) = landscape.semi_above_solid(tx, ty) else {
+                        return Ok(None);
+                    };
+                    Vector2::new(tx, ty.wrapping_add(3))
                 }
-                let Some(ty) = landscape.semi_above_solid(tx, ty) else {
-                    return Ok(None);
-                };
-                Vector2::new(tx, ty.wrapping_add(3))
-            }
-            _ => return Ok(None),
-        };
+                _ => return Ok(None),
+            };
 
-        Ok(Some(register_placement_object(
-            context, definition, metadata, bottom, growth,
-        )))
-    })?;
+            Ok(Some(register_placement_object(
+                context, definition, metadata, bottom, growth,
+            )))
+        },
+    )?;
     let Some(registration) = registration else {
         return Ok(Value::Nil);
     };
@@ -6265,239 +6264,239 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
         ));
     }
 
-    let registration = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("CreateConstruction requires an active engine context")
-        })?;
-
-        // ConstructionCheck resolves the definition first and reports
-        // IDS_OBJ_UNDEF through the calling object when a site check was
-        // requested (C4Landscape.cpp:2131-2138); the later
-        // CreateObjectConstruction C4Id2Def failure stays a silent nullptr
-        // (C4Game.cpp:1183).
-        if context.world.definition_known(&definition) == Some(false) {
-            if check_site {
-                let text = context
-                    .world
-                    .construction_check_strings
-                    .format_undefined(&definition);
-                register_construction_check_feedback(context, text);
-            }
-            return Ok(None);
-        }
-
-        let metadata = context
-            .definition_metadata(&definition)
-            .cloned()
-            .unwrap_or_else(|| DefinitionMetadata {
-                category: context
-                    .definition_category(&definition)
-                    .unwrap_or(DEFAULT_CATEGORY),
-                ocf_base: ocf::NORMAL,
-                constructable: true,
-                ..Default::default()
-            });
-        let definition_category = metadata.category;
-        let creator = context.object_context().map(ObjectScopeContext::id);
-        let creator_layer = creator.and_then(|creator| context.object_layer(creator));
-        let creator_layer_cache = creator
-            .map(|creator| context.object_layer_compiler_cache(creator))
-            .unwrap_or(0);
-
-        let base_position = context
-            .object_context()
-            .map(|object| object.effective_position())
-            .unwrap_or(Vector2::ZERO);
-        let substitute_local_owner = matches!(
-            clonk_script::caller_strictness(),
-            clonk_script::HostCallerStrictness::NoCaller
-                | clonk_script::HostCallerStrictness::NonStrict
-        );
-        let owner = if substitute_local_owner {
-            context
-                .object_context()
-                .map(ObjectScopeContext::owner)
-                .unwrap_or(requested_owner)
-        } else {
-            requested_owner
-        };
-        let position = Vector2::new(
-            base_position.x.saturating_add(x_offset),
-            base_position.y.saturating_add(y_offset),
-        );
-
-        // FnCreateConstruction forwards `iCompletion * FullCon / 100`
-        // without clamping the percentage (C4Script.cpp:1911-1933). Normal
-        // definitions clamp in DoCon; Oversize definitions retain values
-        // above FullCon, including EMDropDef's unusual FullCon argument.
-        let construction_value =
-            ((i64::from(completion_percent) * i64::from(FULL_CON)) / 100) as i32;
-
-        if check_site {
-            if let Some(failure) = construction_check(context, &definition, &metadata, position)? {
-                // GameMsgObject(..., cthr->Obj, FRed) feedback per failed
-                // branch (C4Landscape.cpp:2139-2163).
-                let text = match failure {
-                    crate::command::ConstructionCheckFailure::NotConstructable => {
-                        let name = if metadata.name.is_empty() {
-                            definition.clone()
-                        } else {
-                            metadata.name.clone()
-                        };
-                        context
-                            .world
-                            .construction_check_strings
-                            .format_not_constructable(&name)
-                    }
-                    crate::command::ConstructionCheckFailure::NoRoom => {
-                        context.world.construction_check_strings.no_room.clone()
-                    }
-                    crate::command::ConstructionCheckFailure::NoLevel => {
-                        context.world.construction_check_strings.no_level.clone()
-                    }
-                    crate::command::ConstructionCheckFailure::Blocked(blocker) => {
-                        let name = context
-                            .object_effective_name(blocker)
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or_default();
-                        context
-                            .world
-                            .construction_check_strings
-                            .format_blocked(&name)
-                    }
-                };
-                register_construction_check_feedback(context, text);
+    let registration = try_with_host_context_mut(
+        "CreateConstruction requires an active engine context",
+        |context| {
+            // ConstructionCheck resolves the definition first and reports
+            // IDS_OBJ_UNDEF through the calling object when a site check was
+            // requested (C4Landscape.cpp:2131-2138); the later
+            // CreateObjectConstruction C4Id2Def failure stays a silent nullptr
+            // (C4Game.cpp:1183).
+            if context.world.definition_known(&definition) == Some(false) {
+                if check_site {
+                    let text = context
+                        .world
+                        .construction_check_strings
+                        .format_undefined(&definition);
+                    register_construction_check_feedback(context, text);
+                }
                 return Ok(None);
             }
-        }
 
-        if terrain_flag {
-            let (width, height) = metadata
-                .shape
-                .map(|shape| (shape.width, shape.height))
-                .unwrap_or_default();
-            context.prepare_construction_terrain(
-                position.x,
-                position.y,
-                width,
-                height,
-                metadata.basement,
+            let metadata = context
+                .definition_metadata(&definition)
+                .cloned()
+                .unwrap_or_else(|| DefinitionMetadata {
+                    category: context
+                        .definition_category(&definition)
+                        .unwrap_or(DEFAULT_CATEGORY),
+                    ocf_base: ocf::NORMAL,
+                    constructable: true,
+                    ..Default::default()
+                });
+            let definition_category = metadata.category;
+            let creator = context.object_context().map(ObjectScopeContext::id);
+            let creator_layer = creator.and_then(|creator| context.object_layer(creator));
+            let creator_layer_cache = creator
+                .map(|creator| context.object_layer_compiler_cache(creator))
+                .unwrap_or(0);
+
+            let base_position = context
+                .object_context()
+                .map(|object| object.effective_position())
+                .unwrap_or(Vector2::ZERO);
+            let substitute_local_owner = matches!(
+                clonk_script::caller_strictness(),
+                clonk_script::HostCallerStrictness::NoCaller
+                    | clonk_script::HostCallerStrictness::NonStrict
             );
-        }
-
-        let id = context.allocate_object_id();
-
-        let mut spawn = SpawnConfig::new(definition.clone())
-            .with_position(position)
-            .with_owner(owner)
-            .with_category(definition_category)
-            // C4Game::NewObject inserts the object at Con=0, calls
-            // Construction, and only then applies the requested iCon.
-            .with_construction(0)
-            .with_id(id);
-        if let Some(layer) = creator_layer {
-            spawn = spawn.with_layer(layer);
-        }
-        spawn.compiler_cache.layer = creator_layer_cache;
-        // The creating controller rides onto the site (FnCreateConstruction,
-        // C4Script.cpp:1932-1933).
-        let creator_controller = context
-            .object_context()
-            .map(ObjectScopeContext::controller)
-            .filter(|value| *value > OWNER_NONE);
-        if let Some(controller) = creator_controller {
-            spawn = spawn.with_controller(controller);
-        }
-        // The lifecycle below runs while this host call is live; the later
-        // copy-out spawn must not repeat callbacks or the initial DoCon.
-        spawn.initialized = true;
-        spawn.position_adjusted = true;
-
-        let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
-        let preview_ocf = ocf::compute(
-            metadata.ocf_base,
-            metadata.crew_member,
-            initial_alive,
-            ObjectStatus::Normal,
-            false,
-            0,
-            metadata.category,
-        );
-        let preview = HostWorldObject::with_category(
-            id,
-            definition,
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            owner,
-            definition_category,
-            if initial_alive {
-                metadata.physical.energy
+            let owner = if substitute_local_owner {
+                context
+                    .object_context()
+                    .map(ObjectScopeContext::owner)
+                    .unwrap_or(requested_owner)
             } else {
-                0
-            },
-            0,
-            0,
-            position,
-            Vector2::ZERO,
-            0,
-            Vec::new(),
-            0,
-            0,
-            0,
-            None,
-        )
-        .with_compiler_fields(
-            0,
-            0,
-            -1,
-            crate::ObjectCompilerCache {
-                layer: creator_layer_cache,
-                ..crate::ObjectCompilerCache::default()
-            },
-        )
-        .with_alive(initial_alive)
-        .with_ocf(preview_ocf)
-        .with_full_state(Rc::new({
-            let mut state = crate::preview_spawn_state_with_components(
-                position,
-                owner,
-                creator_controller.unwrap_or(owner),
-                definition_category,
-                0,
-                metadata.contact_density(),
-                metadata.vertices.clone(),
-                metadata.components.as_slice(),
-            );
-            state.alive = initial_alive;
-            state.energy = if initial_alive {
-                metadata.physical.energy
-            } else {
-                0
+                requested_owner
             };
-            state.crew_member = metadata.crew_member;
-            state.layer = creator_layer;
-            state.blit_mode = metadata.blit_mode;
-            state
-        }));
+            let position = Vector2::new(
+                base_position.x.saturating_add(x_offset),
+                base_position.y.saturating_add(y_offset),
+            );
 
-        context.register_spawn(spawn, preview);
-        Ok(Some((
-            id,
-            creator,
-            construction_value,
-            metadata.shape,
-            metadata.stretch_growth,
-            metadata.line,
-            metadata.ocf_base,
-            metadata.crew_member,
-            metadata.category,
-            initial_alive,
-        )))
-    })?;
+            // FnCreateConstruction forwards `iCompletion * FullCon / 100`
+            // without clamping the percentage (C4Script.cpp:1911-1933). Normal
+            // definitions clamp in DoCon; Oversize definitions retain values
+            // above FullCon, including EMDropDef's unusual FullCon argument.
+            let construction_value =
+                ((i64::from(completion_percent) * i64::from(FULL_CON)) / 100) as i32;
+
+            if check_site {
+                if let Some(failure) =
+                    construction_check(context, &definition, &metadata, position)?
+                {
+                    // GameMsgObject(..., cthr->Obj, FRed) feedback per failed
+                    // branch (C4Landscape.cpp:2139-2163).
+                    let text = match failure {
+                        crate::command::ConstructionCheckFailure::NotConstructable => {
+                            let name = if metadata.name.is_empty() {
+                                definition.clone()
+                            } else {
+                                metadata.name.clone()
+                            };
+                            context
+                                .world
+                                .construction_check_strings
+                                .format_not_constructable(&name)
+                        }
+                        crate::command::ConstructionCheckFailure::NoRoom => {
+                            context.world.construction_check_strings.no_room.clone()
+                        }
+                        crate::command::ConstructionCheckFailure::NoLevel => {
+                            context.world.construction_check_strings.no_level.clone()
+                        }
+                        crate::command::ConstructionCheckFailure::Blocked(blocker) => {
+                            let name = context
+                                .object_effective_name(blocker)
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or_default();
+                            context
+                                .world
+                                .construction_check_strings
+                                .format_blocked(&name)
+                        }
+                    };
+                    register_construction_check_feedback(context, text);
+                    return Ok(None);
+                }
+            }
+
+            if terrain_flag {
+                let (width, height) = metadata
+                    .shape
+                    .map(|shape| (shape.width, shape.height))
+                    .unwrap_or_default();
+                context.prepare_construction_terrain(
+                    position.x,
+                    position.y,
+                    width,
+                    height,
+                    metadata.basement,
+                );
+            }
+
+            let id = context.allocate_object_id();
+
+            let mut spawn = SpawnConfig::new(definition.clone())
+                .with_position(position)
+                .with_owner(owner)
+                .with_category(definition_category)
+                // C4Game::NewObject inserts the object at Con=0, calls
+                // Construction, and only then applies the requested iCon.
+                .with_construction(0)
+                .with_id(id);
+            if let Some(layer) = creator_layer {
+                spawn = spawn.with_layer(layer);
+            }
+            spawn.compiler_cache.layer = creator_layer_cache;
+            // The creating controller rides onto the site (FnCreateConstruction,
+            // C4Script.cpp:1932-1933).
+            let creator_controller = context
+                .object_context()
+                .map(ObjectScopeContext::controller)
+                .filter(|value| *value > OWNER_NONE);
+            if let Some(controller) = creator_controller {
+                spawn = spawn.with_controller(controller);
+            }
+            // The lifecycle below runs while this host call is live; the later
+            // copy-out spawn must not repeat callbacks or the initial DoCon.
+            spawn.initialized = true;
+            spawn.position_adjusted = true;
+
+            let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
+            let preview_ocf = ocf::compute(
+                metadata.ocf_base,
+                metadata.crew_member,
+                initial_alive,
+                ObjectStatus::Normal,
+                false,
+                0,
+                metadata.category,
+            );
+            let preview = HostWorldObject::with_category(
+                id,
+                definition,
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                owner,
+                definition_category,
+                if initial_alive {
+                    metadata.physical.energy
+                } else {
+                    0
+                },
+                0,
+                0,
+                position,
+                Vector2::ZERO,
+                0,
+                Vec::new(),
+                0,
+                0,
+                0,
+                None,
+            )
+            .with_compiler_fields(
+                0,
+                0,
+                -1,
+                crate::ObjectCompilerCache {
+                    layer: creator_layer_cache,
+                    ..crate::ObjectCompilerCache::default()
+                },
+            )
+            .with_alive(initial_alive)
+            .with_ocf(preview_ocf)
+            .with_full_state(Rc::new({
+                let mut state = crate::preview_spawn_state_with_components(
+                    position,
+                    owner,
+                    creator_controller.unwrap_or(owner),
+                    definition_category,
+                    0,
+                    metadata.contact_density(),
+                    metadata.vertices.clone(),
+                    metadata.components.as_slice(),
+                );
+                state.alive = initial_alive;
+                state.energy = if initial_alive {
+                    metadata.physical.energy
+                } else {
+                    0
+                };
+                state.crew_member = metadata.crew_member;
+                state.layer = creator_layer;
+                state.blit_mode = metadata.blit_mode;
+                state
+            }));
+
+            context.register_spawn(spawn, preview);
+            Ok(Some((
+                id,
+                creator,
+                construction_value,
+                metadata.shape,
+                metadata.stretch_growth,
+                metadata.line,
+                metadata.ocf_base,
+                metadata.crew_member,
+                metadata.category,
+                initial_alive,
+            )))
+        },
+    )?;
     let Some((
         target,
         creator,
@@ -6766,39 +6765,38 @@ pub(crate) fn find_construction_site(args: &[Value]) -> Result<Value, RuntimeErr
     let v1 = value_as_int(&slots.get(var_x));
     let v2 = value_as_int(&slots.get(var_y));
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref().ok_or_else(|| {
-            RuntimeError::new("FindConstructionSite requires an active engine context")
-        })?;
-        let Some(metadata) = context.definition_metadata(&definition) else {
-            return Ok(Value::Nil);
-        };
-        // Construction check at the starting position (:1970-1971): the
-        // caller's vars stay untouched on an immediate hit. C++ passes no
-        // pByObj here, so a failure produces no feedback (:1964).
-        if construction_check(context, &definition, metadata, Vector2::new(v1, v2))?.is_none() {
-            return Ok(Value::Bool(true));
-        }
-        // Search for real (:1973-1977) with pDef->Shape.Wdt/Hgt and
-        // Category.
-        let (wdt, hgt) = metadata
-            .shape
-            .map(|rect| (rect.width, rect.height))
-            .unwrap_or((0, 0));
-        let category = metadata.category;
-        let found = context.landscape_ref().and_then(|landscape| {
-            landscape.find_con_site_spot(v1, v2, wdt, hgt, 20, |x, y, w, h| {
-                host_overlap_object(context, x, y, w, h, category)
-            })
-        });
-        // V1 = C4VInt(v1); V2 = C4VInt(v2) — written back even when the
-        // probe found nothing (:1978).
-        let (out_x, out_y) = found.unwrap_or((v1, v2));
-        slots.set(var_x, Value::Int(out_x));
-        slots.set(var_y, Value::Int(out_y));
-        Ok(Value::Bool(found.is_some()))
-    })
+    try_with_host_context(
+        "FindConstructionSite requires an active engine context",
+        |context| {
+            let Some(metadata) = context.definition_metadata(&definition) else {
+                return Ok(Value::Nil);
+            };
+            // Construction check at the starting position (:1970-1971): the
+            // caller's vars stay untouched on an immediate hit. C++ passes no
+            // pByObj here, so a failure produces no feedback (:1964).
+            if construction_check(context, &definition, metadata, Vector2::new(v1, v2))?.is_none() {
+                return Ok(Value::Bool(true));
+            }
+            // Search for real (:1973-1977) with pDef->Shape.Wdt/Hgt and
+            // Category.
+            let (wdt, hgt) = metadata
+                .shape
+                .map(|rect| (rect.width, rect.height))
+                .unwrap_or((0, 0));
+            let category = metadata.category;
+            let found = context.landscape_ref().and_then(|landscape| {
+                landscape.find_con_site_spot(v1, v2, wdt, hgt, 20, |x, y, w, h| {
+                    host_overlap_object(context, x, y, w, h, category)
+                })
+            });
+            // V1 = C4VInt(v1); V2 = C4VInt(v2) — written back even when the
+            // probe found nothing (:1978).
+            let (out_x, out_y) = found.unwrap_or((v1, v2));
+            slots.set(var_x, Value::Int(out_x));
+            slots.set(var_y, Value::Int(out_y));
+            Ok(Value::Bool(found.is_some()))
+        },
+    )
 }
 
 pub(crate) fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -7141,152 +7139,151 @@ pub(crate) struct NativeObjectCreation {
 pub(crate) fn create_native_object(
     request: NativeObjectCreation,
 ) -> Result<Option<ObjectId>, RuntimeError> {
-    let registration = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("native object creation requires an active engine context")
-        })?;
-        if context.world.definition_known(&request.definition) == Some(false) {
-            return Ok(None);
-        }
-        let metadata = context
-            .definition_metadata(&request.definition)
-            .cloned()
-            .unwrap_or_else(|| DefinitionMetadata {
-                category: context
-                    .definition_category(&request.definition)
-                    .unwrap_or(DEFAULT_CATEGORY),
-                ..DefinitionMetadata::default()
-            });
-        // C4Object::Init discards initial r/rdir for non-rotateable defs,
-        // after their callers have already consumed every random draw.
-        let (rotation, rotation_velocity) = if metadata.rotateable == 0 {
-            (0, C4Fixed::ZERO)
-        } else {
-            (request.rotation, request.rotation_velocity)
-        };
-        let controller = if request.controller > OWNER_NONE {
-            request.controller
-        } else {
-            request.owner
-        };
-        let creator_layer = request
-            .creator
-            .and_then(|creator| context.object_layer(creator));
-        let creator_layer_cache = request
-            .creator
-            .map(|creator| context.object_layer_compiler_cache(creator))
-            .unwrap_or(0);
-        let id = context.allocate_object_id();
-        let mut spawn = SpawnConfig::new(request.definition.clone())
-            .with_position(request.position)
-            .with_fixed_velocity(request.velocity)
-            .with_rotation(rotation)
-            .with_rotation_velocity(rotation_velocity)
-            .with_owner(request.owner)
-            .with_controller(controller)
-            .with_category(metadata.category)
-            .with_construction(0)
-            .with_id(id);
-        if let Some(layer) = creator_layer {
-            spawn = spawn.with_layer(layer);
-        }
-        spawn.compiler_cache.layer = creator_layer_cache;
-        spawn.initialized = true;
-        spawn.position_adjusted = true;
+    let registration = try_with_host_context_mut(
+        "native object creation requires an active engine context",
+        |context| {
+            if context.world.definition_known(&request.definition) == Some(false) {
+                return Ok(None);
+            }
+            let metadata = context
+                .definition_metadata(&request.definition)
+                .cloned()
+                .unwrap_or_else(|| DefinitionMetadata {
+                    category: context
+                        .definition_category(&request.definition)
+                        .unwrap_or(DEFAULT_CATEGORY),
+                    ..DefinitionMetadata::default()
+                });
+            // C4Object::Init discards initial r/rdir for non-rotateable defs,
+            // after their callers have already consumed every random draw.
+            let (rotation, rotation_velocity) = if metadata.rotateable == 0 {
+                (0, C4Fixed::ZERO)
+            } else {
+                (request.rotation, request.rotation_velocity)
+            };
+            let controller = if request.controller > OWNER_NONE {
+                request.controller
+            } else {
+                request.owner
+            };
+            let creator_layer = request
+                .creator
+                .and_then(|creator| context.object_layer(creator));
+            let creator_layer_cache = request
+                .creator
+                .map(|creator| context.object_layer_compiler_cache(creator))
+                .unwrap_or(0);
+            let id = context.allocate_object_id();
+            let mut spawn = SpawnConfig::new(request.definition.clone())
+                .with_position(request.position)
+                .with_fixed_velocity(request.velocity)
+                .with_rotation(rotation)
+                .with_rotation_velocity(rotation_velocity)
+                .with_owner(request.owner)
+                .with_controller(controller)
+                .with_category(metadata.category)
+                .with_construction(0)
+                .with_id(id);
+            if let Some(layer) = creator_layer {
+                spawn = spawn.with_layer(layer);
+            }
+            spawn.compiler_cache.layer = creator_layer_cache;
+            spawn.initialized = true;
+            spawn.position_adjusted = true;
 
-        let alive = metadata.category & crate::CATEGORY_LIVING != 0;
-        let preview_ocf = ocf::compute(
-            metadata.ocf_base,
-            metadata.crew_member,
-            alive,
-            ObjectStatus::Normal,
-            false,
-            0,
-            metadata.category,
-        );
-        let preview_velocity = Vector2::new(request.velocity.int_x(), request.velocity.int_y());
-        let preview = HostWorldObject::with_category(
-            id,
-            request.definition.clone(),
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            request.owner,
-            metadata.category,
-            if alive { metadata.physical.energy } else { 0 },
-            0,
-            0,
-            request.position,
-            preview_velocity,
-            rotation,
-            metadata.vertices.clone(),
-            0,
-            0,
-            0,
-            None,
-        )
-        .with_compiler_fields(
-            0,
-            0,
-            -1,
-            crate::ObjectCompilerCache {
-                layer: creator_layer_cache,
-                ..crate::ObjectCompilerCache::default()
-            },
-        )
-        .with_fixed_motion(
-            FixedVec2::from_ints(request.position.x, request.position.y),
-            request.velocity,
-        )
-        .with_rotation_velocity(rotation_velocity)
-        .with_alive(alive)
-        .with_ocf(preview_ocf)
-        .with_full_state(Rc::new({
-            let mut state = crate::preview_spawn_state_with_components(
-                request.position,
-                request.owner,
-                controller,
-                metadata.category,
+            let alive = metadata.category & crate::CATEGORY_LIVING != 0;
+            let preview_ocf = ocf::compute(
+                metadata.ocf_base,
+                metadata.crew_member,
+                alive,
+                ObjectStatus::Normal,
+                false,
                 0,
-                metadata.contact_density(),
-                metadata.vertices.clone(),
-                metadata.components.as_slice(),
+                metadata.category,
             );
-            state.velocity = preview_velocity;
-            state.script_fixed_velocity = Some(request.velocity);
-            state.script_rotation_velocity = Some(rotation_velocity);
-            state.rotation = rotation;
-            state.alive = alive;
-            state.energy = if alive { metadata.physical.energy } else { 0 };
-            state.breath = metadata.physical.breath;
-            state.crew_member = metadata.crew_member;
-            state.layer = creator_layer;
-            state.blit_mode = metadata.blit_mode;
-            if context.world.definition_color_by_owner(&request.definition) {
-                state.color = context
-                    .player_state(request.owner)
-                    .and_then(|player| player.color)
-                    .map(|color| {
-                        u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
-                    })
-                    .unwrap_or(0);
+            let preview_velocity = Vector2::new(request.velocity.int_x(), request.velocity.int_y());
+            let preview = HostWorldObject::with_category(
+                id,
+                request.definition.clone(),
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                request.owner,
+                metadata.category,
+                if alive { metadata.physical.energy } else { 0 },
+                0,
+                0,
+                request.position,
+                preview_velocity,
+                rotation,
+                metadata.vertices.clone(),
+                0,
+                0,
+                0,
+                None,
+            )
+            .with_compiler_fields(
+                0,
+                0,
+                -1,
+                crate::ObjectCompilerCache {
+                    layer: creator_layer_cache,
+                    ..crate::ObjectCompilerCache::default()
+                },
+            )
+            .with_fixed_motion(
+                FixedVec2::from_ints(request.position.x, request.position.y),
+                request.velocity,
+            )
+            .with_rotation_velocity(rotation_velocity)
+            .with_alive(alive)
+            .with_ocf(preview_ocf)
+            .with_full_state(Rc::new({
+                let mut state = crate::preview_spawn_state_with_components(
+                    request.position,
+                    request.owner,
+                    controller,
+                    metadata.category,
+                    0,
+                    metadata.contact_density(),
+                    metadata.vertices.clone(),
+                    metadata.components.as_slice(),
+                );
+                state.velocity = preview_velocity;
+                state.script_fixed_velocity = Some(request.velocity);
+                state.script_rotation_velocity = Some(rotation_velocity);
+                state.rotation = rotation;
+                state.alive = alive;
+                state.energy = if alive { metadata.physical.energy } else { 0 };
+                state.breath = metadata.physical.breath;
+                state.crew_member = metadata.crew_member;
+                state.layer = creator_layer;
+                state.blit_mode = metadata.blit_mode;
+                if context.world.definition_color_by_owner(&request.definition) {
+                    state.color = context
+                        .player_state(request.owner)
+                        .and_then(|player| player.color)
+                        .map(|color| {
+                            u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+                        })
+                        .unwrap_or(0);
+                }
+                state.mobile = metadata.category != crate::CATEGORY_STATIC_BACK
+                    && (request.velocity != FixedVec2::ZERO || rotation_velocity.is_nonzero());
+                state
+            }));
+            context.register_spawn(spawn, preview);
+            if context.ensure_object_scope(id) {
+                if let Some(scope) = context.object_scope_mut(id) {
+                    scope.current_fixed_velocity = request.velocity;
+                    scope.current_rotation_velocity = rotation_velocity;
+                }
             }
-            state.mobile = metadata.category != crate::CATEGORY_STATIC_BACK
-                && (request.velocity != FixedVec2::ZERO || rotation_velocity.is_nonzero());
-            state
-        }));
-        context.register_spawn(spawn, preview);
-        if context.ensure_object_scope(id) {
-            if let Some(scope) = context.object_scope_mut(id) {
-                scope.current_fixed_velocity = request.velocity;
-                scope.current_rotation_velocity = rotation_velocity;
-            }
-        }
-        Ok(Some((id, metadata, rotation)))
-    })?;
+            Ok(Some((id, metadata, rotation)))
+        },
+    )?;
     let Some((target, metadata, initial_rotation)) = registration else {
         return Ok(None);
     };
@@ -9452,71 +9449,70 @@ pub(crate) fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    let (success, clear_target, activate_target) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetObjectStatus requires an active engine context")
-        })?;
-        let object_id = match context.object_context() {
-            Some(object) => object.id(),
-            None => return Ok((false, None, None)),
-        };
+    let (success, clear_target, activate_target) = try_with_host_context_mut(
+        "SetObjectStatus requires an active engine context",
+        |context| {
+            let object_id = match context.object_context() {
+                Some(object) => object.id(),
+                None => return Ok((false, None, None)),
+            };
 
-        if let Some(target) = target_id {
-            if target != object_id {
+            if let Some(target) = target_id {
+                if target != object_id {
+                    return Ok((false, None, None));
+                }
+            }
+            let current = context
+                .object_scope(object_id)
+                .map(ObjectScopeContext::status)
+                .unwrap_or(ObjectStatus::Deleted);
+            if current == ObjectStatus::Deleted {
                 return Ok((false, None, None));
             }
-        }
-        let current = context
-            .object_scope(object_id)
-            .map(ObjectScopeContext::status)
-            .unwrap_or(ObjectStatus::Deleted);
-        if current == ObjectStatus::Deleted {
-            return Ok((false, None, None));
-        }
-        if current == status {
-            return Ok((true, None, None));
-        }
-        if status == ObjectStatus::Inactive {
-            // StatusDeactivate clears both front and back particle lists
-            // before it leaves the active object list.
-            context.register_particle(ParticleCommand::Clear {
-                definition_id: None,
-                scope: ParticleScope::Object(object_id),
-            });
-        }
-        if let Some(object) = context.object_scope_mut(object_id) {
-            object.set_status(status);
-        }
-        context.preview_object_status_change(object_id, status);
-        if status == ObjectStatus::Normal {
-            let metadata = context
-                .object_effective_definition_id(object_id)
-                .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
-                .unwrap_or_default();
-            if let Some(object) = context.object_scope_mut(object_id) {
-                if metadata.line == 0 {
-                    object.pending_update.shape_override = Some(None);
-                }
-                object.refresh_shape_preview(&metadata);
+            if current == status {
+                return Ok((true, None, None));
             }
-            // StatusActivate::UpdateFace(true) still performs the ordinary
-            // UpdateSolidMask remove/re-put before UpdateTransferZone.
-            context.preview_live_object_sector(object_id);
-            context.update_live_solid_mask(object_id, false);
-        }
-        if status == ObjectStatus::Inactive && !clear_pointers {
-            // The no-clear branch only clears transfer zones. Clear-mode
-            // does this later as part of Game.ClearPointers, after every
-            // Ejection and Departure callback has completed.
-            context.register_transfer_zone_command(TransferZoneCommand::clear(object_id));
-        }
-        Ok((
-            true,
-            (status == ObjectStatus::Inactive && clear_pointers).then_some(object_id),
-            (status == ObjectStatus::Normal).then_some(object_id),
-        ))
-    })?;
+            if status == ObjectStatus::Inactive {
+                // StatusDeactivate clears both front and back particle lists
+                // before it leaves the active object list.
+                context.register_particle(ParticleCommand::Clear {
+                    definition_id: None,
+                    scope: ParticleScope::Object(object_id),
+                });
+            }
+            if let Some(object) = context.object_scope_mut(object_id) {
+                object.set_status(status);
+            }
+            context.preview_object_status_change(object_id, status);
+            if status == ObjectStatus::Normal {
+                let metadata = context
+                    .object_effective_definition_id(object_id)
+                    .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
+                    .unwrap_or_default();
+                if let Some(object) = context.object_scope_mut(object_id) {
+                    if metadata.line == 0 {
+                        object.pending_update.shape_override = Some(None);
+                    }
+                    object.refresh_shape_preview(&metadata);
+                }
+                // StatusActivate::UpdateFace(true) still performs the ordinary
+                // UpdateSolidMask remove/re-put before UpdateTransferZone.
+                context.preview_live_object_sector(object_id);
+                context.update_live_solid_mask(object_id, false);
+            }
+            if status == ObjectStatus::Inactive && !clear_pointers {
+                // The no-clear branch only clears transfer zones. Clear-mode
+                // does this later as part of Game.ClearPointers, after every
+                // Ejection and Departure callback has completed.
+                context.register_transfer_zone_command(TransferZoneCommand::clear(object_id));
+            }
+            Ok((
+                true,
+                (status == ObjectStatus::Inactive && clear_pointers).then_some(object_id),
+                (status == ObjectStatus::Normal).then_some(object_id),
+            ))
+        },
+    )?;
     if !success {
         return Ok(Value::Bool(false));
     }

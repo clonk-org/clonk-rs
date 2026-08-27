@@ -3628,54 +3628,52 @@ fn cast_a_particles(args: &[Value], back: bool, fn_name: &str) -> Result<Value, 
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new(format!("{fn_name} requires an active engine context"))
-        })?;
-
-        // safety: pObj && !pObj->Status → false (C4Script.cpp:4884)
-        let layer = if let Some(target) = target_object {
-            if !context.object_status_present(target) {
-                return Ok(Value::Bool(false));
-            }
-            if context.get_world_object(target).is_none() {
-                return Ok(Value::Bool(false));
-            }
-            if back {
-                ParticleLayer::ObjectBack(target)
+    try_with_host_context_mut(
+        &format!("{fn_name} requires an active engine context"),
+        |context| {
+            // safety: pObj && !pObj->Status → false (C4Script.cpp:4884)
+            let layer = if let Some(target) = target_object {
+                if !context.object_status_present(target) {
+                    return Ok(Value::Bool(false));
+                }
+                if context.get_world_object(target).is_none() {
+                    return Ok(Value::Bool(false));
+                }
+                if back {
+                    ParticleLayer::ObjectBack(target)
+                } else {
+                    ParticleLayer::ObjectFront(target)
+                }
             } else {
-                ParticleLayer::ObjectFront(target)
+                ParticleLayer::Global
+            };
+
+            // GetDef failure → false (C4Script.cpp:4893)
+            if context.particle_def_known(&definition) == Some(false) {
+                return Ok(Value::Bool(false));
             }
-        } else {
-            ParticleLayer::Global
-        };
 
-        // GetDef failure → false (C4Script.cpp:4893)
-        if context.particle_def_known(&definition) == Some(false) {
-            return Ok(Value::Bool(false));
-        }
+            // local offset (C4Script.cpp:4886-4890)
+            let base_position = context
+                .object_context()
+                .map(|object| object.effective_position())
+                .unwrap_or(Vector2::ZERO);
 
-        // local offset (C4Script.cpp:4886-4890)
-        let base_position = context
-            .object_context()
-            .map(|object| object.effective_position())
-            .unwrap_or(Vector2::ZERO);
-
-        context.register_particle(ParticleCommand::Cast {
-            definition_id: definition,
-            amount,
-            x: base_position.x.saturating_add(x) as f32,
-            y: base_position.y.saturating_add(y) as f32,
-            level,
-            a0: a0 as f32 / 10.0,
-            b0,
-            a1: a1 as f32 / 10.0,
-            b1,
-            layer,
-        });
-        Ok(Value::Bool(true))
-    })
+            context.register_particle(ParticleCommand::Cast {
+                definition_id: definition,
+                amount,
+                x: base_position.x.saturating_add(x) as f32,
+                y: base_position.y.saturating_add(y) as f32,
+                level,
+                a0: a0 as f32 / 10.0,
+                b0,
+                a1: a1 as f32 / 10.0,
+                b1,
+                layer,
+            });
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn cast_particles(args: &[Value]) -> Result<Value, RuntimeError> {

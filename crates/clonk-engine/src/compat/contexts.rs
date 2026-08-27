@@ -295,28 +295,24 @@ pub(crate) fn broadcast_global_callback(
 pub(crate) fn with_creatorless_object_context<T>(
     callback: impl FnOnce() -> T,
 ) -> Result<T, RuntimeError> {
-    let calling_object = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("creatorless object creation requires an active engine context")
-        })?;
-        Ok(context.object.take())
-    })?;
+    let calling_object = try_with_host_context_mut(
+        "creatorless object creation requires an active engine context",
+        |context| Ok(context.object.take()),
+    )?;
 
     let result = callback();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("host context disappeared during creatorless object creation")
-        })?;
-        debug_assert!(
-            context.object.is_none(),
-            "creatorless nested creation must restore its empty active scope"
-        );
-        context.object = calling_object;
-        Ok(())
-    })?;
+    try_with_host_context_mut(
+        "host context disappeared during creatorless object creation",
+        |context| {
+            debug_assert!(
+                context.object.is_none(),
+                "creatorless nested creation must restore its empty active scope"
+            );
+            context.object = calling_object;
+            Ok(())
+        },
+    )?;
     Ok(result)
 }
 
@@ -2573,14 +2569,13 @@ pub(crate) fn with_context_mut<R>(
     scope: EffectScope,
     func: impl FnOnce(&mut EffectScopeContext) -> R,
 ) -> Result<R, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("effect host functions require an active engine context")
-        })?;
-        let stack = context.scope_mut(scope)?;
-        Ok(func(stack))
-    })
+    try_with_host_context_mut(
+        "effect host functions require an active engine context",
+        |context| {
+            let stack = context.scope_mut(scope)?;
+            Ok(func(stack))
+        },
+    )
 }
 
 pub(crate) fn snapshot_effects_from_context(scope: EffectScope) -> Option<Vec<EffectState>> {

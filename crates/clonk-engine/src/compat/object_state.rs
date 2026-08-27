@@ -2713,39 +2713,37 @@ pub(crate) fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeErr
         -1
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetBridgeActionData requires an active engine context")
-        })?;
+    try_with_host_context_mut(
+        "SetBridgeActionData requires an active engine context",
+        |context| {
+            // C4Action::SetBridgeData clamps to the last loaded material before
+            // packing the low byte (C4Object.cpp:54-62). A loaded empty table has
+            // Num-1 == -1 and therefore stores the no-material sentinel 0xff.
+            let material = clamp_bridge_material(material, context.world.materials());
+            let encoded = encode_bridge_action_data(length, move_clonk, wall, material);
 
-        // C4Action::SetBridgeData clamps to the last loaded material before
-        // packing the low byte (C4Object.cpp:54-62). A loaded empty table has
-        // Num-1 == -1 and therefore stores the no-material sentinel 0xff.
-        let material = clamp_bridge_material(material, context.world.materials());
-        let encoded = encode_bridge_action_data(length, move_clonk, wall, material);
+            // FnSetBridgeActionData defaults pObj to cthr->Obj, but an explicit
+            // object may be foreign (C4Script.cpp:757-765). LOAM::StartBridge
+            // runs in the loam's scope after ObjectSetAction staged "Bridge" on
+            // the Clonk, so read and write that target's live nested scope.
+            let Some(target) = target_id.or(context.script_object_context) else {
+                return Ok(Value::Bool(false));
+            };
+            if !context.object_status_present(target) || !context.ensure_object_scope(target) {
+                return Ok(Value::Bool(false));
+            }
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
 
-        // FnSetBridgeActionData defaults pObj to cthr->Obj, but an explicit
-        // object may be foreign (C4Script.cpp:757-765). LOAM::StartBridge
-        // runs in the loam's scope after ObjectSetAction staged "Bridge" on
-        // the Clonk, so read and write that target's live nested scope.
-        let Some(target) = target_id.or(context.script_object_context) else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
-        };
+            if object.effective_action_procedure() != ActionProcedure::Bridge {
+                return Ok(Value::Bool(false));
+            }
 
-        if object.effective_action_procedure() != ActionProcedure::Bridge {
-            return Ok(Value::Bool(false));
-        }
-
-        object.set_action_data(encoded);
-        Ok(Value::Bool(true))
-    })
+            object.set_action_data(encoded);
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -2836,26 +2834,25 @@ pub(crate) fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> 
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetActionTargets requires an active engine context")
-        })?;
-        let Some(target) = object_id.or(context.script_object_context) else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
-        };
+    try_with_host_context_mut(
+        "SetActionTargets requires an active engine context",
+        |context| {
+            let Some(target) = object_id.or(context.script_object_context) else {
+                return Ok(Value::Bool(false));
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(Value::Bool(false));
+            }
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
 
-        object.set_action_target(0, target1);
-        object.set_action_target(1, target2);
+            object.set_action_target(0, target1);
+            object.set_action_target(1, target2);
 
-        Ok(Value::Bool(true))
-    })
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -4419,6 +4416,11 @@ pub(crate) fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
+    // Kept on the direct borrow rather than `try_with_host_context_mut`: this
+    // wrapper releases the borrow part-way through (`drop(borrow)`) so the
+    // TurnAction it schedules can re-enter host state, and a helper holds the
+    // borrow for its whole closure. The borrow duration is the behaviour here,
+    // not scaffolding.
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
@@ -4477,16 +4479,15 @@ pub(crate) fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
                 if let Some(turn_action) = turn_action {
                     let _ = native_set_action_by_name(target, &turn_action)?;
                 }
-                return HOST_CONTEXT.with(|cell| {
-                    let mut borrow = cell.borrow_mut();
-                    let context = borrow.as_mut().ok_or_else(|| {
-                        RuntimeError::new("SetDir requires an active engine context")
-                    })?;
-                    if let Some(scope) = context.object_scope_mut(target) {
-                        scope.set_direction(direction);
-                    }
-                    Ok(Value::Bool(true))
-                });
+                return try_with_host_context_mut(
+                    "SetDir requires an active engine context",
+                    |context| {
+                        if let Some(scope) = context.object_scope_mut(target) {
+                            scope.set_direction(direction);
+                        }
+                        Ok(Value::Bool(true))
+                    },
+                );
             }
         }
         let object = match context.object_context_mut() {
@@ -4999,41 +5000,39 @@ fn set_velocity_component(
         )));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new(format!(
-                "{} requires an active engine context",
-                component.set_function_name()
-            ))
-        })?;
+    try_with_host_context_mut(
+        &format!(
+            "{} requires an active engine context",
+            component.set_function_name()
+        ),
+        |context| {
+            let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+            let Some(target) = target else {
+                return Ok(Value::Bool(false));
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(Value::Bool(false));
+            }
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
 
-        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
-        let Some(target) = target else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
-        };
-
-        // C++ SetXDir/SetYDir set ONLY xdir/ydir = itofix(value, prec)
-        // (default precision 10, C4Script.cpp:697-732) — the other
-        // component keeps its full sub-pixel value. A whole-vector write
-        // here would quantize it through the scope's int-seeded mirror
-        // (the GoldRush snake's SetXDir(0) turned ydir 2.6 into 3.0).
-        object.set_fixed_velocity_component(
-            component,
-            itofix_prec(value, normalise_precision(precision)),
-        );
-        // FnSetXDir/FnSetYDir assign Mobile=1 synchronously after the dir
-        // write (C4Script.cpp:697-732). Stage it here so later native
-        // Tumble preserves the live value and call order remains observable.
-        object.set_mobile(true);
-        Ok(Value::Bool(true))
-    })
+            // C++ SetXDir/SetYDir set ONLY xdir/ydir = itofix(value, prec)
+            // (default precision 10, C4Script.cpp:697-732) — the other
+            // component keeps its full sub-pixel value. A whole-vector write
+            // here would quantize it through the scope's int-seeded mirror
+            // (the GoldRush snake's SetXDir(0) turned ydir 2.6 into 3.0).
+            object.set_fixed_velocity_component(
+                component,
+                itofix_prec(value, normalise_precision(precision)),
+            );
+            // FnSetXDir/FnSetYDir assign Mobile=1 synchronously after the dir
+            // write (C4Script.cpp:697-732). Stage it here so later native
+            // Tumble preserves the live value and call order remains observable.
+            object.set_mobile(true);
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn get_x_dir(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -5079,67 +5078,65 @@ pub(crate) fn adjust_walk_rotation(args: &[Value]) -> Result<Value, RuntimeError
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("AdjustWalkRotation requires an active engine context")
-        })?;
-
-        let target = target_id.or(context.script_object_context);
-        let Some(target) = target else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-
-        let (seed, rotation, live_vtx_x) = {
-            let Some(object) = context.object_scope(target) else {
+    try_with_host_context_mut(
+        "AdjustWalkRotation requires an active engine context",
+        |context| {
+            let target = target_id.or(context.script_object_context);
+            let Some(target) = target else {
                 return Ok(Value::Bool(false));
             };
-            let seed = object.walk_rotation;
-            let rotation = object.rotation();
-            // The LIVE Shape.VtxX for the else-branch (C4Object.cpp:6072).
-            let live_vtx_x = usize::try_from(seed.attach.vtx)
-                .ok()
-                .and_then(|vtx| object.vertices().get(vtx))
-                .map(|vertex| vertex.x)
-                .unwrap_or(0);
-            (seed, rotation, live_vtx_x)
-        };
+            if !context.ensure_object_scope(target) {
+                return Ok(Value::Bool(false));
+            }
 
-        // Guard: Rotateable + bottom attach + attached material
-        // (C4Script.cpp:5443-5446).
-        if seed.rotateable == 0 || seed.t_attach & CNAT_BOTTOM == 0 || !seed.attach.mat_valid {
-            return Ok(Value::Bool(false));
-        }
+            let (seed, rotation, live_vtx_x) = {
+                let Some(object) = context.object_scope(target) else {
+                    return Ok(Value::Bool(false));
+                };
+                let seed = object.walk_rotation;
+                let rotation = object.rotation();
+                // The LIVE Shape.VtxX for the else-branch (C4Object.cpp:6072).
+                let live_vtx_x = usize::try_from(seed.attach.vtx)
+                    .ok()
+                    .and_then(|vtx| object.vertices().get(vtx))
+                    .map(|vertex| vertex.x)
+                    .unwrap_or(0);
+                (seed, rotation, live_vtx_x)
+            };
 
-        let rotation_velocity = {
-            let landscape = context.landscape_ref();
-            crate::calculate_walk_rotation_velocity(
-                rotation,
-                seed.attach,
-                seed.def_attach_vtx_x,
-                live_vtx_x,
-                range_x,
-                range_y,
-                speed,
-                |x, y| evaluate_landscape_query(landscape, LandscapeQuery::Solid, x, y),
-            )
-        };
+            // Guard: Rotateable + bottom attach + attached material
+            // (C4Script.cpp:5443-5446).
+            if seed.rotateable == 0 || seed.t_attach & CNAT_BOTTOM == 0 || !seed.attach.mat_valid {
+                return Ok(Value::Bool(false));
+            }
 
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
-        };
-        // Move to destination angle (C4Object.cpp:6085-6088). C++ writes
-        // rdir directly and never touches Mobile, so this uses the raw
-        // staging path. The mobilising one outlived its procedure: a
-        // walking object that died in the same frame still carried the
-        // staged field into ChangeDef's fold, which re-mobilised the corpse
-        // after ExecMovement had demobilised it (clonk-org/clonk-rs#1157).
-        object.set_rotation_velocity_raw(rotation_velocity);
-        Ok(Value::Bool(true))
-    })
+            let rotation_velocity = {
+                let landscape = context.landscape_ref();
+                crate::calculate_walk_rotation_velocity(
+                    rotation,
+                    seed.attach,
+                    seed.def_attach_vtx_x,
+                    live_vtx_x,
+                    range_x,
+                    range_y,
+                    speed,
+                    |x, y| evaluate_landscape_query(landscape, LandscapeQuery::Solid, x, y),
+                )
+            };
+
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
+            // Move to destination angle (C4Object.cpp:6085-6088). C++ writes
+            // rdir directly and never touches Mobile, so this uses the raw
+            // staging path. The mobilising one outlived its procedure: a
+            // walking object that died in the same frame still carried the
+            // staged field into ChangeDef's fold, which re-mobilised the corpse
+            // after ExecMovement had demobilised it (clonk-org/clonk-rs#1157).
+            object.set_rotation_velocity_raw(rotation_velocity);
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -5889,42 +5886,41 @@ pub(crate) fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeErr
         && components[0] == components[4]
         && matches!(components[0], 0 | 1000);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetObjDrawTransform requires an active engine context")
-        })?;
-        let object_id =
-            match target_id.or_else(|| context.object_context().map(|object| object.id())) {
-                Some(object) => object,
-                None => return Ok(Value::Bool(false)),
-            };
-        if !context.ensure_object_scope(object_id) {
-            return Ok(Value::Bool(false));
-        }
-        let Some(object) = context.object_scope_mut(object_id) else {
-            return Ok(Value::Bool(false));
-        };
-
-        if overlay_id == 0 {
-            let current = object.draw_transform();
-            let flip_dir = current.map_or(1, |transform| transform.flip_dir());
-            if resets_base && flip_dir == 1 {
-                object.set_draw_transform(None);
-            } else {
-                object.set_draw_transform(Some(transform.with_flip_dir(flip_dir)));
+    try_with_host_context_mut(
+        "SetObjDrawTransform requires an active engine context",
+        |context| {
+            let object_id =
+                match target_id.or_else(|| context.object_context().map(|object| object.id())) {
+                    Some(object) => object,
+                    None => return Ok(Value::Bool(false)),
+                };
+            if !context.ensure_object_scope(object_id) {
+                return Ok(Value::Bool(false));
             }
-            Ok(Value::Bool(true))
-        } else {
-            let flip_dir = object
-                .overlay_transform(overlay_id)
-                .flatten()
-                .map_or(1, |transform| transform.flip_dir());
-            let changed =
-                object.set_overlay_transform(overlay_id, Some(transform.with_flip_dir(flip_dir)));
-            Ok(Value::Bool(changed))
-        }
-    })
+            let Some(object) = context.object_scope_mut(object_id) else {
+                return Ok(Value::Bool(false));
+            };
+
+            if overlay_id == 0 {
+                let current = object.draw_transform();
+                let flip_dir = current.map_or(1, |transform| transform.flip_dir());
+                if resets_base && flip_dir == 1 {
+                    object.set_draw_transform(None);
+                } else {
+                    object.set_draw_transform(Some(transform.with_flip_dir(flip_dir)));
+                }
+                Ok(Value::Bool(true))
+            } else {
+                let flip_dir = object
+                    .overlay_transform(overlay_id)
+                    .flatten()
+                    .map_or(1, |transform| transform.flip_dir());
+                let changed = object
+                    .set_overlay_transform(overlay_id, Some(transform.with_flip_dir(flip_dir)));
+                Ok(Value::Bool(changed))
+            }
+        },
+    )
 }
 
 /// FnSetObjDrawTransform2 (C4Script.cpp:5276-5305): nine matrix integers
@@ -5955,36 +5951,35 @@ pub(crate) fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeEr
         matrix[8] as f32 / 1000.0,
     ]);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("SetObjDrawTransform2 requires an active engine context")
-        })?;
-        let Some(object_id) = context.script_object_context else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.ensure_object_scope(object_id) {
-            return Ok(Value::Bool(false));
-        }
-        let Some(object) = context.object_scope_mut(object_id) else {
-            return Ok(Value::Bool(false));
-        };
-
-        if overlay_id == 0 {
-            let current = object.draw_transform().unwrap_or(DrawTransform::identity());
-            let combined = current.combined(delta);
-            object.set_draw_transform(Some(combined));
-            Ok(Value::Bool(true))
-        } else {
-            let existing = match object.overlay_transform(overlay_id) {
-                Some(transform) => transform.unwrap_or(DrawTransform::identity()),
-                None => return Ok(Value::Bool(false)),
+    try_with_host_context_mut(
+        "SetObjDrawTransform2 requires an active engine context",
+        |context| {
+            let Some(object_id) = context.script_object_context else {
+                return Ok(Value::Bool(false));
             };
-            let combined = existing.combined(delta);
-            object.set_overlay_transform(overlay_id, Some(combined));
-            Ok(Value::Bool(true))
-        }
-    })
+            if !context.ensure_object_scope(object_id) {
+                return Ok(Value::Bool(false));
+            }
+            let Some(object) = context.object_scope_mut(object_id) else {
+                return Ok(Value::Bool(false));
+            };
+
+            if overlay_id == 0 {
+                let current = object.draw_transform().unwrap_or(DrawTransform::identity());
+                let combined = current.combined(delta);
+                object.set_draw_transform(Some(combined));
+                Ok(Value::Bool(true))
+            } else {
+                let existing = match object.overlay_transform(overlay_id) {
+                    Some(transform) => transform.unwrap_or(DrawTransform::identity()),
+                    None => return Ok(Value::Bool(false)),
+                };
+                let combined = existing.combined(delta);
+                object.set_overlay_transform(overlay_id, Some(combined));
+                Ok(Value::Bool(true))
+            }
+        },
+    )
 }
 
 /// FnGetActMapVal (C4Script.cpp:4216-4241): one entry of one action in a

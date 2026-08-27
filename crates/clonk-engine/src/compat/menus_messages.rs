@@ -1212,13 +1212,10 @@ pub(crate) fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
     if let Some(id) = decoration.as_deref() {
-        let known = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref().ok_or_else(|| {
-                RuntimeError::new("CustomMessage requires an active engine context")
-            })?;
-            Ok(context.world.definition_known(id))
-        })?;
+        let known = try_with_host_context(
+            "CustomMessage requires an active engine context",
+            |context| Ok(context.world.definition_known(id)),
+        )?;
         // `FnCustomMessage` returns false before creating a message when
         // `idDeco && !C4Id2Def(idDeco)` (C4Script.cpp:6002).
         if known == Some(false) {
