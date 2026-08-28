@@ -3762,6 +3762,9 @@ impl GameApp {
         let activation_refusals = self
             .app_paths
             .as_ref()
+            // The capture fork keeps the audited input byte-exact, and native
+            // player-list construction does not save Config here.
+            .filter(|_| !crate::presentation_pixel_capture::capture_or_discovery_requested())
             .map(AppPaths::config_file)
             .map(|config_path| persist_activations(&config_path, &mut self.startup.player_files))
             .transpose();

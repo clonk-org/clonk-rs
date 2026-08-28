@@ -2442,6 +2442,25 @@ mod tests {
     }
 
     #[test]
+    fn player_selection_capture_preserves_the_canonical_config_bytes() -> Result<()> {
+        // Native player-list construction only rebuilds Participants in memory;
+        // it does not save the config (src/C4StartupPlrSelDlg.cpp:662-729,824-833).
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("clonk-app belongs to the workspace");
+        let (environment, mut app) = canonical_install_root_capture_app()?;
+
+        stage_layout_checkpoint(&mut app, LayoutCaptureCase::PlayerSelection, b"")?;
+
+        assert_eq!(
+            std::fs::read(environment._user_data.path().join("rust.config"))?,
+            std::fs::read(repository.join("compat/presentation/rust.config"))?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn runtime_resource_identity_recomputes_git_tree_and_flat_manifest() -> Result<()> {
         let directory = tempfile::tempdir()?;
         std::fs::write(directory.path().join("a.txt"), b"alpha\n")?;
