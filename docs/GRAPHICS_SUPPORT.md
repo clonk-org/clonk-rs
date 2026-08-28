@@ -84,7 +84,8 @@ budget.
 | macOS software | A reference run is recorded in `scripts/SOFTWARE_PRESENTATION_SMOKE.md`. |
 | Windows software | Not yet qualified; clonk-org/clonk-rs#1254 owns the missing platform evidence. |
 | Native Wayland software | Not yet qualified; the Xvfb run does not exercise Wayland. Tracked by clonk-org/clonk-rs#1255. |
-| Raspberry Pi 4 / Pi 5 retained GPU | Their nominal APIs avoid the GLES 2 rejection, but neither generation has real-board evidence. Tracked separately by clonk-org/clonk-rs#1250. |
+| Raspberry Pi 4 retained GPU | Runs, but does not sustain the cadence. Real-board evidence below: V3D presents every frame through the retained path, and the complete frame is 46 ms at p50 against a 28 ms budget. **Implemented and correct, not playable at native speed.** |
+| Raspberry Pi 5 retained GPU | Still no real-board evidence. A Pi 4 result says nothing about it — different GPU generation, different driver limits. Tracked by clonk-org/clonk-rs#1250. |
 | Raspberry Pi 0–3 / VideoCore IV software | The GPU path cannot use their GLES 2-only adapter. The wgpu-free fallback is a possible from-source route, not a support claim; real-board windowing and cadence remain unqualified in clonk-org/clonk-rs#1249. |
 
 The repository currently publishes Linux only for x86_64, so no Raspberry Pi
@@ -103,3 +104,66 @@ Run the retained GPU procedure with an explicit backend as documented in
 `scripts/HEADED_SURFACE_TEARDOWN_SMOKE.md`. Preserve the generated JSON report,
 commit, content revision, OS, architecture, driver/backend, window system, and
 hardware with every qualification result.
+
+Note that `scripts/run_headed_surface_teardown_smoke.py` cannot qualify other
+hardware: it rejects any adapter that is not discrete NVIDIA on the proprietary
+driver, because it exists for the NVIDIA Wayland crashes in
+clonk-org/clonk-rs#53 and clonk-org/clonk-rs#54. Qualifying a different board
+means driving `--headed-surface-smoke` directly and recording the report by
+hand, as the Pi 4 run below did.
+
+## Raspberry Pi 4 retained GPU, qualified
+
+Commit `7497af24799d`, content `b9214cafb46a`, built with the pinned 1.98.0
+toolchain on the board itself (51m57s, release profile).
+
+| | |
+| --- | --- |
+| Board | Raspberry Pi 4 Model B rev 1.4, 8 GB |
+| OS | Debian 13 (trixie), kernel 6.12.47 aarch64 |
+| Adapter | `V3D 4.2.14.0`, integrated GPU |
+| Driver | `V3DV Mesa`, Mesa 26.2.0-1~bpo13+0~rpt2, Vulkan 1.3.354, conformance 1.3.8.3 |
+| Backend | vulkan |
+| Window system | Wayland (weston 14.0.2, headless backend, GL renderer on V3D) |
+
+**The surface lifecycle passes.** Two real windows and two real surfaces:
+both presented, the child closed while the shell survived, the child released,
+the shell presented again afterwards, and the registry was empty at loop exit.
+
+**The cadence does not.** A 20-second Deep Sea measurement, 348 presentations,
+every one of them through the retained GPU path and none through the CPU
+presenter:
+
+| | p50 | p95 | max |
+| --- | ---: | ---: | ---: |
+| complete frame | 46.0 ms | 101.1 ms | 117.6 ms |
+| simulation | 26.6 ms | 82.5 ms | 99.9 ms |
+| platform present | 18.5 ms | 19.6 ms | 27.4 ms |
+| CPU raster | 0.09 ms | 0.12 ms | 0.24 ms |
+
+That is 17.4 presented frames per second against the 28 ms tick's 35.7, and the
+run fails the native-tick assertion. The split says where it goes: simulation
+alone spends the whole budget at p50, the platform present spends most of
+another one, and CPU composition is free at 0.09 ms. `surface_reallocations=0`,
+so no setup cost is hiding inside those steady-state numbers.
+
+**Two limits worth naming.** `max_texture_dimension_2d` is 4096 on V3D, where
+the desktop adapters this port is developed against report 16384 or more. The
+floor compares that against the requested buffer extent rather than a fixed
+threshold, so it passes below 4096 px and fails above — a 4K output would not
+present here. wgpu also reports V3D as downlevel: "does not support enough
+features to be a fully compliant implementation of WebGPU".
+
+**What this run does not cover.** The board had no monitor attached — both HDMI
+connectors read `disconnected` — so the compositor ran headless and nothing was
+scanned out to a display. Modesetting, vsync and real display output remain
+unqualified on this board. Pi 5 remains entirely unqualified.
+
+**The compositor decides which adapter you get, and nothing says so.** With
+weston's headless backend on its default renderer, V3D is not among the
+adapters compatible with the surface — the only one offered is `llvmpipe`, a
+CPU Vulkan device — and the run still reports success with no indication it was
+not on the GPU. Passing `--use-gl`, which brings up the GL renderer on V3D and
+advertises dmabuf, is what makes V3D surface-compatible. **Any Pi qualification
+must read the adapter out of the report rather than assume the board's GPU was
+used.** The missing diagnostic is clonk-org/clonk-rs#1381.
