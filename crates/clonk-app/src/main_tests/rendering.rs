@@ -2843,6 +2843,45 @@ fn an_empty_configured_font_name_fails_before_any_font_lookup() {
 }
 
 #[test]
+fn a_cpu_adapter_is_reported_however_it_was_selected() {
+    use wgpu::DeviceType;
+
+    // Asking for a fallback because nothing else answered is the case the port
+    // already reported. The one it missed is the ordinary request *returning* a
+    // CPU device, which happens when no hardware adapter is compatible with the
+    // surface -- on a Raspberry Pi 4 under a compositor advertising no dmabuf,
+    // V3D is not surface-compatible and llvmpipe is the only adapter offered.
+    // That run reported success on CPU Vulkan with nothing in the log
+    // (clonk-org/clonk-rs#1381).
+    main_assert!(software_adapter_warning(DeviceType::Cpu, true).is_some());
+    main_assert!(
+        software_adapter_warning(DeviceType::Cpu, false).is_some(),
+        "a CPU adapter is a CPU adapter however it arrived"
+    );
+
+    // The two situations get different text: one says nothing answered, the
+    // other says nothing compatible answered, and the fix differs.
+    main_assert_ne!(
+        software_adapter_warning(DeviceType::Cpu, true) =>
+        software_adapter_warning(DeviceType::Cpu, false)
+    );
+
+    // Hardware stays quiet, including the integrated GPU a Pi 4 reports once
+    // its compositor does advertise dmabuf.
+    for device_type in [
+        DeviceType::IntegratedGpu,
+        DeviceType::DiscreteGpu,
+        DeviceType::VirtualGpu,
+        DeviceType::Other,
+    ] {
+        main_assert!(
+            software_adapter_warning(device_type, false).is_none(),
+            "hardware must not be reported as software: {device_type:?}"
+        );
+    }
+}
+
+#[test]
 fn general_font_size_sixteen_builds_the_cpp_derived_app_bundle() {
     let _lock = env_lock().lock();
     let root = tempdir();
