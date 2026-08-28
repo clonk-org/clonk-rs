@@ -4036,7 +4036,17 @@ def _require_fresh_external_output(
 
 def _copy_fixture_content(fixture_source: Path, destination: Path) -> None:
     _require(fixture_source.is_dir() and not fixture_source.is_symlink(), "fixture archive is invalid")
-    _require(not destination.exists(), f"fixture content destination already exists: {destination}")
+    if destination.exists() or destination.is_symlink():
+        _require(
+            destination.is_dir()
+            and not destination.is_symlink()
+            and next(destination.iterdir(), None) is None,
+            f"fixture content destination already exists: {destination}",
+        )
+        # `git archive` materializes a submodule gitlink as an empty directory.
+        # Remove only that validated placeholder before installing the pinned
+        # fixture tree.
+        destination.rmdir()
     for path in fixture_source.rglob("*"):
         _require(
             not path.is_symlink() and (path.is_dir() or path.is_file()),

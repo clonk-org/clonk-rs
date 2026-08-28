@@ -1184,6 +1184,22 @@ class PinAndGitTests(unittest.TestCase):
             self.assertFalse(inside_checkout.exists())
             self.assertEqual(run_git(repository, "status", "--short"), "")
 
+    def test_fixture_content_replaces_an_empty_archive_gitlink_placeholder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            fixture = temporary / "fixture"
+            fixture.mkdir()
+            (fixture / "Scenario.txt").write_text("fixture", encoding="utf-8")
+            destination = temporary / "rust-source/content"
+            destination.mkdir(parents=True)
+
+            MODULE._copy_fixture_content(fixture, destination)
+
+            self.assertEqual(
+                (destination / "Scenario.txt").read_text(encoding="utf-8"),
+                "fixture",
+            )
+
     def test_gitlink_reader_rejects_a_normal_tree_entry(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary) / "source"
