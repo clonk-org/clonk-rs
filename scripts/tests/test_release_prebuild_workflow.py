@@ -113,7 +113,7 @@ class ReleasePrebuildWorkflowTests(unittest.TestCase):
                 self.assertIn(cache, workflow)
         self.assertIn("run: scripts/configure-msvc-runtime.sh", runtime)
         self.assertIn("name: Restore trusted-main ThinLTO cache", runtime)
-        self.assertIn("clonk-msvc-thinlto-v2-windows-x64-rustc-1.98.0-llvm-22.1.6-", runtime)
+        self.assertIn("clonk-msvc-thinlto-v2-windows-x64-rustc-1.98.0-llvm-22.1.8-", runtime)
         self.assertIn("run: scripts/validate-msvc-runtime.sh", runtime)
         self.assertNotIn("Publish trusted ThinLTO cache", workflow)
 

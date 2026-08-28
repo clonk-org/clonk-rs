@@ -155,7 +155,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         script = MSVC_RUNTIME_CONFIG.read_text(encoding="utf-8")
         for fragment in (
             "release: 1.98.0",
-            "LLVM version: 22.1.6",
+            "LLVM version: 22.1.8",
             "cargo_target=x86_64-pc-windows-msvc",
             'CARGO_BUILD_TARGET=$cargo_target',
             "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER",
@@ -233,7 +233,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             self.assertIn(guard, trusted_save)
 
         production_key = (
-            "clonk-msvc-thinlto-v2-windows-x64-rustc-1.98.0-llvm-22.1.6-${{ "
+            "clonk-msvc-thinlto-v2-windows-x64-rustc-1.98.0-llvm-22.1.8-${{ "
             "hashFiles('rust-toolchain.toml', '.cargo/config.toml', "
             "'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs') }}"
         )
