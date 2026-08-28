@@ -1,3 +1,15 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -494,7 +494,7 @@ target_link_libraries(clonk PRIVATE CURL::libcurl)
+ 
+ # Link fmt
+ find_package(fmt REQUIRED)
+-target_link_libraries(standard fmt::fmt)
++target_link_libraries(standard fmt::fmt-header-only)
+ list(APPEND PCH_EXTRA <fmt/format.h> <fmt/printf.h>)
+ 
+ # Link Freetype
 diff --git a/src/C4Application.cpp b/src/C4Application.cpp
 index 89bbf76..05c3c12 100644
 --- a/src/C4Application.cpp

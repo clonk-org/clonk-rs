@@ -1935,6 +1935,17 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 canonical_sha256({"commands": recipe["commands"]}),
             )
 
+    def test_cpp_capture_patch_links_the_pinned_fmt_headers_without_a_runtime_dylib(self):
+        patch = (REPOSITORY / MODULE.CAPTURE_PATCH_SOURCE_PATH).read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "-target_link_libraries(standard fmt::fmt)\n"
+            "+target_link_libraries(standard fmt::fmt-header-only)\n",
+            patch,
+        )
+
     def test_launch_contract_uses_exact_inputs_and_refuses_unaudited_cpp_runtime(self):
         candidate = Path("/tmp/presentation-candidate")
         binaries = {
