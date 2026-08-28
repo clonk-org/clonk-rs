@@ -6,6 +6,20 @@
 
 use super::*;
 
+/// What one batch of startup-menu actions asks the app to do next.
+///
+/// Returned instead of a tuple because the third outcome -- opening an entry in
+/// the developer console -- reads as a mode, not as another string.
+#[derive(Debug, Default)]
+pub(crate) struct MenuActionOutcome {
+    /// A scenario to start as an ordinary round.
+    pub(crate) start: Option<String>,
+    /// A scenario to open in the developer console; C++'s editor entry.
+    pub(crate) edit: Option<String>,
+    /// A refreshed breadcrumb label.
+    pub(crate) label: Option<String>,
+}
+
 impl GameApp {
     pub(crate) fn open_league_signup_dialog(
         &mut self,
@@ -2531,15 +2545,19 @@ impl GameApp {
         &mut self,
         actions: Vec<StartupMenuAction>,
     ) -> Result<(), EngineError> {
-        let (start_identifier, updated_label) = self
+        let outcome = self
             .process_menu_actions(actions)
             .map_err(classic_parity_engine_error)?;
 
-        if let Some(label) = updated_label {
+        if let Some(label) = outcome.label {
             self.scenario_label = label;
         }
 
-        if let Some(identifier) = start_identifier {
+        if let Some(identifier) = outcome.edit {
+            self.open_editor_entry(&identifier)?;
+        }
+
+        if let Some(identifier) = outcome.start {
             if let Some(scenario) = self.scensel.catalog.get(&identifier).cloned() {
                 if self.startup.view == StartupView::ScenarioBrowser {
                     if let Some(message) = self
@@ -2615,12 +2633,46 @@ impl GameApp {
         Ok(())
     }
 
+    /// Route an editor entry into the in-process developer console.
+    ///
+    /// C++ hands an editor entry to `C4Console` rather than starting a round
+    /// (`C4StartupScenSelDlg.cpp:1650-1666`), which is what
+    /// `open_developer_console_game` already does for the console's own
+    /// File/Open. A missing catalog entry is a stale summary, not a crash: the
+    /// browser reports it the way an unavailable scenario is reported.
+    fn open_editor_entry(&mut self, identifier: &str) -> Result<(), EngineError> {
+        let Some(scenario) = self.scensel.catalog.get(identifier).cloned() else {
+            tracing::warn!(
+                scenario = %identifier,
+                "editor entry is not available in Rust catalog"
+            );
+            return Ok(());
+        };
+        let Some(path) = scenario.path.clone() else {
+            tracing::warn!(
+                scenario = %identifier,
+                "editor entry carries no path to open"
+            );
+            return Ok(());
+        };
+        self.play_ui_sound("Click");
+        // Participants come from the configured list, exactly as an ordinary
+        // start takes them; the console supplies its own only when its file
+        // dialog chose them.
+        if let Err(error) = self.open_developer_console_game(path, Vec::new()) {
+            tracing::error!(%error, scenario = %identifier, "editor entry open failed");
+            // Same cleanup the console's own OpenGame failure takes: drop the
+            // partial bootstrap and leave the developer window alive.
+            self.close_console_game();
+        }
+        Ok(())
+    }
+
     pub(crate) fn process_menu_actions(
         &mut self,
         actions: Vec<StartupMenuAction>,
-    ) -> std::result::Result<(Option<String>, Option<String>), ClassicParityBoundary> {
-        let mut start_identifier: Option<String> = None;
-        let mut updated_label: Option<String> = None;
+    ) -> std::result::Result<MenuActionOutcome, ClassicParityBoundary> {
+        let mut outcome = MenuActionOutcome::default();
         let mut pending: VecDeque<StartupMenuAction> = actions.into();
 
         while let Some(action) = pending.pop_front() {
@@ -2631,23 +2683,22 @@ impl GameApp {
                     self.play_ui_sound("Command");
                 }
                 StartupMenuAction::StartScenario(summary) => {
+                    // C4StartupScenSelDlg::DoOk opens an editor entry in the
+                    // console rather than starting it as a round
+                    // (`C4StartupScenSelDlg.cpp:1650-1666`). The summary's kind
+                    // and the catalog's kind are checked separately because a
+                    // stale summary can outlive a refreshed catalog.
                     if summary.kind == ScenarioKind::Editor {
-                        return Err(report_classic_parity_boundary(
-                            ClassicParityBoundary::EditorScenario {
-                                identifier: summary.identifier,
-                            },
-                        ));
+                        outcome.edit = Some(summary.identifier);
+                        continue;
                     }
                     let entry_kind = self
                         .menu_state
                         .require_supported_activation(&summary.identifier)
                         .map_err(report_classic_parity_boundary)?;
                     if matches!(entry_kind, Some(ScenarioKind::Editor)) {
-                        return Err(report_classic_parity_boundary(
-                            ClassicParityBoundary::EditorScenario {
-                                identifier: summary.identifier,
-                            },
-                        ));
+                        outcome.edit = Some(summary.identifier);
+                        continue;
                     }
                     self.play_ui_sound("Click");
                     if matches!(self.startup.view, StartupView::NetworkLobby) {
@@ -2655,7 +2706,7 @@ impl GameApp {
                             self.status_text = format!("Selected {}", summary.title);
                         }
                     } else {
-                        start_identifier = Some(summary.identifier);
+                        outcome.start = Some(summary.identifier);
                     }
                 }
                 StartupMenuAction::OpenEntry(summary) => {
@@ -2667,18 +2718,18 @@ impl GameApp {
                             self.menu_state.leave_folder();
                             self.configure_current_folder_map();
                             self.refresh_scenario_entry_enabled();
-                            updated_label = Some(self.menu_state.label_path());
+                            outcome.label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }
                         continue;
                     }
 
+                    // Opening an editor entry is the same console open as
+                    // starting one; C++ makes no distinction at this point
+                    // (`C4StartupScenSelDlg.cpp:1650-1666`).
                     if summary.kind == ScenarioKind::Editor {
-                        return Err(report_classic_parity_boundary(
-                            ClassicParityBoundary::EditorScenario {
-                                identifier: summary.identifier,
-                            },
-                        ));
+                        outcome.edit = Some(summary.identifier);
+                        continue;
                     }
 
                     let entry_kind = self
@@ -2691,7 +2742,7 @@ impl GameApp {
                             self.play_ui_sound("DoorOpen");
                             self.enter_scenario_folder(&summary.identifier);
                             self.scenario_game_options.set_focused_button(None);
-                            updated_label = Some(self.menu_state.label_path());
+                            outcome.label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }
                         Some(ScenarioKind::Scenario) => {
@@ -2704,35 +2755,29 @@ impl GameApp {
                                     self.status_text = format!("Selected {}", summary.title);
                                 }
                             } else {
-                                start_identifier = Some(summary.identifier);
+                                outcome.start = Some(summary.identifier);
                             }
                         }
                         Some(ScenarioKind::Editor) => {
-                            return Err(report_classic_parity_boundary(
-                                ClassicParityBoundary::EditorScenario {
-                                    identifier: summary.identifier,
-                                },
-                            ));
+                            outcome.edit = Some(summary.identifier);
                         }
                         None => {
                             self.play_ui_sound("DoorOpen");
                             self.enter_scenario_folder(&summary.identifier);
                             self.scenario_game_options.set_focused_button(None);
-                            updated_label = Some(self.menu_state.label_path());
+                            outcome.label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }
                     }
                 }
                 StartupMenuAction::EditEntry(summary) => {
-                    return Err(report_classic_parity_boundary(
-                        ClassicParityBoundary::EditScenario {
-                            identifier: summary.identifier,
-                        },
-                    ));
+                    // The explicit Edit command reaches the same console open
+                    // as activating an editor entry does.
+                    outcome.edit = Some(summary.identifier);
                 }
             }
         }
-        Ok((start_identifier, updated_label))
+        Ok(outcome)
     }
 
     pub(crate) fn process_network_dialog_actions(

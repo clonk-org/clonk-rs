@@ -4749,10 +4749,11 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         .test_value();
     app.process_menu_actions(vec![StartupMenuAction::OpenEntry(summary(mission))])
         .test_value();
-    let (selected, _) = app
+    let selected = app
         .process_menu_actions(vec![StartupMenuAction::StartScenario(summary(resume))])
+        .test_value()
+        .start
         .test_value();
-    let selected = selected.test_value();
     main_assert_eq!(
         app.scensel.catalog
             .get(&selected)

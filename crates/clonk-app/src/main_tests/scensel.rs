@@ -3184,8 +3184,8 @@ fn folder_map_loads_renders_titles_access_overlays_and_cpp_click_semantics() {
     app.process_menu_actions(vec![first]).test_value();
     main_assert_eq!(scensel_selection_info(&app.menu_state).title => Some("Alpha Mission"));
     let second = app.menu_state.activate_map_button(0).test_value();
-    let (start, _) = app.process_menu_actions(vec![second]).test_value();
-    main_assert_eq!(start.as_deref() => Some(alpha.identifier.as_str()));
+    let outcome = app.process_menu_actions(vec![second]).test_value();
+    main_assert_eq!(outcome.start.as_deref() => Some(alpha.identifier.as_str()));
 
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(
         640,

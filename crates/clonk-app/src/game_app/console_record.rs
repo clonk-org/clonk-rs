@@ -59,7 +59,7 @@ impl GameApp {
         self.close_console_game();
     }
 
-    fn close_console_game(&mut self) {
+    pub(crate) fn close_console_game(&mut self) {
         let boot_still_loading = self.boot_loading.is_some();
         let network_game_active = self.network.is_some()
             || self.network_mode.is_some()
@@ -251,7 +251,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn open_developer_console_game(
+    pub(crate) fn open_developer_console_game(
         &mut self,
         scenario: PathBuf,
         player_files: Vec<PathBuf>,

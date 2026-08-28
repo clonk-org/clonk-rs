@@ -2868,12 +2868,6 @@ pub(crate) enum ClassicParityBoundary {
         path: PathBuf,
         detail: String,
     },
-    EditorScenario {
-        identifier: String,
-    },
-    EditScenario {
-        identifier: String,
-    },
     IngameMenuResources {
         missing: Vec<&'static str>,
     },
@@ -2980,14 +2974,6 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "cannot verify classic scenario-start constraints for {}: {detail}",
                 path.display()
-            ),
-            Self::EditorScenario { identifier } => write!(
-                f,
-                "classic editor entry `{identifier}` is unavailable in the Rust menu"
-            ),
-            Self::EditScenario { identifier } => write!(
-                f,
-                "classic Edit action for `{identifier}` is unavailable in the Rust menu"
             ),
             Self::IngameMenuResources { missing } => write!(
                 f,
