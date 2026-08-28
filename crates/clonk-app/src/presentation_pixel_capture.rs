@@ -2952,13 +2952,28 @@ mod tests {
         // C4Surface::SavePNG reads GL_BGR into a 24-bit PNG
         // (src/C4Startup.cpp:711-719; src/graphics/C4Surface.cpp:411-458).
         let (_environment, _user_data, mut app) = real_capture_app()?;
-        let checkpoint = stage_pixel_checkpoint(&mut app, PixelCaptureCase::NetworkLobby)?;
+        let checkpoint = stage_pixel_checkpoint(&mut app, PixelCaptureCase::Loader)?;
 
         let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
         let reader = png::Decoder::new(Cursor::new(png)).read_info()?;
 
         assert_eq!(reader.info().color_type, png::ColorType::Rgb);
         assert_eq!(reader.info().bit_depth, png::BitDepth::Eight);
+        Ok(())
+    }
+
+    #[test]
+    fn network_lobby_capture_paints_the_tab_background_after_its_frame() -> Result<()> {
+        // C4GUI::Tabular::DrawElement draws the 3D frame before painting the
+        // translucent sheet background over it (src/C4GuiTabular.cpp:370-377).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let checkpoint = stage_pixel_checkpoint(&mut app, PixelCaptureCase::NetworkLobby)?;
+
+        let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
+        let (width, _, pixels) = decode_capture_png("network-lobby", &png)?;
+        let start = ((99 * width + 850) * 4) as usize;
+
+        assert_eq!(&pixels[start..start + 4], &[34, 11, 2, 255]);
         Ok(())
     }
 

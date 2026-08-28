@@ -522,6 +522,20 @@ fn startup_player_count_uses_roster_only_at_frame_zero() {
 }
 
 #[test]
+fn fresh_network_lobby_state_preserves_the_native_focused_chat_caret() {
+    // MainDlg focuses pEdtChat on construction, and Edit::OnGetFocus starts
+    // its visible caret interval (src/C4GameLobby.cpp:305-306;
+    // src/C4GuiEdit.cpp:538-546,614-620).
+    let mut lobby = client_lobby_state();
+
+    lobby.sync_classic_controller();
+
+    main_assert_eq!(lobby.controller.focus() => LobbyControl::ChatInput);
+    main_assert!(lobby.chat_edit.cursor_visible);
+    main_assert!(lobby.controller.chat_edit_view().cursor_visible);
+}
+
+#[test]
 fn classic_command_line_lobby_timeout_starts_the_host_countdown() {
     main_assert_eq!(parse_classic_command_line(&[OsString::from("/network")]).lobby_timeout => None,);
     main_assert_eq!(parse_classic_command_line(&[OsString::from("/lobby")]).lobby_timeout => Some(None),);

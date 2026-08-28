@@ -645,7 +645,7 @@ fn bilinear_sample_tile(
         let x = tile_x + relative_x.clamp(0, tile_size - 1);
         let y = tile_y + relative_y.clamp(0, tile_size - 1);
         if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
-            return [0.0; 4];
+            return [255.0, 255.0, 255.0, 0.0];
         }
         let index = ((y as u32 * image.width() + x as u32) * 4) as usize;
         image
@@ -1076,6 +1076,18 @@ mod tests {
         (0..width)
             .map(|x| surface.get_pixel(x, y).map(|color| color.r).unwrap_or(0))
             .collect()
+    }
+
+    #[test]
+    fn facet_sampler_uses_native_transparent_white_texture_padding() {
+        // C4TexRef initializes the complete power-of-two allocation to 0xff
+        // before C4Surface uploads only the image rows
+        // (src/C4Surface.cpp:190-205,955-991,1075-1113).
+        let image = ImageData::new(4, 3, [10, 20, 30, 255].repeat(4 * 3));
+
+        let sample = bilinear_sample_tile(&image, 0, 0, 4, 0.0, 3.0);
+
+        assert_eq!(sample, [255.0, 255.0, 255.0, 0.0]);
     }
 
     // `DynBarFacet::SetHorizontal` + exact `Element::DrawBar`: begin, tiled

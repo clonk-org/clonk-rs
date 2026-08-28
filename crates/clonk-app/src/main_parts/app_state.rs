@@ -6070,7 +6070,10 @@ impl NetworkLobbyState {
             preload: LobbyPreloadState::new(false),
             labels: LobbyLabels::default(),
             logs: Vec::new(),
-            chat_edit: LobbyChatEditView::default(),
+            chat_edit: LobbyChatEditView {
+                cursor_visible: true,
+                ..LobbyChatEditView::default()
+            },
             chat_history_index: -1,
             client_sound_status: HashMap::new(),
             local_client_id,
