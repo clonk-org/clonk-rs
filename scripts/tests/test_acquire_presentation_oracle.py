@@ -1913,6 +1913,48 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                         scenario_resources=scenario_resources,
                     )
 
+    def test_cpp_runtime_launch_accepts_a_hash_bound_directory_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate"
+            scenario_resources = {}
+            for scenario_path in MODULE.CPP_RUNTIME_SCENARIO_PATHS:
+                scenario = candidate / "work/fixture-content" / scenario_path
+                scenario.mkdir(parents=True)
+                (scenario / "Scenario.txt").write_text(
+                    f"{scenario_path}\n",
+                    encoding="utf-8",
+                )
+                scenario_resources[scenario_path] = MODULE.runtime_resource_identity(
+                    scenario
+                )
+
+            with (
+                mock.patch.object(MODULE, "_validate_staged_cpp_runtime_resources"),
+                mock.patch.object(MODULE, "_validate_staged_cpp_runtime_content"),
+            ):
+                command, cwd = MODULE._capture_command(
+                    candidate,
+                    {"cpp": candidate / "clonk"},
+                    engine="cpp",
+                    case_id="gameplay",
+                    runtime_resources=synthetic_runtime_resources()["cpp"],
+                    runtime_content_resources={
+                        group: {"tree": "a" * 40, "manifest_sha256": "b" * 64}
+                        for group in MODULE.CPP_RUNTIME_CONTENT_GROUPS
+                    },
+                    scenario_resources=scenario_resources,
+                )
+
+            self.assertEqual(
+                command[1],
+                str(
+                    candidate
+                    / "work/fixture-content"
+                    / MODULE.CPP_RUNTIME_SCENARIOS["gameplay"]
+                ),
+            )
+            self.assertEqual(cwd, candidate / "inputs")
+
     def test_build_recipes_record_every_executed_command_without_a_shell(self):
         cpp = MODULE.cpp_build_recipe()
         rust = MODULE.rust_build_recipe()

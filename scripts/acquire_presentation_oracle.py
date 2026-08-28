@@ -4308,7 +4308,6 @@ def _capture_command(
             scenario_resources,
         )
         scenario = candidate_root / "work/fixture-content" / scenario_relative
-        _regular_file(scenario, f"C++ {case_id} scenario")
         network_arguments = ["/network", "/lobby"] if case_id == "network-lobby" else []
         return (
             [
