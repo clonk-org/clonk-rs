@@ -851,7 +851,7 @@ fn render_checkpoint_png(app: &mut crate::GameApp, render_ordinal: u32) -> Resul
         app.render(&mut frame)
             .map_err(|error| anyhow::anyhow!("render presentation ordinal {ordinal}: {error}"))?;
     }
-    crate::encode_rgba_png(width, height, &frame)
+    crate::encode_screenshot_png(width, height, &frame)
         .map_err(|error| anyhow::anyhow!("encode presentation PNG: {error}"))
 }
 
@@ -1130,7 +1130,7 @@ fn render_layout_capture(
     }
     // The semantic commands and encoded pixels now come from the same second
     // full render, after its native-resolution layers have been composited.
-    let png = crate::encode_rgba_png(width, height, &frame)
+    let png = crate::encode_screenshot_png(width, height, &frame)
         .map_err(|error| anyhow::anyhow!("encode {} PNG: {error}", case.id()))?;
     let gui_fonts = app
         .assets
@@ -2947,6 +2947,22 @@ mod tests {
     }
 
     #[test]
+    fn pixel_capture_png_omits_the_native_framebuffer_alpha_channel() -> Result<()> {
+        // C4Startup::SaveScreenshot requests fSaveAlpha=false, so
+        // C4Surface::SavePNG reads GL_BGR into a 24-bit PNG
+        // (src/C4Startup.cpp:711-719; src/graphics/C4Surface.cpp:411-458).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let checkpoint = stage_pixel_checkpoint(&mut app, PixelCaptureCase::NetworkLobby)?;
+
+        let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
+        let reader = png::Decoder::new(Cursor::new(png)).read_info()?;
+
+        assert_eq!(reader.info().color_type, png::ColorType::Rgb);
+        assert_eq!(reader.info().bit_depth, png::BitDepth::Eight);
+        Ok(())
+    }
+
+    #[test]
     fn loader_capture_encodes_the_final_ordinal_two_render_frame() -> Result<()> {
         // C4LoaderScreen::Draw draws the current progress/log into lpBack,
         // and the oracle saves that completed second frame
@@ -3223,11 +3239,29 @@ mod tests {
 
         let (png, _layout) = render_layout_capture(&mut app, LayoutCaptureCase::Main)?;
         let uncomposed = crate::encode_surface_to_png(app.graphics.surface())?;
+        let (_, _, presented_pixels) = decode_capture_png("presented", &png)?;
+        let (_, _, uncomposed_pixels) = decode_capture_png("uncomposed", &uncomposed)?;
 
         assert_ne!(
-            png, uncomposed,
+            presented_pixels, uncomposed_pixels,
             "native text/chrome must be replayed before encoding the ordinal-2 PNG"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn layout_capture_png_omits_the_native_framebuffer_alpha_channel() -> Result<()> {
+        // The instrumented startup capture passes fSaveAlpha=false to
+        // C4Surface::SavePNG (parity/oracle/presentation_capture.patch:2047;
+        // src/graphics/C4Surface.cpp:411-458).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        stage_layout_checkpoint(&mut app, LayoutCaptureCase::Main, b"")?;
+
+        let (png, _layout) = render_layout_capture(&mut app, LayoutCaptureCase::Main)?;
+        let reader = png::Decoder::new(Cursor::new(png)).read_info()?;
+
+        assert_eq!(reader.info().color_type, png::ColorType::Rgb);
+        assert_eq!(reader.info().bit_depth, png::BitDepth::Eight);
         Ok(())
     }
 
