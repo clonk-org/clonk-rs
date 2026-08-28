@@ -149,9 +149,19 @@ Run and passing on:
 - **Linux / X11 under Xvfb** — `aarch64`, Debian-based `rust:1.98.0` container,
   no GPU present.
 - **macOS** — an ordinary desktop session.
+- **Linux / native Wayland** — `aarch64`, Raspberry Pi 4 Model B rev 1.4,
+  Debian 13 (trixie), kernel 6.12.47, weston 14.0.2. No XWayland: the app
+  reports `display_backend: wayland`. A V3D GPU is present and unused, which is
+  the point — the software presenter has to work where an adapter exists but is
+  not being asked for. Schema 2, all three transition phases presented, scale
+  1 → 2 → 1, no window left behind.
 
 These are path-specific reference runs, not a claim about every `softbuffer`
-platform. Windows qualification is tracked by clonk-org/clonk-rs#1254, native
-Wayland by clonk-org/clonk-rs#1255, fullscreen/input-coordinate proof by
-clonk-org/clonk-rs#1262, and presenter-specific performance evidence by
-clonk-org/clonk-rs#1263.
+platform. Windows qualification is tracked by clonk-org/clonk-rs#1254.
+
+The native Wayland run above was taken on a board with no monitor attached, so
+the compositor had no physical output. It exercises the Wayland protocol path,
+the drawable lifecycle and the transition transforms; it does not exercise
+modesetting, vsync or scanout, and it says nothing about a compositor other
+than weston. Fractional scale is likewise untested — weston's headless output
+runs at scale 1.
