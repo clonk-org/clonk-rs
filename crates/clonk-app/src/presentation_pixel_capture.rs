@@ -1650,6 +1650,12 @@ impl PresentationRandomGuard {
         clonk_engine::particles::begin_presentation_safe_random_capture();
         Self
     }
+
+    fn pin_runtime_streams(&self) {
+        crate::seed_classic_safe_random(587);
+        clonk_engine::particles::install_presentation_safe_random_seed(587);
+        clonk_engine::particles::reset_presentation_safe_random_after_fix_random();
+    }
 }
 
 impl Drop for PresentationRandomGuard {
@@ -1707,11 +1713,16 @@ fn run_capture_request(
 ) -> Result<()> {
     let inputs = validate_capture_inputs(request, classic, app_paths)?;
     std::env::set_var("LC_PIN_SEED", "587");
-    let _random = PresentationRandomGuard::install();
+    let random = PresentationRandomGuard::install();
     let mut app = boot_capture_app_to_menu(classic, app_paths)?;
     let case = PresentationCaptureCase::from_id(&request.case_id).ok_or_else(|| {
         anyhow::anyhow!("unknown presentation capture case {:?}", request.case_id)
     })?;
+    if matches!(case, PresentationCaptureCase::Pixel(_)) {
+        // Native launches runtime captures directly. Exclude the Rust-only
+        // startup-menu bootstrap before staging that equivalent route.
+        random.pin_runtime_streams();
+    }
     let (checkpoint, png, layout) = match case {
         PresentationCaptureCase::Layout(case) => {
             let output = capture_layout_case_with_app(&mut app, case, &inputs.network_references)?;
@@ -1813,8 +1824,11 @@ pub(crate) fn run_capture_or_discovery_from_environment(
             validate_fixed_runtime_inputs(classic, app_paths, None)?;
             let network_references = discovery_network_references(app_paths, case)?;
             std::env::set_var("LC_PIN_SEED", "587");
-            let _random = PresentationRandomGuard::install();
+            let random = PresentationRandomGuard::install();
             let mut app = boot_capture_app_to_menu(classic, app_paths)?;
+            if matches!(case, PresentationCaptureCase::Pixel(_)) {
+                random.pin_runtime_streams();
+            }
             discover_capture_case_with_app(
                 &mut app,
                 case,
@@ -3195,6 +3209,25 @@ mod tests {
         assert_eq!(checkpoint.random_count, 0);
         assert_eq!(report.calls, 0);
         assert_eq!(report.raw_calls, 0);
+        assert!(report.trace.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_capture_discards_rust_only_startup_random_draws() -> Result<()> {
+        // A direct native scenario skips the startup loader before game init
+        // (src/C4Application.cpp:239-248), so Rust's menu bootstrap must not
+        // contribute to the runtime presentation stream.
+        let random = PresentationRandomGuard::install();
+        let (_environment, _user_data, _app) = real_capture_app()?;
+        let _raw = clonk_engine::particles::presentation_safe_random_capture_raw_value()
+            .expect("presentation raw-call audit is active");
+
+        random.pin_runtime_streams();
+
+        let report = clonk_engine::particles::presentation_safe_random_capture_report();
+        assert_eq!(report.calls, 0);
+        assert_eq!(report.raw_calls, 1);
         assert!(report.trace.is_empty());
         Ok(())
     }
