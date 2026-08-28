@@ -83,7 +83,7 @@ budget.
 | Linux/X11 software | A no-GPU Xvfb reference run is recorded in `scripts/SOFTWARE_PRESENTATION_SMOKE.md`; it covers attach, present, resize, and shutdown. |
 | macOS software | A reference run is recorded in `scripts/SOFTWARE_PRESENTATION_SMOKE.md`. |
 | Windows software | Not yet qualified; clonk-org/clonk-rs#1254 owns the missing platform evidence. |
-| Native Wayland software | Not yet qualified; the Xvfb run does not exercise Wayland. Tracked by clonk-org/clonk-rs#1255. |
+| Native Wayland software | Qualified on a Raspberry Pi 4 under weston 14.0.2 with no XWayland: presented, resized, ran the windowed/fullscreen/windowed transition sequence, and left no window behind. The reference run is recorded in `scripts/SOFTWARE_PRESENTATION_SMOKE.md`, including what it does not cover — no scanout, one compositor, scale 1 only. |
 | Raspberry Pi 4 retained GPU | Runs, but does not sustain the cadence. Real-board evidence below: V3D presents every frame through the retained path, and the complete frame is 46 ms at p50 against a 28 ms budget. **Implemented and correct, not playable at native speed.** |
 | Raspberry Pi 5 retained GPU | Still no real-board evidence. A Pi 4 result says nothing about it — different GPU generation, different driver limits. Tracked by clonk-org/clonk-rs#1250. |
 | Raspberry Pi 0–3 / VideoCore IV software | The GPU path cannot use their GLES 2-only adapter. The wgpu-free fallback is a possible from-source route, not a support claim; real-board windowing and cadence remain unqualified in clonk-org/clonk-rs#1249. |
