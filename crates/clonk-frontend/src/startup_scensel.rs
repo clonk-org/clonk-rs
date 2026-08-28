@@ -1962,7 +1962,11 @@ pub fn selection_info_scroll_metrics(
     });
     let text_height = selection_info_lines(info, book_fonts)
         .iter()
-        .map(|(text, font, _)| wrap_line(text, font, content_w).len() as i32 * font.line_height)
+        .enumerate()
+        .map(|(index, (text, font, _))| {
+            wrap_line(text, font, content_w).len() as i32 * font.line_height
+                + if index == 0 { 0 } else { font.line_height / 3 }
+        })
         .sum::<i32>();
     let content_height = picture_height + text_height;
     SelectionInfoScrollMetrics {
@@ -2042,7 +2046,13 @@ pub fn draw_selection_info_scrolled(
                 y += pic_h + 10;
             }
 
-            for (text, font, color) in selection_info_lines(info, book_fonts) {
+            for (index, (text, font, color)) in selection_info_lines(info, book_fonts)
+                .into_iter()
+                .enumerate()
+            {
+                if index > 0 {
+                    y += font.line_height / 3;
+                }
                 for wrapped in wrap_line(&text, font, content_w) {
                     font.draw_with_gamma(
                         surface,
@@ -2761,6 +2771,55 @@ mod tests {
         assert_eq!(
             metrics.clamp_offset(metrics.max_scroll + 60),
             metrics.max_scroll
+        );
+    }
+
+    #[test]
+    fn selection_info_indents_each_new_paragraph() {
+        // C4LogBuffer marks each nonempty segment and each later AddTextLine as
+        // a new paragraph; MultilineLabel adds current line-height / 3 before
+        // drawing and sizing it (C4LogBuf.cpp:174-252;
+        // C4GuiLabels.cpp:240-285; C4StartupScenSelDlg.cpp:1607-1616).
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
+        let gui_fonts = crate::clonk_fonts::build_font_set(&ttf).expect("build GUI fonts");
+        let book_fonts = build_book_font_set(&ttf).expect("build book fonts");
+        let layout = scen_sel_layout(1280, 720, &gui_fonts);
+        let assets = test_assets();
+        let info = SelectionInfo {
+            desc: Some("Title\nBody\nNext"),
+            author: Some("Ada"),
+            version: Some("1"),
+            ..SelectionInfo::default()
+        };
+        let mut surface = Surface::new(1280, 720, clonk_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+
+        let metrics = draw_selection_info_scrolled(
+            &mut surface,
+            &layout,
+            &assets,
+            &book_fonts,
+            &info,
+            0,
+            None,
+        );
+        let commands = surface.take_clonk_text_capture();
+
+        assert_eq!(metrics.content_height, 141);
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| (command.text.as_str(), command.y))
+                .collect::<Vec<_>>(),
+            [
+                ("Title", 146),
+                ("Body", 178),
+                ("Next", 207),
+                ("Author: Ada", 236),
+                ("Version 1", 265),
+            ]
         );
     }
 
