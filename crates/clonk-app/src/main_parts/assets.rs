@@ -733,18 +733,20 @@ pub(crate) fn run_headless_server(
     // other renderer, so the logical surface keeps its ordinary size. Nothing
     // presents it.
     let (logical_width, logical_height) = DisplayOptions::default().actual_size();
-    let mut app = GameApp::new_with_debug_hud(
+    let compat_profile = resolve_classic_compat_profile(app_paths.map(|paths| &**paths), classic);
+    let mut app = GameApp::new_with_debug_hud_for_profile(
         logical_width,
         logical_height,
         AudioOptions::silenced(),
         app_paths.map(|paths| &**paths),
         runtime,
         false,
+        compat_profile,
     )
     .context("failed to initialise headless server state")?;
     app.headless = true;
     app.set_display_mode(DisplayMode::Window);
-    app.apply_classic_command_line(classic)?;
+    app.apply_classic_command_line_with_profile(classic, compat_profile)?;
     app.auto_start_sandbox = cli.sandbox;
     app.launch_classic_command_line_join()
         .context("failed to start command-line network join")?;
@@ -1467,9 +1469,20 @@ pub(crate) enum LobbyPreloadTaskState {
 
 extern "C" {
     pub(crate) fn rand() -> std::os::raw::c_int;
+    fn srand(seed: std::os::raw::c_uint);
+}
+
+pub(crate) fn seed_classic_safe_random(seed: u32) {
+    let _guard = lock_unpoisoned(&CLASSIC_SAFE_RANDOM_LOCK);
+    // SAFETY: C guarantees `srand` accepts every unsigned seed. The same
+    // process-global lock serializes this with all `rand` consumers.
+    unsafe { srand(seed) };
 }
 
 pub(crate) fn classic_safe_random_unlocked(range: usize) -> usize {
+    if let Some(value) = clonk_engine::particles::presentation_safe_random_capture_range(range) {
+        return value;
+    }
     if range == 0 {
         return 0;
     }
@@ -8138,12 +8151,50 @@ pub(crate) fn test_scenario_load(
     }
 }
 
+pub(crate) fn resolve_classic_compat_profile(
+    app_paths: Option<&AppPaths>,
+    classic: &ClassicCommandLine,
+) -> CompatProfile {
+    let persisted_config =
+        app_paths.and_then(|paths| clonk_core::std_config::Config::load(paths.config_file()).ok());
+    crate::settings::resolve_compat_profile(persisted_config.as_ref(), classic.compat_profile)
+}
+
 pub(crate) fn prepare_capture_app(
     mut app: GameApp,
     classic: &ClassicCommandLine,
+    compat_profile: CompatProfile,
 ) -> Result<GameApp> {
-    app.apply_classic_command_line(classic)?;
+    anyhow::ensure!(
+        app.config.compat_profile == compat_profile,
+        "presentation capture app was constructed for {:?}, not {:?}",
+        app.config.compat_profile,
+        compat_profile
+    );
+    app.apply_classic_command_line_with_profile(classic, compat_profile)?;
     Ok(app)
+}
+
+pub(crate) fn build_capture_app(
+    classic: &ClassicCommandLine,
+    app_paths: Option<&Arc<AppPaths>>,
+    runtime: RuntimeConfig,
+) -> Result<GameApp> {
+    let compat_profile = resolve_classic_compat_profile(app_paths.map(|paths| &**paths), classic);
+    prepare_capture_app(
+        GameApp::new_with_debug_hud_for_profile(
+            1280,
+            720,
+            AudioOptions::load(app_paths.map(|paths| &**paths)),
+            app_paths.map(|paths| &**paths),
+            runtime,
+            false,
+            compat_profile,
+        )
+        .context("failed to initialise app for presentation capture")?,
+        classic,
+        compat_profile,
+    )
 }
 
 /// Headless: boot the sandbox scenario, advance `test_frames` simulation frames,
@@ -8160,18 +8211,8 @@ pub(crate) fn run_sandbox_dump(
     use std::thread;
     use std::time::Duration;
 
-    let mut app = prepare_capture_app(
-        GameApp::new_with_debug_hud(
-            1280,
-            720,
-            AudioOptions::default(),
-            app_paths.map(|v| &**v),
-            runtime,
-            false,
-        )
-        .context("failed to initialise app for frame dump")?,
-        classic,
-    )?;
+    let mut app = build_capture_app(classic, app_paths, runtime)
+        .context("failed to initialise app for frame dump")?;
     app.auto_start_sandbox = true;
 
     // Pump update() until async boot finishes and the sandbox auto-starts (Running).
@@ -8247,18 +8288,8 @@ pub(crate) fn run_menu_dump(
     use std::thread;
     use std::time::Duration;
 
-    let mut app = prepare_capture_app(
-        GameApp::new_with_debug_hud(
-            1280,
-            720,
-            AudioOptions::default(),
-            app_paths.map(|v| &**v),
-            runtime,
-            false,
-        )
-        .context("failed to initialise app for menu dump")?,
-        classic,
-    )?;
+    let mut app = build_capture_app(classic, app_paths, runtime)
+        .context("failed to initialise app for menu dump")?;
 
     // Pump update() until async boot finishes and the startup menu is shown.
     let mut booted = false;
@@ -8873,6 +8904,74 @@ pub(crate) fn configured_remaster(config: &[u8]) -> bool {
 fn configured_remaster_feature(config: &[u8], key: &str) -> bool {
     clonk_app_netplay::configured_native_boolean(config, "Graphics", key)
         .unwrap_or_else(|| configured_remaster(config))
+}
+
+/// The ten presentation-only remaster switches after the compatibility
+/// profile has overlaid the native configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CompatPresentationFeatures {
+    pub(crate) high_dpi_cursor: bool,
+    pub(crate) mipmaps: bool,
+    pub(crate) smooth_landscape: bool,
+    pub(crate) fine_fog_of_war: bool,
+    pub(crate) hd_exact_blits: bool,
+    pub(crate) shader_landscape: bool,
+    pub(crate) loader_aspect: bool,
+    pub(crate) snap_text_to_pixels: bool,
+    pub(crate) sky_dither: bool,
+    pub(crate) smooth_presentation: bool,
+    pub(crate) landscape_detail: u32,
+}
+
+impl CompatPresentationFeatures {
+    pub(crate) fn resolve(config: &[u8], profile: CompatProfile) -> Self {
+        let allowed = profile == CompatProfile::Normal;
+        let shader_landscape = allowed && configured_shader_landscape(config);
+        Self {
+            high_dpi_cursor: allowed && configured_high_dpi_cursor(config),
+            mipmaps: allowed && configured_mipmaps(config),
+            smooth_landscape: allowed && configured_smooth_landscape(config),
+            fine_fog_of_war: allowed && configured_fine_fog_of_war(config),
+            hd_exact_blits: allowed && configured_hd_exact_blits(config),
+            shader_landscape,
+            loader_aspect: allowed && configured_loader_aspect(config),
+            snap_text_to_pixels: allowed && configured_snap_text_to_pixels(config),
+            sky_dither: allowed && configured_sky_dither(config),
+            smooth_presentation: allowed && configured_smooth_presentation(config),
+            landscape_detail: if allowed {
+                configured_landscape_detail(config)
+            } else {
+                1
+            },
+        }
+    }
+
+    pub(crate) const fn remaster_family(self) -> [bool; 10] {
+        [
+            self.high_dpi_cursor,
+            self.mipmaps,
+            self.smooth_landscape,
+            self.fine_fog_of_war,
+            self.hd_exact_blits,
+            self.shader_landscape,
+            self.loader_aspect,
+            self.snap_text_to_pixels,
+            self.sky_dither,
+            self.smooth_presentation,
+        ]
+    }
+
+    pub(crate) fn startup_refresh_delay_ms(
+        self,
+        config: &[u8],
+        display_refresh_period_ms: Option<u64>,
+    ) -> u64 {
+        if self.smooth_presentation {
+            effective_max_refresh_delay_ms(config, display_refresh_period_ms)
+        } else {
+            configured_max_refresh_delay_ms(config)
+        }
+    }
 }
 
 /// `Graphics.HighDpiCursor`: opt in to the physical-width cursor ladder. This

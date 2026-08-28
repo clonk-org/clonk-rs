@@ -2991,10 +2991,7 @@ impl AudioContext {
                     catalog
                         .select_enabled_with(playlist.as_deref(), recent.as_ref(), |range| {
                             debug_assert!(range > 0);
-                            // SAFETY: C rand takes no arguments and C guarantees a
-                            // non-negative result. The process-global lock above
-                            // serializes this shared unsynced stream with the loader.
-                            (unsafe { rand() } as usize) % range
+                            classic_safe_random_unlocked(range)
                         })
                         .cloned()
                 }
@@ -5497,6 +5494,11 @@ pub(crate) enum MessageDialogContinuation {
     },
     NetworkRuntimeJoin {
         reference: clonk_network::NetworkGameReference,
+    },
+    /// A port-only compatibility-profile report shown over the already-open
+    /// C++-mirrored network lobby without adding text to its native log.
+    CompatProfileLobbyNotice {
+        finish_classic_command_line_host_entry: bool,
     },
     NetworkServerRedirect {
         address: String,

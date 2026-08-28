@@ -730,6 +730,13 @@ impl Engine {
         &self.particle_system
     }
 
+    /// Seed every engine-owned process-local presentation RNG for a capture.
+    #[doc(hidden)]
+    pub fn seed_presentation_safe_random(&mut self, seed: u32) {
+        self.particle_system.safe_rng = particles::SafeRng::new(seed);
+        crate::compat::seed_script_safe_random(seed);
+    }
+
     /// Set process-local `Config.Graphics.SmokeLevel`. Def-based particles
     /// consume the configured value directly; synchronized BubbleOut object
     /// creation uses the fixed legacy cap instead.

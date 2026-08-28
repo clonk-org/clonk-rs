@@ -897,6 +897,34 @@ pub(crate) fn startup_main_logo_geometry(
     (logo_x, logo_y, logo_w, logo_h)
 }
 
+pub(crate) fn startup_main_classic_logo_geometry(
+    surface_width: i32,
+    surface_height: i32,
+) -> (i32, i32, i32, i32) {
+    // Native Logo.png is 960x320 and C4StartupMainDlg draws it at 0.4 zoom
+    // (C4StartupMainDlg.cpp:115-121). The LegacyClonk profile preserves that
+    // semantic allocation even when the port supplies different artwork.
+    const WIDTH: i32 = 384;
+    const HEIGHT: i32 = 128;
+    (
+        surface_width * 30 / 31 - WIDTH,
+        surface_height / 21 - 5,
+        WIDTH,
+        HEIGHT,
+    )
+}
+
+pub(crate) fn scenario_list_scrollbar_visible(
+    scenario_menu: &MenuState,
+    layout: &clonk_frontend::startup_scensel::ScenSelLayout,
+    book_fonts: &clonk_frontend::startup_scensel::BookFontSet,
+) -> bool {
+    let item_height = clonk_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+    let pitch = item_height + 1;
+    let viewport_height = layout.list.h - 6;
+    scenario_menu.scenario_list_max_scroll(viewport_height, pitch) > 0
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_startup_frame(
     graphics: &mut GraphicsSystem,
@@ -927,6 +955,7 @@ pub(crate) fn render_startup_frame(
     network_lobby: Option<&mut NetworkLobbyState>,
     flags: StartupViewFlags,
     backdrop: &mut StartupBackdropCache,
+    classic_main_logo: bool,
     defer_native_main_text: bool,
     gamma: &clonk_graphics::GammaRamp,
     frame: &mut [u8],
@@ -938,6 +967,22 @@ pub(crate) fn render_startup_frame(
     }
     {
         let surface = graphics.surface_mut();
+        let scenario_list_scrollbar_visible = if view == StartupView::ScenarioBrowser {
+            assets
+                .clonk_fonts
+                .as_ref()
+                .zip(assets.book_fonts.as_ref())
+                .is_some_and(|(fonts, book_fonts)| {
+                    let layout = clonk_frontend::startup_scensel::scen_sel_layout(
+                        surface.width() as i32,
+                        surface.height() as i32,
+                        fonts,
+                    );
+                    scenario_list_scrollbar_visible(scenario_menu, &layout, book_fonts)
+                })
+        } else {
+            false
+        };
         let backdrop_key = StartupBackdropKey {
             view,
             width: surface.width(),
@@ -945,6 +990,7 @@ pub(crate) fn render_startup_frame(
             fair_crew: flags.fair_crew,
             record: flags.record,
             network_host_selector: scenario_selector_mode == ScenarioSelectorMode::NetworkHost,
+            scenario_list_scrollbar_visible,
         };
 
         // C++-faithful parity renderers draw their own backgrounds.
@@ -1020,6 +1066,7 @@ pub(crate) fn render_startup_frame(
                                 surface,
                                 &dlg_assets,
                                 fonts,
+                                scenario_list_scrollbar_visible,
                                 Some(gamma),
                             );
                         });
@@ -1225,8 +1272,11 @@ pub(crate) fn render_startup_frame(
                 if let Some(logo) = assets.logo() {
                     let width = surface.width() as i32;
                     let height = surface.height() as i32;
-                    let (logo_x, logo_y, logo_w, logo_h) =
-                        startup_main_logo_geometry(width, height, logo.width(), logo.height());
+                    let (logo_x, logo_y, logo_w, logo_h) = if classic_main_logo {
+                        startup_main_classic_logo_geometry(width, height)
+                    } else {
+                        startup_main_logo_geometry(width, height, logo.width(), logo.height())
+                    };
                     let logo_rect = clonk_gui::Rect::new(
                         logo_x as f32,
                         logo_y as f32,

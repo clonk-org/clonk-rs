@@ -87,13 +87,12 @@
       "description": "About/update subtree.",
       "status": "pending",
       "blocker": {
-        "summary": "Compared 2026-08-26 against the pinned oracle: 81.44% bit-identical. Same StartupDlgPaper.png divergence as startup-options, over a smaller sheet area, plus the port's own credits text. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run.",
+        "summary": "Compared 2026-08-26 against the pinned oracle: 81.44% bit-identical. Both engines load the same LoaderWatercave1.png background and the same seven credit lists; the port-authored fan-project footer is the declared branding difference. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result is expected rather than a defect. It stays pending until a layout comparison is actually run.",
         "issue": "clonk-org/clonk-rs#587"
       },
       "comparison": "layout",
       "port_assets": [
-        "branding",
-        "super-resolved-startup-art"
+        "branding"
       ]
     },
     {

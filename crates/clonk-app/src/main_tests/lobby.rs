@@ -727,7 +727,7 @@ fn local_join_publishes_control_before_initialize_player_audio() {
 }
 
 #[test]
-fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
+fn network_too_few_warning_then_profile_ack_stages_and_enters_exact_lobby() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
     let user_data = tempdir();
@@ -784,6 +784,7 @@ fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
     let blocker = app.startup_network_connection.take().test_value();
     drop(blocker);
     drop(blocker_sender);
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
 
     let (manager, _events) = NetworkManager::test_stub();
     let (sender, receiver) = mpsc::channel();
@@ -803,6 +804,15 @@ fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
     app.poll_startup_network_connection().test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
+    main_assert!(matches!(
+        app.dialogs.messages.last().test_ref().continuation,
+        MessageDialogContinuation::CompatProfileLobbyNotice {
+            finish_classic_command_line_host_entry: true
+        }
+    ));
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+        .test_value();
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network.is_some());
     main_assert!(app.network_lobby.is_none());
@@ -7276,24 +7286,162 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
 }
 
 #[test]
-fn only_a_host_announces_its_compatibility_profile_in_the_lobby() {
-    // The lobby line states a property of the *session*, and only the host's
-    // setting decides that: `session_control_mode` resolves the host's
+fn compatibility_profile_notice_overlays_the_cpp_lobby_and_leaves_its_log_native() {
+    // C4Network2::DoLobby installs lobby/status semantics before constructing
+    // MainDlg (src/C4Network2.cpp:451-485); src/C4GameLobby.cpp:269-281 then
+    // installs the native chat log without a compatibility-profile line. The
+    // port-only report is therefore a child notice over the active lobby, never
+    // a line in that C++-mirrored log.
+    let (mut host, _host_events, _host_commands) = networked_host_lobby_with_commands(
+        new_menu_app(640, 480),
+        NetworkLobbyState::new(0, "Host".to_string(), true),
+    );
+    host.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+
+    host.open_network_lobby();
+    host.open_network_lobby();
+
+    main_assert_eq!(host.startup.view => StartupView::NetworkLobby);
+    main_assert_eq!(host.dialogs.messages.len() => 1, "the lobby owns one profile notice");
+    let notice = host.dialogs.messages.last().test_value();
+    main_assert!(matches!(
+        notice.continuation,
+        MessageDialogContinuation::CompatProfileLobbyNotice { .. }
+    ));
+    main_assert!(notice.state.message().contains("LegacyClonk"));
+
+    host.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+        .test_value();
+
+    main_assert_eq!(host.startup.view => StartupView::NetworkLobby);
+    main_assert!(host.dialogs.messages.is_empty());
+    main_assert!(
+        !host
+            .network_lobby
+            .as_ref()
+            .test_value()
+            .logs
+            .iter()
+            .any(|line| line.text.contains("Compatibility profile")
+                || line.text.contains("compatibility profile")),
+        "an open C++ lobby must contain only its native log lines"
+    );
+}
+
+#[test]
+fn compatibility_profile_notice_cannot_reopen_a_client_after_go_or_pause() {
+    // C4Network2::DoLobby begins with fLobbyRunning=true and exits as soon as
+    // HandleStatus installs GS_Go or GS_Pause; the dialog and all of its child
+    // dialogs are then destroyed (src/C4Network2.cpp:451-461,490-507,
+    // 1501-1510). A port-only notice must therefore be a child of the already
+    // open lobby, so the same close removes its continuation before it can
+    // recreate a lobby the network status has left.
+    for state in [
+        clonk_network::NETWORK_STATE_GO,
+        clonk_network::NETWORK_STATE_PAUSE,
+    ] {
+        let mut app = new_menu_app(320, 200);
+        let fonts = app.assets.clonk_fonts.clone().test_value();
+        app.loader_screen = Some(
+            LoaderScreen::new(
+                LoaderSelection::startup("LoaderCompatNotice.png")
+                    .expect("valid client loader selection"),
+                ImageData::new(1, 1, vec![7, 8, 9, 255]),
+                LoaderResources::new(fonts, ImageData::new(3, 1, vec![255; 12]))
+                    .expect("valid client loader resources"),
+                LoaderState::initial("Loading"),
+            )
+            .test_value(),
+        );
+        app.loader_error = None;
+        app.loader_render_error = None;
+        let (mut app, events, _commands) =
+            networked_client_lobby_with_commands(app, "Client", client_lobby_state());
+        app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+
+        app.open_network_lobby();
+
+        main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
+        main_assert!(matches!(
+            app.dialogs.messages.last().test_ref().continuation,
+            MessageDialogContinuation::CompatProfileLobbyNotice { .. }
+        ));
+        let status = lobby_fixture!(status: state, 1, 23);
+        send_network_event(&events, NetworkEvent::StatusRequested(status));
+        app.test_network_events();
+        app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+            .test_value();
+
+        main_assert!(matches!(app.mode, AppMode::Loading));
+        main_assert!(app.network_lobby.is_none());
+        main_assert!(app.dialogs.messages.is_empty());
+    }
+}
+
+#[test]
+fn cancelling_compatibility_profile_notice_fully_tears_down_the_visible_lobby() {
+    // MainDlg::OnClosed(false) aborts DoLobby, whose failure path clears the
+    // live network session before OpenGame returns (src/C4GameLobby.cpp:432-440;
+    // src/C4Network2.cpp:497-507). Keep the port-only notice inside MainDlg so
+    // the existing visible-lobby teardown owns the same complete cleanup.
+    let (mut host, _events, _commands) = networked_host_lobby_with_commands(
+        new_menu_app(640, 480),
+        NetworkLobbyState::new(0, "Host".to_string(), true),
+    );
+    host.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    host.open_network_lobby();
+
+    main_assert_eq!(host.startup.view => StartupView::NetworkLobby);
+    main_assert!(host.network.is_some());
+    host.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+        .test_value();
+
+    main_assert!(host.network.is_none());
+    main_assert!(host.network_mode.is_none());
+    main_assert!(host.network_lobby.is_none());
+    main_assert!(host.classic_host_lobby.is_none());
+    main_assert!(host.dialogs.messages.is_empty());
+}
+
+#[test]
+fn headless_or_console_blocked_profile_preserves_lobby_transition_without_a_notice() {
+    for (headless, console_mode) in [(true, false), (false, true)] {
+        let (mut host, _host_events, _host_commands) = networked_host_lobby_with_commands(
+            new_menu_app(640, 480),
+            NetworkLobbyState::new(0, "Host".to_string(), true),
+        );
+        host.headless = headless;
+        host.console_mode = console_mode;
+        host.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+
+        host.open_network_lobby();
+
+        main_assert_eq!(host.startup.view => StartupView::NetworkLobby);
+        main_assert!(!host.exit_requested);
+        main_assert!(
+            host.dialogs.messages.is_empty(),
+            "non-interactive launch reports to the log instead of opening a modal"
+        );
+    }
+}
+
+#[test]
+fn host_reports_the_session_profile_while_a_client_reports_only_its_own_refusal() {
+    // A successful host report states a property of the *session*, and only the
+    // host's setting decides that: `session_control_mode` resolves the host's
     // `initial_status.control_mode` (`game_app/network.rs:5612,7190`) and every
     // client adopts the received `status.control_mode`
     // (`game_app/network.rs:2208`). A joining client's own profile therefore
-    // changes nothing about the session it is joining, so announcing it there
-    // asserts a promise that session never made.
+    // changes nothing about the session it is joining, so its lobby notice is
+    // about the local request only.
     // The wording depends on whether the contract can back the profile today
     // (clonk-org/clonk-rs#588): a claimable one states itself, a blocked one
-    // reports why it is not being claimed. Either way only a host says it.
-    let compat_line = |app: &GameApp| {
-        app.network_lobby
-            .as_ref()
-            .expect("the lobby exists")
-            .logs
-            .iter()
-            .any(|line| line.text.starts_with("Compatibility profile"))
+    // reports why it is not being claimed.
+    let notice_message = |app: &GameApp| {
+        app.dialogs
+            .messages
+            .last()
+            .map(|dialog| dialog.state.message().to_owned())
     };
 
     let (mut client, _client_events) = networked_client_lobby(
@@ -7303,10 +7451,16 @@ fn only_a_host_announces_its_compatibility_profile_in_the_lobby() {
     );
     client.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     client.open_network_lobby();
-    main_assert!(
-        !compat_line(&client),
-        "a joining client must not announce its own profile as the session's"
+    let blocked = !crate::compat_readiness::is_ready();
+    main_assert_eq!(
+        notice_message(&client).is_some_and(|message| message.starts_with("This client")) => blocked,
+        "the client reports only a blocked local request"
     );
+    if blocked {
+        client
+            .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+            .test_value();
+    }
 
     let (mut host, _host_events, _host_commands) = networked_host_lobby_with_commands(
         new_menu_app(640, 480),
@@ -7315,9 +7469,21 @@ fn only_a_host_announces_its_compatibility_profile_in_the_lobby() {
     host.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     host.open_network_lobby();
     main_assert!(
-        compat_line(&host),
-        "the host decides the session profile, so it still states it"
+        notice_message(&host).is_some_and(|message| message.contains("LegacyClonk")),
+        "the host reports its requested session profile over the active lobby"
     );
+    host.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+        .test_value();
+
+    for app in [&client, &host] {
+        main_assert!(
+            !app.network_lobby.test_ref().logs.iter().any(|line| line
+                .text
+                .to_ascii_lowercase()
+                .contains("compatibility profile")),
+            "neither open lobby receives the port-only report"
+        );
+    }
 }
 
 #[test]
@@ -7326,16 +7492,15 @@ fn a_joining_client_is_told_its_own_requested_profile_is_unavailable() {
     // joining, and forbids a silent downgrade of the requested profile. A
     // client still must not announce a profile as the session's -- the host
     // decides that, which
-    // `only_a_host_announces_its_compatibility_profile_in_the_lobby` pins --
-    // so this line is explicitly about the client's own request instead, and
-    // appears only when the contract cannot back it.
-    let compat_line = |app: &GameApp, needle: &str| {
-        app.network_lobby
-            .as_ref()
-            .expect("the lobby exists")
-            .logs
-            .iter()
-            .any(|line| line.text.contains(needle))
+    // `host_reports_the_session_profile_while_a_client_reports_only_its_own_refusal`
+    // pins --
+    // so this lobby notice is explicitly about the client's own request
+    // instead, and appears only when the contract cannot back it.
+    let compat_report = |app: &GameApp, needle: &str| {
+        app.dialogs
+            .messages
+            .last()
+            .is_some_and(|dialog| dialog.state.message().contains(needle))
     };
 
     let (mut client, _client_events) = networked_client_lobby(
@@ -7348,19 +7513,22 @@ fn a_joining_client_is_told_its_own_requested_profile_is_unavailable() {
 
     let blocked = !crate::compat_readiness::is_ready();
     main_assert_eq!(
-        compat_line(&client, "cannot honour it") => blocked,
+        compat_report(&client, "cannot honour it") => blocked,
         "a client that asked for a profile it cannot have must be told"
     );
-    // Still never phrased as a claim about the session the host owns.
+    main_assert_eq!(client.startup.view => StartupView::NetworkLobby);
+    if blocked {
+        client
+            .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+            .test_value();
+    }
+    main_assert_eq!(client.startup.view => StartupView::NetworkLobby);
     main_assert!(
-        !client
-            .network_lobby
-            .as_ref()
-            .test_value()
-            .logs
-            .iter()
-            .any(|line| line.text.starts_with("Compatibility profile")),
-        "the session's profile is the host's statement, not the client's"
+        !client.network_lobby.test_ref().logs.iter().any(|line| line
+            .text
+            .to_ascii_lowercase()
+            .contains("compatibility profile")),
+        "the session's native log does not carry the client's local report"
     );
     // The request itself is never rewritten: a player who asked still sees it.
     main_assert_eq!(client.config.compat_profile => crate::settings::CompatProfile::LegacyClonk);
@@ -7373,18 +7541,18 @@ fn a_joining_client_is_told_its_own_requested_profile_is_unavailable() {
     );
     ordinary.open_network_lobby();
     main_assert!(
-        !compat_line(&ordinary, "cannot honour it"),
+        !compat_report(&ordinary, "cannot honour it"),
         "normal Rust-only play is unaffected"
     );
+    main_assert_eq!(ordinary.startup.view => StartupView::NetworkLobby);
 }
 
 #[test]
 fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
-    // clonk-org/clonk-rs#588: readiness is computed from the contract itself,
-    // and a profile the contract cannot back must be refused *before* anyone
-    // joins. The requested profile is never rewritten — a player who asked for
-    // it still sees that they asked — but what the session may claim to a peer
-    // is the honest answer, and the refusal is visible in the lobby.
+    // clonk-org/clonk-rs#588: readiness is computed from the contract itself.
+    // The requested profile is never rewritten — a player who asked for it
+    // still sees that they asked — but what the session may claim to a peer is
+    // the honest answer, and any refusal is visible over the active lobby.
     let (mut host, _host_events, _host_commands) = networked_host_lobby_with_commands(
         new_menu_app(640, 480),
         NetworkLobbyState::new(0, "Host".to_string(), true),
@@ -7392,14 +7560,14 @@ fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
     host.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     host.open_network_lobby();
 
-    let logs = &host.network_lobby.as_ref().test_value().logs;
-    let reported = logs
-        .iter()
-        .any(|line| line.text.contains("NOT claimed") && line.text.contains("LegacyClonk"));
+    let reported = host.dialogs.messages.last().is_some_and(|dialog| {
+        dialog.state.message().contains("NOT claimed")
+            && dialog.state.message().contains("LegacyClonk")
+    });
     let blocked = !crate::compat_readiness::is_ready();
     main_assert_eq!(
         reported => blocked,
-        "a blocked profile must say so in the lobby, and a claimable one must not"
+        "a blocked profile must say so in the lobby notice, and a claimable one must not"
     );
     main_assert_eq!(
         host.config.compat_profile => crate::settings::CompatProfile::LegacyClonk,
@@ -7412,6 +7580,15 @@ fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
             crate::settings::CompatProfile::LegacyClonk
         },
         "only a contract-backed profile may be claimed to a peer"
+    );
+    host.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+        .test_value();
+    main_assert!(
+        !host.network_lobby.test_ref().logs.iter().any(|line| line
+            .text
+            .to_ascii_lowercase()
+            .contains("compatibility profile")),
+        "the acknowledged refusal never enters the native lobby log"
     );
 
     // Normal-profile play is untouched: no compatibility line at all.

@@ -1872,6 +1872,37 @@ fn the_remaster_switch_supplies_a_default_that_each_key_can_override() {
 }
 
 #[test]
+fn compatibility_profile_forces_the_entire_remaster_family_off_before_setup() {
+    let config = b"[Graphics]\nRemaster=1\nLandscapeDetail=3\n";
+    let normal = CompatPresentationFeatures::resolve(config, crate::settings::CompatProfile::Normal);
+    runtime_assert_eq!(
+        normal.remaster_family() => [true; 10];
+        normal.landscape_detail => 3;
+        normal.startup_refresh_delay_ms(config, Some(8)) => 8;
+    );
+
+    let legacy = CompatPresentationFeatures::resolve(
+        config,
+        crate::settings::CompatProfile::LegacyClonk,
+    );
+    runtime_assert_eq!(
+        legacy.remaster_family() => [false; 10];
+        legacy.landscape_detail => 1;
+        legacy.startup_refresh_delay_ms(config, Some(8)) => 30;
+    );
+}
+
+#[test]
+fn normal_profile_preserves_landscape_detail_when_shader_landscape_is_disabled() {
+    let config = b"[Graphics]\nShaderLandscape=0\nLandscapeDetail=3\n";
+
+    let normal = CompatPresentationFeatures::resolve(config, crate::settings::CompatProfile::Normal);
+
+    assert!(!normal.shader_landscape);
+    assert_eq!(normal.landscape_detail, 3);
+}
+
+#[test]
 fn landscape_detail_defaults_to_the_cpp_exact_level_and_clamps_hand_edits() {
     // Detail 1 is byte-identical to the CPU composer, so an absent key must
     // leave the composition C++-exact. Everything else is clamped HERE

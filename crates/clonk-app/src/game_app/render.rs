@@ -1664,6 +1664,7 @@ impl GameApp {
                     network_lobby,
                     self.startup.view_flags,
                     &mut self.menu_backdrop_cache,
+                    self.config.compat_profile == crate::settings::CompatProfile::LegacyClonk,
                     defer_native_main_text && !fade_was_active,
                     menu_gamma,
                     frame,

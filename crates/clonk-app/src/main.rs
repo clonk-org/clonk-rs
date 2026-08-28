@@ -65,6 +65,10 @@ mod offline_savegame;
 mod offline_startup;
 mod output_folders;
 mod presentation_captures;
+mod presentation_layout;
+mod presentation_layout_producers;
+mod presentation_pixel_capture;
+mod presentation_pixel_startup;
 mod ready_check_backend;
 mod ready_check_notification;
 use clonk_app_netplay::prepared_host_bootstrap;
@@ -220,6 +224,11 @@ use clonk_engine::player_file::PlayerFile;
 use clonk_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead, ScenarioLobbyMetadata};
 use clonk_engine::text_spec::{parse_text_spec, TextSpec};
 use clonk_engine::ControlKeyName;
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-1")
+))]
+use clonk_engine::FLAG_NO_BREAK;
 use clonk_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlClientRegistry,
     ControlCommand, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
@@ -237,7 +246,7 @@ use clonk_engine::{
     PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
 };
 #[cfg(test)]
-use clonk_engine::{FLAG_LEFT, FLAG_NO_BREAK, FLAG_TOP};
+use clonk_engine::{FLAG_LEFT, FLAG_TOP};
 use clonk_frontend::clonk_fonts::expand_hotkey_markup;
 use clonk_frontend::context_menu::{
     ClassicContextMenu, ClassicTooltipTracker, ContextMenuDirection, ContextMenuEntry,
@@ -585,6 +594,9 @@ fn run() -> Result<()> {
     }
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
+    if presentation_pixel_capture::run_presentation_utility_from_environment()? {
+        return Ok(());
+    }
     let cli = Cli::parse();
     if let Some(report_path) = cli.software_present_smoke.as_deref() {
         software_present_smoke::prepare(report_path)?;
@@ -725,6 +737,13 @@ fn run() -> Result<()> {
         network: resolve_network_mode(&cli, &classic, app_paths.as_deref())?,
         record_enabled: load_recording_flag(app_paths.as_deref()),
     };
+
+    if presentation_pixel_capture::run_capture_or_discovery_from_environment(
+        &classic,
+        app_paths.as_ref(),
+    )? {
+        return Ok(());
+    }
 
     // Handle integration-test mode: full scenario lifecycle test
     if let Some(test_path) = &cli.integration_test {
@@ -899,6 +918,9 @@ fn run() -> Result<()> {
             tracing::warn!(%reason, "presenting in software");
         }
         let renderer_config = load_native_config_bytes(app_paths.as_deref());
+        let compat_profile = resolve_classic_compat_profile(app_paths.as_deref(), &classic);
+        let presentation_features =
+            CompatPresentationFeatures::resolve(&renderer_config, compat_profile);
         // Software presentation has no device to build a retained renderer
         // from, and never takes the retained path.
         let retained_gpu_renderer = match &presentation {
@@ -908,10 +930,10 @@ fn run() -> Result<()> {
                     pixels.queue(),
                     pixels.surface_texture_format(),
                 );
-                renderer.set_mipmaps(configured_mipmaps(&renderer_config));
-                renderer.set_smooth_landscape(configured_smooth_landscape(&renderer_config));
-                renderer.set_shader_landscape(configured_shader_landscape(&renderer_config));
-                renderer.set_landscape_detail(configured_landscape_detail(&renderer_config));
+                renderer.set_mipmaps(presentation_features.mipmaps);
+                renderer.set_smooth_landscape(presentation_features.smooth_landscape);
+                renderer.set_shader_landscape(presentation_features.shader_landscape);
+                renderer.set_landscape_detail(presentation_features.landscape_detail);
                 Some(renderer)
             }
             PrimaryPresentation::Software(_) => None,
@@ -931,13 +953,14 @@ fn run() -> Result<()> {
         );
         let (logical_width, logical_height) = presenter.logical_size();
 
-        let mut app = GameApp::new_with_debug_hud(
+        let mut app = GameApp::new_with_debug_hud_for_profile(
             logical_width,
             logical_height,
             audio_options,
             app_paths.as_deref(),
             runtime,
             debug_hud,
+            compat_profile,
         )
         .context("failed to initialise app state")?;
         let update_failure_prefix =
@@ -990,7 +1013,7 @@ fn run() -> Result<()> {
         // the panel period can only be substituted here (opt-in; see
         // `configured_smooth_presentation`).
         app.display_refresh_period_ms = display_refresh_period_ms(&window);
-        app.startup_refresh_delay_ms = effective_max_refresh_delay_ms(
+        app.startup_refresh_delay_ms = presentation_features.startup_refresh_delay_ms(
             &load_native_config_bytes(app.app_paths.as_ref()),
             app.display_refresh_period_ms,
         );
@@ -998,7 +1021,7 @@ fn run() -> Result<()> {
         app.graphics
             .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
         app.configure_native_startup_fonts(presenter.scale(), display_options.point_filtering);
-        app.apply_classic_command_line(&classic)?;
+        app.apply_classic_command_line_with_profile(&classic, compat_profile)?;
         // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
         let render_inactive_mask =
             load_render_inactive_mask(app.app_paths.as_ref(), app.config.compat_profile);
@@ -2273,7 +2296,15 @@ impl GameApp {
         paths: Option<&AppPaths>,
         runtime: RuntimeConfig,
     ) -> Result<Self> {
-        Self::new_with_frontend_scenarios(width, height, audio_options, paths, runtime, None)
+        Self::new_with_frontend_scenarios_for_profile(
+            width,
+            height,
+            audio_options,
+            paths,
+            runtime,
+            None,
+            crate::settings::CompatProfile::Normal,
+        )
     }
 
     fn new_with_debug_hud(
@@ -2293,6 +2324,28 @@ impl GameApp {
         Ok(app)
     }
 
+    fn new_with_debug_hud_for_profile(
+        width: u32,
+        height: u32,
+        audio_options: AudioOptions,
+        paths: Option<&AppPaths>,
+        runtime: RuntimeConfig,
+        debug_hud: bool,
+        compat_profile: crate::settings::CompatProfile,
+    ) -> Result<Self> {
+        let mut app = Self::new_with_frontend_scenarios_for_profile(
+            width,
+            height,
+            audio_options,
+            paths,
+            runtime,
+            None,
+            compat_profile,
+        )?;
+        app.debug_hud = debug_hud && cfg!(debug_assertions);
+        Ok(app)
+    }
+
     fn new_with_frontend_scenarios(
         width: u32,
         height: u32,
@@ -2301,13 +2354,33 @@ impl GameApp {
         runtime: RuntimeConfig,
         frontend_scenarios: Option<Vec<FrontendScenario>>,
     ) -> Result<Self> {
+        Self::new_with_frontend_scenarios_for_profile(
+            width,
+            height,
+            audio_options,
+            paths,
+            runtime,
+            frontend_scenarios,
+            crate::settings::CompatProfile::Normal,
+        )
+    }
+
+    fn new_with_frontend_scenarios_for_profile(
+        width: u32,
+        height: u32,
+        audio_options: AudioOptions,
+        paths: Option<&AppPaths>,
+        runtime: RuntimeConfig,
+        frontend_scenarios: Option<Vec<FrontendScenario>>,
+        compat_profile: crate::settings::CompatProfile,
+    ) -> Result<Self> {
         // Capture native Boolean grammar before participant validation or any
         // other UTF-8 convenience writer can rewrite the config projection.
         // Both values are process-local in C++ and fixed before startup UI.
         let native_config = load_native_config_bytes(paths);
         let advanced_renderer_config = load_advanced_renderer_config(&native_config);
-        let high_dpi_cursor = configured_high_dpi_cursor(&native_config);
-        let sky_dither = configured_sky_dither(&native_config);
+        let presentation_features =
+            CompatPresentationFeatures::resolve(&native_config, compat_profile);
         let loader_gamma = load_classic_loader_gamma_from_native(&native_config);
         let gamepads_enabled = configured_gamepads_enabled(&native_config);
         let allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
@@ -2318,7 +2391,11 @@ impl GameApp {
         // before any controller, discovery worker, renderer, or app-owned UI
         // state is constructed. Asset-less test apps install their explicit
         // fixture immediately after construction instead.
-        let assets = Arc::new(FrontendAssets::load(paths));
+        let mut assets = FrontendAssets::load(paths);
+        if let Some(source) = assets.startup_native_font_source.as_mut() {
+            source.snap_to_pixels = presentation_features.snap_text_to_pixels;
+        }
+        let assets = Arc::new(assets);
         if paths.is_some() {
             assets
                 .require_classic_global_gui_bootstrap_resources(&HashMap::new())
@@ -2585,15 +2662,15 @@ impl GameApp {
             assets.hud_graphics(),
         );
         graphics.set_advanced_renderer_config(advanced_renderer_config);
-        graphics.set_cursor_tiers(if high_dpi_cursor {
+        graphics.set_cursor_tiers(if presentation_features.high_dpi_cursor {
             CursorTiers::HighDpi
         } else {
             CursorTiers::Classic
         });
-        graphics.set_sky_dither(sky_dither);
-        graphics.set_fine_fog_of_war(configured_fine_fog_of_war(&native_config));
-        graphics.set_hd_exact_blits(configured_hd_exact_blits(&native_config));
-        graphics.set_shader_landscape(configured_shader_landscape(&native_config));
+        graphics.set_sky_dither(presentation_features.sky_dither);
+        graphics.set_fine_fog_of_war(presentation_features.fine_fog_of_war);
+        graphics.set_hd_exact_blits(presentation_features.hd_exact_blits);
+        graphics.set_shader_landscape(presentation_features.shader_landscape);
         graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         graphics.set_game_palette(assets.game_palette());
         graphics.set_liquid_animation(assets.liquid_animation());
@@ -2713,8 +2790,7 @@ impl GameApp {
             process_group_maker,
             config: ConfigState {
                 deferred: crate::deferred_config::DeferredConfig::default(),
-                // Resolved once the classic command line is parsed.
-                compat_profile: crate::settings::CompatProfile::Normal,
+                compat_profile,
                 language_charset: runtime_language_charset,
                 persisted_mission_access: mission_access.snapshot(),
                 mission_access,
@@ -3142,6 +3218,15 @@ impl GameApp {
     }
 
     fn apply_classic_command_line(&mut self, classic: &ClassicCommandLine) -> Result<()> {
+        let compat_profile = resolve_classic_compat_profile(self.app_paths.as_ref(), classic);
+        self.apply_classic_command_line_with_profile(classic, compat_profile)
+    }
+
+    fn apply_classic_command_line_with_profile(
+        &mut self,
+        classic: &ClassicCommandLine,
+        compat_profile: crate::settings::CompatProfile,
+    ) -> Result<()> {
         self.classic_command_line = classic.clone();
         self.classic_record_stream_activation_pending = false;
         self.initial_definition_seed = Some(classic_command_line_definition_modules(
@@ -3158,17 +3243,7 @@ impl GameApp {
         self.apply_classic_game_option_overrides();
         self.incoming_update = classic.incoming_update.clone();
         self.update_check_requested = classic.update_requested;
-        // One typed profile for the run: the launch override wins, otherwise
-        // the persisted key, otherwise Normal. The override is deliberately not
-        // written back into `self.config`.
-        let persisted_config = self
-            .app_paths
-            .as_ref()
-            .and_then(|paths| clonk_core::std_config::Config::load(paths.config_file()).ok());
-        self.config.compat_profile = crate::settings::resolve_compat_profile(
-            persisted_config.as_ref(),
-            classic.compat_profile,
-        );
+        self.config.compat_profile = compat_profile;
         // Synchronized, so it is resolved once here rather than read from
         // configuration mid-round (clonk-org/clonk-rs#1132).
         self.engine

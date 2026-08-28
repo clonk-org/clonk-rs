@@ -2477,7 +2477,12 @@ fn store_map_palette(
             for channel in &mut palette[slot] {
                 // StoreMapPalette intentionally consumes the process-global
                 // C rand() stream; the chosen color is presentation-only.
-                let increase = unsafe { rand() } < C_RAND_MAX / 2;
+                let increase = palette_random_increases(
+                    crate::particles::presentation_safe_random_capture_raw_value(),
+                    // SAFETY: libc guarantees a non-negative `rand` result;
+                    // ordinary execution keeps the native unsynced stream.
+                    || unsafe { rand() },
+                );
                 *channel = if increase {
                     channel.wrapping_add(3)
                 } else {
@@ -2487,6 +2492,16 @@ fn store_map_palette(
         }
     }
     palette
+}
+
+fn palette_random_increases(
+    capture_value: Option<u32>,
+    native_random: impl FnOnce() -> i32,
+) -> bool {
+    capture_value.map_or_else(
+        || native_random() < C_RAND_MAX / 2,
+        |value| value < (i32::MAX / 2) as u32,
+    )
 }
 
 fn store_surface_palette(
@@ -8346,6 +8361,19 @@ mod tests {
             .landscape
             .as_ref()
             .and_then(|landscape| landscape.grid_byte_at(x, y))
+    }
+
+    #[test]
+    fn capture_palette_random_uses_the_darwin_rand_max_midpoint() {
+        // StoreMapPalette compares each raw draw with RAND_MAX / 2
+        // (C4Texture.cpp:448-451); capture emulates the Darwin oracle even on
+        // targets whose native RAND_MAX is smaller.
+        assert!(palette_random_increases(Some(1_000_000_000), || {
+            unreachable!("capture draw bypasses host libc")
+        }));
+        assert!(!palette_random_increases(Some(1_500_000_000), || {
+            unreachable!("capture draw bypasses host libc")
+        }));
     }
 
     #[test]

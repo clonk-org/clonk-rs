@@ -15,6 +15,8 @@ use clonk_resources::GraphicsImage;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 #[cfg(test)]
 use crate::PARTICLE_LIST_RETAIN_PASSES;
@@ -72,6 +74,180 @@ pub struct SafeRng {
     state: u32,
 }
 
+static PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PRESENTATION_SAFE_RANDOM_CAPTURE_CALLS: AtomicU64 = AtomicU64::new(0);
+static PRESENTATION_SAFE_RANDOM_CAPTURE_RAW_CALLS: AtomicU64 = AtomicU64::new(0);
+static PRESENTATION_SAFE_RANDOM_SEED_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PRESENTATION_SAFE_RANDOM_SEED: AtomicU32 = AtomicU32::new(1);
+static PRESENTATION_SAFE_RANDOM_CAPTURE: Mutex<PresentationSafeRandomCapture> =
+    Mutex::new(PresentationSafeRandomCapture {
+        state: 1,
+        trace: Vec::new(),
+    });
+
+struct PresentationSafeRandomCapture {
+    state: u32,
+    trace: Vec<u8>,
+}
+
+#[doc(hidden)]
+pub struct PresentationSafeRandomCaptureReport {
+    pub calls: u64,
+    pub raw_calls: u64,
+    pub trace: Vec<u8>,
+}
+
+fn presentation_safe_random_capture_state() -> MutexGuard<'static, PresentationSafeRandomCapture> {
+    PRESENTATION_SAFE_RANDOM_CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn next_darwin_park_miller(state: &mut u32) -> u32 {
+    // Apple OSS Libc stdlib/FreeBSD/rand.c `do_rand`: Park–Miller without
+    // overflowing 31 bits. Presentation capture uses this explicit portable
+    // stream because its C++ oracle is acquired on Darwin.
+    if *state == 0 {
+        *state = 123_459_876;
+    }
+    let hi = i64::from(*state / 127_773);
+    let lo = i64::from(*state % 127_773);
+    let mut next = 16_807 * lo - 2_836 * hi;
+    if next < 0 {
+        next += 0x7fff_ffff;
+    }
+    *state = next as u32;
+    *state
+}
+
+fn presentation_safe_random_capture_value(range: i64) -> Option<i64> {
+    if !PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.load(Ordering::SeqCst) {
+        return None;
+    }
+    let mut capture = presentation_safe_random_capture_state();
+    if !PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.load(Ordering::SeqCst) {
+        return None;
+    }
+    let result = if range == 0 {
+        0
+    } else {
+        i64::from(next_darwin_park_miller(&mut capture.state)) % range
+    };
+    PRESENTATION_SAFE_RANDOM_CAPTURE_CALLS.fetch_add(1, Ordering::SeqCst);
+    capture
+        .trace
+        .extend_from_slice(format!("{range}:{result}\n").as_bytes());
+    Some(result)
+}
+
+/// Route an app-owned logical `SafeRandom(range)` call through the active
+/// capture stream, returning `None` during ordinary execution.
+#[doc(hidden)]
+pub fn presentation_safe_random_capture_range(range: usize) -> Option<usize> {
+    let range = i64::try_from(range).ok()?;
+    presentation_safe_random_capture_value(range).and_then(|value| usize::try_from(value).ok())
+}
+
+/// Route a signed native-style logical `SafeRandom(range)` call through the
+/// active capture stream, returning `None` during ordinary execution.
+#[doc(hidden)]
+pub fn presentation_safe_random_capture_signed_range(range: i32) -> Option<i32> {
+    presentation_safe_random_capture_value(i64::from(range))
+        .and_then(|value| i32::try_from(value).ok())
+}
+
+/// Draw one raw Darwin `rand()` value from the capture-only global stream.
+///
+/// Direct native `rand()` routes advance the shared stream but are not logical
+/// `SafeRandom(range)` calls, so they do not enter the receipt count or trace.
+#[doc(hidden)]
+pub fn presentation_safe_random_capture_raw_value() -> Option<u32> {
+    if !PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.load(Ordering::SeqCst) {
+        return None;
+    }
+    let mut capture = presentation_safe_random_capture_state();
+    if !PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.load(Ordering::SeqCst) {
+        return None;
+    }
+    PRESENTATION_SAFE_RANDOM_CAPTURE_RAW_CALLS.fetch_add(1, Ordering::SeqCst);
+    Some(next_darwin_park_miller(&mut capture.state))
+}
+
+/// Canonical ordered `"<range>:<result>\n"` trace for the active capture.
+#[doc(hidden)]
+pub fn presentation_safe_random_capture_trace() -> Vec<u8> {
+    presentation_safe_random_capture_state().trace.clone()
+}
+
+/// Atomically snapshot the receipt-bound logical call count and ordered trace.
+#[doc(hidden)]
+pub fn presentation_safe_random_capture_report() -> PresentationSafeRandomCaptureReport {
+    let capture = presentation_safe_random_capture_state();
+    PresentationSafeRandomCaptureReport {
+        calls: PRESENTATION_SAFE_RANDOM_CAPTURE_CALLS.load(Ordering::SeqCst),
+        raw_calls: PRESENTATION_SAFE_RANDOM_CAPTURE_RAW_CALLS.load(Ordering::SeqCst),
+        trace: capture.trace.clone(),
+    }
+}
+
+/// Override the seed used by every subsequently constructed presentation RNG.
+#[doc(hidden)]
+pub fn install_presentation_safe_random_seed(seed: u32) {
+    PRESENTATION_SAFE_RANDOM_SEED.store(seed, Ordering::SeqCst);
+    PRESENTATION_SAFE_RANDOM_SEED_ACTIVE.store(true, Ordering::SeqCst);
+    crate::compat::seed_script_safe_random(seed);
+}
+
+/// Remove the capture-only presentation seed override.
+#[doc(hidden)]
+pub fn clear_presentation_safe_random_seed() {
+    PRESENTATION_SAFE_RANDOM_SEED_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// Start one process-wide presentation `SafeRandom` call-structure capture.
+///
+/// Capture processes are intentionally single-purpose. The counter is global
+/// because native `SafeRandom` is global and Rust presentation calls can come
+/// from both the main thread and scenario-loading workers.
+#[doc(hidden)]
+pub fn begin_presentation_safe_random_capture() {
+    let mut capture = presentation_safe_random_capture_state();
+    capture.state = PRESENTATION_SAFE_RANDOM_SEED.load(Ordering::SeqCst);
+    capture.trace.clear();
+    PRESENTATION_SAFE_RANDOM_CAPTURE_CALLS.store(0, Ordering::SeqCst);
+    PRESENTATION_SAFE_RANDOM_CAPTURE_RAW_CALLS.store(0, Ordering::SeqCst);
+    PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// Mirror the capture hook immediately after `C4Game::FixRandom`.
+///
+/// Native reseeds and clears the logical SafeRandom ledger here, while the
+/// separately audited direct raw-call ledger spans the entire process route.
+pub(crate) fn reset_presentation_safe_random_after_fix_random() {
+    if !PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    let mut capture = presentation_safe_random_capture_state();
+    if !PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    capture.state = PRESENTATION_SAFE_RANDOM_SEED.load(Ordering::SeqCst);
+    capture.trace.clear();
+    PRESENTATION_SAFE_RANDOM_CAPTURE_CALLS.store(0, Ordering::SeqCst);
+}
+
+/// Count logical calls made since [`begin_presentation_safe_random_capture`].
+#[doc(hidden)]
+pub fn presentation_safe_random_capture_count() -> u64 {
+    PRESENTATION_SAFE_RANDOM_CAPTURE_CALLS.load(Ordering::SeqCst)
+}
+
+/// Stop the process-wide presentation `SafeRandom` call-structure capture.
+#[doc(hidden)]
+pub fn end_presentation_safe_random_capture() {
+    PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
+}
+
 impl SafeRng {
     pub fn new(seed: u32) -> Self {
         Self { state: seed }
@@ -79,6 +255,9 @@ impl SafeRng {
 
     /// `SafeRandom(range)`: `if (!range) return 0; return rand() % range;`.
     pub fn random(&mut self, range: i32) -> i32 {
+        if let Some(value) = presentation_safe_random_capture_signed_range(range) {
+            return value;
+        }
         if range == 0 {
             return 0;
         }
@@ -89,7 +268,12 @@ impl SafeRng {
 
 impl Default for SafeRng {
     fn default() -> Self {
-        Self::new(1)
+        let seed = if PRESENTATION_SAFE_RANDOM_SEED_ACTIVE.load(Ordering::SeqCst) {
+            PRESENTATION_SAFE_RANDOM_SEED.load(Ordering::SeqCst)
+        } else {
+            1
+        };
+        Self::new(seed)
     }
 }
 
@@ -2646,6 +2830,127 @@ mod tests {
         for range in [5, 7, 100, 33, 256, 1000] {
             assert_eq!(a.random(range), b.random(range));
         }
+    }
+
+    #[test]
+    fn capture_safe_random_counter_includes_zero_range_calls() {
+        // `SafeRandom` tests the range only after entering the logical call;
+        // range zero returns without `rand` (C4Random.h:71-75). The capture
+        // receipt records call structure, so both branches count.
+        begin_presentation_safe_random_capture();
+        let mut rng = SafeRng::new(587);
+
+        assert_eq!(rng.random(0), 0);
+        let _ = rng.random(7);
+
+        assert_eq!(presentation_safe_random_capture_count(), 2);
+        end_presentation_safe_random_capture();
+    }
+
+    #[test]
+    fn capture_raw_random_uses_the_authoritative_darwin_park_miller_stream() {
+        // Apple OSS Libc stdlib/FreeBSD/rand.c:43-62 (`do_rand`) is the
+        // Darwin oracle used by the macOS C++ presentation acquisition.
+        install_presentation_safe_random_seed(587);
+        begin_presentation_safe_random_capture();
+
+        let values = std::array::from_fn::<_, 5, _>(|_| {
+            presentation_safe_random_capture_raw_value().expect("capture stream is active")
+        });
+
+        assert_eq!(
+            values,
+            [
+                9_865_709,
+                456_730_344,
+                1_160_337_230,
+                488_826_203,
+                1_577_044_046
+            ]
+        );
+        assert_eq!(presentation_safe_random_capture_count(), 0);
+        assert!(presentation_safe_random_capture_trace().is_empty());
+        end_presentation_safe_random_capture();
+        clear_presentation_safe_random_seed();
+    }
+
+    #[test]
+    fn capture_report_counts_untraced_raw_draws() {
+        install_presentation_safe_random_seed(587);
+        begin_presentation_safe_random_capture();
+
+        assert!(presentation_safe_random_capture_raw_value().is_some());
+        let report = presentation_safe_random_capture_report();
+
+        assert_eq!(report.raw_calls, 1);
+        assert_eq!(report.calls, 0);
+        assert!(report.trace.is_empty());
+        end_presentation_safe_random_capture();
+        clear_presentation_safe_random_seed();
+    }
+
+    #[test]
+    fn capture_report_preserves_process_global_logical_call_order() {
+        install_presentation_safe_random_seed(587);
+        begin_presentation_safe_random_capture();
+        let mut particle_rng = SafeRng::new(1);
+        let mut script_rng = SafeRng::new(2);
+
+        assert_eq!(particle_rng.random(10), 9);
+        assert_eq!(script_rng.random(0), 0);
+        assert_eq!(presentation_safe_random_capture_range(7), Some(0));
+        let report = presentation_safe_random_capture_report();
+
+        assert_eq!(report.calls, 3);
+        assert_eq!(report.trace, b"10:9\n0:0\n7:0\n");
+        end_presentation_safe_random_capture();
+        clear_presentation_safe_random_seed();
+    }
+
+    #[test]
+    fn post_fix_random_reset_reseeds_logical_trace_but_preserves_raw_audit() {
+        // C4Game::FixRandom is the authoritative post-initialization reset
+        // boundary (C4Game.cpp:3554-3558); the capture hook clears only the
+        // logical SafeRandom ledger after reseeding its stream.
+        install_presentation_safe_random_seed(587);
+        begin_presentation_safe_random_capture();
+        assert_eq!(presentation_safe_random_capture_range(3), Some(2));
+        assert!(presentation_safe_random_capture_raw_value().is_some());
+
+        reset_presentation_safe_random_after_fix_random();
+        assert_eq!(presentation_safe_random_capture_range(5), Some(4));
+        let report = presentation_safe_random_capture_report();
+
+        assert_eq!(report.calls, 1);
+        assert_eq!(report.raw_calls, 1);
+        assert_eq!(report.trace, b"5:4\n");
+        end_presentation_safe_random_capture();
+        clear_presentation_safe_random_seed();
+    }
+
+    #[test]
+    fn capture_negative_range_uses_cpp_signed_remainder_and_trace() {
+        // SafeRandom passes the signed range directly to libc's positive
+        // `rand() % range` expression (C4Random.h:71-75).
+        install_presentation_safe_random_seed(587);
+        begin_presentation_safe_random_capture();
+        let mut rng = SafeRng::new(1);
+
+        assert_eq!(rng.random(-10), 9);
+        assert_eq!(presentation_safe_random_capture_report().trace, b"-10:9\n");
+        end_presentation_safe_random_capture();
+        clear_presentation_safe_random_seed();
+    }
+
+    #[test]
+    fn capture_seed_override_reaches_new_safe_rng_streams() {
+        install_presentation_safe_random_seed(587);
+        let mut capture_default = SafeRng::default();
+        let mut expected = SafeRng::new(587);
+
+        assert_eq!(capture_default.random(10_000), expected.random(10_000));
+
+        clear_presentation_safe_random_seed();
     }
 
     #[test]

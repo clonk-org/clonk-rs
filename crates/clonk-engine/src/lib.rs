@@ -8413,6 +8413,9 @@ pub struct Engine {
     /// Per-player crew info lists (C4Player::CrewInfoList): the roster
     /// GetIdle/New recruit from at join.
     crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
+    /// Process-local `Config.Graphics.AddNewCrewPortraits`. Random portrait
+    /// selection is deliberately outside the synchronized game stream.
+    add_new_crew_portraits: bool,
     /// C4ObjectInfoList traversal order expressed as stable roster indices.
     /// New entries are appended to `crew_rosters` for pointer identity but
     /// inserted at the front here like `C4ObjectInfoList::New`.
@@ -10627,6 +10630,7 @@ impl Engine {
                 ..ScenarioSectionState::default()
             },
             crew_rosters: HashMap::new(),
+            add_new_crew_portraits: true,
             crew_info_order: HashMap::new(),
             crew_object_infos: Rc::new(HashMap::new()),
             crew_ranks: Rc::new(HashMap::new()),

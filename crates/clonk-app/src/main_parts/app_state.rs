@@ -1341,6 +1341,7 @@ pub(crate) struct StartupBackdropKey {
     pub(crate) fair_crew: bool,
     pub(crate) record: bool,
     pub(crate) network_host_selector: bool,
+    pub(crate) scenario_list_scrollbar_visible: bool,
 }
 
 /// Restores the cached static layer for `key` into `surface`, or renders it

@@ -63,9 +63,10 @@ impl GameApp {
     pub(crate) fn configure_native_startup_fonts(&mut self, scale: f32, point_filtering: bool) {
         match LoaderRenderConfig::new(scale, point_filtering) {
             Ok(config) => {
-                let config = config.with_aspect_fill(configured_loader_aspect(
-                    &load_native_config_bytes(self.app_paths.as_ref()),
-                ));
+                let native_config = load_native_config_bytes(self.app_paths.as_ref());
+                let presentation_features =
+                    CompatPresentationFeatures::resolve(&native_config, self.config.compat_profile);
+                let config = config.with_aspect_fill(presentation_features.loader_aspect);
                 self.loader_render_config = Some(config);
                 self.loader_render_error = None;
             }
@@ -2803,11 +2804,10 @@ impl GameApp {
                             self.network_control_clock = network_control_clock;
                             self.network_lobby = Some(lobby);
                             self.classic_host_lobby = None;
-                            self.replace_startup_view(StartupView::NetworkLobby);
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
                             self.restore_startup_fonts();
-                            self.finish_classic_command_line_host_entry()?;
+                            self.open_network_lobby_with_compat_notice(true)?;
                             return Ok(());
                         }
                     }
@@ -2859,14 +2859,13 @@ impl GameApp {
                             self.sync_classic_lobby_roster();
                             self.sync_classic_lobby_resource_ready();
                             self.scenario_game_options = options;
-                            self.replace_startup_view(StartupView::NetworkLobby);
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
                             if let Some(audio) = self.sound.context.as_ref() {
                                 let mut audio = audio.borrow_mut();
                                 audio.stop_music();
                             }
-                            self.finish_classic_command_line_host_entry()?;
+                            self.open_network_lobby_with_compat_notice(true)?;
                             return Ok(());
                         }
                         Err(error) => {
@@ -4884,6 +4883,7 @@ impl GameApp {
             None,
             self.startup.view_flags,
             &mut self.menu_backdrop_cache,
+            self.config.compat_profile == crate::settings::CompatProfile::LegacyClonk,
             false,
             &gamma,
             frame,

@@ -17,6 +17,56 @@ use crate::prepared_host_bootstrap::{
     PreparedLeagueHostConfig,
 };
 
+static PRESENTATION_RNG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn process_team_assignment_safe_random_joins_the_capture_trace() {
+    // SafeRandom retains signed remainder and counts range zero without a
+    // libc draw (src/C4Random.h:71-75).
+    let _guard = PRESENTATION_RNG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
+    clonk_engine::particles::begin_presentation_safe_random_capture();
+    let mut oracle = prepared_host_bootstrap::ProcessInitialHostTeamAssignmentOracle::new(
+        clonk_engine::LegacyCString::default(),
+    );
+
+    let negative = clonk_engine::InitialHostTeamAssignmentOracle::safe_random(&mut oracle, -10);
+    let zero = clonk_engine::InitialHostTeamAssignmentOracle::safe_random(&mut oracle, 0);
+    let report = clonk_engine::particles::presentation_safe_random_capture_report();
+    drop(oracle);
+    clonk_engine::particles::end_presentation_safe_random_capture();
+    clonk_engine::particles::clear_presentation_safe_random_seed();
+
+    assert_eq!(negative, 9);
+    assert_eq!(zero, 0);
+    assert_eq!(report.calls, 2);
+    assert_eq!(report.raw_calls, 0);
+    assert_eq!(report.trace, b"-10:9\n0:0\n");
+}
+
+#[test]
+fn league_checksum_draws_join_the_capture_raw_audit() {
+    // C4LeagueClient advances the same process-global raw stream twice for
+    // every checksum start (src/C4League.cpp:530).
+    let _guard = PRESENTATION_RNG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
+    clonk_engine::particles::begin_presentation_safe_random_capture();
+
+    let checksum = prepared_host_bootstrap::league_checksum_start();
+    let report = clonk_engine::particles::presentation_safe_random_capture_report();
+    clonk_engine::particles::end_presentation_safe_random_capture();
+    clonk_engine::particles::clear_presentation_safe_random_seed();
+
+    assert_eq!(checksum, 9_865_709_u32 | 456_730_344_u32.wrapping_shl(16));
+    assert_eq!(report.raw_calls, 2);
+    assert_eq!(report.calls, 0);
+    assert!(report.trace.is_empty());
+}
+
 fn prepare_harpoonrace_host(
     random_seed_unix_seconds: i64,
     league: Option<&PreparedLeagueHostConfig>,

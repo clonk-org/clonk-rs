@@ -4335,6 +4335,17 @@ impl GameApp {
                 self.activate_network_reference_join(reference)?;
             }
             MessageDialogContinuation::NetworkRuntimeJoin { .. } => {}
+            MessageDialogContinuation::CompatProfileLobbyNotice {
+                finish_classic_command_line_host_entry,
+            } => {
+                if result == clonk_frontend::message_dialog::MessageDialogResult::Ok {
+                    if finish_classic_command_line_host_entry {
+                        self.finish_classic_command_line_host_entry()?;
+                    }
+                } else {
+                    self.return_to_menu();
+                }
+            }
             MessageDialogContinuation::NetworkServerRedirect { address }
                 if result == clonk_frontend::message_dialog::MessageDialogResult::Yes =>
             {

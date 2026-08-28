@@ -42,6 +42,12 @@ fn name_key(name: &str) -> String {
 }
 
 impl Engine {
+    /// Install the process-local `Config.Graphics.AddNewCrewPortraits` value
+    /// consulted when `C4ObjectInfoList::New` creates a crew entry.
+    pub fn set_add_new_crew_portraits(&mut self, enabled: bool) {
+        self.add_new_crew_portraits = enabled;
+    }
+
     /// Checks the next `C4PlayerList::Join` admission without mutating player
     /// or team state. The join entry points repeat this check authoritatively.
     pub fn check_player_capacity(&self) -> Result<(), EngineError> {
@@ -1739,6 +1745,38 @@ impl Engine {
             type_name: bounded_crew_type_name(definition.name()),
             ..CrewInfoCoreFields::default()
         };
+        let portrait = self.add_new_crew_portraits.then(|| {
+            let own_names = definition
+                .portrait_graphics_names()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let (source, names) = if own_names.is_empty() {
+                let source = DefinitionId::from("CLNK");
+                let names = self
+                    .definitions
+                    .get(&source)
+                    .map(|definition| {
+                        definition
+                            .portrait_graphics_names()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (source, names)
+            } else {
+                (DefinitionId::from(id), own_names)
+            };
+            let range = i32::try_from(names.len()).ok()?;
+            if range == 0 {
+                return None;
+            }
+            let index = usize::try_from(crate::compat::script_safe_random(range)).ok()?;
+            names.get(index).cloned().map(|name| CrewPortrait {
+                source: Some(source),
+                name,
+            })
+        });
+        let portrait = portrait.flatten();
         let mut rank_name = default_crew_rank_name();
         update_custom_rank_fields(
             &mut rank_name,
@@ -1765,12 +1803,19 @@ impl Engine {
             next_number += 1;
         }
 
+        let portraits =
+            portrait.map_or_else(CrewPortraitState::default, |portrait| CrewPortraitState {
+                current: Some(portrait.clone()),
+                permanent: CrewPermanentPortrait::Assigned(portrait),
+                ..CrewPortraitState::default()
+            });
         roster.push(player_file::CrewInfo {
             id: id.to_string(),
             name,
             core,
             rank_name,
             physical,
+            portraits,
             ..Default::default()
         });
         let index = roster.len() - 1;
@@ -3121,6 +3166,53 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_crew_selects_a_permanent_portrait_from_the_capture_safe_random_stream() {
+        // C4ObjectInfoList::New adds a permanent random portrait when
+        // AddNewCrewPortraits is enabled, and SetRandomPortrait selects from
+        // the loaded CLNK list (C4ObjectInfoList.cpp:174-178;
+        // C4ObjectInfo.cpp:398-424).
+        let mut engine = Engine::new();
+        let mut clonk = crate::test_definition("CLNK", "Clonk", "");
+        clonk.set_portrait_graphics(
+            (1..=5)
+                .map(|number| {
+                    (
+                        format!("Portrait{number}"),
+                        DefinitionPictureImage::from_resource(
+                            &clonk_resources::GraphicsImage::new(1, 1, vec![0, 0, 0, 255]),
+                            None,
+                        ),
+                    )
+                })
+                .collect(),
+        );
+        engine
+            .register_definition(clonk)
+            .expect("CLNK definition registers");
+        crate::particles::install_presentation_safe_random_seed(587);
+        crate::particles::begin_presentation_safe_random_capture();
+
+        let created = engine.create_crew_info(1, "");
+        let report = crate::particles::presentation_safe_random_capture_report();
+        crate::particles::end_presentation_safe_random_capture();
+        crate::particles::clear_presentation_safe_random_seed();
+
+        assert!(created);
+        assert_eq!(report.calls, 1);
+        assert_eq!(report.trace, b"5:4\n");
+        let portrait = CrewPortrait {
+            source: Some(DefinitionId::from("CLNK")),
+            name: "Portrait5".to_string(),
+        };
+        let info = &engine.crew_rosters[&1][0];
+        assert_eq!(info.portraits.current.as_ref(), Some(&portrait));
+        assert_eq!(
+            info.portraits.permanent,
+            CrewPermanentPortrait::Assigned(portrait)
+        );
+    }
 
     fn engine_with_player_file(filename: &str) -> Engine {
         let mut engine = Engine::new();

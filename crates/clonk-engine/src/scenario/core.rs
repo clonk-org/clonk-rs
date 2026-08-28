@@ -3551,7 +3551,13 @@ impl Scenario {
             .as_ref()
             .and_then(MapPixelClassifier::material_library)
             .cloned();
-        report_progress(60, "Material library prepared");
+        // C4Game.cpp:981 reports the exact loaded-material count before the
+        // material enumeration and texture-map initialization.
+        let loaded_materials = material_library
+            .as_ref()
+            .map(|library| library.iter().count())
+            .unwrap_or_default();
+        report_progress(60, &format!("{loaded_materials} materials loaded."));
         let mut post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
         let mut prepared_map_creator = None;
         let mut landscape = load_legacy_landscape_with_progress(

@@ -1,0 +1,380 @@
+[
+  {
+    "id": "startup-main",
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "startup/main/branding/logo": "branding",
+      "startup/main/branding/version": "branding",
+      "startup/main/branding/fan-project": "branding"
+    },
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 0},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+    },
+    "trigger": {"id": "direct-startup-dialog"},
+    "scenario": {"path": null, "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "startup-main/fade-complete", "number": 2},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "startup-scenario-selection",
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "startup/scenario-selection/background": "super-resolved-startup-art"
+    },
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 0},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+    },
+    "trigger": {"id": "direct-startup-dialog"},
+    "scenario": {"path": null, "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "startup-scenario-selection/fade-complete", "number": 2},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "startup-network-browser",
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "startup/network-browser/background": "super-resolved-startup-art"
+    },
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 0},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+    },
+    "trigger": {"id": "direct-startup-dialog"},
+    "scenario": {"path": null, "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "startup-network-browser/fade-complete", "number": 2},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "startup-player-selection",
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "startup/player-selection/background": "super-resolved-startup-art"
+    },
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 0},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+    },
+    "trigger": {"id": "direct-startup-dialog"},
+    "scenario": {"path": null, "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "startup-player-selection/fade-complete", "number": 2},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "startup-options",
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "startup/options/tabs/paper": "super-resolved-startup-art"
+    },
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 0},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+    },
+    "trigger": {"id": "direct-startup-dialog"},
+    "scenario": {"path": null, "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "startup-options/fade-complete", "number": 2},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "startup-about",
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "startup/about/branding/fan-project": "branding"
+    },
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 0},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+    },
+    "trigger": {"id": "direct-startup-dialog"},
+    "scenario": {"path": null, "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "startup-about/fade-complete", "number": 2},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "network-lobby",
+    "comparison": "pixel",
+    "port_asset_exemptions": {},
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 0},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 3, "trace_sha256": "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"}
+    },
+    "trigger": {"id": "network-host-lobby-v1"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "lobby-notice-acknowledged/render-ordinal-2", "number": 2},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "loader",
+    "comparison": "pixel",
+    "port_asset_exemptions": {},
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 0},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 3, "trace_sha256": "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"}
+    },
+    "trigger": {"id": "scenario-loader-v1"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "loader-progress-60-fixed-log/render-ordinal-2", "number": 2},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "hud",
+    "comparison": "pixel",
+    "port_asset_exemptions": {},
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 585},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 1, "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}
+    },
+    "trigger": {"id": "tutorial01-frame-v1"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "state-frame-90/render-ordinal-1", "number": 90},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "ingame-menu",
+    "comparison": "pixel",
+    "port_asset_exemptions": {},
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 585},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 1, "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}
+    },
+    "trigger": {"id": "tutorial01-activate-menu-main-v1"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "state-frame-90/render-ordinal-2", "number": 90},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "object-menu",
+    "comparison": "pixel",
+    "port_asset_exemptions": {},
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 890},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 7, "trace_sha256": "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6"}
+    },
+    "trigger": {"id": "tutorial03-object-menu-input-v1"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial03.c4s", "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "state-frame-410/tooltip-render-ordinal-90", "number": 410},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "gameplay",
+    "comparison": "pixel",
+    "port_asset_exemptions": {},
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 581},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 1, "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}
+    },
+    "trigger": {"id": "tutorial02-frame-v1"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial02.c4s", "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "state-frame-180/render-ordinal-1", "number": 180},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  },
+  {
+    "id": "evaluation",
+    "comparison": "pixel",
+    "port_asset_exemptions": {},
+    "config_sha256": {
+      "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+      "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+    },
+    "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+    "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
+    "seeds": {
+      "simulation": {"seed": 587, "calls": 585},
+      "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 1, "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}
+    },
+    "trigger": {"id": "tutorial01-game-over-v1"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "df08a1ea6d4ad70313b20e0b95996a354f059d6b"},
+    "frame": {"checkpoint": "state-frame-90/evaluation-open/render-ordinal-2", "number": 90},
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {"tree": "153c435149fffeb0f6790d95b3c2136278393310", "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d"},
+        "system": {"tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3", "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b"}
+      },
+      "rust": {
+        "graphics": {"tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e", "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0"},
+        "system": {"tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f", "manifest_sha256": "7fd27e369d6b872a1d8326d015603c9d8425412a56925093da3471d20cb2d8ad"}
+      }
+    }
+  }
+]

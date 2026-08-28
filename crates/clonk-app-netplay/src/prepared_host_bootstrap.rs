@@ -1118,8 +1118,14 @@ pub(crate) fn league_checksum_start() -> u32 {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // C4LeagueClient uses `rand() | rand() << 16` before each request.
-    let low = unsafe { c_rand() } as u32;
-    let high = unsafe { c_rand() } as u32;
+    let raw_random = || {
+        clonk_engine::particles::presentation_safe_random_capture_raw_value()
+            // SAFETY: `rand` has no pointer preconditions and the enclosing
+            // CLASSIC_SAFE_RANDOM_LOCK serializes ordinary native draws.
+            .unwrap_or_else(|| unsafe { c_rand() } as u32)
+    };
+    let low = raw_random();
+    let high = raw_random();
     low | high.wrapping_shl(16)
 }
 
@@ -1181,6 +1187,11 @@ impl ProcessInitialHostTeamAssignmentOracle {
 
 impl InitialHostTeamAssignmentOracle for ProcessInitialHostTeamAssignmentOracle {
     fn safe_random(&mut self, range: i32) -> i32 {
+        if let Some(value) =
+            clonk_engine::particles::presentation_safe_random_capture_signed_range(range)
+        {
+            return value;
+        }
         if range == 0 {
             return 0;
         }

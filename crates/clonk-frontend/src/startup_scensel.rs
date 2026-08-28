@@ -1158,6 +1158,7 @@ impl ScenSelScreen {
             Some("Start Game"),
             true,
             Some((fair_crew, record)),
+            true,
             gamma,
         );
     }
@@ -1177,7 +1178,16 @@ impl ScenSelScreen {
         title: &str,
         gamma: Option<&GammaRamp>,
     ) {
-        Self::render_chrome_impl(surface, assets, gui_fonts, Some(title), false, None, gamma);
+        Self::render_chrome_impl(
+            surface,
+            assets,
+            gui_fonts,
+            Some(title),
+            false,
+            None,
+            true,
+            gamma,
+        );
     }
 
     /// Raster-only selection-independent chrome for the application's static
@@ -1188,9 +1198,19 @@ impl ScenSelScreen {
         surface: &mut Surface,
         assets: &ScenSelAssets,
         gui_fonts: &ClonkFontSet,
+        list_scrollbar_visible: bool,
         gamma: Option<&GammaRamp>,
     ) {
-        Self::render_chrome_impl(surface, assets, gui_fonts, None, false, None, gamma);
+        Self::render_chrome_impl(
+            surface,
+            assets,
+            gui_fonts,
+            None,
+            false,
+            None,
+            list_scrollbar_visible,
+            gamma,
+        );
     }
 
     /// Draws the fullscreen base title and the static CStdFont label owned by
@@ -1244,6 +1264,7 @@ impl ScenSelScreen {
         static_title: Option<&str>,
         draw_back: bool,
         game_options: Option<(bool, bool)>,
+        list_scrollbar_visible: bool,
         gamma: Option<&GammaRamp>,
     ) {
         let layout = scen_sel_layout(surface.width() as i32, surface.height() as i32, gui_fonts);
@@ -1292,8 +1313,10 @@ impl ScenSelScreen {
         // 6. List scrollbar track (visible-but-pinless first-shown quirk,
         // spec §4.3): DrawVBar with sfctBookScroll
         // (C4GuiContainers.cpp:446-473).
-        let bar = &layout.list_scrollbar;
-        draw_vbar(surface, bar.x, bar.y, bar.h, &assets.book_scroll, gamma);
+        if list_scrollbar_visible {
+            let bar = &layout.list_scrollbar;
+            draw_vbar(surface, bar.x, bar.y, bar.h, &assets.book_scroll, gamma);
+        }
 
         // 7-10. Bottom bar in add order: Back, icon buttons
         // (C4StartupScenSelDlg.cpp:1367-1382); the checkbox and Open button
