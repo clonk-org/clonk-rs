@@ -28,12 +28,33 @@ machine that has a working adapter.
 3. **Shrink** the drawable and present again. A shrink rather than a grow: a
    window manager can silently clamp a grow, which would let the resize phase
    pass without resizing anything.
-4. Exit the event loop and confirm the window registry is empty, so no window
+4. Grow the drawable to twice the window's extent **while holding the frame**,
+   and present again. This is what a windowed-to-fullscreen transition does to
+   the presenter: the renderer keeps drawing at its logical resolution and the
+   destination changes underneath it.
+5. Restore the windowed drawable and present a third time.
+6. Exit the event loop and confirm the window registry is empty, so no window
    outlived the loop.
 
 Resize is the phase worth having. A drawable that is not resized with its window
 presents a stale or wrongly-sized frame, and unlike the GPU path there is no
 surface reconfiguration underneath to catch it.
+
+The transition phases exist because the resize cannot catch a wrong *scale* or
+crop: it moves the frame and the drawable together, so the scale stays one and
+nothing is ever letterboxed. Only a drawable that changes on its own produces a
+scale above one, and the report records the resulting scale and clip rectangle
+for each phase so a transform kept across a transition is visible rather than
+inferred.
+
+Steps 4 and 5 change the drawable directly rather than asking the window manager
+to go fullscreen. That is deliberate and is the same reasoning as the shrink in
+step 3: a compositor may refuse or defer a fullscreen request, which would make
+the phase pass without transitioning anything. What the presenter sees during a
+real transition is a drawable that changed without the frame, and that is what
+is reproduced here. Driving a real compositor through the transition is platform
+breadth, owned by clonk-org/clonk-rs#1249, clonk-org/clonk-rs#1254 and
+clonk-org/clonk-rs#1255.
 
 ## Running without a desktop session
 
@@ -70,7 +91,7 @@ or to `--artifact-dir`. A passing run:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "kind": "clonk_software_present_smoke",
   "success": true,
   "failure": null,
@@ -78,14 +99,48 @@ or to `--artifact-dir`. A passing run:
   "resized_extent": [760, 560],
   "presented_before_resize": true,
   "presented_after_resize": true,
+  "phases": [
+    {
+      "name": "windowed",
+      "frame_extent": [760, 560],
+      "drawable_extent": [760, 560],
+      "scale": 1,
+      "clip_rect": [0, 0, 760, 560],
+      "presented": true
+    },
+    {
+      "name": "fullscreen",
+      "frame_extent": [760, 560],
+      "drawable_extent": [1520, 1120],
+      "scale": 2,
+      "clip_rect": [0, 0, 1520, 1120],
+      "presented": true
+    },
+    {
+      "name": "windowed-again",
+      "frame_extent": [760, 560],
+      "drawable_extent": [760, 560],
+      "scale": 1,
+      "clip_rect": [0, 0, 760, 560],
+      "presented": true
+    }
+  ],
   "registry_empty_at_exit": true
 }
 ```
 
 The runner treats the process exit code as authoritative and additionally
-rejects a report whose `initial_extent` equals its `resized_extent`, because a
-resize that did not change the extent proves nothing about the drawable
-following the window.
+rejects:
+
+- a report whose `initial_extent` equals its `resized_extent`, because a resize
+  that did not change the extent proves nothing about the drawable following the
+  window;
+- a phase sequence that is not `windowed`, `fullscreen`, `windowed-again`, or
+  any phase that presented nothing;
+- a phase whose `clip_rect` does not fit its own `drawable_extent` — which is
+  what a transform kept across the transition produces;
+- a `fullscreen` phase whose `scale` is still one, because a transition that did
+  not scale could not have caught a wrong scale.
 
 ## Coverage
 

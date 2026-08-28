@@ -144,6 +144,13 @@ impl SoftwarePresenter {
         self.frame.extent
     }
 
+    /// The drawable's extent, which follows the window. Reported apart from
+    /// the frame because a transition moves this one alone, and the pair is
+    /// what decides the presented scale and crop.
+    pub const fn drawable_extent(&self) -> (u32, u32) {
+        self.drawable_extent
+    }
+
     /// Resize the CPU frame, clearing it.
     ///
     /// Kept separate from [`Self::resize_drawable`] because the two change for

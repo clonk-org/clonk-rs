@@ -26,7 +26,7 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parent.parent
 
 REPORT_KIND = "clonk_software_present_smoke"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: The probe reads this and refuses to run without it, so that a machine with a
 #: working adapter cannot quietly qualify the GPU presenter instead.
@@ -120,6 +120,32 @@ def check_report(report_path: Path) -> dict:
         failures.append(
             "the drawable never changed size, so the resize proved nothing "
             f"({report.get('initial_extent')})"
+        )
+    # A resize moves the frame and the drawable together, so it never produces
+    # a scale above one. Only the transition phases do, which is why they are
+    # checked separately rather than folded into the resize above.
+    phases = report.get("phases") or []
+    names = [phase.get("name") for phase in phases]
+    if names != ["windowed", "fullscreen", "windowed-again"]:
+        failures.append(f"the transition sequence is incomplete: {names}")
+    for phase in phases:
+        name = phase.get("name")
+        if not phase.get("presented"):
+            failures.append(f"the {name} phase presented no frame")
+        clip = phase.get("clip_rect") or [0, 0, 0, 0]
+        drawable = phase.get("drawable_extent") or [0, 0]
+        if clip[0] + clip[2] > drawable[0] or clip[1] + clip[3] > drawable[1]:
+            failures.append(
+                f"the {name} phase presented through a clip that does not fit "
+                f"its drawable: clip {clip} in {drawable}"
+            )
+    fullscreen = next(
+        (phase for phase in phases if phase.get("name") == "fullscreen"), None
+    )
+    if fullscreen is not None and fullscreen.get("scale", 0) <= 1:
+        failures.append(
+            "the fullscreen phase never scaled, so a wrong scale would go "
+            "unnoticed"
         )
     if not report.get("registry_empty_at_exit"):
         failures.append("a window outlived the event loop")
