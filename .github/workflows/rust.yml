@@ -362,7 +362,7 @@ jobs:
           # Release preparation changes Cargo package versions without changing
           # bitcode. Key the trusted cache by compiler/config/source instead;
           # LLD independently hashes every input before reusing an entry.
-          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.98.0-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs') }}
+          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.98.0-llvm-22.1.8-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs') }}
 
       # Keep the shipped graph in its own write-capable cache action. Swatinem
       # cleans target in its post step, so nesting it with the landing-cache

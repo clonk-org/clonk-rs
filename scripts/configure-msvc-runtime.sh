@@ -9,13 +9,13 @@ set -euo pipefail
 
 rustc_info=$(rustc -vV)
 grep -Fqx 'release: 1.98.0' <<<"$rustc_info"
-grep -Fqx 'LLVM version: 22.1.6' <<<"$rustc_info"
+grep -Fqx 'LLVM version: 22.1.8' <<<"$rustc_info"
 
 cargo_target=x86_64-pc-windows-msvc
 target_libdir=$(cygpath -u "$(rustc --target "$cargo_target" --print target-libdir)")
 rust_lld="${target_libdir%/lib}/bin/rust-lld.exe"
 test -f "$rust_lld"
-"$rust_lld" -flavor link --version | grep -F 'LLD 22.1.6'
+"$rust_lld" -flavor link --version | grep -F 'LLD 22.1.8'
 
 thinlto_cache=$(cygpath -u "$RUNNER_TEMP")/clonk-msvc-thinlto
 thinlto_cache_native=$(cygpath -m "$thinlto_cache")
