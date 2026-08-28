@@ -63,7 +63,7 @@ pub struct LayoutElement {
     pub rect: LayoutRect,
     pub visible: bool,
     /// The manifest-declared port-authored asset class whose text may differ.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_asset: Option<String>,
     pub caption: String,
     /// Lines after wrapping has been resolved by the implementation.
@@ -449,6 +449,31 @@ pub fn compare_layout_traces(
 ))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_absent_port_asset_is_omitted_from_layout_json() {
+        let element = LayoutElement {
+            path: "startup/main/buttons/start-game".to_owned(),
+            role: "button".to_owned(),
+            rect: LayoutRect {
+                x: 40,
+                y: 80,
+                width: 240,
+                height: 32,
+            },
+            visible: true,
+            port_asset: None,
+            caption: "Local Game".to_owned(),
+            lines: Vec::new(),
+        };
+
+        let json = serde_json::to_value(element).expect("serialize layout element");
+
+        assert!(!json
+            .as_object()
+            .expect("layout element is an object")
+            .contains_key("port_asset"));
+    }
 
     fn element(path: &str) -> String {
         format!(
