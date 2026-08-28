@@ -2950,7 +2950,7 @@ mod tests {
     fn pixel_capture_png_omits_the_native_framebuffer_alpha_channel() -> Result<()> {
         // C4Startup::SaveScreenshot requests fSaveAlpha=false, so
         // C4Surface::SavePNG reads GL_BGR into a 24-bit PNG
-        // (src/C4Startup.cpp:711-719; src/graphics/C4Surface.cpp:411-458).
+        // (src/C4Startup.cpp:711-719; src/C4Surface.cpp:411-458).
         let (_environment, _user_data, mut app) = real_capture_app()?;
         let checkpoint = stage_pixel_checkpoint(&mut app, PixelCaptureCase::Loader)?;
 
