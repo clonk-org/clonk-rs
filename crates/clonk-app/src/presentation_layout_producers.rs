@@ -103,6 +103,7 @@ fn command_lines(command: &CapturedClonkText, font: &ClonkFont) -> Vec<LayoutLin
     let line_height = (command.zoom * font.line_height as f32) as i32;
     split_command_lines(command)
         .enumerate()
+        .filter(|(_, text)| !text.is_empty())
         .map(|(index, text)| {
             let width = (command.zoom * font.measure(text, command.markup).0 as f32) as i32;
             let x = match command.align {
@@ -1831,6 +1832,25 @@ fn startup_about_trace_for_test(gui: &clonk_frontend::ClonkFontSet) -> LayoutTra
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn an_empty_edit_capture_emits_no_semantic_lines() {
+        // Native constructs the search CallbackEdit empty, and the capture
+        // records a semantic line only for a nonempty caption
+        // (src/C4StartupScenSelDlg.cpp:1340-1347; src/C4Startup.cpp:436-461).
+        let bytes = include_bytes!("../../../planet/System.c4g/Endeavour.ttf");
+        let fonts = clonk_frontend::clonk_fonts::build_font_set(bytes)
+            .expect("build pinned startup GUI fonts");
+        let command = test_text_command(
+            clonk_graphics::clonk_font::ClonkFontRole::GuiText,
+            229,
+            565,
+            "",
+            TextAlign::Left,
+        );
+
+        assert!(command_lines(&command, &fonts.text).is_empty());
+    }
 
     #[test]
     fn startup_main_branding_trace_uses_the_native_semantic_allocations() {
