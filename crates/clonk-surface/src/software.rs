@@ -150,6 +150,188 @@ fn checked_area(width: u32, height: u32) -> Result<usize, SoftwarePresentError> 
 }
 
 #[cfg(test)]
+mod transition_tests {
+    use super::*;
+    use crate::blit::BlitTransform;
+
+    /// One phase of a windowed -> fullscreen -> windowed sequence.
+    struct Phase {
+        name: &'static str,
+        frame: (u32, u32),
+        drawable: (u32, u32),
+    }
+
+    /// A transition changes the drawable under a presenter that keeps
+    /// presenting. Every phase is recomputed from its *own* extent, which is
+    /// what a stale drawable or a pre-transition dimension would break.
+    const SEQUENCE: [Phase; 3] = [
+        Phase {
+            name: "windowed",
+            frame: (320, 200),
+            drawable: (960, 600),
+        },
+        // Fullscreen on a wider display: the scale rises and the frame is
+        // letterboxed on the long axis rather than stretched.
+        Phase {
+            name: "fullscreen",
+            frame: (320, 200),
+            drawable: (2560, 1440),
+        },
+        // Back to a window, and deliberately not the one we left: a transition
+        // that restores a remembered size is still a new extent.
+        Phase {
+            name: "windowed-again",
+            frame: (320, 200),
+            drawable: (1280, 800),
+        },
+    ];
+
+    fn present_phase(phase: &Phase) -> (BlitTransform, Vec<u32>) {
+        let frame = vec![0xff_u8; (phase.frame.0 as usize) * (phase.frame.1 as usize) * 4];
+        let mut drawable = vec![0_u32; (phase.drawable.0 as usize) * (phase.drawable.1 as usize)];
+        present_pixel_perfect(&frame, phase.frame, phase.drawable, &mut drawable)
+            .expect("every phase presents");
+        (
+            BlitTransform::pixel_perfect(phase.frame, phase.drawable),
+            drawable,
+        )
+    }
+
+    #[test]
+    fn every_transition_phase_presents_through_its_own_drawable_extent() {
+        for phase in &SEQUENCE {
+            let (transform, drawable) = present_phase(phase);
+            let (clip_x, clip_y, clip_width, clip_height) = transform.clip_rect();
+            let scale = transform.scale();
+
+            assert!(scale >= 1, "{}: a presented phase has a scale", phase.name);
+            assert_eq!(
+                (clip_width, clip_height),
+                (phase.frame.0 * scale, phase.frame.1 * scale),
+                "{}: the clip is the frame at this phase's own scale",
+                phase.name
+            );
+            assert!(
+                clip_x + clip_width <= phase.drawable.0 && clip_y + clip_height <= phase.drawable.1,
+                "{}: the clip has to fit the drawable it was computed for",
+                phase.name
+            );
+
+            // Inside the clip is frame; outside it is letterbox. A transform
+            // computed for a different extent puts the boundary elsewhere,
+            // which is exactly what this separates.
+            let inside = (clip_y as usize) * (phase.drawable.0 as usize) + clip_x as usize;
+            assert_ne!(
+                drawable[inside], LETTERBOX,
+                "{}: the clip's first pixel is frame",
+                phase.name
+            );
+            if clip_x > 0 {
+                let outside = (clip_y as usize) * (phase.drawable.0 as usize);
+                assert_eq!(
+                    drawable[outside], LETTERBOX,
+                    "{}: the column left of the clip is letterbox",
+                    phase.name
+                );
+            }
+            if clip_y > 0 {
+                assert_eq!(
+                    drawable[clip_x as usize], LETTERBOX,
+                    "{}: the row above the clip is letterbox",
+                    phase.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_transform_kept_across_a_transition_lands_outside_the_new_drawable() {
+        // The regression this exists to catch: presenting the new frame through
+        // the transform the previous phase computed. It is not a subtle
+        // difference -- the fullscreen clip does not fit the window it came
+        // from, so a presenter that skipped recreation writes out of bounds or
+        // crops to the wrong rectangle.
+        let windowed = BlitTransform::pixel_perfect(SEQUENCE[0].frame, SEQUENCE[0].drawable);
+        let fullscreen = BlitTransform::pixel_perfect(SEQUENCE[1].frame, SEQUENCE[1].drawable);
+        assert_ne!(
+            windowed.scale(),
+            fullscreen.scale(),
+            "the sequence has to actually change the scale to test this"
+        );
+
+        let (_, _, stale_width, stale_height) = fullscreen.clip_rect();
+        assert!(
+            stale_width > SEQUENCE[2].drawable.0 || stale_height > SEQUENCE[2].drawable.1,
+            "the fullscreen clip must not fit the restored window, or reusing \
+             it would go unnoticed"
+        );
+    }
+
+    #[test]
+    fn a_pointer_maps_through_the_same_crop_and_scale_the_blit_used() {
+        // Pointer positions have to invert the presented transform, including
+        // in the letterbox where there is no frame pixel at all. Software and
+        // retained GPU presentation share `BlitTransform`, so this is the
+        // mapping both paths owe.
+        for phase in &SEQUENCE {
+            let transform = BlitTransform::pixel_perfect(phase.frame, phase.drawable);
+            let (clip_x, clip_y, clip_width, clip_height) = transform.clip_rect();
+            let scale = transform.scale();
+
+            let frame_pixel = |x: u32, y: u32| -> Option<(u32, u32)> {
+                if x < clip_x || y < clip_y {
+                    return None;
+                }
+                let (column, row) = (x - clip_x, y - clip_y);
+                (column < clip_width && row < clip_height).then(|| (column / scale, row / scale))
+            };
+
+            assert_eq!(
+                frame_pixel(clip_x, clip_y),
+                Some((0, 0)),
+                "{}: the clip's origin is the frame's origin",
+                phase.name
+            );
+            assert_eq!(
+                frame_pixel(clip_x + clip_width - 1, clip_y + clip_height - 1),
+                Some((phase.frame.0 - 1, phase.frame.1 - 1)),
+                "{}: the clip's far corner is the frame's far corner",
+                phase.name
+            );
+            // One scaled pixel in is still the first frame pixel: the mapping
+            // divides by the scale rather than assuming one-to-one.
+            if scale > 1 {
+                assert_eq!(
+                    frame_pixel(clip_x + scale - 1, clip_y),
+                    Some((0, 0)),
+                    "{}: a point inside the first scaled pixel maps to it",
+                    phase.name
+                );
+                assert_eq!(
+                    frame_pixel(clip_x + scale, clip_y),
+                    Some((1, 0)),
+                    "{}: the next scaled pixel is the next frame column",
+                    phase.name
+                );
+            }
+            // Outside the viewport there is no frame pixel, in either axis.
+            if clip_x > 0 {
+                assert_eq!(frame_pixel(clip_x - 1, clip_y), None, "{}", phase.name);
+            }
+            if clip_y > 0 {
+                assert_eq!(frame_pixel(clip_x, clip_y - 1), None, "{}", phase.name);
+            }
+            assert_eq!(
+                frame_pixel(clip_x + clip_width, clip_y),
+                None,
+                "{}: past the clip is letterbox, not the next row",
+                phase.name
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -56,8 +56,26 @@ pub(crate) fn prepare(report_path: &Path) -> Result<()> {
 enum SmokePhase {
     PresentInitial,
     PresentAfterResize,
+    PresentLetterboxed,
+    PresentRestored,
     AwaitLoopExit,
     Failed,
+}
+
+/// One presented phase, with everything needed to tell a correct present
+/// from one that used the extent before the transition.
+#[derive(Debug, Clone, Serialize)]
+struct PresentedPhase {
+    name: &'static str,
+    /// What the renderer draws at, and what the window presents into. A
+    /// transition changes the second without changing the first, which is the
+    /// only case that produces a scale above one and a letterbox.
+    frame_extent: [u32; 2],
+    drawable_extent: [u32; 2],
+    scale: u32,
+    /// Where the scaled frame lands: x, y, width, height.
+    clip_rect: [u32; 4],
+    presented: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +89,8 @@ struct SmokeReport {
     resized_extent: [u32; 2],
     presented_before_resize: bool,
     presented_after_resize: bool,
+    /// Every phase the probe presented, in order.
+    phases: Vec<PresentedPhase>,
     /// The shell must still be the only registry entry at teardown: a software
     /// presenter that leaked a window would show up here.
     registry_empty_at_exit: bool,
@@ -86,6 +106,7 @@ pub(crate) struct SoftwarePresentSmoke {
     resized_extent: [u32; 2],
     presented_before_resize: bool,
     presented_after_resize: bool,
+    phases: Vec<PresentedPhase>,
     failure: Option<String>,
 }
 
@@ -108,6 +129,7 @@ impl SoftwarePresentSmoke {
         Ok(Self {
             report_path,
             phase: SmokePhase::PresentInitial,
+            phases: Vec::new(),
             deadline: now + SMOKE_TIMEOUT,
             next_retry: now,
             shell_os_window_id: shell.window.id(),
@@ -167,6 +189,40 @@ impl SoftwarePresentSmoke {
             SmokePhase::PresentAfterResize => {
                 self.presented_after_resize |= present_shell(windows, [0xa8, 0x6f, 0x2f, 0xff])?;
                 if self.presented_after_resize {
+                    let recorded = record_phase(windows, "windowed", true)?;
+                    self.phases.push(recorded);
+                    // The presenter-visible shape of going fullscreen: the
+                    // drawable grows and the frame does not, so the frame is
+                    // scaled up and letterboxed rather than stretched.
+                    set_drawable_holding_frame(
+                        windows,
+                        [
+                            self.resized_extent[0].saturating_mul(2).max(1),
+                            self.resized_extent[1].saturating_mul(2).max(1),
+                        ],
+                    )?;
+                    self.phase = SmokePhase::PresentLetterboxed;
+                    windows.request_redraw(SHELL_WINDOW);
+                }
+            }
+            SmokePhase::PresentLetterboxed => {
+                let presented = present_shell(windows, [0x2f, 0xa8, 0x6f, 0xff])?;
+                if presented {
+                    let recorded = record_phase(windows, "fullscreen", true)?;
+                    self.phases.push(recorded);
+                    // And back to a window. A presenter that kept the previous
+                    // transform would now scale and crop for a drawable twice
+                    // the size of the one it is presenting into.
+                    set_drawable_holding_frame(windows, self.resized_extent)?;
+                    self.phase = SmokePhase::PresentRestored;
+                    windows.request_redraw(SHELL_WINDOW);
+                }
+            }
+            SmokePhase::PresentRestored => {
+                let presented = present_shell(windows, [0x6f, 0x2f, 0xa8, 0xff])?;
+                if presented {
+                    let recorded = record_phase(windows, "windowed-again", true)?;
+                    self.phases.push(recorded);
                     self.phase = SmokePhase::AwaitLoopExit;
                     event_loop.exit();
                 }
@@ -183,13 +239,30 @@ impl SoftwarePresentSmoke {
     }
 
     pub(crate) fn finish(&mut self, registry_empty: bool) -> Result<()> {
+        // Each phase must have presented through its own drawable: the
+        // recorded clip has to fit the drawable it was computed for, and the
+        // fullscreen phase has to have actually scaled, or the sequence proved
+        // nothing about a transition.
+        let phases_fit = self.phases.iter().all(|phase| {
+            phase.presented
+                && phase.clip_rect[0] + phase.clip_rect[2] <= phase.drawable_extent[0]
+                && phase.clip_rect[1] + phase.clip_rect[3] <= phase.drawable_extent[1]
+        });
+        let letterboxed_scaled = self
+            .phases
+            .iter()
+            .find(|phase| phase.name == "fullscreen")
+            .is_some_and(|phase| phase.scale > 1);
         let success = self.failure.is_none()
             && self.presented_before_resize
             && self.presented_after_resize
             && self.resized_extent != self.initial_extent
+            && self.phases.len() == 3
+            && phases_fit
+            && letterboxed_scaled
             && registry_empty;
         let report = SmokeReport {
-            schema_version: 1,
+            schema_version: 2,
             kind: "clonk_software_present_smoke",
             success,
             failure: self.failure.clone(),
@@ -197,6 +270,7 @@ impl SoftwarePresentSmoke {
             resized_extent: self.resized_extent,
             presented_before_resize: self.presented_before_resize,
             presented_after_resize: self.presented_after_resize,
+            phases: self.phases.clone(),
             registry_empty_at_exit: registry_empty,
         };
         let encoded =
@@ -238,6 +312,58 @@ fn present_shell(windows: &mut DeveloperWindows<DeveloperHost>, color: [u8; 4]) 
     target
         .present()
         .context("failed to present the software presentation probe's frame")
+}
+
+/// Grow the drawable while holding the frame, which is what a windowed to
+/// fullscreen transition does to the presenter.
+///
+/// The existing resize moves both together, so the scale stays one and nothing
+/// is ever letterboxed -- it cannot catch a wrong scale or a crop computed from
+/// the extent before the transition. Only a drawable that changes on its own
+/// produces those.
+fn set_drawable_holding_frame(
+    windows: &mut DeveloperWindows<DeveloperHost>,
+    drawable: [u32; 2],
+) -> Result<()> {
+    let shell = windows
+        .shell_mut()
+        .and_then(DeveloperHost::as_shell_mut)
+        .context("the software presentation probe's shell disappeared before a transition")?;
+    let presenter = shell
+        .software
+        .as_mut()
+        .context("the software presentation probe's presenter disappeared before a transition")?;
+    presenter
+        .resize_drawable((drawable[0], drawable[1]))
+        .context("failed to resize the software presentation drawable for a transition")
+}
+
+/// What the presenter would put on screen right now.
+fn record_phase(
+    windows: &mut DeveloperWindows<DeveloperHost>,
+    name: &'static str,
+    presented: bool,
+) -> Result<PresentedPhase> {
+    let shell = windows
+        .shell_mut()
+        .and_then(DeveloperHost::as_shell_mut)
+        .context("the software presentation probe's shell disappeared before recording")?;
+    let presenter = shell
+        .software
+        .as_ref()
+        .context("the software presentation probe's presenter disappeared before recording")?;
+    let frame = presenter.frame_extent();
+    let drawable = presenter.drawable_extent();
+    let transform = clonk_surface::BlitTransform::pixel_perfect(frame, drawable);
+    let (clip_x, clip_y, clip_width, clip_height) = transform.clip_rect();
+    Ok(PresentedPhase {
+        name,
+        frame_extent: [frame.0, frame.1],
+        drawable_extent: [drawable.0, drawable.1],
+        scale: transform.scale(),
+        clip_rect: [clip_x, clip_y, clip_width, clip_height],
+        presented,
+    })
 }
 
 /// Shrink the drawable and report the extent that took effect.
