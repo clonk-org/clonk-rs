@@ -223,7 +223,8 @@ pub fn begin_presentation_safe_random_capture() {
 ///
 /// Native reseeds and clears the logical SafeRandom ledger here, while the
 /// separately audited direct raw-call ledger spans the entire process route.
-pub(crate) fn reset_presentation_safe_random_after_fix_random() {
+#[doc(hidden)]
+pub fn reset_presentation_safe_random_after_fix_random() {
     if !PRESENTATION_SAFE_RANDOM_CAPTURE_ACTIVE.load(Ordering::SeqCst) {
         return;
     }

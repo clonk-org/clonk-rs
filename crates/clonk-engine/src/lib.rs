@@ -10679,6 +10679,16 @@ impl Engine {
         self.random_seed
     }
 
+    /// Mirror the capture fork's `C4Startup::Execute` RNG pin without
+    /// rebuilding FRndBuf3, which native startup leaves untouched.
+    #[doc(hidden)]
+    pub fn pin_presentation_startup_random_state(&mut self, seed: u64) {
+        self.random_seed = seed;
+        self.rng.hold = seed as u32;
+        self.rng.count = 0;
+        crate::particles::reset_presentation_safe_random_after_fix_random();
+    }
+
     /// Apply the C++ network client's control clock before synchronized
     /// gameplay starts (`C4Network2.cpp:1607-1608`).
     pub fn initialize_network_control_timing(&mut self, timing: NetworkControlTiming) {

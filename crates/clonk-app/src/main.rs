@@ -2401,7 +2401,9 @@ impl GameApp {
                 .require_classic_global_gui_bootstrap_resources(&HashMap::new())
                 .map_err(report_classic_parity_boundary)?;
         }
-        if let Some(paths) = paths {
+        if let Some(paths) =
+            paths.filter(|_| !presentation_pixel_capture::capture_or_discovery_requested())
+        {
             if let Err(error) = validate_startup_participant_config(paths) {
                 // C++ configuration strings are legacy byte buffers. Until
                 // the general Config model is byte-preserving, never rewrite

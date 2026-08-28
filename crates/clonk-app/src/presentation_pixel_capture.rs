@@ -35,6 +35,11 @@ const CANONICAL_NETWORK_REFERENCES_SHA256: &str =
 const PRESENTATION_RNG_ALGORITHM: &str = "darwin-libc-rand-park-miller-v1";
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+pub(crate) fn capture_or_discovery_requested() -> bool {
+    std::env::var_os(CAPTURE_ENABLED_ENV).is_some()
+        || std::env::var_os(CAPTURE_DISCOVER_ENV).is_some()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PresentationComparisonRequest {
     case_id: String,
@@ -1062,6 +1067,10 @@ fn stage_layout_checkpoint(
     if case == LayoutCaptureCase::PlayerSelection {
         validate_canonical_player_selection(app)?;
     }
+    // The capture fork performs this at the start of every
+    // C4Startup::Execute, after dialog construction and before the stable
+    // render. Native changes RandomHold/RandomCount but not FRndBuf3.
+    app.engine.pin_presentation_startup_random_state(587);
     let random_count = u64::try_from(app.engine.sync_check(0).random_count)
         .map_err(|_| anyhow::anyhow!("simulation RandomCount became negative"))?;
     Ok(crate::presentation_pixel_startup::StartupPixelCheckpoint {
@@ -2228,6 +2237,7 @@ mod tests {
                 ("LC_CONTENT_DIR", content_root.as_os_str().to_owned()),
                 ("LC_USER_DATA_DIR", user_data.as_os_str().to_owned()),
                 ("LC_PIN_SEED", OsString::from("587")),
+                (CAPTURE_DISCOVER_ENV, OsString::from("startup-main")),
             ];
             let saved = values
                 .iter()
@@ -2410,6 +2420,23 @@ mod tests {
         assert_eq!(
             CANONICAL_PLAYER_SHA256,
             "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn capture_boot_preserves_the_canonical_config_bytes() -> Result<()> {
+        // The capture fork suppresses both native Config.Save sites so the
+        // audited input stays byte-exact (src/C4Application.cpp:95-98,364-367).
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("clonk-app belongs to the workspace");
+        let (_environment, user_data, _app) = real_capture_app()?;
+
+        assert_eq!(
+            std::fs::read(user_data.path().join("rust.config"))?,
+            std::fs::read(repository.join("compat/presentation/rust.config"))?,
         );
         Ok(())
     }
@@ -3132,6 +3159,24 @@ mod tests {
             png, uncomposed,
             "native text/chrome must be replayed before encoding the ordinal-2 PNG"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam() -> Result<()> {
+        // The instrumented C4Startup::Execute pins RandomHold/RandomCount and
+        // SafeRandom before each stable render (src/C4Startup.cpp:370-378).
+        let _random = PresentationRandomGuard::install();
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+
+        let checkpoint = stage_layout_checkpoint(&mut app, LayoutCaptureCase::Main, b"")?;
+        let report = clonk_engine::particles::presentation_safe_random_capture_report();
+
+        assert_eq!(checkpoint.simulation_seed, 587);
+        assert_eq!(checkpoint.random_count, 0);
+        assert_eq!(report.calls, 0);
+        assert_eq!(report.raw_calls, 0);
+        assert!(report.trace.is_empty());
         Ok(())
     }
 
