@@ -3065,7 +3065,7 @@ pub(crate) fn load_scenario_with_definition_load_and_progress<F>(
     mut progress: F,
 ) -> Result<Scenario, ScenarioError>
 where
-    F: FnMut(i32, &'static str),
+    F: FnMut(i32, &str),
 {
     let group = open_group_path_for_folder_map(path)?;
     match definition_load {
@@ -3142,7 +3142,7 @@ pub(crate) fn load_scenario_with_definition_load_and_seed_and_startup_player_cou
     mut progress: F,
 ) -> Result<Scenario, ScenarioError>
 where
-    F: FnMut(i32, &'static str),
+    F: FnMut(i32, &str),
 {
     let group = open_group_path_for_folder_map(path)?;
     match definition_load {
@@ -3189,7 +3189,7 @@ pub(crate) fn load_fresh_scenario_with_valid_generated_landscape<F>(
     mut progress: F,
 ) -> std::result::Result<(Scenario, u64), String>
 where
-    F: FnMut(i32, &'static str),
+    F: FnMut(i32, &str),
 {
     let mut random_seed = u64::from(initial_random_seed as u32);
     for rejected in 0..AUTHORITATIVE_WORLDGEN_SEED_ATTEMPTS {

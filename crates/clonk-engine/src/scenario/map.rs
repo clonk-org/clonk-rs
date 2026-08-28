@@ -899,7 +899,7 @@ pub(in crate::scenario) fn load_legacy_landscape(
     post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
     prepared_map_creator: &mut Option<crate::map_creator_s2::MapCreatorS2State>,
 ) -> Result<Option<Landscape>, ScenarioError> {
-    let mut ignore_progress = |_: i32, _: &'static str| {};
+    let mut ignore_progress = |_: i32, _: &str| {};
     load_legacy_landscape_with_progress(
         group,
         manifest,
@@ -927,7 +927,7 @@ pub(in crate::scenario) fn load_legacy_landscape_with_progress(
     map_callback_functions: &HashSet<String>,
     post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
     prepared_map_creator: &mut Option<crate::map_creator_s2::MapCreatorS2State>,
-    report_progress: &mut dyn FnMut(i32, &'static str),
+    report_progress: &mut dyn FnMut(i32, &str),
 ) -> Result<Option<Landscape>, ScenarioError> {
     *post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
     let Some(mut landscape) = load_legacy_landscape_body_with_progress(
@@ -998,7 +998,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
     post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
     prepared_map_creator: &mut Option<crate::map_creator_s2::MapCreatorS2State>,
 ) -> Result<Option<Landscape>, ScenarioError> {
-    let mut ignore_progress = |_: i32, _: &'static str| {};
+    let mut ignore_progress = |_: i32, _: &str| {};
     load_legacy_landscape_body_with_progress(
         group,
         manifest,
@@ -1026,7 +1026,7 @@ pub(in crate::scenario) fn load_legacy_landscape_body_with_progress(
     map_callback_functions: &HashSet<String>,
     post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
     prepared_map_creator: &mut Option<crate::map_creator_s2::MapCreatorS2State>,
-    report_progress: &mut dyn FnMut(i32, &'static str),
+    report_progress: &mut dyn FnMut(i32, &str),
 ) -> Result<Option<Landscape>, ScenarioError> {
     *prepared_map_creator = None;
     let landscape_section = manifest.sections.get("landscape");
@@ -1846,13 +1846,13 @@ pub(in crate::scenario) fn legacy_scenario_section_name(
 pub(in crate::scenario) fn load_legacy_landscape_systems(
     group: &Group,
 ) -> Result<ScenarioLandscapeSystems, ScenarioError> {
-    let mut ignore_progress = |_: i32, _: &'static str| {};
+    let mut ignore_progress = |_: i32, _: &str| {};
     load_legacy_landscape_systems_with_progress(group, &mut ignore_progress)
 }
 
 pub(in crate::scenario) fn load_legacy_landscape_systems_with_progress(
     group: &Group,
-    report_progress: &mut dyn FnMut(i32, &'static str),
+    report_progress: &mut dyn FnMut(i32, &str),
 ) -> Result<ScenarioLandscapeSystems, ScenarioError> {
     let pxs = read_optional_legacy_entry(group, "PXS.c4b")?
         .map(|bytes| {

@@ -1437,7 +1437,7 @@ global func Step(state, frame, random)
             &[] as &[String],
             None,
             None,
-            |progress, log| reported.push((progress, log)),
+            |progress, log| reported.push((progress, log.to_owned())),
         ).test_value();
 
         let checkpoints = reported
@@ -1683,7 +1683,7 @@ global func Step(state, frame, random)
             &["US"],
             0,
             &LanguagePacks::default(),
-            |progress, log| reported.push((progress, log)),
+            |progress, log| reported.push((progress, log.to_owned())),
         ).test_value();
 
         assert_eq!(

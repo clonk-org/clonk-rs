@@ -2332,7 +2332,7 @@ impl Scenario {
     ) -> Result<Self, ScenarioError>
     where
         S: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         Self::load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
             path,
@@ -2366,7 +2366,7 @@ impl Scenario {
     ) -> Result<Self, ScenarioError>
     where
         S: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let group = Group::open(path)?;
         Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
@@ -2425,7 +2425,7 @@ impl Scenario {
     ) -> Result<Self, ScenarioError>
     where
         S: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
             group,
@@ -2460,7 +2460,7 @@ impl Scenario {
     ) -> Result<Self, ScenarioError>
     where
         S: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         let definition_modules = (0..definition_groups.len())
@@ -2633,7 +2633,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
         M: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress(
             group,
@@ -2667,7 +2667,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
         M: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_progress(
             group,
@@ -2743,7 +2743,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
         M: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let initial_spellings = initial_modules
             .iter()
@@ -2802,7 +2802,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
         M: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let initial_spellings = initial_modules
             .iter()
@@ -2887,7 +2887,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
-        let mut ignore_progress = |_: i32, _: &'static str| {};
+        let mut ignore_progress = |_: i32, _: &str| {};
         Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count_and_progress(
             group,
             resolver,
@@ -2914,7 +2914,7 @@ impl Scenario {
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
         startup_player_count: i32,
-        report_progress: &mut dyn FnMut(i32, &'static str),
+        report_progress: &mut dyn FnMut(i32, &str),
     ) -> Result<Self, ScenarioError>
     where
         R: LegacyDefinitionResolver,
@@ -2950,7 +2950,7 @@ impl Scenario {
         selector_definition_root: Option<&Path>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
-        report_progress: &mut dyn FnMut(i32, &'static str),
+        report_progress: &mut dyn FnMut(i32, &str),
     ) -> Result<Self, ScenarioError> {
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
             group,
@@ -2981,7 +2981,7 @@ impl Scenario {
         definition_path_expansion: Option<DefinitionPathExpansion<'_>>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
-        report_progress: &mut dyn FnMut(i32, &'static str),
+        report_progress: &mut dyn FnMut(i32, &str),
     ) -> Result<Self, ScenarioError> {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
@@ -3153,7 +3153,7 @@ impl Scenario {
         definition_path_expansion: Option<DefinitionPathExpansion<'_>>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
-        report_progress: &mut dyn FnMut(i32, &'static str),
+        report_progress: &mut dyn FnMut(i32, &str),
     ) -> Result<Self, ScenarioError> {
         let indexed_group = group.is_directory().then(|| group.indexed()).transpose()?;
         let group = indexed_group.as_ref().unwrap_or(group);

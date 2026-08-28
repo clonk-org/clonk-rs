@@ -1018,7 +1018,7 @@ impl ScenarioLoadingReporter {
     /// log sink appends to, so a worker thread's log event between two
     /// milestones keeps its position instead of either source replacing the
     /// other (`src/C4Log.cpp:208-243`).
-    pub(crate) fn report(&mut self, progress: i32, line: &'static str) {
+    pub(crate) fn report(&mut self, progress: i32, line: &str) {
         self.last_progress = self.last_progress.max(progress.clamp(0, 99));
         clonk_logging::push_loader_log_line(line);
         let _ = self.sender.send(ScenarioLoadingEvent::LoaderFrame {

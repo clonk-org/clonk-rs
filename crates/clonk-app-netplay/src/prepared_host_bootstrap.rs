@@ -368,7 +368,7 @@ impl PreparedLeagueGeneratedLandscapeLoader {
         report_progress: F,
     ) -> Result<Scenario, ScenarioError>
     where
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         Scenario::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
             &self.scenario_group,
@@ -415,7 +415,7 @@ impl PreparedHostScenarioLoad {
         report_progress: F,
     ) -> Result<Scenario, ScenarioError>
     where
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let Self {
             retained,
