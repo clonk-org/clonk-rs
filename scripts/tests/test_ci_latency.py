@@ -45,6 +45,17 @@ def fires_on_a_non_default_ref(workflow):
 
 
 class CiLatencyTests(unittest.TestCase):
+    def test_qualification_uses_portable_command_timeouts(self):
+        qualification = QUALIFICATION.read_text(encoding="utf-8")
+
+        self.assertNotIn('timeout "$budget" git submodule update', qualification)
+        self.assertEqual(
+            qualification.count(
+                'python3 scripts/run_with_timeout.py "$budget" git submodule update'
+            ),
+            3,
+        )
+
     def test_native_dependency_install_retries_are_shared_and_bounded(self):
         installer = APT_INSTALLER.read_text(encoding="utf-8")
         workflows = "\n".join(

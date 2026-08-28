@@ -142,7 +142,7 @@ jobs:
             esac
             started=$SECONDS
             status=0
-            timeout "$budget" git submodule update --init --force --depth=1 \
+            python3 scripts/run_with_timeout.py "$budget" git submodule update --init --force --depth=1 \
               --filter=blob:none content || status=$?
             elapsed=$((SECONDS - started))
             if (( status == 0 )); then
@@ -150,7 +150,7 @@ jobs:
               echo "content-checkout attempt=$attempt seconds=$elapsed size-kib=$size"
               exit 0
             fi
-            # `timeout` reports 124 for the stall this exists to bound; any
+            # `run_with_timeout.py` reports 124 for the stall this exists to bound; any
             # other status is the fetch itself failing, and reporting one as
             # the other sends the next reader looking at the wrong thing. The
             # size on the success line is what separates a provider stall from
@@ -440,7 +440,7 @@ jobs:
             esac
             started=$SECONDS
             status=0
-            timeout "$budget" git submodule update --init --force --depth=1 \
+            python3 scripts/run_with_timeout.py "$budget" git submodule update --init --force --depth=1 \
               --filter=blob:none content || status=$?
             elapsed=$((SECONDS - started))
             if (( status == 0 )); then
@@ -448,7 +448,7 @@ jobs:
               echo "content-checkout attempt=$attempt seconds=$elapsed size-kib=$size"
               exit 0
             fi
-            # `timeout` reports 124 for the stall this exists to bound; any
+            # `run_with_timeout.py` reports 124 for the stall this exists to bound; any
             # other status is the fetch itself failing, and reporting one as
             # the other sends the next reader looking at the wrong thing. The
             # size on the success line is what separates a provider stall from
@@ -601,7 +601,7 @@ jobs:
             esac
             started=$SECONDS
             status=0
-            timeout "$budget" git submodule update --init --force --depth=1 \
+            python3 scripts/run_with_timeout.py "$budget" git submodule update --init --force --depth=1 \
               --filter=blob:none content || status=$?
             elapsed=$((SECONDS - started))
             if (( status == 0 )); then
@@ -609,7 +609,7 @@ jobs:
               echo "content-checkout attempt=$attempt seconds=$elapsed size-kib=$size"
               exit 0
             fi
-            # `timeout` reports 124 for the stall this exists to bound; any
+            # `run_with_timeout.py` reports 124 for the stall this exists to bound; any
             # other status is the fetch itself failing, and reporting one as
             # the other sends the next reader looking at the wrong thing. The
             # size on the success line is what separates a provider stall from
