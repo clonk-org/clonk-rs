@@ -868,6 +868,31 @@ pub(crate) fn framebuffer_backend_attempts(
 }
 
 /// One framebuffer creation attempt: a backend set, and whether wgpu is asked
+/// Why a selected adapter deserves the software warning, if it does.
+///
+/// Two different situations with two different fixes, so they get two
+/// different messages. Asking for a fallback means nothing answered at all.
+/// The ordinary request *returning* a CPU device means hardware answered but
+/// none of it was compatible with this surface — which used to be silent
+/// (clonk-org/clonk-rs#1381). A Raspberry Pi 4 under a compositor advertising
+/// no dmabuf reaches the second: V3D is not surface-compatible there and
+/// `llvmpipe` is the only adapter offered, so a run reports success on CPU
+/// Vulkan with nothing to say why it is slow.
+///
+/// A software adapter stays above the floor either way
+/// (`docs/GRAPHICS_SUPPORT.md`); this reports the choice, it does not refuse it.
+pub(crate) fn software_adapter_warning(
+    device_type: wgpu::DeviceType,
+    fallback_adapter: bool,
+) -> Option<&'static str> {
+    if fallback_adapter {
+        return Some("no hardware GPU adapter answered; running on a software adapter");
+    }
+    (device_type == wgpu::DeviceType::Cpu).then_some(
+        "no surface-compatible hardware adapter was offered; running on a software adapter",
+    )
+}
+
 /// for a software adapter rather than the default one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FramebufferAttempt {
@@ -946,13 +971,15 @@ pub(crate) fn build_framebuffer(
             },
         ) {
             Ok(pixels) => {
-                if fallback_adapter {
-                    // Worth saying out loud: the machine is running on a CPU
-                    // rasterizer because no hardware adapter answered, and it
-                    // will be slow for reasons the user cannot see otherwise.
+                // Report what was *selected*, not what was asked for. Gating
+                // this on `fallback_adapter` alone missed the case where the
+                // ordinary request returns a CPU device on its own.
+                let device_type = pixels.device().adapter_info().device_type;
+                if let Some(warning) = software_adapter_warning(device_type, fallback_adapter) {
                     tracing::warn!(
                         ?backends,
-                        "no hardware GPU adapter answered; running on a software adapter"
+                        adapter = %pixels.device().adapter_info().name,
+                        "{warning}"
                     );
                 }
                 return Ok(pixels);
