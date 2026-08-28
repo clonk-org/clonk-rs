@@ -3512,7 +3512,12 @@ fn packed_logical_folder_map_uses_case_insensitive_group_traversal() {
 }
 
 #[test]
-fn editor_kind_and_edit_action_return_typed_boundaries() {
+fn every_editor_activation_asks_for_the_developer_console() {
+    // C4StartupScenSelDlg::DoOk hands an editor entry to C4Console instead of
+    // starting a round (`C4StartupScenSelDlg.cpp:1650-1666`), and the explicit
+    // Edit command reaches the same place. All three used to return a typed
+    // parity boundary; the in-process developer console now exists, so each one
+    // asks for it by identifier.
     let mut editor = FrontendScenario::fallback();
     editor.identifier = "Editor.c4s".to_string();
     editor.title = "Editor".to_string();
@@ -3531,14 +3536,56 @@ fn editor_kind_and_edit_action_return_typed_boundaries() {
     for action in [
         StartupMenuAction::OpenEntry(summary.clone()),
         StartupMenuAction::StartScenario(summary.clone()),
+        StartupMenuAction::EditEntry(summary.clone()),
     ] {
-        runtime_assert!(
-            matches!(app.process_menu_actions(vec![action]), Err(ClassicParityBoundary::EditorScenario { ref identifier }) if identifier == &editor.identifier)
+        let outcome = app.process_menu_actions(vec![action]).test_value();
+        runtime_assert_eq!(
+            outcome.edit.as_deref() => Some(editor.identifier.as_str());
+            // An editor entry is never also a round: routing it to the console
+            // and starting it are alternatives, not a sequence.
+            outcome.start => None;
         );
     }
-    runtime_assert!(
-        matches!(app.process_menu_actions(vec![StartupMenuAction::EditEntry(summary)]), Err(ClassicParityBoundary::EditScenario { ref identifier }) if identifier == &editor.identifier);
-    );
+}
+
+#[test]
+fn an_editor_entry_with_no_catalog_path_is_reported_rather_than_opened() {
+    // A summary can outlive the catalog it came from -- a refresh drops the
+    // entry, or the entry carries no path. Neither is a crash: the browser
+    // reports an unavailable scenario the same way it does for an ordinary one.
+    let mut editor = FrontendScenario::fallback();
+    editor.identifier = "Editor.c4s".to_string();
+    editor.title = "Editor".to_string();
+    editor.kind = ScenarioKind::Editor;
+    editor.path = None;
+    let scenarios = vec![editor.clone()];
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
+    let mut app = new_menu_app(640, 480);
+    app.menu_state = MenuState::new(menu, scenarios.clone());
+    app.scensel.catalog = scenarios
+        .iter()
+        .map(|scenario| (scenario.identifier.clone(), scenario.clone()))
+        .collect();
+    let summary = clonk_frontend::ScenarioSummary {
+        identifier: editor.identifier.clone(),
+        title: editor.title.clone(),
+        kind: ScenarioKind::Editor,
+    };
+
+    // The pathless entry, and one the catalog does not carry at all.
+    app.handle_menu_actions(vec![StartupMenuAction::EditEntry(summary)])
+        .test_value();
+    runtime_assert!(!app.console_game_active());
+
+    let missing = clonk_frontend::ScenarioSummary {
+        identifier: "Absent.c4s".to_string(),
+        title: "Absent".to_string(),
+        kind: ScenarioKind::Editor,
+    };
+    app.handle_menu_actions(vec![StartupMenuAction::EditEntry(missing)])
+        .test_value();
+    runtime_assert!(!app.console_game_active());
 }
 
 #[test]
