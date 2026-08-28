@@ -741,6 +741,12 @@ fn stage_tutorial_checkpoint(
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     app.discard_terminal_loader_frame_for_headless_render();
+    app.sound
+        .context
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("{} capture requires logical audio", case.id()))?
+        .borrow_mut()
+        .install_presentation_capture_clock();
 
     while app.engine.frame() < case.frame() {
         if case == PixelCaptureCase::ObjectMenu {
@@ -760,6 +766,13 @@ fn stage_tutorial_checkpoint(
             }
         }
         let before = app.engine.frame();
+        let tick_delay = std::time::Duration::from_millis(app.engine.game_tick_delay_ms());
+        app.sound
+            .context
+            .as_ref()
+            .expect("logical audio was required before capture staging")
+            .borrow_mut()
+            .advance_presentation_capture_clock(tick_delay);
         app.update().map_err(|error| {
             anyhow::anyhow!("advance {} from frame {before}: {error}", case.id())
         })?;
@@ -2981,6 +2994,29 @@ mod tests {
             .is_some());
         assert_eq!(checkpoint.render_ordinal, 90);
         assert_eq!((width, height), (1280, 720));
+        Ok(())
+    }
+
+    #[test]
+    fn object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence() -> Result<()> {
+        // C4Game::OpenGame installs the 28 ms application timer before
+        // C4SoundSystem::Execute ages muted one-shots (src/C4Game.cpp:63,443;
+        // src/C4Application.cpp:495-496; src/C4SoundSystem.cpp:153-202,336).
+        let random = PresentationRandomGuard::install();
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        random.pin_runtime_streams();
+        let scenario = crate::resolve_next_mission_scenario(
+            &app.scensel.catalog,
+            PixelCaptureCase::ObjectMenu.scenario(),
+        )
+        .expect("tracked Tutorial03 scenario");
+
+        stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::ObjectMenu)?;
+        let report = clonk_engine::particles::presentation_safe_random_capture_report();
+
+        assert_eq!(report.calls, 7);
+        assert_eq!(report.raw_calls, 0);
+        assert_eq!(report.trace, b"5:4\n5:4\n5:0\n5:3\n5:1\n5:3\n5:4\n");
         Ok(())
     }
 

@@ -2647,6 +2647,10 @@ pub(crate) struct AudioContext {
     /// C4SoundSystem selects RXSound only while Game.IsRunning; startup and
     /// scenario initialization use the independent FESamples toggle.
     synchronous_game_running: bool,
+    /// Presentation acquisition fast-forwards simulation without a window
+    /// scheduler. Pin its logical sound-instance clock so muted one-shots age
+    /// by native game ticks instead of host wall time.
+    presentation_capture_now: Option<Instant>,
     /// Where a sound's object stood when the engine queued the call, for
     /// objects that did not survive into the snapshot this frame applies
     /// against. Entries live only as long as an instance refers to them.
@@ -2713,6 +2717,24 @@ pub(crate) fn reconnect_audio_context(engine: &mut Engine, audio: Option<&Shared
 }
 
 impl AudioContext {
+    fn sound_instance_now(&self) -> Instant {
+        self.presentation_capture_now.unwrap_or_else(Instant::now)
+    }
+
+    pub(crate) fn install_presentation_capture_clock(&mut self) {
+        self.presentation_capture_now = Some(Instant::now());
+    }
+
+    pub(crate) fn advance_presentation_capture_clock(&mut self, elapsed: Duration) {
+        let now = self
+            .presentation_capture_now
+            .as_mut()
+            .expect("presentation capture clock must be installed before it advances");
+        *now = now
+            .checked_add(elapsed)
+            .expect("presentation capture clock cannot overflow");
+    }
+
     #[cfg(test)]
     pub(crate) fn try_new(options: AudioOptions) -> Result<Self, AudioError> {
         Self::try_new_with_paths(options, None)
@@ -2781,6 +2803,7 @@ impl AudioContext {
             rendered_object_audibility: HashMap::new(),
             synchronous_sound_viewports: Vec::new(),
             synchronous_game_running: false,
+            presentation_capture_now: None,
             emitter_positions: HashMap::new(),
             resolver,
             music_resolver,
@@ -3779,7 +3802,7 @@ impl AudioContext {
             target,
             volume,
             custom_falloff,
-            started_at: Instant::now(),
+            started_at: self.sound_instance_now(),
             detached_mix: initial_mix,
         };
         let (mut mix_volume, pan) = initial_execute_mix.unwrap_or_else(|| {
@@ -4037,7 +4060,7 @@ impl AudioContext {
         viewports: &[ActiveViewportProjection],
         game_running: bool,
     ) {
-        let now = Instant::now();
+        let now = self.sound_instance_now();
         let mut finished = Vec::new();
         let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
         let rendered_object_audibility = &self.rendered_object_audibility;
