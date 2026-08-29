@@ -723,16 +723,5 @@ fn file_crc(path: &Path) -> Result<u32, io::Error> {
 }
 
 fn crc32(initial: u32, data: &[u8]) -> u32 {
-    let mut crc = initial ^ u32::MAX;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ 0xedb8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    crc ^ u32::MAX
+    clonk_resources::c4group_crc32(initial, data)
 }

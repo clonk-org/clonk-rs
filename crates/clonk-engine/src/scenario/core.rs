@@ -3797,6 +3797,19 @@ impl Scenario {
         &self.definition_resource_paths
     }
 
+    /// Rebinds the lightweight pre-lobby projection to the exact definition
+    /// rows frozen in network JoinData. The full post-lobby network load still
+    /// rebuilds definitions, sounds, materials, scripts and landscape from
+    /// those groups; this only makes resource identity consumers observe the
+    /// same alias collapse and repetition before that load runs.
+    pub fn rebind_network_definition_resource_projection(&mut self, groups: &[Group]) {
+        self.definition_resource_paths = groups
+            .iter()
+            .map(|group| group.root().to_path_buf())
+            .collect();
+        self.definition_root_groups = groups.to_vec();
+    }
+
     /// Exact ordered resources registered as `C4GSCnt_DefinitionRoot`,
     /// including folder-local definition roots appended by C++.
     pub fn definition_root_groups(&self) -> &[Group] {

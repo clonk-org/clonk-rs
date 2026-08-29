@@ -1467,15 +1467,7 @@ fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
 }
 
 fn crc32(initial: u32, data: &[u8]) -> u32 {
-    let mut crc = initial ^ u32::MAX;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    crc ^ u32::MAX
+    crate::group_writer::c4group_crc32(initial, data)
 }
 
 fn c_bytes(buf: &[u8]) -> &[u8] {

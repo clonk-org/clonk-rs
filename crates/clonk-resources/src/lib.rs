@@ -29,7 +29,7 @@ pub use font::{
 pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};
 pub use group::{Group, GroupEntry, GroupError};
 pub use group_writer::{
-    c4group_file_crc, compress_c4group_image, MutableGroup, MutableGroupChildMut,
+    c4group_crc32, c4group_file_crc, compress_c4group_image, MutableGroup, MutableGroupChildMut,
     MutableGroupEntryKind, MutableGroupError,
 };
 pub use image_decode::{load_image_from_memory, load_image_from_memory_with_format, open_image};

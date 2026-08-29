@@ -643,6 +643,7 @@ impl GameApp {
         self.poll_startup_irc()?;
         self.poll_classic_direct_reference_query()?;
         self.poll_startup_network_connection()?;
+        self.poll_pending_network_host_preparation()?;
         self.poll_live_masterserver_signup()?;
         self.poll_league_player_auth()?;
         self.process_network_events()?;

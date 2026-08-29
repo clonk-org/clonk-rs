@@ -1842,7 +1842,7 @@ fn command_line_definition_selection_is_published_to_network_clients() {
         .prepare_network_host_scenario(frontend, definition_load)
         .test_value();
     main_assert!(matches!(app.scenario_seed_definition_load(), ScenarioDefinitionLoad::Seed { modules, .. } if modules == ["Objects.c4d"]));
-    main_assert_eq!(staged.scenario.definition_resource_paths() => &[base.clone(), extra_one.clone(), extra_two.clone(), objects.clone(),]);
+    main_assert_eq!(staged.scenario.as_ref().expect("staged scenario").definition_resource_paths() => &[base.clone(), extra_one.clone(), extra_two.clone(), objects.clone(),]);
     let prepared = prepare_staged_network_host(&app, &staged);
     main_assert_eq!(
         published_definition_wire_names(&prepared) =>
@@ -1978,7 +1978,7 @@ fn packed_scenario_alias_is_skipped_as_an_external_definition() {
             },
         )
         .test_value();
-    main_assert_eq!(staged.scenario.definition_resource_paths() => std::slice::from_ref(&scenario_path));
+    main_assert_eq!(staged.scenario.as_ref().expect("staged scenario").definition_resource_paths() => std::slice::from_ref(&scenario_path));
 
     let prepared = prepare_staged_network_host(&app, &staged);
     let snapshot = prepared.host_config().initial_join_snapshot.test_ref();
@@ -2034,7 +2034,7 @@ fn packed_system_alias_becomes_a_repeated_definition_row() {
             },
         )
         .test_value();
-    main_assert_eq!(staged.scenario.definition_resource_paths() => std::slice::from_ref(&system_path));
+    main_assert_eq!(staged.scenario.as_ref().expect("staged scenario").definition_resource_paths() => std::slice::from_ref(&system_path));
 
     let prepared = prepare_staged_network_host(&app, &staged);
     let game_resources = &prepared

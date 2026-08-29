@@ -1275,7 +1275,13 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
         SocketAddr::from(([127, 0, 0, 1], 0)),
     );
     let host_deadline = Instant::now() + Duration::from_secs(30);
-    while host.network.is_none() {
+    while host.startup_network_connection.is_some()
+        || host.pending_network_host_preparation.is_some()
+        || !host
+            .advertised_game_reference
+            .as_ref()
+            .is_some_and(|reference| reference.summary().join_allowed)
+    {
         host.test_update();
         main_assert!(
             Instant::now() < host_deadline,

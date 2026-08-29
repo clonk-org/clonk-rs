@@ -5270,20 +5270,27 @@ impl GameApp {
         scenario: FrontendScenario,
         bind_addr: SocketAddr,
     ) {
-        if self.startup_network_connection.is_some() {
+        if self.startup_network_connection.is_some()
+            || self.pending_network_host_preparation.is_some()
+        {
             self.status_text = "A network connection is already in progress".to_string();
             return;
         }
-        let staged = self.staged_network_host_scenario.as_ref().filter(|staged| {
-            staged.frontend.identifier == scenario.identifier
-                && staged.frontend.path == scenario.path
-        });
-        let Some(staged) = staged else {
+        let Some(mut staged) = self.staged_network_host_scenario.take() else {
             self.status_text =
                 "Unable to prepare network game: staged scenario resources are unavailable"
                     .to_string();
             return;
         };
+        if staged.frontend.identifier != scenario.identifier
+            || staged.frontend.path != scenario.path
+        {
+            self.staged_network_host_scenario = Some(staged);
+            self.status_text =
+                "Unable to prepare network game: staged scenario resources are unavailable"
+                    .to_string();
+            return;
+        }
         let staged_identity = Some((staged.lobby.local_name.as_str(), staged.lobby.nick.as_str()));
         let preparation = match build_network_host_preparation(
             self,
@@ -5296,42 +5303,60 @@ impl GameApp {
         ) {
             Ok(preparation) => preparation,
             Err(error) => {
+                self.staged_network_host_scenario = Some(staged);
                 self.status_text = format!("Unable to prepare network game: {error}");
                 return;
             }
         };
+        let Some(staged_scenario) = staged.scenario.take() else {
+            self.staged_network_host_scenario = Some(staged);
+            self.status_text =
+                "Unable to prepare network game: staged scenario was already claimed".to_string();
+            return;
+        };
+        let preparation = preparation.with_staged_scenario(staged_scenario);
+        let preparing_config = preparation.preparing_host_config();
+        self.staged_network_host_scenario = Some(staged);
         let selected_scenario = Some((scenario.identifier.clone(), scenario.title.clone()));
         self.startup_game_search = None;
         let (sender, receiver) = mpsc::channel();
+        let (preparation_sender, preparation_receiver) = mpsc::channel();
         let local_owner = self.players.local_owner;
         let voice_enabled = self.voice_chat_enabled();
         let spawn = thread::Builder::new()
             .name("lc-prepare-network-host".to_string())
             .spawn(move || {
-                let result = preparation
-                    .prepare()
-                    .map_err(|error| {
-                        NetworkStartError::Other(format!("host preparation failed: {error}"))
-                    })
-                    .and_then(|prepared| {
-                        let mode = NetworkMode::Host(HostSettings {
-                            bind_addr,
-                            player_name: native_bytes_as_legacy_text(
-                                prepared.host_config().local_core.name.as_bytes(),
-                            ),
-                            prepared: Some(prepared),
-                        });
-                        NetworkManager::for_mode_with_voice_enabled(
-                            mode.clone(),
-                            local_owner,
-                            voice_enabled,
-                        )
-                        .map(|manager| (mode, manager))
-                    });
-                let _ = sender.send(result);
+                let player_name =
+                    native_bytes_as_legacy_text(preparing_config.local_core.name.as_bytes());
+                let settings = HostSettings {
+                    bind_addr,
+                    player_name,
+                    prepared: None,
+                };
+                let mode = NetworkMode::Host(settings.clone());
+                let manager = match NetworkManager::for_preparing_host_with_voice_enabled(
+                    settings,
+                    preparing_config,
+                    local_owner,
+                    voice_enabled,
+                ) {
+                    Ok(manager) => manager,
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                };
+                if sender.send(Ok((mode, manager))).is_err() {
+                    return;
+                }
+                let prepared = preparation.prepare().map_err(|error| {
+                    NetworkStartError::Other(format!("host preparation failed: {error}"))
+                });
+                let _ = preparation_sender.send(prepared);
             });
         match spawn {
             Ok(_) => {
+                self.pending_network_host_preparation = Some(preparation_receiver);
                 match self.begin_startup_network_connection(
                     receiver,
                     StartupNetworkPurpose::StagedHost,
@@ -5342,13 +5367,80 @@ impl GameApp {
                         self.status_text = "Preparing network game…".to_string();
                     }
                     Err(error) => {
+                        self.pending_network_host_preparation = None;
                         self.status_text = format!("Unable to start network preparation: {error}");
                     }
                 }
             }
             Err(error) => {
+                self.pending_network_host_preparation = None;
                 self.status_text = format!("Unable to start network preparation: {error}");
             }
+        }
+    }
+
+    /// Replaces the resource-empty preliminary transport with the exact final
+    /// host off-thread, leaving the already-rendered lobby on screen. Rebinding
+    /// preserves the established startup and restart semantics for every host,
+    /// including configured master/league registration.
+    fn begin_prepared_network_host_after_preparation(
+        &mut self,
+        prepared: prepared_host_bootstrap::PreparedHostBootstrap,
+    ) -> Result<(), EngineError> {
+        let bind_addr = match self.network_mode.as_ref() {
+            Some(NetworkMode::Host(settings)) => settings.bind_addr,
+            Some(NetworkMode::Client(_)) | None => {
+                return self.finish_startup_network_failure(
+                    StartupNetworkPurpose::StagedHost,
+                    "Unable to replace the preliminary host transport".to_string(),
+                );
+            }
+        };
+        let selected_scenario = self.staged_network_host_scenario.as_ref().map(|staged| {
+            (
+                staged.frontend.identifier.clone(),
+                staged.frontend.title.clone(),
+            )
+        });
+        let mode = NetworkMode::Host(HostSettings {
+            bind_addr,
+            player_name: native_bytes_as_legacy_text(
+                prepared.host_config().local_core.name.as_bytes(),
+            ),
+            prepared: Some(prepared),
+        });
+        let local_owner = self.players.local_owner;
+        let voice_enabled = self.voice_chat_enabled();
+        self.clear_live_network_session();
+        let (sender, receiver) = mpsc::channel();
+        let spawn = thread::Builder::new()
+            .name("lc-finalize-network-host".to_string())
+            .spawn(move || {
+                let result = NetworkManager::for_mode_with_voice_enabled(
+                    mode.clone(),
+                    local_owner,
+                    voice_enabled,
+                )
+                .map(|manager| (mode, manager));
+                let _ = sender.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                // Deliberately bypass `install_startup_network_connection`:
+                // OpenScenario has already reached DoLobby, so the final
+                // rebind must not put the loader back over that lobby.
+                self.startup_network_connection = Some(StartupNetworkConnection::new(
+                    receiver,
+                    selected_scenario,
+                    StartupNetworkPurpose::StagedHost,
+                ));
+                self.status_text = "Publishing network game…".to_string();
+                Ok(())
+            }
+            Err(error) => self.finish_startup_network_failure(
+                StartupNetworkPurpose::StagedHost,
+                format!("Unable to start prepared network host: {error}"),
+            ),
         }
     }
 
@@ -5417,6 +5509,38 @@ impl GameApp {
             }
         }
         Ok(())
+    }
+
+    /// Finishes exact resource preparation after the closed-admission lobby is
+    /// already rendered. The preliminary transport remains discoverable with
+    /// admission closed while the ordinary fully prepared host replaces it,
+    /// so incomplete JoinData stays unreachable and later round-restart
+    /// semantics remain unchanged.
+    pub(crate) fn poll_pending_network_host_preparation(&mut self) -> Result<(), EngineError> {
+        let result = match self.pending_network_host_preparation.as_ref() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(NetworkStartError::Other(
+                    "host preparation worker disconnected before publishing resources".to_string(),
+                ))),
+            },
+            None => None,
+        };
+        let Some(result) = result else {
+            return Ok(());
+        };
+        self.pending_network_host_preparation = None;
+        let prepared = match result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self.finish_startup_network_failure(
+                    StartupNetworkPurpose::StagedHost,
+                    format!("Unable to prepare network game: {error}"),
+                );
+            }
+        };
+        self.begin_prepared_network_host_after_preparation(prepared)
     }
 
     /// Why this client must not join the advertised game, if it must not.
@@ -5628,6 +5752,109 @@ impl GameApp {
         }
         let config = load_network_advertiser_settings(self.app_paths.as_ref());
         self.start_network_game_advertiser_with_reference(config, reference);
+    }
+
+    /// Publishes the real closed-admission lobby while exact transferable
+    /// standalones are still being materialized. The reference uses only
+    /// OpenScenario data and the already-bound transport; the prepared host
+    /// replaces it atomically before admission opens.
+    pub(crate) fn start_preparing_network_game_advertiser(&mut self, network: &NetworkManager) {
+        let reference = (|| -> Result<clonk_network::HostGameReference> {
+            let staged = self
+                .staged_network_host_scenario
+                .as_ref()
+                .context("the preparing host has no staged scenario")?;
+            let legacy = |value: &str, field: &str| {
+                clonk_resources::encode_legacy_script_text(value)
+                    .and_then(clonk_engine::LegacyCString::from_bytes)
+                    .ok_or_else(|| anyhow!("the preparing host {field} is not legacy text"))
+            };
+            let title = legacy(&staged.frontend.title, "title")?;
+            let scenario_filename = legacy(&staged.frontend.identifier, "scenario filename")?;
+            let host_name = legacy(&staged.lobby.local_name, "name")?;
+            let host_nick = legacy(&staged.lobby.nick, "nick")?;
+            let comment = legacy(&staged.options.comment, "comment")?;
+            let local_core = clonk_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                observer: false,
+                name: host_name.clone(),
+                nick: host_nick.clone(),
+                lobby_ready: false,
+            };
+            let parameters = clonk_network::JoinGameParametersEnvelope {
+                random_seed: 0,
+                startup_player_count: 0,
+                max_players: staged.lobby.max_players,
+                use_fair_crew: staged.lobby.fair_crew,
+                fair_crew_forced: staged.lobby.fair_crew_forced,
+                fair_crew_strength: staged.lobby.fair_crew_strength,
+                allow_debug: true,
+                is_network_game: true,
+                control_rate: 2,
+                auto_frame_skip: true,
+                rules: Vec::new(),
+                goals: Vec::new(),
+                league: clonk_engine::LegacyCString::default(),
+                league_address: clonk_engine::LegacyCString::default(),
+                title,
+                scenario: clonk_engine::NetworkResourceCore {
+                    resource_type: clonk_network::HostResourceType::Scenario as u8,
+                    id: 0,
+                    filename: scenario_filename,
+                    ..Default::default()
+                },
+                game_resources: Vec::new(),
+                player_infos: clonk_network::PlayerInfoListSnapshot::default(),
+                restore_player_infos: clonk_network::PlayerInfoListSnapshot::default(),
+                teams: clonk_network::JoinTeamListSnapshot::default(),
+                clients: clonk_network::JoinClientRegistrySnapshot::new(vec![local_core]),
+            };
+            let (_, addresses) = network.netpuncher_state();
+            let summary = clonk_network::NetworkGameReference {
+                icon: staged.frontend.icon_index.unwrap_or_default(),
+                title: staged.frontend.title.clone(),
+                host_name: staged.lobby.local_name.clone(),
+                host_nick: staged.lobby.nick.clone(),
+                state: "Lobby".to_string(),
+                control_mode: 2,
+                start_time: i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX),
+                comment: staged.options.comment.clone(),
+                join_allowed: false,
+                password_needed: !staged.options.password.is_empty(),
+                use_fair_crew: staged.lobby.fair_crew,
+                max_players: staged.lobby.max_players,
+                game: "LegacyClonk".to_string(),
+                version: clonk_network::CURRENT_GAME_VERSION,
+                build: clonk_network::CURRENT_GAME_BUILD,
+                addresses: addresses.clone(),
+                tcp_addresses: addresses
+                    .iter()
+                    .filter_map(|address| {
+                        (address.protocol == clonk_network::NetworkProtocol::Tcp)
+                            .then_some(address.endpoint)
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let metadata = clonk_network::HostGameReferenceMetadata {
+                icon: summary.icon,
+                comment,
+                addresses,
+                ..Default::default()
+            };
+            clonk_network::HostGameReference::new(summary, metadata, parameters)
+                .map_err(anyhow::Error::new)
+        })();
+        match reference {
+            Ok(reference) => {
+                let config = load_network_advertiser_settings(self.app_paths.as_ref());
+                self.start_network_game_advertiser_with_reference(config, reference);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "preparing network game reference unavailable");
+            }
+        }
     }
 
     pub(crate) fn start_network_game_advertiser_with_reference(
@@ -5902,8 +6129,9 @@ impl GameApp {
                     .is_some_and(|artifact| {
                         artifact.catalog_host.is_none() && artifact.client.is_none()
                     });
-            let use_lobby_preload =
-                host_first_part_preloaded && !scenario_load.retained().uses_map_player_extend();
+            let use_lobby_preload = host_first_part_preloaded
+                && !scenario_load.requires_post_lobby_load()
+                && !scenario_load.retained().uses_map_player_extend();
             let target_tick =
                 i32::try_from(self.local_control_submission_tick()).unwrap_or(i32::MAX);
             let status = clonk_network::NetworkStatus {
@@ -6884,6 +7112,7 @@ impl GameApp {
         let removed_voice = self.voice_chat.clear();
         self.remove_voice_playback(removed_voice);
         self.pending_round_restart_join_data = false;
+        self.pending_network_host_preparation = None;
         if self.network.is_none() {
             return;
         }
@@ -9571,6 +9800,19 @@ impl GameApp {
         let effective_definition_modules = metadata.definitions().effective_modules().to_vec();
         let effective_definition_spellings =
             metadata.definitions().requested_module_spellings().to_vec();
+        let definition_resource_paths = scenario.definition_resource_paths().to_vec();
+        let is_replay = metadata.head().is_replay();
+        let is_save_game = metadata.head().is_save_game();
+        let has_melee_goal = scenario
+            .initial_network_scenario_metadata()
+            .map_err(|error| {
+                classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                    detail: format!("scenario network metadata is unavailable: {error}"),
+                })
+            })?
+            .goals
+            .iter()
+            .any(|entry| matches!(entry.id.as_str(), "MELE" | "MEL2") && entry.count != 0);
         let native_config = load_native_config_bytes(Some(paths));
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(Some(paths), &native_config);
@@ -9590,7 +9832,7 @@ impl GameApp {
                     detail: format!("definition publication freeze failed: {error}"),
                 })
             })?;
-        if metadata.head().is_replay() {
+        if is_replay {
             return Err(classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
                 detail: "network replay selection must be rejected by CanOpen".to_string(),
             }));
@@ -9650,15 +9892,19 @@ impl GameApp {
             fair_crew,
             fair_crew_forced: parameters.fair_crew_forced(),
             fair_crew_strength,
+            is_replay,
+            is_save_game,
+            has_melee_goal,
         };
         Ok(StagedNetworkHostScenario {
             frontend,
             definition_load,
             effective_definition_modules,
             definition_resources,
+            definition_resource_paths,
             definition_executable_path,
             definition_path,
-            scenario,
+            scenario: Some(scenario),
             loader_screen: Some(loader_setup.screen),
             loader_initial_tooltip_font,
             loader_initial_native_font_source: loader_setup.initial_native_font_source,

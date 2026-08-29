@@ -4450,6 +4450,7 @@ pub(crate) fn build_network_host_preparation(
                 .unwrap_or(network_ports.udp),
         },
         league,
+        staged_scenario: None,
     })
 }
 

@@ -6379,7 +6379,13 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
 
     host.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
     let host_deadline = Instant::now() + Duration::from_secs(30);
-    while host.startup_network_connection.is_some() {
+    while host.startup_network_connection.is_some()
+        || host.pending_network_host_preparation.is_some()
+        || !host
+            .advertised_game_reference
+            .as_ref()
+            .is_some_and(|reference| reference.summary().join_allowed)
+    {
         host.test_update();
         main_assert!(
             Instant::now() < host_deadline,
@@ -6580,9 +6586,15 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         }
         main_assert!(
             Instant::now() < timeout,
-            "initial network game join did not fully load the lobby after {elapsed:?}; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}; host status = {:?}; client status = {:?}",
+            "initial network game join did not fully load the lobby after {elapsed:?}; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}; host status = {:?}; client status = {:?}; host preparation pending={}; host signup pending={}; host PlayerInfo={:?}; client PlayerInfo={:?}; host resources={:?}; client resources={:?}",
             host.status_text,
             client.status_text,
+            host.pending_network_host_preparation.is_some(),
+            host.pending_lobby_internet_signup.is_some(),
+            host.control_player_infos.retained_rows_snapshot(),
+            client.control_player_infos.retained_rows_snapshot(),
+            host.admission_resources.present_percent,
+            client.admission_resources.present_percent,
         );
         thread::yield_now();
     }
@@ -6593,6 +6605,221 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         elapsed <= Duration::from_millis(500),
         "initial network game join took {elapsed:?}, exceeding the inclusive 500ms lobby budget; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}"
     );
+}
+
+#[test]
+fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
+    // Native opens the scenario, initializes the host, and enters DoLobby
+    // before the full InitGame load begins (src/C4Game.cpp:422-457,3872-3906).
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let repository = test_repository_root();
+    let content = repository.join("content");
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(&content));
+    configure_test_startup_participant(&paths, user_data.path());
+    let master_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind selected-host masterserver fixture");
+    let master_endpoint = format!("http://{}/", master_listener.local_addr().test_value());
+    let (master_request_tx, master_request_rx) = mpsc::channel();
+    let master_server = thread::spawn(move || {
+        let (mut stream, _) = master_listener
+            .accept()
+            .expect("accept selected-host masterserver Start");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .test_value();
+        let mut request = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 4096];
+            let count = stream.read(&mut chunk).test_value();
+            main_assert_ne!(count => 0, "masterserver request ended before its headers");
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().test_value())
+                })
+            })
+            .test_value();
+        while request.len() < header_end + content_length {
+            let mut chunk = [0_u8; 4096];
+            let count = stream.read(&mut chunk).test_value();
+            main_assert_ne!(count => 0, "masterserver request ended before its body");
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = request[header_end..header_end + content_length].to_vec();
+        let reply = b"[Response]\r\nStatus=Success\r\n";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            reply.len()
+        )
+        .test_value();
+        stream.write_all(reply).test_value();
+        master_request_tx.send((Instant::now(), body)).test_value();
+    });
+    persist_config_value(&paths, "Network", "ServerAddress", master_endpoint).test_value();
+    let tcp_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve selected-host TCP port")
+        .local_addr()
+        .test_value()
+        .port();
+    persist_config_value(&paths, "Network", "PortTCP", tcp_port.to_string()).test_value();
+    persist_config_value(&paths, "Network", "PortUDP", "0").test_value();
+    let reference_port = std::net::TcpListener::bind("[::1]:0")
+        .expect("reserve selected-host reference port")
+        .local_addr()
+        .test_value()
+        .port();
+    persist_config_value(
+        &paths,
+        "Network",
+        "PortRefServer",
+        reference_port.to_string(),
+    )
+    .test_value();
+    persist_config_value(&paths, "Network", "PortDiscovery", "0").test_value();
+    persist_config_value(&paths, "Network", "EnableUPnP", "0").test_value();
+    persist_config_value(&paths, "Network", "LeagueServerSignUp", "0").test_value();
+    persist_config_value(&paths, "General", "Preloading", "0").test_value();
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    main_assert!(app.scenario_game_options.values().master_server_signup);
+    let mut scenario = FrontendScenario::fallback();
+    scenario.identifier = "ClonkMars.c4f/03_Chaos.c4s".to_string();
+    scenario.title = "Chaos".to_string();
+    scenario.path = Some(content.join("ClonkMars.c4f/03_Chaos.c4s"));
+
+    let started = Instant::now();
+    app.stage_network_host_scenario(
+        scenario,
+        ScenarioDefinitionLoad::Seed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root: None,
+        },
+    )
+    .test_value();
+    let staging_elapsed = started.elapsed();
+    let deadline = started + Duration::from_secs(30);
+    let mut lobby_rendered = false;
+    while app.advertised_game_reference.is_none() {
+        app.test_update();
+        if app.classic_host_lobby_active() && !lobby_rendered {
+            let mut frame = vec![0_u8; 640 * 480 * 4];
+            lobby_rendered = app.test_render(&mut frame);
+        }
+        main_assert!(
+            Instant::now() < deadline,
+            "selected host reference did not become queryable: {}",
+            app.status_text
+        );
+        thread::yield_now();
+    }
+    let startup_messages = app
+        .dialogs
+        .messages
+        .iter()
+        .map(|dialog| dialog.state.message().to_string())
+        .collect::<Vec<_>>();
+    main_assert!(
+        app.classic_host_lobby_active(),
+        "status={:?}, startup_messages={startup_messages:?}, view={:?}",
+        app.status_text,
+        app.startup.view,
+    );
+    main_assert!(lobby_rendered, "the queryable lobby must have rendered");
+    let expected_title = app
+        .advertised_game_reference
+        .test_ref()
+        .summary()
+        .title
+        .clone();
+    let advertised = query_first_classic_reference(
+        clonk_network::ReferenceEndpoint::Address(SocketAddr::from((
+            std::net::Ipv6Addr::LOCALHOST,
+            reference_port,
+        ))),
+        &clonk_network::ReferenceQueryConfig::default(),
+    )
+    .test_value();
+    main_assert_eq!(advertised.title => expected_title);
+    main_assert!(
+        !advertised.join_allowed,
+        "resource preparation keeps early discovery closed to admission"
+    );
+    main_assert!(
+        advertised
+            .addresses
+            .iter()
+            .any(|address| address.protocol == clonk_network::NetworkProtocol::Tcp),
+        "an external reference query must return a client-reachable TCP route"
+    );
+    main_assert!(
+        matches!(master_request_rx.try_recv(), Err(TryRecvError::Empty)),
+        "masterserver Start must retain the exact synchronized-response ordering"
+    );
+    let elapsed = started.elapsed();
+    eprintln!(
+        "selected ClonkMars host staged in {staging_elapsed:?} and exposed its reference in {elapsed:?}"
+    );
+    main_assert!(
+        elapsed <= Duration::from_secs(1),
+        "selected ClonkMars host took {elapsed:?}, exceeding the inclusive one-second reference-query budget"
+    );
+
+    while app.startup_network_connection.is_some()
+        || app.pending_network_host_preparation.is_some()
+        || !app
+            .advertised_game_reference
+            .as_ref()
+            .is_some_and(|reference| reference.summary().join_allowed)
+    {
+        app.test_update();
+        main_assert!(
+            Instant::now() < deadline,
+            "selected host did not open admission: {}",
+            app.status_text
+        );
+        thread::yield_now();
+    }
+    let (master_received_at, master_request) = master_request_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the exact prepared host must register with the masterserver");
+    master_server.test_join();
+    main_assert!(
+        master_request
+            .windows(b"Action=Start\r\n".len())
+            .any(|window| window == b"Action=Start\r\n"),
+        "the public request must be a masterserver Start"
+    );
+    main_assert!(
+        master_request
+            .windows(b"JoinAllowed=false\r\n".len())
+            .any(|window| window == b"JoinAllowed=false\r\n"),
+        "masterserver Start precedes the final local admission step"
+    );
+    let master_elapsed = master_received_at.duration_since(started);
+    eprintln!("selected ClonkMars host began public registration in {master_elapsed:?}");
+    let joinable = query_first_classic_reference(
+        clonk_network::ReferenceEndpoint::Address(SocketAddr::from((
+            std::net::Ipv6Addr::LOCALHOST,
+            reference_port,
+        ))),
+        &clonk_network::ReferenceQueryConfig::default(),
+    )
+    .test_value();
+    main_assert!(
+        joinable.join_allowed,
+        "the external reference must open only after exact preparation"
+    );
+    let joinable_elapsed = started.elapsed();
+    eprintln!("selected ClonkMars host opened admission in {joinable_elapsed:?}");
 }
 
 #[test]
@@ -6609,6 +6836,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     persist_config_value(&paths, "Network", "PortUDP", "0").test_value();
     persist_config_value(&paths, "Network", "PortDiscovery", "0").test_value();
     persist_config_value(&paths, "Network", "EnableUPnP", "0").test_value();
+    persist_config_value(&paths, "Network", "MasterServerSignUp", "0").test_value();
     // The enabled async path has its own preload-reuse regression; this test
     // isolates host preparation and admission ordering.
     persist_config_value(&paths, "General", "Preloading", "0").test_value();
@@ -6629,7 +6857,10 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     app.staged_network_host_scenario = Some(staged);
 
     app.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
-    main_assert!(app.network.is_none(), "preparation must precede bind");
+    main_assert!(
+        app.network.is_none(),
+        "the preliminary host handoff must stay asynchronous"
+    );
     main_assert!(app.startup_network_connection.is_some());
     // OpenScenario publishes 4 before InitNetworkHost begins, so the
     // loader installed around host preparation must retain that value
@@ -6638,13 +6869,51 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
 
     for _ in 0..3_000 {
         app.poll_startup_network_connection().test_value();
-        if app.network.is_some() && app.network_control_clock.is_some() {
+        if app.network.is_some() {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 
     main_assert!(app.network.is_some(), "{}", app.status_text);
+    let NetworkMode::Host(preparing) = some(&app.network_mode) else {
+        panic!("selected network scenario must install a host");
+    };
+    main_assert!(preparing.prepared.is_none());
+    main_assert!(app.pending_network_host_preparation.is_some());
+    main_assert!(app.host_join_snapshot.is_none());
+    main_assert!(
+        app.advertised_game_reference
+            .as_ref()
+            .is_some_and(|reference| !reference.summary().join_allowed),
+        "the preparing host reference must be externally queryable without opening admission"
+    );
+    for _ in 0..3_000 {
+        app.test_update();
+        if app.pending_network_host_preparation.is_none()
+            && app.startup_network_connection.is_none()
+            && matches!(
+                app.network_mode.as_ref(),
+                Some(NetworkMode::Host(HostSettings {
+                    prepared: Some(_),
+                    ..
+                }))
+            )
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    main_assert!(
+        app.pending_network_host_preparation.is_none(),
+        "prepared host resources did not finish: {}",
+        app.status_text
+    );
+    main_assert!(
+        app.startup_network_connection.is_none(),
+        "final prepared host did not replace the preliminary transport: {}",
+        app.status_text
+    );
     let NetworkMode::Host(settings) = some(&app.network_mode) else {
         panic!("prepared network selection must install a host");
     };
@@ -7619,7 +7888,10 @@ fn configured_automatic_lobby_preload_runs_off_thread_and_activation_reuses_it()
     app.network_mode = None;
     app.classic_host_lobby = None;
     let staged = app.staged_network_host_scenario.take().test_value();
-    app.activate_loaded_scenario(staged.frontend, &staged.scenario)
+    app.activate_loaded_scenario(
+        staged.frontend,
+        staged.scenario.as_ref().expect("staged scenario"),
+    )
         .test_value();
     main_assert!(Arc::ptr_eq(
         &expected_hud,

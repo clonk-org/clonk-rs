@@ -2929,6 +2929,7 @@ impl GameApp {
             control_messages,
             league_votes: LeagueVoteState::default(),
             startup_network_connection: None,
+            pending_network_host_preparation: None,
             classic_direct_reference_query: None,
             pending_network_join: None,
             staged_network_host_scenario: None,
