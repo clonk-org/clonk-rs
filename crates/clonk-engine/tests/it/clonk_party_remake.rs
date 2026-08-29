@@ -2,7 +2,8 @@ use crate::support::{join_player_config, real_scenario::load_installed_scenario,
 use clonk_engine::JoinPlayerOutcome;
 use clonk_script::Value;
 
-const CLONK_PARTY_REMAKE: &str = "Collection.c4f/Fun.c4f/ClonkPartyRemake8.c4s";
+const CLONK_PARTY_REMAKE: &str =
+    "Collection.c4f/Fun.c4f/ClonkPartyRemake8-clonk-rs-localized.c4s";
 
 /// Clonk Party replaces every lobby crew while loading the chosen section,
 /// then creates and positions one minigame crew per player in `NextGameCom`
