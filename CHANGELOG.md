@@ -4,6 +4,12 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.2] - 2026-08-29
+
+### Bug fixes
+
+- Preserve section transition ordering (#1396)
+
 ## [0.21.1] - 2026-08-28
 
 ### Bug fixes
