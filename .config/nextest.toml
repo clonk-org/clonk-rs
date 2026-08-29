@@ -46,6 +46,13 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 filter = 'package(clonk-app) and test(initial_network_game_join_fully_loads_the_client_lobby_within_500ms)'
 threads-required = 12
 
+# This is the selector-to-lobby wall-clock contract over real ClonkMars
+# resources. Run it alone inside nextest so unrelated scenario decompression
+# cannot spend the one-second product budget on the selection's behalf.
+[[profile.default.overrides]]
+filter = 'package(clonk-app) and test(selected_clonkmars_host_reaches_rendered_lobby_within_one_second)'
+threads-required = 24
+
 [[profile.default.overrides]]
 filter = 'package(clonk-network) and test(control_sync_and_reconnect_smoke)'
 retries = 2

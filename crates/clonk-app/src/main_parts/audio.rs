@@ -5722,9 +5722,14 @@ pub(crate) struct StagedNetworkHostScenario {
     pub(crate) definition_load: ScenarioDefinitionLoad,
     pub(crate) effective_definition_modules: Vec<String>,
     pub(crate) definition_resources: Vec<clonk_network::HostInitialResourceSource>,
+    /// Exact definition paths seen by the staged Scenario. Lobby preloading
+    /// keeps this projection after host preparation claims the Scenario.
+    pub(crate) definition_resource_paths: Vec<PathBuf>,
     pub(crate) definition_executable_path: String,
     pub(crate) definition_path: String,
-    pub(crate) scenario: Scenario,
+    /// The OpenScenario-equivalent load. Host preparation takes this value;
+    /// the immutable lobby projection below remains available afterward.
+    pub(crate) scenario: Option<Scenario>,
     /// The exact scenario loader selected before the host socket is opened.
     /// It is moved into `GameApp::loader_screen` while the worker starts and
     /// remains the transparent lobby's backdrop.
@@ -5764,6 +5769,9 @@ pub(crate) struct ClassicHostLobbyProjection {
     pub(crate) fair_crew: bool,
     pub(crate) fair_crew_forced: bool,
     pub(crate) fair_crew_strength: i32,
+    pub(crate) is_replay: bool,
+    pub(crate) is_save_game: bool,
+    pub(crate) has_melee_goal: bool,
 }
 
 /// C4GameParameters' pre-game fair-crew resolution shared by local startup

@@ -1397,14 +1397,14 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
             .replacen("[Head]\n", "[Head]\nReplay=1\n", 1);
     fs::write(&core_path, core).test_value();
     let resolver = InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
-    staged.scenario = load_scenario_with_definition_load(
+    staged.scenario = Some(load_scenario_with_definition_load(
         &scenario_path,
         &resolver,
         &startup_language_sequence(Some(&paths)),
         &staged.definition_load,
     )
-    .test_value();
-    main_assert!(staged.scenario.lobby_metadata().expect("reloaded lobby metadata").head().is_replay());
+    .test_value());
+    main_assert!(staged.scenario.as_ref().expect("reloaded staged scenario").lobby_metadata().expect("reloaded lobby metadata").head().is_replay());
     app.staged_network_host_scenario = Some(staged);
     app.network_mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),

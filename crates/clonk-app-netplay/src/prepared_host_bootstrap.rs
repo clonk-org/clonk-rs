@@ -1361,6 +1361,18 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     spec: PreparedHostBootstrapSpec<'_>,
     team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
 ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
+    prepare_host_bootstrap_with_staged_scenario_and_team_assignment_oracle(
+        spec,
+        None,
+        team_assignment_oracle,
+    )
+}
+
+pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_oracle(
+    spec: PreparedHostBootstrapSpec<'_>,
+    staged_scenario: Option<Scenario>,
+    team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
+) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
     validate_inputs(&spec)?;
     let scenario_group = open_group_path(spec.scenario_path).map_err(|source| {
         PrepareHostBootstrapError::ScenarioGroup {
@@ -1394,15 +1406,17 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         spec.definition_resources,
         spec.selector_definition_root.is_some(),
     );
-    let mut scenario =
-        Scenario::load_from_group_with_languages_and_definition_selection_and_prefix(
+    let mut scenario = match staged_scenario {
+        Some(scenario) => scenario,
+        None => Scenario::load_from_group_with_languages_and_definition_selection_and_prefix(
             &scenario_group,
             &definition_resolver,
             spec.languages,
             spec.initial_definition_modules,
             spec.fixed_definition_modules,
             spec.selector_definition_root,
-        )?;
+        )?,
+    };
     let lobby_metadata = scenario
         .lobby_metadata()
         .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)?;

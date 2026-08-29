@@ -1807,6 +1807,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
         loader_screen,
         ..
     } = staged;
+    let scenario = scenario.test_value();
     success.loader_screen = loader_screen;
     let refreshed = make_resources(&success, [0x11, 0x22, 0x33, 0xff]);
     let expected_progress = refreshed.progress_bar().test_value().pixels().to_vec();
@@ -1849,6 +1850,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
         loader_screen,
         ..
     } = staged;
+    let scenario = scenario.test_value();
     failure.loader_screen = loader_screen;
     let refreshed = make_resources(&failure, [0x44, 0x55, 0x66, 0xff]);
     let (sender, receiver) = mpsc::channel();

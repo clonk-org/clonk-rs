@@ -3244,6 +3244,7 @@ enum NetworkCommand {
 enum WorkerMode {
     Host {
         settings: HostSettings,
+        initial_config: Option<HostConfig>,
         local_owner: i32,
         voice_enabled: bool,
     },
@@ -3260,6 +3261,7 @@ impl WorkerMode {
         match mode {
             NetworkMode::Host(settings) => Self::Host {
                 settings,
+                initial_config: None,
                 local_owner,
                 voice_enabled,
             },
@@ -3414,6 +3416,24 @@ impl NetworkManager {
         voice_enabled: bool,
     ) -> std::result::Result<Self, NetworkStartError> {
         Self::spawn(WorkerMode::for_mode(mode, local_owner, voice_enabled))
+    }
+
+    /// Opens a configured host transport with admission closed while the
+    /// selected scenario's exact resource standalones are still being built.
+    /// The app replaces this unadvertised transport with an ordinary prepared
+    /// host once publication completes; no peer can observe incomplete data.
+    pub fn for_preparing_host_with_voice_enabled(
+        settings: HostSettings,
+        initial_config: HostConfig,
+        local_owner: i32,
+        voice_enabled: bool,
+    ) -> std::result::Result<Self, NetworkStartError> {
+        Self::spawn(WorkerMode::Host {
+            settings,
+            initial_config: Some(initial_config),
+            local_owner,
+            voice_enabled,
+        })
     }
 
     pub fn for_client_cancellable(
@@ -6204,11 +6224,13 @@ async fn run_worker(
     match mode {
         WorkerMode::Host {
             settings,
+            initial_config,
             local_owner,
             voice_enabled,
         } => {
             run_host_worker_with_voice_enabled(
                 settings,
+                initial_config,
                 local_owner,
                 voice_enabled,
                 &mut command_rx,
@@ -6263,6 +6285,7 @@ async fn run_host_worker(
 ) -> Result<()> {
     run_host_worker_with_voice_enabled(
         settings,
+        None,
         local_owner,
         true,
         command_rx,
@@ -6279,6 +6302,7 @@ async fn run_host_worker(
 #[allow(clippy::too_many_arguments)]
 async fn run_host_worker_with_voice_enabled(
     settings: HostSettings,
+    initial_config: Option<HostConfig>,
     local_owner: i32,
     voice_enabled: bool,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
@@ -6293,6 +6317,7 @@ async fn run_host_worker_with_voice_enabled(
         clonk_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
             .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
     let mut prepared = settings.prepared.clone();
+    let has_initial_config = initial_config.is_some();
     let mut host_config = match prepared.as_ref() {
         Some(prepared) => match prepared.claim_host_config() {
             Ok(config) => config,
@@ -6302,7 +6327,7 @@ async fn run_host_worker_with_voice_enabled(
                 return Err(anyhow!(message));
             }
         },
-        None => HostConfig {
+        None => initial_config.unwrap_or_else(|| HostConfig {
             backlog_limit: 256,
             max_players: 8,
             resync_interval: Duration::from_millis(200),
@@ -6324,12 +6349,14 @@ async fn run_host_worker_with_voice_enabled(
             initial_join_snapshot: None,
             resource_directory: Some(PathBuf::from("Network")),
             ..HostConfig::default()
-        },
+        }),
     };
     host_config.voice_enabled = voice_enabled;
     let is_prepared = settings.prepared.is_some();
-    let tcp_bind_address =
-        (!is_prepared || host_config.configured_tcp_port != Some(0)).then_some(settings.bind_addr);
+    let has_configured_transport = is_prepared || has_initial_config;
+    let tcp_bind_address = (!has_configured_transport
+        || host_config.configured_tcp_port != Some(0))
+    .then_some(settings.bind_addr);
     let (listener, bound_addr, tcp_bind_error) = match tcp_bind_address {
         Some(bind_address) => match TcpListener::bind(bind_address).await {
             Ok(listener) => match listener.local_addr() {
@@ -6350,13 +6377,13 @@ async fn run_host_worker_with_voice_enabled(
         },
         None => (None, None, None),
     };
-    if is_prepared {
+    if has_configured_transport {
         // Production supplies the configured TCP port. A nonzero prepared
         // port may still be deliberately overridden with an ephemeral
         // HostSettings address by tests and embedders.
         host_config.configured_tcp_port = Some(bound_addr.map_or(0, |address| address.port()));
     }
-    let udp_port = if is_prepared {
+    let udp_port = if has_configured_transport {
         host_config.configured_udp_port.unwrap_or_else(|| {
             bound_addr.map_or(settings.bind_addr.port(), |address| address.port())
         })

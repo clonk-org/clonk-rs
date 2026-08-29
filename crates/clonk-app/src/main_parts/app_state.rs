@@ -939,6 +939,11 @@ pub(crate) struct GameApp {
     pub(crate) control_messages: ControlMessageState,
     pub(crate) league_votes: LeagueVoteState,
     pub(crate) startup_network_connection: Option<StartupNetworkConnection>,
+    /// Exact resource publication which continues after a host has entered its
+    /// closed-admission lobby. Once complete, the ordinary final host startup
+    /// path replaces the unadvertised preliminary transport.
+    pub(crate) pending_network_host_preparation:
+        Option<Receiver<PendingNetworkHostPreparationResult>>,
     pub(crate) classic_direct_reference_query: Option<ClassicDirectReferenceQuery>,
     /// Frozen C++-ordered address attempts retained across password prompts.
     pub(crate) pending_network_join: Option<ClientSettings>,
@@ -1437,6 +1442,9 @@ pub(crate) struct RecordingSession {
 
 pub(crate) type StartupNetworkResult =
     std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>;
+
+pub(crate) type PendingNetworkHostPreparationResult =
+    std::result::Result<PreparedHostBootstrap, NetworkStartError>;
 
 pub(crate) struct StartupNetworkAttempt {
     cancellation: NetworkStartupCancellation,

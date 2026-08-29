@@ -156,7 +156,9 @@ impl GameApp {
     }
 
     pub(crate) fn startup_network_transition_active(&self) -> bool {
-        self.mode != AppMode::Running && self.startup_network_connection.is_some()
+        self.mode != AppMode::Running
+            && (self.startup_network_connection.is_some()
+                || self.pending_network_host_preparation.is_some())
     }
 
     fn startup_network_join_progress_active(&self) -> bool {
@@ -2368,6 +2370,7 @@ impl GameApp {
         self.classic_host_lobby = None;
         self.network_lobby = None;
         self.network_start_wait = None;
+        self.pending_network_host_preparation = None;
         self.staged_network_host_scenario = None;
         self.network_lobby_min_players = None;
         self.reinitialize_startup_loader_screen();
@@ -5109,6 +5112,7 @@ impl GameApp {
         self.definition_selector_pointer_capture = false;
         self.clear_pending_league_player_auth();
         self.startup_network_connection = None;
+        self.pending_network_host_preparation = None;
         self.startup_game_search = None;
         self.startup_network_last_refresh = None;
         self.startup_masterserver_next_query_at = None;

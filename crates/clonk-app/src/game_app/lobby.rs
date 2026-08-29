@@ -490,8 +490,15 @@ impl GameApp {
         let replay = self
             .staged_network_host_scenario
             .as_ref()
-            .and_then(|staged| staged.scenario.lobby_metadata())
-            .is_some_and(|metadata| metadata.head().is_replay());
+            .is_some_and(|staged| {
+                staged
+                    .scenario
+                    .as_ref()
+                    .and_then(Scenario::lobby_metadata)
+                    .map_or(staged.lobby.is_replay, |metadata| {
+                        metadata.head().is_replay()
+                    })
+            });
         let (_, retained) = self.control_player_infos.retained_rows_snapshot();
         let retained_players = retained
             .iter()
@@ -4456,29 +4463,15 @@ impl GameApp {
         let melee = if teams_custom {
             false
         } else {
-            let scenario = self
-                .staged_network_host_scenario
+            self.staged_network_host_scenario
                 .as_ref()
-                .map(|staged| &staged.scenario)
                 .ok_or_else(|| {
                     classic_game_lobby_model_engine_error(
                         "league start validation has no retained staged scenario",
                     )
-                })?;
-            let metadata = scenario
-                .initial_network_scenario_metadata()
-                .map_err(|error| {
-                    classic_game_lobby_model_engine_error(format!(
-                        "league start validation cannot read scenario goals: {error}"
-                    ))
-                })?;
-            ["MELE", "MEL2"].into_iter().any(|wanted| {
-                metadata
-                    .goals
-                    .iter()
-                    .find(|entry| entry.id == wanted)
-                    .is_some_and(|entry| entry.count != 0)
-            })
+                })?
+                .lobby
+                .has_melee_goal
         };
         let fallback = "Players %s and %s would be playing against each other in split-screen. This is disallowed in league games!";
         let template = self.runtime_resource_text("IDS_MSG_NOSPLITSCREENINLEAGUE", fallback);
@@ -4727,8 +4720,7 @@ impl GameApp {
                 .clone()
                 .ok_or_else(|| "staged host scenario has no filesystem path".to_string())?;
             let definition_paths = staged
-                .scenario
-                .definition_resource_paths()
+                .definition_resource_paths
                 .iter()
                 .map(|path| path_as_legacy_text(path))
                 .collect::<Vec<_>>();
@@ -5126,8 +5118,7 @@ impl GameApp {
                 .as_ref()
                 .is_some_and(|staged| {
                     let definition_paths = staged
-                        .scenario
-                        .definition_resource_paths()
+                        .definition_resource_paths
                         .iter()
                         .map(|path| path_as_legacy_text(path))
                         .collect::<Vec<_>>();
@@ -5294,11 +5285,15 @@ impl GameApp {
     }
 
     fn classic_lobby_authoritative_has_unassociated_savegame_players(&self) -> Option<bool> {
-        let save_game = self
-            .staged_network_host_scenario
-            .as_ref()
-            .and_then(|staged| staged.scenario.lobby_metadata())
-            .map(|metadata| metadata.head().is_save_game());
+        let save_game = self.staged_network_host_scenario.as_ref().map(|staged| {
+            staged
+                .scenario
+                .as_ref()
+                .and_then(Scenario::lobby_metadata)
+                .map_or(staged.lobby.is_save_game, |metadata| {
+                    metadata.head().is_save_game()
+                })
+        });
         if save_game == Some(false) {
             return Some(false);
         }
