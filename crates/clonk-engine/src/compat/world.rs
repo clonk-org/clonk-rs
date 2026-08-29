@@ -2188,6 +2188,11 @@ pub struct HostWorldContext {
     /// Scenario-section group names available to `LoadScenarioSection`,
     /// normalized to ASCII lowercase like C++'s `SEqualNoCase` lookup.
     scenario_sections: Rc<HashSet<String>>,
+    /// Prepared target landscape extents keyed like `scenario_sections`.
+    /// `LoadScenarioSection` is synchronous in C++, so later host calls in
+    /// the same VM invocation must already read the target dimensions.
+    scenario_section_landscape_extents: Rc<HashMap<String, Option<(i32, i32)>>>,
+    scenario_section_landscape_extent: Option<(i32, i32)>,
     /// C4SolidMask pixels not already baked into the landscape plane.
     /// Grid worlds bake MCVehic directly; column fixtures retain the same
     /// overlay used by movement/contact checks.
@@ -2481,6 +2486,8 @@ impl Default for HostWorldContext {
             landscape: OnceCell::new(),
             scenario_values: Rc::new(ScenarioValueStore::default()),
             scenario_sections: Rc::new(HashSet::new()),
+            scenario_section_landscape_extents: Rc::new(HashMap::new()),
+            scenario_section_landscape_extent: None,
             movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -2935,6 +2942,8 @@ impl HostWorldContext {
             landscape: OnceCell::from(landscape.map(Arc::new)),
             scenario_values,
             scenario_sections: Rc::new(HashSet::new()),
+            scenario_section_landscape_extents: Rc::new(HashMap::new()),
+            scenario_section_landscape_extent: None,
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -4767,6 +4776,29 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_scenario_section_landscape_extents<I, S>(mut self, sections: I) -> Self
+    where
+        I: IntoIterator<Item = (S, Option<(i32, i32)>)>,
+        S: AsRef<str>,
+    {
+        self.scenario_section_landscape_extents = Rc::new(
+            sections
+                .into_iter()
+                .map(|(name, extent)| (name.as_ref().to_ascii_lowercase(), extent))
+                .collect(),
+        );
+        self
+    }
+
+    pub(crate) fn preview_scenario_section_landscape(&mut self, name: &str) {
+        if let Some(extent) = self
+            .scenario_section_landscape_extents
+            .get(name.to_ascii_lowercase().as_str())
+        {
+            self.scenario_section_landscape_extent = *extent;
+        }
+    }
+
     pub(crate) fn scenario_section_known(&self, name: &str) -> bool {
         self.scenario_sections
             .contains(name.to_ascii_lowercase().as_str())
@@ -5038,6 +5070,9 @@ impl HostWorldContext {
     /// The landscape extent, preferring any answer that avoids materializing
     /// the callback-local landscape shell.
     fn landscape_dimensions(&self) -> Option<(i32, i32)> {
+        if let Some(extent) = self.scenario_section_landscape_extent {
+            return Some(extent);
+        }
         // An already-materialized landscape stays authoritative: a host API
         // may have mutated this context's private copy, and reading it back
         // cannot force a second clone.
@@ -5047,6 +5082,10 @@ impl HostWorldContext {
         self.lazy_world
             .and_then(LazyHostWorldProvider::landscape_dimensions)
             .or_else(|| self.landscape_ref().map(landscape_extent))
+    }
+
+    pub(crate) fn current_landscape_dimensions(&self) -> Option<(i32, i32)> {
+        self.landscape_dimensions()
     }
 
     /// Preserve the callback-entry sector lists before applying one of C++'s
@@ -5940,10 +5979,11 @@ pub(crate) fn load_scenario_section(args: &[Value]) -> Result<Value, RuntimeErro
             })
             .collect();
         context.record_player_command(PlayerCommand::LoadScenarioSection {
-            name,
+            name: name.clone(),
             flags,
             preserve_ids,
         });
+        context.preview_scenario_section_load(&name);
         Ok(Value::Int(1))
     })
 }

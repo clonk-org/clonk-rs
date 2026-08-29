@@ -28,19 +28,43 @@ impl LegacyDefinitionResolver for RawContentResolver {
 impl LegacyDefinitionResolver for ContentResolver {
     fn resolve_definition_groups(
         &self,
-        _scenario: &Group,
+        scenario: &Group,
         identifier: &str,
     ) -> Result<Vec<Group>, ScenarioError> {
         let relative = identifier.replace('\\', "/");
-        self.roots
+        if let Some(group) = self
+            .roots
             .iter()
             .map(|root| root.join(&relative))
             .find(|candidate| candidate.exists())
             .map(Group::open)
             .transpose()
             .map_err(ScenarioError::Resources)?
-            .map(|group| vec![group])
-            .ok_or_else(|| ScenarioError::LegacyDefinitionNotFound { path: relative })
+        {
+            return Ok(vec![group]);
+        }
+
+        // An explicit definition name that misses the installed roots falls
+        // through to the folders enclosing the scenario. C++ appends every
+        // `.c4f` parent as an NRT_Definitions source (C4Game.cpp:210-213,
+        // 3961-3994); the app resolver and scenario sweep use the same order.
+        let mut current = scenario.root().parent();
+        while let Some(folder) = current {
+            if self.roots.iter().any(|root| folder == root) {
+                break;
+            }
+            if self.roots.iter().any(|root| folder.starts_with(root)) {
+                let candidate = folder.join(&relative);
+                if candidate.exists() {
+                    return Group::open(candidate)
+                        .map(|group| vec![group])
+                        .map_err(ScenarioError::Resources);
+                }
+            }
+            current = folder.parent();
+        }
+
+        Err(ScenarioError::LegacyDefinitionNotFound { path: relative })
     }
 
     /// C4GameParameters::Load publishes every registered parent folder's

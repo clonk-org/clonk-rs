@@ -407,8 +407,8 @@ pub(crate) fn landscape_width(_args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(Value::Int(
             cell.borrow()
                 .as_ref()
-                .and_then(|context| context.landscape_ref())
-                .map(|landscape| landscape.width() as i32)
+                .and_then(|context| context.landscape_dimensions())
+                .map(|(width, _)| width)
                 .unwrap_or(0),
         ))
     })
@@ -420,8 +420,8 @@ pub(crate) fn landscape_height(_args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(Value::Int(
             cell.borrow()
                 .as_ref()
-                .and_then(|context| context.landscape_ref())
-                .map(|landscape| landscape.estimated_height())
+                .and_then(|context| context.landscape_dimensions())
+                .map(|(_, height)| height)
                 .unwrap_or(0),
         ))
     })

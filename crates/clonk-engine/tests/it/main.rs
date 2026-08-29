@@ -47,6 +47,7 @@ shard_modules!(
     activate_entrance_native,
     burning_clonk_fire_particles,
     catapult_payload_launch,
+    clonk_party_remake,
     column_landscape_reachability,
     component_natives,
     component_order,
