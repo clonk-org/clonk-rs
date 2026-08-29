@@ -1181,6 +1181,16 @@ pub fn c4group_file_crc(data: &[u8]) -> u32 {
     crc32(0, data)
 }
 
+/// zlib-compatible CRC-32 update, accelerated by the same library used for
+/// C4Group compression and preserving chained-update semantics.
+pub fn c4group_crc32(initial: u32, data: &[u8]) -> u32 {
+    data.chunks(u32::MAX as usize).fold(initial, |crc, chunk| {
+        // SAFETY: `chunk` remains live for the call and zlib reads exactly its
+        // represented `uInt` length. The return value is the updated CRC only.
+        unsafe { libz_sys::crc32(crc.into(), chunk.as_ptr(), chunk.len() as _) as u32 }
+    })
+}
+
 /// Computes the CRC C4Group writes for a regular entry after reading it back
 /// from disk. Empty files are the one exception: their entry CRC is always
 /// zero and does not include the filename.
@@ -1213,18 +1223,7 @@ fn imported_file_entry_crc(data: &[u8], name: &[u8], crc_state: u8, stored_crc: 
 }
 
 fn crc32(initial: u32, data: &[u8]) -> u32 {
-    let mut crc = initial ^ u32::MAX;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ 0xedb8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    crc ^ u32::MAX
+    c4group_crc32(initial, data)
 }
 
 fn unix_time_now() -> u32 {
@@ -1245,6 +1244,16 @@ fn entry_time_or_now(time: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accelerated_crc_preserves_cpp_chained_update_semantics() {
+        // C4Group_GetFileCRC starts at zero and chains zlib crc32 over every
+        // file chunk (src/C4Group.cpp:429-469).
+        let first = c4group_crc32(0, b"1234");
+
+        assert_eq!(c4group_crc32(first, b"56789"), 0xcbf4_3926);
+        assert_eq!(c4group_crc32(first, b""), first);
+    }
 
     #[test]
     fn packed_entry_borrows_unchanged_payload_until_final_image_copy() {

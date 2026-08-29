@@ -941,7 +941,7 @@ pub(crate) struct GameApp {
     pub(crate) startup_network_connection: Option<StartupNetworkConnection>,
     /// Exact resource publication which continues after a host has entered its
     /// closed-admission lobby. Once complete, the ordinary final host startup
-    /// path replaces the unadvertised preliminary transport.
+    /// path replaces the discoverable, closed-admission preliminary transport.
     pub(crate) pending_network_host_preparation:
         Option<Receiver<PendingNetworkHostPreparationResult>>,
     pub(crate) classic_direct_reference_query: Option<ClassicDirectReferenceQuery>,

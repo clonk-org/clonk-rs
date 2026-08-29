@@ -402,6 +402,12 @@ impl PreparedHostScenarioLoad {
         self.retained
     }
 
+    /// Whether gameplay still needs the exact frozen network-resource load.
+    /// A host lobby graphics preload does not perform this engine load.
+    pub fn requires_post_lobby_load(&self) -> bool {
+        self.loader.is_some()
+    }
+
     pub fn load_with_progress<F>(
         self,
         random_seed: u64,
@@ -1767,11 +1773,8 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         .collect();
     let temporary_files = PreparedTemporaryFiles::new(temporary_files);
     // C++'s pre-publication OpenScenario only establishes metadata and probes
-    // the definition groups. InitDefs/InitMaterialTexture run after every
-    // AddByFile/SetNetRes row is final and after Parameters.RandomSeed is
-    // frozen. Rebuild unconditionally from those exact rows, even when no
-    // cross-type reuse occurred, so the host and clients consume identical
-    // bytes and random landscape seed.
+    // the definition groups. Retain the exact published rows for post-lobby
+    // InitDefs/InitMaterialTexture after Parameters.RandomSeed is frozen.
     let definition_groups =
         published_game_resource_groups(&publication, HostResourceType::Definitions)?;
     let material_resource_groups =
@@ -1781,23 +1784,11 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         &published_scenario_group,
         &definition_groups,
     )?;
-    let random_seed = u64::from(publication.join_snapshot.parameters.random_seed as u32);
-    scenario = Scenario::load_network_from_group_with_languages_and_seed_and_packs(
-        &published_scenario_group,
-        &definition_groups,
-        &material_resource_groups,
-        &graphics_groups,
-        spec.languages,
-        random_seed,
-        spec.language_packs,
-    )?;
-    if retry_generated_landscape_seed && scenario.generated_landscape_requires_seed_retry() {
-        return Err(
-            PrepareHostBootstrapError::PublishedGeneratedLandscapeInvalid {
-                random_seed: random_seed as u32,
-            },
-        );
-    }
+    // SetNetRes can collapse a selected definition onto the scenario row or
+    // repeat a System/Material row as a definition. Reflect those final rows
+    // in the retained OpenScenario projection without running InitDefs,
+    // scripts, materials and landscape before the lobby.
+    scenario.rebind_network_definition_resource_projection(&definition_groups);
     // Retain the exact post-publication loader through the lobby. C++ runs
     // the shared InitGame phases only after DoLobby unless a lobby preload
     // completed them first (src/C4Game.cpp:438-457,2004-2042).
@@ -1811,6 +1802,23 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         reload_generated_landscape_for_league_start: !is_save_game
             && scenario.generated_landscape_seed_retry_applies(),
     });
+    // Savegames and fresh generated-landscape retries are the pre-lobby
+    // exceptions. A save must retain its serialized landscape; a retry has
+    // already changed synchronized Parameters and must reproduce that accepted
+    // map. Ordinary scenarios stay at OpenScenario until GO, matching native
+    // DoLobby ordering and avoiding a full InitGame load on admission.
+    if is_save_game || retry_generated_landscape_seed {
+        let random_seed = publication.join_snapshot.parameters.random_seed as u32;
+        scenario = league_generated_landscape_loader
+            .as_ref()
+            .expect("the post-publication loader was just installed")
+            .load(random_seed)?;
+        if retry_generated_landscape_seed && scenario.generated_landscape_requires_seed_retry() {
+            return Err(
+                PrepareHostBootstrapError::PublishedGeneratedLandscapeInvalid { random_seed },
+            );
+        }
+    }
     let mut published_index = 0;
     let published_local_players = local_players
         .iter()

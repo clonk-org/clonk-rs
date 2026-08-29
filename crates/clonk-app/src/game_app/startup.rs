@@ -2820,6 +2820,11 @@ impl GameApp {
                                 }) => {
                                     self.start_prepared_network_game_advertiser(prepared, &manager)
                                 }
+                                NetworkMode::Host(_)
+                                    if self.pending_network_host_preparation.is_some() =>
+                                {
+                                    self.start_preparing_network_game_advertiser(&manager)
+                                }
                                 NetworkMode::Host(_) | NetworkMode::Client(_) => {
                                     self.network_game_advertiser = None;
                                     self.advertised_game_reference = None;

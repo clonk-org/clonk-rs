@@ -3420,8 +3420,9 @@ impl NetworkManager {
 
     /// Opens a configured host transport with admission closed while the
     /// selected scenario's exact resource standalones are still being built.
-    /// The app replaces this unadvertised transport with an ordinary prepared
-    /// host once publication completes; no peer can observe incomplete data.
+    /// The app advertises this transport as discoverable but closed to joins,
+    /// then replaces it with an ordinary prepared host once publication
+    /// completes; no peer can request incomplete data.
     pub fn for_preparing_host_with_voice_enabled(
         settings: HostSettings,
         initial_config: HostConfig,
