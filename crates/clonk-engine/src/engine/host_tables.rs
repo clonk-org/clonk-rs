@@ -830,6 +830,17 @@ impl Engine {
                 .values()
                 .map(|section| section.name.as_str()),
         )
+        .with_scenario_section_landscape_extents(self.scenario_section_state.sections.values().map(
+            |section| {
+                (
+                    section.name.as_str(),
+                    section
+                        .landscape
+                        .as_ref()
+                        .map(crate::compat::landscape_extent),
+                )
+            },
+        ))
         .with_teams(Rc::clone(&self.team_state.teams))
         .with_team_runtime_options(self.team_state.team_configuration, self.league_game)
         .with_game_tick_delay(

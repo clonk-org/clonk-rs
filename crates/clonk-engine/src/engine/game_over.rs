@@ -448,6 +448,21 @@ impl Engine {
             script_counter,
         } = batch;
 
+        // Host-created objects already consumed their explicit numbers while
+        // the script was running. Reserve them before a deferred player
+        // command such as LoadScenarioSection can synchronously create
+        // objects of its own during callbackful teardown.
+        let max_explicit_id = spawns
+            .iter()
+            .filter_map(|spawn| spawn.id)
+            .map(|id| id.as_u64())
+            .max();
+        if let Some(max_id) = max_explicit_id {
+            if max_id >= self.next_object_id {
+                self.next_object_id = max_id + 1;
+            }
+        }
+
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
@@ -491,54 +506,15 @@ impl Engine {
             }
         }
 
-        // Pre-scan spawns to find maximum explicit ID and reserve ID space
-        // This prevents conflicts between auto-assigned IDs (from earlier objects like crew)
-        // and explicit IDs (from scenario Objects.txt)
-        let max_explicit_id = spawns
-            .iter()
-            .filter_map(|spawn| spawn.id)
-            .map(|id| id.as_u64())
-            .max();
-
-        if let Some(max_id) = max_explicit_id {
-            // Reserve ID space: ensure next_object_id is beyond all explicit IDs
-            if max_id >= self.next_object_id {
-                self.next_object_id = max_id + 1;
-            }
-        }
-
-        let mut created = Vec::with_capacity(spawns.len());
-        // C4Object::Enter binds two objects that already exist, because
-        // FnCreateObject hands back a live C4Object (C4Object.cpp:1560-1620;
-        // C4Script.cpp FnCreateObject). One scenario-script call may therefore
-        // create its content before the container it enters, as Eke Reloaded's
-        // CaptureTheFlag InitializeClonk does. Materialize in creation order
-        // and hold such a link until the queued container exists, exactly like
-        // process_spawn_queue.
-        let mut pending: VecDeque<SpawnConfig> = spawns.into_iter().collect();
-        let mut deferred_enters: Vec<(ObjectId, ObjectId)> = Vec::new();
-        while let Some(mut spawn) = pending.pop_front() {
-            if let (Some(object_id), Some(container)) = (spawn.id, spawn.container) {
-                if self.find_object_index(container).is_none()
-                    && pending.iter().any(|queued| queued.id == Some(container))
-                {
-                    spawn.container = None;
-                    deferred_enters.push((object_id, container));
-                }
-            }
-            match self.spawn_object(spawn) {
-                Ok(id) => created.push(id),
-                // CreateObject resolves the id with C4Id2Def and yields
-                // nullptr for unknown definitions — never an error
-                // (Drachenfels' Initialize creates `_EAI` before its def
-                // loads). Mirrors the process_spawn_queue tolerance.
-                Err(EngineError::UnknownDefinition(definition)) => {
-                    tracing::warn!(%definition, "scenario spawn names an unknown definition; skipped");
-                }
-                Err(error) => return Err(error),
-            }
-            self.apply_materialized_deferred_enters(&mut deferred_enters)?;
-        }
+        // One script callback creates one live object batch. Materialize the
+        // complete batch before pruning crew pointers or checking game over:
+        // SetCrewRosters may already name a later deferred spawn, exactly as
+        // C++ can because every CreateObject is live before the callback
+        // returns (C4Game.cpp:1102-1142).
+        let created =
+            self.process_spawn_queue_with_outcomes_inner(spawns, Vec::new(), VecDeque::new())?;
+        self.refresh_elimination_state();
+        self.check_game_over()?;
         // Transfer zones fold AFTER the spawns: C4Game::NewObject adds the
         // object to Game.Objects BEFORE its creation callbacks fire
         // (C4Game.cpp:1115-1131), so a SetTransferZone recorded during the

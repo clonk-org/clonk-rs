@@ -7222,6 +7222,39 @@ impl EffectHostContext {
         self.world.landscape_ref()
     }
 
+    pub(crate) fn landscape_dimensions(&self) -> Option<(i32, i32)> {
+        self.world.current_landscape_dimensions()
+    }
+
+    /// Preview the two section results a suspended script can consume here:
+    /// target dimensions and active-crew removal. Native clears each removed
+    /// object from `C4Player::Crew` before returning from the host call
+    /// (C4Game.cpp:4190-4231; C4Player.cpp:57-63). The authoritative command
+    /// performs the full callbackful transition after this copied context
+    /// returns.
+    pub(crate) fn preview_scenario_section_load(&mut self, name: &str) {
+        self.world.preview_scenario_section_landscape(name);
+        for player_id in self.player_ids().to_vec() {
+            let retained = self
+                .player_state(player_id)
+                .map(|player| {
+                    player
+                        .crew
+                        .iter()
+                        .copied()
+                        .filter(|crew| {
+                            self.get_world_object(*crew)
+                                .is_some_and(|object| object.status() == ObjectStatus::Inactive)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if let Some(player) = self.player_state_mut(player_id) {
+                player.crew = retained;
+            }
+        }
+    }
+
     pub(crate) fn runtime_texmap(&self) -> Option<&crate::landscape::RuntimeTexMapState> {
         self.runtime_texmap
             .get_or_init(|| {
