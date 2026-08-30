@@ -2155,6 +2155,40 @@ fn atomic_go_worker_failure_is_reported_before_lobby_teardown() {
 }
 
 #[test]
+fn prepared_host_rebind_leaves_the_classic_lobby_presentable() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    let prepared = prepare_staged_network_host(&app, &staged);
+    app.staged_network_host_scenario = Some(staged);
+    app.network_mode = Some(NetworkMode::Host(
+        lobby_fixture!(host: 0, "Exact Host".to_string(), None),
+    ));
+    install_test_classic_host_lobby(&mut app);
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Ok(prepared)).test_value();
+    app.pending_network_host_preparation = Some(receiver);
+
+    app.poll_pending_network_host_preparation().test_value();
+
+    main_assert!(app.startup_network_connection.is_some());
+    main_assert!(app.pending_network_host_preparation.is_none());
+    // DoLobby has already drawn C4GameLobby::MainDlg, and the transport swap
+    // behind it has no classic presentation: a retained status would reach
+    // the generic-status boundary and terminate rendering the next frame.
+    main_assert!(
+        app.status_text.is_empty(),
+        "prepared host rebind left a generic status over the lobby: {}",
+        app.status_text
+    );
+    app.preflight_startup_presentation().test_value();
+}
+
+#[test]
 fn classic_ready_packets_update_roster_and_start_when_relevant_clients_are_ready() {
     let mut app = new_menu_app(640, 480);
     let (events, mut commands) = install_classic_host_network_stub(&mut app);
