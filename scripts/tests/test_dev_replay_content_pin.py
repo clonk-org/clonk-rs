@@ -14,6 +14,16 @@ This check fails the bump instead. It is deliberately platform-independent and
 cheap: it compares a recorded pin against the submodule gitlink and never runs
 a replay, so it belongs in the landing gate where the real check cannot go.
 
+Re-record on macOS. Directory order is a property of the recording host, not
+of the content, so the three hosts disagree: for `tutorial01-idle.json` at
+content `ab9094f9`, macOS produces `79d4ca59bf4af7d4` and a Linux box produces
+`d2cff76cc8044f0e`. Only the macOS job asserts these values, so goldens
+re-recorded anywhere else strand it exactly as a stale pin would --
+clonk-org/clonk-rs#1406 bumped content, re-recorded off-host, and reddened the
+release qualification it was meant to keep green. A bump that leaves material
+order untouched needs no new hashes at all; check the content diff for
+`Material.c4g` before recording anything.
+
 `compat/profile.json` protects its own content claims the same way, via
 `pinned.content_commit`.
 """
@@ -56,8 +66,9 @@ class DevReplayContentPinTest(unittest.TestCase):
             "goldens. Material indices follow the unpacked content's directory "
             "order, so the committed checkpoints in testdata/dev-replays are "
             "now stale and the macOS material-order job will go red after this "
-            "lands. Re-record them and update "
-            "testdata/dev-replays/content-pin.txt in the same change.",
+            "lands. Re-record them on macOS -- that job is the only one that "
+            "asserts them, and the hashes follow the recording host -- and "
+            "update testdata/dev-replays/content-pin.txt in the same change.",
         )
 
 

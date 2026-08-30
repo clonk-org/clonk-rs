@@ -1187,7 +1187,7 @@ pub fn c4group_crc32(initial: u32, data: &[u8]) -> u32 {
     data.chunks(u32::MAX as usize).fold(initial, |crc, chunk| {
         // SAFETY: `chunk` remains live for the call and zlib reads exactly its
         // represented `uInt` length. The return value is the updated CRC only.
-        unsafe { libz_sys::crc32(crc.into(), chunk.as_ptr(), chunk.len() as _) as u32 }
+        unsafe { libz_sys::crc32(crc as _, chunk.as_ptr(), chunk.len() as _) as u32 }
     })
 }
 
