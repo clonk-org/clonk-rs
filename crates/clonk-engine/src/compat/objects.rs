@@ -4632,34 +4632,41 @@ fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> 
     None
 }
 
+/// C4Game::FindObject's closest arm (C4Game.cpp:1343-1344,1357-1362,
+/// 1400-1411,1418-1420). `pFindNext` only supplies `iFartherThan` here — it
+/// does not skip the scan the way the ranged arms do — and the walk over
+/// equidistant objects is what `pFindNextCpy` resolves: once master order has
+/// passed the find-next object, the first object at exactly that distance is
+/// returned outright, while before it only strictly farther objects
+/// accumulate. Skipping every tie instead ends the walk early
+/// (clonk-org/clonk-rs#1422).
 fn find_object_closest(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
-    let reference = params.reference_distance(world);
+    // `iFartherThan` defaults to -1, below every squared distance, so a search
+    // without a find-next object takes the plain closest arm untouched.
+    let farther_than = params.reference_distance(world).unwrap_or(-1);
+    let mut find_next_pending = params.find_next;
     let mut best: Option<(ObjectId, i64)> = None;
     for object_id in world.master_object_ids() {
-        if params.excludes_id(object_id) {
-            continue;
-        }
-        if !world
-            .matches_legacy_find_object_candidate(object_id, params)
-            .unwrap_or(false)
+        if !params.excludes_id(object_id)
+            && world
+                .matches_legacy_find_object_candidate(object_id, params)
+                .unwrap_or(false)
         {
-            continue;
-        }
-        let Some(object) = world.get_object(object_id) else {
-            continue;
-        };
-        let distance = squared_distance(object.position(), params.x, params.y);
-        if let Some(reference) = reference {
-            if distance <= reference {
-                continue;
+            if let Some(object) = world.get_object(object_id) {
+                let distance = squared_distance(object.position(), params.x, params.y);
+                if distance == farther_than && find_next_pending.is_none() {
+                    return Some(object_id);
+                }
+                if distance > farther_than && best.is_none_or(|(_, closest)| distance < closest) {
+                    best = Some((object_id, distance));
+                }
             }
         }
-        match best {
-            None => best = Some((object_id, distance)),
-            Some((_, best_distance)) if distance < best_distance => {
-                best = Some((object_id, distance));
-            }
-            _ => {}
+        // The find-next mark is reached by master order alone, outside the
+        // candidate filters: an object that no longer matches the query still
+        // releases the tie.
+        if find_next_pending == Some(object_id) {
+            find_next_pending = None;
         }
     }
     best.map(|(id, _)| id)

@@ -560,6 +560,73 @@
     }
 
     #[test]
+    fn find_object_closest_walk_returns_equidistant_objects_in_master_order() {
+        // C4Game::FindObject's closest arm (C4Game.cpp:1343-1344,1357-1362,
+        // 1400-1411,1418-1420): pFindNext only supplies iFartherThan, it does
+        // not skip the scan. Once master order has passed pFindNextCpy, the
+        // first object at exactly that distance is returned outright; before
+        // it, only strictly farther objects accumulate. Skipping ties instead
+        // ends the walk early, which costs the spell selector its targets
+        // (MagiClonk.c4d/Selector.c4d/Script.c FindTargets).
+        let dir = test_tempdir();
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize() {\n\
+                 var p = CreateObject(GOOD, 100, 100, -1);\n\
+                 var a = CreateObject(GOOD, 90, 100, -1);\n\
+                 var b = CreateObject(GOOD, 110, 100, -1);\n\
+                 var far = CreateObject(GOOD, 100, 180, -1);\n\
+                 p->Probe(a, b, far);\n\
+                 return 1;\n\
+             }\n",
+        );
+        write_test_file(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\n\
+             local iFirst; local iSecond; local iThird; local iFourth;\n\
+             public func Probe(pA, pB, pFar) {\n\
+                 var first = FindObject(GOOD, 0, 0, -1, -1);\n\
+                 if (first == pA) iFirst = 1;\n\
+                 var second = FindObject(GOOD, 0, 0, -1, -1, 0, 0, 0, 0, first);\n\
+                 if (second == pB) iSecond = 1;\n\
+                 var third = FindObject(GOOD, 0, 0, -1, -1, 0, 0, 0, 0, second);\n\
+                 if (third == pFar) iThird = 1;\n\
+                 if (!FindObject(GOOD, 0, 0, -1, -1, 0, 0, 0, 0, third)) iFourth = 1;\n\
+             }\n",
+        );
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine.snapshot();
+        let prober = snapshot
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "GOOD")
+            .min_by_key(|object| object.id).test_value();
+        let flag = |name: &str| prober.local_vars.get(name).cloned();
+        assert_eq!(
+            flag("iFirst"),
+            Some(clonk_script::Value::Int(1)),
+            "an unbounded closest search takes the first master-order minimum"
+        );
+        assert_eq!(
+            flag("iSecond"),
+            Some(clonk_script::Value::Int(1)),
+            "the equidistant object after pFindNextCpy is returned outright"
+        );
+        assert_eq!(
+            flag("iThird"),
+            Some(clonk_script::Value::Int(1)),
+            "the walk then resumes with the next strictly farther object"
+        );
+        assert_eq!(
+            flag("iFourth"),
+            Some(clonk_script::Value::Int(1)),
+            "the walk ends once nothing is farther than the last result"
+        );
+    }
+
+    #[test]
     fn find_object_uses_the_cpp_argument_layout_and_caller_context() {
         // FnFindObject (C4Script.cpp:2113-2135): parameters are (id, x, y,
         // wdt, hgt, dwOCF, szAction, pActionTarget, vContainer, pFindNext).
