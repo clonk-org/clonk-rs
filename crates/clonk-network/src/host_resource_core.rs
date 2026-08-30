@@ -183,8 +183,17 @@ pub enum HostResourceCoreError {
 /// Builds the core and identifies the exact standalone bytes a host publishes.
 pub fn build_host_resource_core(
     source_path: impl AsRef<Path>,
-    _standalone_directory: impl AsRef<Path>,
+    standalone_directory: impl AsRef<Path>,
     spec: HostResourceCoreSpec,
+) -> Result<HostResourcePublication, HostResourceCoreError> {
+    build_host_resource_core_with_prepared_directory(source_path, standalone_directory, spec, None)
+}
+
+pub(crate) fn build_host_resource_core_with_prepared_directory(
+    source_path: impl AsRef<Path>,
+    standalone_directory: impl AsRef<Path>,
+    spec: HostResourceCoreSpec,
+    prepared_directory: Option<PreparedDirectoryStandalone>,
 ) -> Result<HostResourcePublication, HostResourceCoreError> {
     let source_path = source_path.as_ref().to_path_buf();
     let metadata = fs::metadata(&source_path)?;
@@ -193,23 +202,35 @@ pub fn build_host_resource_core(
         .as_ref()
         .map(|name| name.as_bytes().to_vec())
         .unwrap_or_else(|| clonk_resources::path_to_legacy_bytes(&source_path));
-    let group = Group::open(&source_path).ok();
+    debug_assert!(prepared_directory.is_none() || metadata.is_dir());
+    let group = prepared_directory
+        .is_none()
+        .then(|| Group::open(&source_path).ok())
+        .flatten();
     if spec.resource_type == HostResourceType::Player && group.is_none() {
         return Err(HostResourceCoreError::PlayerGroupRequired(source_path));
     }
-    let (contents_crc, author) = match group.as_ref() {
-        Some(group) => {
-            let maker = if group.is_directory() {
-                b"Open directory".as_slice()
-            } else {
-                group.maker_bytes().unwrap_or_default()
-            };
-            let author = LegacyCString::from_bytes(maker.to_vec())
-                .ok_or(HostResourceCoreError::InvalidGroupMaker)?;
-            let contents_crc = group.contents_crc_or_zero();
-            (contents_crc, author)
+    let (contents_crc, author) = if let Some(prepared) = prepared_directory.as_ref() {
+        (
+            prepared.contents_crc,
+            LegacyCString::from_bytes(b"Open directory".to_vec())
+                .expect("the native directory maker contains no NUL"),
+        )
+    } else {
+        match group.as_ref() {
+            Some(group) => {
+                let maker = if group.is_directory() {
+                    b"Open directory".as_slice()
+                } else {
+                    group.maker_bytes().unwrap_or_default()
+                };
+                let author = LegacyCString::from_bytes(maker.to_vec())
+                    .ok_or(HostResourceCoreError::InvalidGroupMaker)?;
+                let contents_crc = group.contents_crc_or_zero();
+                (contents_crc, author)
+            }
+            None => (file_crc(&source_path)?, LegacyCString::default()),
         }
-        None => (file_crc(&source_path)?, LegacyCString::default()),
     };
 
     let mut core = NetworkResourceCore {
@@ -239,12 +260,17 @@ pub fn build_host_resource_core(
     }
 
     if spec.resource_type == HostResourceType::Definitions && metadata.is_dir() {
-        match directory_size_exceeds(&source_path, u64::from(spec.max_load_file_size)) {
+        let exceeds = prepared_directory.as_ref().map_or_else(
+            || directory_size_exceeds(&source_path, u64::from(spec.max_load_file_size)),
+            |prepared| Ok(prepared.source_size > u64::from(spec.max_load_file_size)),
+        );
+        match exceeds {
             Ok(true) | Err(_) => return Ok(unloadable_publication(core, source_path)),
             Ok(false) => {}
         }
     }
 
+    let mut prepared_directory = prepared_directory;
     let standalone = (|| -> Result<_, HostResourceCoreError> {
         if !metadata.is_dir() {
             if spec.resource_type == HostResourceType::Player
@@ -252,20 +278,28 @@ pub fn build_host_resource_core(
             {
                 // OptimizeStandalone never edits a persistent player in place.
                 let path = write_standalone(
-                    _standalone_directory.as_ref(),
+                    standalone_directory.as_ref(),
                     &standalone_name,
                     &fs::read(&source_path)?,
                 )?;
-                return Ok((path, ResourceFileOwnership::Temporary, true));
+                return Ok((path, ResourceFileOwnership::Temporary, true, None));
             }
-            return Ok((source_path.clone(), spec.source_ownership, false));
+            return Ok((source_path.clone(), spec.source_ownership, false, None));
         }
         if spec.source_ownership == ResourceFileOwnership::Temporary
             && spec.resource_type != HostResourceType::Player
         {
             return Err(HostResourceCoreError::TemporaryDirectoryUnsupported);
         }
-        let packed = pack_directory_standalone(&source_path, spec.group_maker.as_bytes())?;
+        let packed = prepared_directory
+            .take()
+            .and_then(|prepared| prepared.packed)
+            .map_or_else(
+                || pack_directory_standalone(&source_path, spec.group_maker.as_bytes()),
+                Ok,
+            )?;
+        let prepared_physical = (spec.resource_type != HostResourceType::Player)
+            .then(|| (packed.len() as u64, crc32(0, &packed)));
         let path = if spec.source_ownership == ResourceFileOwnership::Temporary {
             // A temporary directory is destructively packed in place before
             // OptimizeStandalone, just like C4Group_PackDirectory.
@@ -273,23 +307,32 @@ pub fn build_host_resource_core(
             source_path.clone()
         } else {
             write_standalone(
-                _standalone_directory.as_ref(),
+                standalone_directory.as_ref(),
                 &standalone_name,
                 packed.as_slice(),
             )?
         };
         let created = spec.source_ownership != ResourceFileOwnership::Temporary;
-        Ok((path, ResourceFileOwnership::Temporary, created))
+        Ok((
+            path,
+            ResourceFileOwnership::Temporary,
+            created,
+            prepared_physical,
+        ))
     })();
-    let (standalone_path, standalone_ownership, standalone_created) = match standalone {
-        Ok(standalone) => standalone,
-        Err(_) if spec.resource_type == HostResourceType::Definitions => {
-            return Ok(unloadable_publication(core, source_path));
-        }
-        Err(error) => return Err(error),
-    };
+    let (standalone_path, standalone_ownership, standalone_created, prepared_physical) =
+        match standalone {
+            Ok(standalone) => standalone,
+            Err(_) if spec.resource_type == HostResourceType::Definitions => {
+                return Ok(unloadable_publication(core, source_path));
+            }
+            Err(error) => return Err(error),
+        };
 
     let finalized = (|| -> Result<(u64, u32), HostResourceCoreError> {
+        if let Some(physical) = prepared_physical {
+            return Ok(physical);
+        }
         if spec.resource_type == HostResourceType::Player {
             optimize_player_standalone(&standalone_path, spec.group_maker.as_bytes())?;
         }
@@ -570,6 +613,54 @@ fn directory_size_exceeds(path: &Path, limit: u64) -> Result<bool, io::Error> {
     Ok(false)
 }
 
+#[derive(Debug)]
+pub(crate) struct PreparedDirectoryStandalone {
+    pub(crate) contents_crc: u32,
+    pub(crate) source_size: u64,
+    pub(crate) packed: Option<Vec<u8>>,
+}
+
+pub(crate) fn prepare_directory_standalone(
+    path: &Path,
+    group_maker: &[u8],
+    max_source_size: Option<u64>,
+) -> Result<PreparedDirectoryStandalone, HostResourceCoreError> {
+    let filename = path
+        .file_name()
+        .map(|filename| clonk_resources::path_to_legacy_bytes(Path::new(filename)))
+        .ok_or_else(|| HostResourceCoreError::NonUtf8EntryName(path.to_path_buf()))?;
+    let snapshot = mutable_directory_snapshot(path, filename, group_maker)?;
+    let contents_crc = snapshot.group.contents_crc();
+    let source_size = snapshot.source_size;
+    let packed = if max_source_size.is_some_and(|limit| source_size > limit) {
+        None
+    } else {
+        Some(snapshot.group.pack()?)
+    };
+    Ok(PreparedDirectoryStandalone {
+        contents_crc,
+        source_size,
+        packed,
+    })
+}
+
+fn directory_size(path: &Path) -> Result<u64, io::Error> {
+    let mut total = 0_u64;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let metadata = fs::metadata(entry.path())?;
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
 pub(crate) fn pack_directory_standalone(
     path: &Path,
     group_maker: &[u8],
@@ -588,7 +679,21 @@ fn mutable_directory(
     filename: Vec<u8>,
     group_maker: &[u8],
 ) -> Result<MutableGroup, HostResourceCoreError> {
+    Ok(mutable_directory_snapshot(path, filename, group_maker)?.group)
+}
+
+struct MutableDirectorySnapshot {
+    group: MutableGroup,
+    source_size: u64,
+}
+
+fn mutable_directory_snapshot(
+    path: &Path,
+    filename: Vec<u8>,
+    group_maker: &[u8],
+) -> Result<MutableDirectorySnapshot, HostResourceCoreError> {
     let mut group = MutableGroup::new_bytes(filename);
+    let mut source_size = 0_u64;
     if !group_maker.is_empty() {
         group.set_maker_bytes(group_maker);
     }
@@ -596,16 +701,25 @@ fn mutable_directory(
         let entry = entry?;
         let entry_path = entry.path();
         let name = clonk_resources::path_to_legacy_bytes(Path::new(&entry.file_name()));
+        let metadata = fs::metadata(&entry_path)?;
         if ignored_group_entry(&name) {
+            source_size = source_size.saturating_add(if metadata.is_dir() {
+                directory_size(&entry_path)?
+            } else if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            });
             continue;
         }
-        let metadata = fs::metadata(&entry_path)?;
         if metadata.is_dir() {
-            let child = mutable_directory(&entry_path, name.clone(), group_maker)?;
+            let child = mutable_directory_snapshot(&entry_path, name.clone(), group_maker)?;
+            source_size = source_size.saturating_add(child.source_size);
             // PackDirectoryTo first creates the child group as a temporary
             // file, so the parent entry gets that newly-created file's time.
-            group.add_child_bytes(name, child)?;
+            group.add_child_bytes(name, child.group)?;
         } else if metadata.is_file() {
+            source_size = source_size.saturating_add(metadata.len());
             let timestamp = entry_timestamp(&metadata);
             let executable = entry_is_executable(&entry_path);
             if let Ok(child) = Group::open(&entry_path) {
@@ -626,7 +740,7 @@ fn mutable_directory(
             )?;
         }
     }
-    Ok(group)
+    Ok(MutableDirectorySnapshot { group, source_size })
 }
 
 fn ignored_group_entry(name: &[u8]) -> bool {
@@ -835,7 +949,42 @@ fn crc32(initial: u32, data: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{network_temp_basename, network_temp_candidate};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::Ordering;
+
+    use clonk_engine::LegacyCString;
+    use clonk_resources::Group;
+
+    use super::{
+        build_host_resource_core_with_prepared_directory, network_temp_basename,
+        network_temp_candidate, pack_directory_standalone, prepare_directory_standalone,
+        HostResourceCoreSpec, HostResourceType, NEXT_STAGED_PATH,
+    };
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new() -> Self {
+            let unique = NEXT_STAGED_PATH.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "clonk-host-resource-snapshot-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("create host-resource snapshot fixture");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn cpp_temp_names_sanitize_before_splitting_and_retain_extensionless_tail() {
@@ -846,5 +995,75 @@ mod tests {
         assert_eq!(network_temp_basename(b"Defs/Objects.c4d"), b"Objects.c4d");
         assert_eq!(network_temp_candidate(b"Objects.c4d", 2), b"Objects_2.c4d");
         assert_eq!(network_temp_candidate(b"plain", 2), b"plai_2n");
+    }
+
+    #[test]
+    fn directory_snapshot_reuses_exact_contents_for_size_crc_and_packing() {
+        // SetByFile calculates the directory contents CRC before GetStandalone
+        // packs that same group (src/C4Network2Res.cpp:1397-1468).
+        let directory = TempDirectory::new();
+        fs::write(directory.path().join("Alpha.txt"), b"alpha")
+            .expect("write top-level snapshot entry");
+        let child = directory.path().join("Child.c4d");
+        fs::create_dir(&child).expect("create child group");
+        fs::write(child.join("Beta.txt"), b"beta").expect("write child snapshot entry");
+
+        let expected_contents_crc = Group::open(directory.path())
+            .expect("open fixture directory")
+            .contents_crc_or_zero();
+        let prepared = prepare_directory_standalone(directory.path(), b"Host", None)
+            .expect("prepare directory snapshot");
+        let expected_packed = pack_directory_standalone(directory.path(), b"Host")
+            .expect("pack fixture through the existing path");
+
+        assert_eq!(prepared.contents_crc, expected_contents_crc);
+        assert_eq!(prepared.source_size, 9);
+        assert_eq!(prepared.packed.as_deref(), Some(expected_packed.as_slice()));
+    }
+
+    #[test]
+    fn prepared_directory_build_does_not_reread_snapshot_entries() {
+        // GetStandalone publishes the group image whose core was calculated by
+        // SetByFile (src/C4Network2Res.cpp:1397-1468).
+        let directory = TempDirectory::new();
+        let source = directory.path().join("Definitions.c4d");
+        fs::create_dir(&source).expect("create definition directory");
+        fs::write(source.join("DefCore.txt"), b"[DefCore]\nid=TEST")
+            .expect("write definition snapshot entry");
+        let prepared = prepare_directory_standalone(&source, b"Host", None)
+            .expect("prepare definition snapshot");
+        let expected_contents_crc = prepared.contents_crc;
+        let expected_packed = prepared
+            .packed
+            .as_ref()
+            .expect("the definition stays loadable")
+            .clone();
+        fs::remove_file(source.join("DefCore.txt"))
+            .expect("remove source entry after preparing its snapshot");
+        let published = TempDirectory::new();
+
+        let publication = build_host_resource_core_with_prepared_directory(
+            &source,
+            published.path(),
+            HostResourceCoreSpec::new(
+                HostResourceType::Definitions,
+                7,
+                LegacyCString::from_bytes(b"Definitions.c4d".to_vec())
+                    .expect("valid resource name"),
+                "Host",
+            ),
+            Some(prepared),
+        )
+        .expect("publish the prepared definition snapshot");
+        let standalone = fs::read(
+            publication
+                .standalone_path
+                .as_deref()
+                .expect("directory publication has a standalone"),
+        )
+        .expect("read published standalone");
+
+        assert_eq!(publication.core.contents_crc, expected_contents_crc);
+        assert_eq!(standalone, expected_packed);
     }
 }

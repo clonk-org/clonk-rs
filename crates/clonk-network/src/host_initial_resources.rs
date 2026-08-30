@@ -8,13 +8,18 @@ use std::path::{Path, PathBuf};
 use clonk_engine::{LegacyCString, NetworkResourceCore};
 use thiserror::Error;
 
+use crate::host_resource_core::{
+    build_host_resource_core_with_prepared_directory, prepare_directory_standalone,
+    PreparedDirectoryStandalone,
+};
 use crate::{
-    build_host_resource_core, HostConfig, HostJoinSnapshot, HostResourceCoreError,
-    HostResourceCoreSpec, HostResourcePublication, HostResourceType, HostedResourceFile,
-    InitialNetworkDynamic, JoinGameParametersEnvelope, ResourceFileOwnership, ResourceRegistration,
+    HostConfig, HostJoinSnapshot, HostResourceCoreError, HostResourceCoreSpec,
+    HostResourcePublication, HostResourceType, HostedResourceFile, InitialNetworkDynamic,
+    JoinGameParametersEnvelope, ResourceFileOwnership, ResourceRegistration,
 };
 
 const MAX_TEMP_SUFFIX: u32 = 999;
+const MAX_DIRECTORY_PREPARATION_WORKERS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostInitialResourceSource {
@@ -121,23 +126,47 @@ pub fn publish_host_initial_resources(
 
     let mut publications = SourcePublications::with_capacity(expected_count);
 
-    let scenario_core =
-        publications.publish_or_reuse(&spec.scenario, HostResourceType::Scenario, &spec)?;
+    let scenario_prepared =
+        prepare_source_directory(&spec.scenario, spec.group_maker.as_bytes(), None);
+    let scenario_core = publications.publish_or_reuse(
+        &spec.scenario,
+        HostResourceType::Scenario,
+        &spec,
+        scenario_prepared,
+    )?;
 
     let mut game_resources =
         Vec::with_capacity(spec.definitions.len() + 1_usize.saturating_add(spec.materials.len()));
-    for definition in &spec.definitions {
-        let core =
-            publications.publish_or_reuse(definition, HostResourceType::Definitions, &spec)?;
-        game_resources.push(core);
-    }
+    prepare_bounded_in_order(
+        &spec.definitions,
+        MAX_DIRECTORY_PREPARATION_WORKERS,
+        |definition| {
+            prepare_source_directory(
+                definition,
+                spec.group_maker.as_bytes(),
+                Some(u64::from(spec.max_load_file_size)),
+            )
+        },
+        |definition, prepared| {
+            let core = publications.publish_or_reuse(
+                definition,
+                HostResourceType::Definitions,
+                &spec,
+                prepared,
+            )?;
+            game_resources.push(core);
+            Ok::<(), HostInitialResourcePublicationError>(())
+        },
+    )?;
 
     let system_core =
-        publications.publish_or_reuse(&spec.system, HostResourceType::System, &spec)?;
+        publications.publish_or_reuse(&spec.system, HostResourceType::System, &spec, None)?;
     game_resources.push(system_core);
 
     for material in &spec.materials {
-        let core = publications.publish_or_reuse(material, HostResourceType::Material, &spec)?;
+        let prepared = prepare_source_directory(material, spec.group_maker.as_bytes(), None);
+        let core =
+            publications.publish_or_reuse(material, HostResourceType::Material, &spec, prepared)?;
         game_resources.push(core);
     }
 
@@ -161,6 +190,7 @@ pub fn publish_host_initial_resources(
         publications.next_id,
         &spec,
         &mut publications.temporary_files,
+        None,
     )?;
     validate_dynamic_metadata(&spec.dynamic, &dynamic.core)?;
     let dynamic_retained_name =
@@ -180,7 +210,7 @@ pub fn publish_host_initial_resources(
     let mut player_resource_sources = Vec::with_capacity(spec.players.len());
     for player in &spec.players {
         let temporary_checkpoint = publications.temporary_files.checkpoint();
-        match publications.publish_or_reuse(player, HostResourceType::Player, &spec) {
+        match publications.publish_or_reuse(player, HostResourceType::Player, &spec, None) {
             Ok(core) => {
                 player_resource_sources.push((player.path.clone(), core.clone()));
                 player_cores.push(core);
@@ -231,12 +261,24 @@ fn resolved_dynamic_wire_name(template: &LegacyCString, path: &Path) -> LegacyCS
         .expect("a LegacyCString prefix and sanitized basename contain no NUL")
 }
 
+fn prepare_source_directory(
+    source: &HostInitialResourceSource,
+    group_maker: &[u8],
+    max_source_size: Option<u64>,
+) -> Option<PreparedDirectoryStandalone> {
+    (source.virtual_group_bytes.is_none()
+        && fs::metadata(&source.path).is_ok_and(|metadata| metadata.is_dir()))
+    .then(|| prepare_directory_standalone(&source.path, group_maker, max_source_size))
+    .and_then(Result::ok)
+}
+
 fn publish_source(
     source: &HostInitialResourceSource,
     resource_type: HostResourceType,
     resource_id: i32,
     spec: &HostInitialResourcePublicationSpec,
     temporary_files: &mut TemporaryFiles,
+    prepared_directory: Option<PreparedDirectoryStandalone>,
 ) -> Result<HostResourcePublication, HostInitialResourcePublicationError> {
     let (source_path, source_ownership) = if let Some(bytes) = source.virtual_group_bytes.as_deref()
     {
@@ -263,14 +305,17 @@ fn publish_source(
     if resource_type == HostResourceType::Definitions {
         core_spec = core_spec.with_max_load_file_size(spec.max_load_file_size);
     }
-    let mut publication =
-        build_host_resource_core(&source_path, &spec.network_directory, core_spec).map_err(
-            |error| HostInitialResourcePublicationError::ResourceCore {
-                resource_type,
-                path: source.path.clone(),
-                source: error,
-            },
-        )?;
+    let mut publication = build_host_resource_core_with_prepared_directory(
+        &source_path,
+        &spec.network_directory,
+        core_spec,
+        prepared_directory,
+    )
+    .map_err(|error| HostInitialResourcePublicationError::ResourceCore {
+        resource_type,
+        path: source.path.clone(),
+        source: error,
+    })?;
     if source_ownership == ResourceFileOwnership::Temporary && publication.standalone_path.is_none()
     {
         publication.standalone_path = Some(publication.source_path.clone());
@@ -321,6 +366,7 @@ impl SourcePublications {
         source: &HostInitialResourceSource,
         resource_type: HostResourceType,
         spec: &HostInitialResourcePublicationSpec,
+        prepared_directory: Option<PreparedDirectoryStandalone>,
     ) -> Result<NetworkResourceCore, HostInitialResourcePublicationError> {
         // AddByFile searches the incoming source filename against the name
         // retained after each earlier group open. That comparison is
@@ -341,6 +387,7 @@ impl SourcePublications {
             resource_id,
             spec,
             &mut self.temporary_files,
+            prepared_directory,
         )?;
         let retained_name = retained_file_name(source, &publication, &spec.dynamic_wire_name);
         let core = publication.core.clone();
@@ -486,5 +533,100 @@ impl Drop for TemporaryFiles {
                 let _ = fs::remove_file(path);
             });
         }
+    }
+}
+
+fn prepare_bounded_in_order<T, R, E>(
+    items: &[T],
+    worker_limit: usize,
+    prepare: impl Fn(&T) -> R + Sync,
+    mut commit: impl FnMut(&T, R) -> Result<(), E>,
+) -> Result<(), E>
+where
+    T: Sync,
+    R: Send,
+{
+    let worker_limit = worker_limit.max(1);
+    for batch in items.chunks(worker_limit) {
+        let prepared = std::thread::scope(|scope| {
+            let prepare = &prepare;
+            batch
+                .iter()
+                .map(|item| scope.spawn(move || prepare(item)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|worker| match worker.join() {
+                    Ok(prepared) => prepared,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                })
+                .collect::<Vec<_>>()
+        });
+        for (item, prepared) in batch.iter().zip(prepared) {
+            commit(item, prepared)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+
+    use super::prepare_bounded_in_order;
+
+    #[test]
+    fn bounded_preparation_runs_two_workers_and_commits_in_source_order() {
+        let items = [0_usize, 1, 2, 3];
+        let barrier = Barrier::new(2);
+        let active = AtomicUsize::new(0);
+        let maximum = AtomicUsize::new(0);
+        let mut committed = Vec::new();
+
+        prepare_bounded_in_order(
+            &items,
+            2,
+            |item| {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(now, Ordering::SeqCst);
+                barrier.wait();
+                active.fetch_sub(1, Ordering::SeqCst);
+                item * 10
+            },
+            |item, prepared| {
+                committed.push((*item, prepared));
+                Ok::<(), ()>(())
+            },
+        )
+        .expect("commit prepared items");
+
+        assert_eq!(maximum.load(Ordering::SeqCst), 2);
+        assert_eq!(committed, [(0, 0), (1, 10), (2, 20), (3, 30)]);
+    }
+
+    #[test]
+    fn bounded_preparation_reports_failures_in_source_order() {
+        let items = [0_usize, 1];
+        let barrier = Barrier::new(2);
+        let prepared = AtomicUsize::new(0);
+        let mut committed = Vec::new();
+
+        let result = prepare_bounded_in_order(
+            &items,
+            2,
+            |item| {
+                prepared.fetch_add(1, Ordering::SeqCst);
+                barrier.wait();
+                Err::<(), _>(*item)
+            },
+            |item, result| {
+                committed.push(*item);
+                result
+            },
+        );
+
+        assert_eq!(prepared.load(Ordering::SeqCst), 2);
+        assert_eq!(committed, [0]);
+        assert_eq!(result, Err(0));
     }
 }
