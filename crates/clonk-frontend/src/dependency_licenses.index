@@ -216,7 +216,7 @@ linux-raw-sys	0.9.4	Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 litemap	0.8.3	Unicode-3.0
 litrs	1.0.0	MIT OR Apache-2.0
 lock_api	0.4.14	MIT OR Apache-2.0
-log	0.4.33	MIT OR Apache-2.0
+log	0.4.34	MIT OR Apache-2.0
 mach2	0.6.0	BSD-2-Clause OR MIT OR Apache-2.0
 matchers	0.2.0	MIT
 memchr	2.8.3	Unlicense OR MIT
@@ -468,7 +468,7 @@ wayland-sys	0.31.11	MIT
 web-sys	0.3.104	MIT OR Apache-2.0
 web-time	1.1.0	MIT OR Apache-2.0
 webpki-root-certs	1.0.9	CDLA-Permissive-2.0
-wgpu	30.0.0	MIT OR Apache-2.0
+wgpu	30.0.1	MIT OR Apache-2.0
 wgpu-core	30.0.0	MIT OR Apache-2.0
 wgpu-core-deps-apple	30.0.0	MIT OR Apache-2.0
 wgpu-core-deps-emscripten	30.0.0	MIT OR Apache-2.0
