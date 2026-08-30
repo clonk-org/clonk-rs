@@ -5434,7 +5434,12 @@ impl GameApp {
                     selected_scenario,
                     StartupNetworkPurpose::StagedHost,
                 ));
-                self.status_text = "Publishing network game…".to_string();
+                // DoLobby has already drawn C4GameLobby::MainDlg, and the
+                // transport swap behind it has no classic presentation. A
+                // generic status over the lobby reaches the startup
+                // generic-status boundary and terminates rendering on the very
+                // next frame, so publishing stays silent.
+                self.status_text.clear();
                 Ok(())
             }
             Err(error) => self.finish_startup_network_failure(
