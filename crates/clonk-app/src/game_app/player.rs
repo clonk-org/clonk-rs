@@ -1541,6 +1541,86 @@ impl GameApp {
         }
     }
 
+    /// `C4Network2Players::Init` rejoins the script players a finished round
+    /// recorded, right after the restarted lobby's local join
+    /// (src/C4Network2Players.cpp:47-70). Nothing else carries them over: the
+    /// next round's host packet is rebuilt from player files, which script
+    /// players have none of.
+    pub(crate) fn submit_restart_restore_script_players(&mut self) {
+        if self.players.restart_restore_script_players_joined
+            || self.players.restart_restore_infos.what & RESTART_RESTORE_SCRIPT_PLAYERS == 0
+            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || self.network.is_none()
+            || (self.classic_host_lobby.is_none() && self.network_lobby.is_none())
+        {
+            return;
+        }
+        self.players.restart_restore_script_players_joined = true;
+
+        // std::map orders the recorded players by name, and each rejoin is a
+        // fresh C4PlayerInfo: SetAsScriptPlayer assigns its color parameter
+        // over itself, so only dwOriginalColor is written and the synchronized
+        // dwColor keeps Clear()'s white (src/C4PlayerInfo.cpp:35-55,109-122).
+        let players = self
+            .players
+            .restart_restore_infos
+            .players
+            .iter()
+            .filter(|(_, restore)| restore.player_type == clonk_engine::PLAYER_INFO_TYPE_SCRIPT)
+            .filter_map(|(name, restore)| {
+                clonk_engine::LegacyCString::from_bytes(name.clone()).map(|name| {
+                    clonk_engine::ControlPlayerInfoEntry {
+                        name,
+                        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+                        original_color: restore.color & 0x00ff_ffff,
+                        team: restore.team,
+                        ..clonk_engine::ControlPlayerInfoEntry::default()
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if players.is_empty() {
+            return;
+        }
+
+        // GetGenerateTeamByID runs per rejoined info, before SetTeam.
+        let mut generated_team = false;
+        if let Some(assignment) = self.players.team_assignment.as_mut() {
+            for team in players
+                .iter()
+                .map(|player| player.team)
+                .filter(|team| *team != 0)
+            {
+                generated_team |= assignment.generate_team_for_id(team);
+            }
+        }
+        if generated_team {
+            if let (Some(assignment), Some(snapshot)) = (
+                self.players.team_assignment.as_ref(),
+                self.host_join_snapshot.as_mut(),
+            ) {
+                snapshot.parameters.teams =
+                    clonk_network::join_team_list_snapshot(assignment.teams().clone());
+            }
+            self.publish_updated_host_join_snapshot();
+        }
+
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        if let Some(Err(error)) = self.network.as_ref().map(|network| {
+            network.submit_player_info_update(clonk_network::PlayerInfoUpdateRequest {
+                client_id: local_client_id,
+                flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players,
+            })
+        }) {
+            tracing::error!(%error, "failed to rejoin restart-restored script players");
+        }
+    }
+
     /// Execute the host-only `CID_RemovePlr` body. Missing players are a
     /// synchronized no-op; a successful removal updates the retained
     /// C4PlayerInfo history after the engine has run the full removal cascade.

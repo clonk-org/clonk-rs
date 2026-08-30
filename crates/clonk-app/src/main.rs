@@ -2980,6 +2980,7 @@ impl GameApp {
                 selected_file: selected_player_file,
                 restart_restore_infos: RestartRestoreInfos::default(),
                 restart_restore_roster_items: HashSet::new(),
+                restart_restore_script_players_joined: false,
                 host_local_info_ids: host_local_player_info_ids,
                 host_local_alternate_colors: host_local_alternate_colors_by_resource,
                 team_assignment: network_team_assignment,

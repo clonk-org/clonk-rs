@@ -1143,6 +1143,7 @@ impl GameApp {
         if self.classic_host_lobby.is_none() && self.network_lobby.is_none() {
             return;
         }
+        self.submit_restart_restore_script_players();
         self.submit_restart_restore_team_updates_for_new_roster_items();
         let active_sheet = self
             .classic_host_lobby
@@ -1765,6 +1766,7 @@ impl GameApp {
 
     fn exit_startup_lobby_to_main(&mut self) {
         self.players.restart_restore_roster_items.clear();
+        self.players.restart_restore_script_players_joined = false;
         self.show_main_menu();
         self.resume_startup_music_after_failed_open_game();
     }

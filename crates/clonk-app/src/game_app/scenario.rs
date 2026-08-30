@@ -1955,6 +1955,7 @@ impl GameApp {
                 .unwrap_or(&self.control_player_infos),
         );
         self.players.restart_restore_roster_items.clear();
+        self.players.restart_restore_script_players_joined = false;
         self.apply_material_library_to(&mut engine);
         if replay {
             // C4GameControl::InitReplay sets fHost=false; replayed Set

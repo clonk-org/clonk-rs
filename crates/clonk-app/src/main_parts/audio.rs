@@ -5887,6 +5887,7 @@ impl LobbyPreloadState {
     }
 }
 
+pub(crate) const RESTART_RESTORE_SCRIPT_PLAYERS: i32 = 0x1;
 pub(crate) const RESTART_RESTORE_PLAYER_TEAMS: i32 = 0x2;
 
 /// Process-runtime `C4NetworkRestartInfos::Player` snapshot retained while a
