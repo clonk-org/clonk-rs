@@ -4904,6 +4904,7 @@ impl GameApp {
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         self.players.restart_restore_roster_items.clear();
+        self.players.restart_restore_script_players_joined = false;
         // Leaving the round abandons any host restart this client was going to
         // follow. `begin_pending_host_rejoin` re-arms it across this teardown
         // precisely because the default is to drop it.

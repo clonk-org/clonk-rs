@@ -386,6 +386,9 @@ pub(crate) struct PlayerState {
     /// PlayerListItem runs its restore hook only on construction, not on each
     /// later row update. Track the items already constructed in this lobby.
     pub(crate) restart_restore_roster_items: HashSet<(i32, i32)>,
+    /// `C4Network2Players::Init` rejoins the recorded script players once per
+    /// network initialization, not on each later roster projection.
+    pub(crate) restart_restore_script_players_joined: bool,
     /// Assigned PlayerInfo identities that still belong to this host process.
     /// Resource IDs are global and may also be referenced by a remote row, so
     /// they cannot by themselves prove ownership of the local-only color.

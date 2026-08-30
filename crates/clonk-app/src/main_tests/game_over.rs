@@ -560,6 +560,105 @@ fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
 }
 
 #[test]
+fn restart_restore_script_players_rejoin_the_restarted_host_lobby() {
+    // C4Network2Players::Init rejoins every recorded script player once the
+    // restarted lobby's local join is in (src/C4Network2Players.cpp:53-68).
+    // The fresh host packet is built from player files, so nothing else can
+    // carry a script player across a restart.
+    let mut app = new_menu_app(640, 480);
+    let (chooser, _companion) = install_test_classic_host_team_lobby(&mut app);
+    let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Host(
+        game_over_fixture!(host: 0, "Host".to_string(), None),
+    ));
+    let recorded_script_player = clonk_engine::ControlPlayerInfoEntry {
+        name: LegacyCString::from_bytes(b"Computer".to_vec()).test_value(),
+        id: 9,
+        team: 5,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        color: 0x00ab_cdef,
+        original_color: 0x00ab_cdef,
+        ..clonk_engine::ControlPlayerInfoEntry::default()
+    };
+    app.control_player_infos.replace_snapshot(
+        9,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![chooser.clone(), recorded_script_player],
+            by_client: 0,
+        }],
+    );
+    app.players.restart_restore_infos
+        .capture_player_infos(&app.control_player_infos);
+    // The restarted round's freshly prepared host packet holds player files only.
+    app.control_player_infos.replace_snapshot(
+        9,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![chooser],
+            by_client: 0,
+        }],
+    );
+    app.engine
+        .execute_script_control(
+            &clonk_engine::ScriptControlData {
+                target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
+                strictness: clonk_engine::ScriptStrictness::Strict3,
+                script: LegacyCString::from_bytes(
+                    b"SetRestoreInfos(RESTORE_ScriptPlayers)".to_vec(),
+                )
+                .expect("script has no NUL"),
+                by_client: 0,
+            },
+            ScriptControlPolicy::live(false),
+        )
+        .test_value();
+    main_assert_eq!(app.engine.restart_restore_info_mask() => RESTART_RESTORE_SCRIPT_PLAYERS);
+    app.retain_restart_restore_mask_for_restart();
+
+    app.sync_classic_lobby_roster();
+
+    // SetAsScriptPlayer writes its color parameter over itself and reaches
+    // only dwOriginalColor; the synchronized dwColor keeps Clear()'s white
+    // until the host's colour pass revisits it (src/C4PlayerInfo.cpp:35-55,109-122).
+    let rejoined = clonk_engine::ControlPlayerInfoEntry {
+        name: LegacyCString::from_bytes(b"Computer".to_vec()).test_value(),
+        team: 5,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        original_color: 0x00ab_cdef,
+        ..clonk_engine::ControlPlayerInfoEntry::default()
+    };
+    main_assert_eq!(
+        commands.take_player_info_updates() =>
+        vec![game_over_fixture!(player_update:
+            0,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![rejoined],
+        )],
+        "the restarted host lobby rejoins its recorded script players"
+    );
+    main_assert!(
+        app.players.team_assignment
+            .as_ref()
+            .unwrap()
+            .teams()
+            .teams
+            .iter()
+            .any(|team| team.id == 5),
+        "GetGenerateTeamByID creates a missing script-player team before submission"
+    );
+
+    app.sync_classic_lobby_roster();
+    main_assert!(
+        commands.take_player_info_updates().is_empty(),
+        "the one-shot network init hook does not rejoin them again"
+    );
+}
+
+#[test]
 fn host_round_restart_returns_to_network_lobby_staging() {
     let mut app = new_running_sandbox_app();
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
