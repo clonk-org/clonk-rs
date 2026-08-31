@@ -1945,7 +1945,7 @@ impl GameApp {
         };
         let Some(path) = self
             .admission_resources
-            .complete_path(core.id)
+            .complete_player_path(core)
             .map(Path::to_path_buf)
         else {
             return;

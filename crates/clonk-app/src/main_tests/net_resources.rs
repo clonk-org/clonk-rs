@@ -3015,6 +3015,234 @@ fn completed_network_resource_enters_the_control_resource_registry() {
 }
 
 #[test]
+fn player_join_resource_id_collision_stalls_until_the_exact_player_core_completes() {
+    // C4ControlJoinPlayer resolves the ByRes resource by its synchronized
+    // core before calling C4PlayerList::Join (C4Control.cpp:758-764). A
+    // dynamic resource with the same ID must not satisfy a player join.
+    let mut app = new_synthetic_running_sandbox_app();
+    let (manager, event_tx) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    app.engine.set_network_game(true);
+    let tick = u32::try_from(app.engine.frame()).test_value();
+    let initial_frame = app.engine.frame();
+    let info_id = 64;
+    let resource_id = 64;
+    let player_path = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../clonk-engine/tests/fixtures/embedded_player.c4p"
+    ));
+    let dynamic_core = netresources_fixture!(
+        resource_resource_type_id_loadable_filename:
+            clonk_network::HostResourceType::Dynamic as u8,
+            resource_id,
+            true,
+            clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4s".to_vec()).test_value(),
+            Default::default(),
+    );
+    event_tx
+        .send(NetworkEvent::ResourceComplete {
+            resource_id,
+            core: dynamic_core,
+            path: PathBuf::from("Dynamic.c4s"),
+            local: false,
+        })
+        .test_value();
+    app.process_network_events().test_value();
+
+    let player_core = netresources_fixture!(
+        resource_resource_type_id_loadable_filename:
+            clonk_network::HostResourceType::Player as u8,
+            resource_id,
+            true,
+            clonk_engine::LegacyCString::from_bytes(b"Player.c4p".to_vec()).test_value(),
+            Default::default(),
+    );
+    event_tx
+        .send(netresources_fixture!(
+            ready_tick:
+                tick,
+                vec![
+                    NetworkControl::PlayerInfo(clonk_engine::PlayerInfoControlData::new(
+                        1,
+                        0,
+                        vec![clonk_engine::ControlPlayerInfoEntry {
+                            id: info_id,
+                            name: legacy_cstring(b"Colliding resource"),
+                            flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                            resource: Some(player_core.clone()),
+                            ..Default::default()
+                        }],
+                        1,
+                    )),
+                    NetworkControl::JoinPlayer(netresources_fixture!(
+                        join_player_info_id_source:
+                            info_id,
+                            clonk_engine::JoinPlayerSource::Resource(player_core.clone()),
+                    )),
+                ],
+        ))
+        .test_value();
+    app.test_update();
+
+    main_assert_eq!(app.engine.frame() => initial_frame);
+    main_assert!(app.network_ticks.ready.contains_key(&tick));
+    main_assert!(app.snapshot.players.iter().all(|player| player.player_info_id != info_id));
+    main_assert_eq!(app.admission_resources.complete_player_path(&player_core) => None);
+    main_assert_eq!(app.blocking_resource_wait.test_ref().resource_id => resource_id);
+
+    event_tx
+        .send(NetworkEvent::ResourceComplete {
+            resource_id,
+            core: player_core.clone(),
+            path: player_path.clone(),
+            local: false,
+        })
+        .test_value();
+    app.test_update();
+
+    main_assert_eq!(app.engine.frame() => initial_frame + 1);
+    main_assert!(!app.network_ticks.ready.contains_key(&tick));
+    main_assert_eq!(app.admission_resources.complete_player_path(&player_core) => Some(player_path.as_path()));
+    main_assert!(app.snapshot.players.iter().any(|player| player.player_info_id == info_id));
+    main_assert!(app.blocking_resource_wait.is_none());
+}
+
+#[test]
+fn missing_completed_player_path_keeps_the_join_control_pending() {
+    // C4ControlJoinPlayer only enters C4PlayerList::Join after the resource
+    // has a usable getFile() path (C4Control.cpp:758-764). A stale completion
+    // marker must therefore keep the synchronized control pending.
+    let mut app = new_synthetic_running_sandbox_app();
+    let (manager, event_tx) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    app.engine.set_network_game(true);
+    let tick = u32::try_from(app.engine.frame()).test_value();
+    let initial_frame = app.engine.frame();
+    let info_id = 65;
+    let resource_id = 65;
+    let missing_dir = tempdir();
+    let missing_path = missing_dir.path().join("Missing.c4p");
+    let player_core = netresources_fixture!(
+        resource_resource_type_id_loadable_filename:
+            clonk_network::HostResourceType::Player as u8,
+            resource_id,
+            true,
+            clonk_engine::LegacyCString::from_bytes(b"Missing.c4p".to_vec()).test_value(),
+            Default::default(),
+    );
+    event_tx
+        .send(NetworkEvent::ResourceComplete {
+            resource_id,
+            core: player_core.clone(),
+            path: missing_path,
+            local: false,
+        })
+        .test_value();
+    app.process_network_events().test_value();
+    main_assert_eq!(app.admission_resources.status(resource_id).is_some() => true);
+    main_assert_eq!(app.admission_resources.complete_player_path(&player_core) => None);
+
+    event_tx
+        .send(netresources_fixture!(
+            ready_tick:
+                tick,
+                vec![
+                    NetworkControl::PlayerInfo(clonk_engine::PlayerInfoControlData::new(
+                        1,
+                        0,
+                        vec![clonk_engine::ControlPlayerInfoEntry {
+                            id: info_id,
+                            name: legacy_cstring(b"Missing resource"),
+                            flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                            resource: Some(player_core.clone()),
+                            ..Default::default()
+                        }],
+                        1,
+                    )),
+                    NetworkControl::JoinPlayer(netresources_fixture!(
+                        join_player_info_id_source:
+                            info_id,
+                            clonk_engine::JoinPlayerSource::Resource(player_core),
+                    )),
+                ],
+        ))
+        .test_value();
+    app.test_update();
+
+    main_assert_eq!(app.engine.frame() => initial_frame);
+    main_assert!(app.network_ticks.ready.contains_key(&tick));
+    main_assert!(app.snapshot.players.iter().all(|player| player.player_info_id != info_id));
+    main_assert_eq!(app.blocking_resource_wait.test_ref().resource_id => resource_id);
+}
+
+#[test]
+fn player_join_with_a_deleted_completed_path_fails_closed() {
+    // C4ControlJoinPlayer does not silently continue after C4PlayerList::Join
+    // cannot obtain the selected player file (C4Control.cpp:758-764).
+    let mut app = new_synthetic_running_sandbox_app();
+    let at_client = app.offline_local_client_id();
+    let info_id = 66;
+    let resource_id = 66;
+    let player_file_dir = tempdir();
+    let player_path = player_file_dir.path().join("Deleted.c4p");
+    fs::write(
+        &player_path,
+        include_bytes!("../../../clonk-engine/tests/fixtures/embedded_player.c4p"),
+    )
+    .test_value();
+    let player_core = netresources_fixture!(
+        resource_resource_type_id_loadable_filename:
+            clonk_network::HostResourceType::Player as u8,
+            resource_id,
+            true,
+            clonk_engine::LegacyCString::from_bytes(b"Deleted.c4p".to_vec()).test_value(),
+            Default::default(),
+    );
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: at_client,
+            ..Default::default()
+        }]);
+    app.control_player_infos
+        .apply(clonk_engine::PlayerInfoControlData {
+            client_id: at_client,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: info_id,
+                name: legacy_cstring(b"Deleted resource"),
+                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(player_core.clone()),
+                ..Default::default()
+            }],
+            by_client: 1,
+            ..Default::default()
+        });
+    app.admission_resources.register_lobby_resource(&player_core);
+    app.admission_resources
+        .mark_complete(resource_id, player_path.clone());
+    fs::remove_file(&player_path).test_value();
+
+    let error = app
+        .apply_join_player_control(clonk_engine::JoinPlayerControlData {
+            filename: clonk_engine::LegacyCString::from_bytes(b"Deleted.c4p".to_vec())
+                .test_value(),
+            at_client,
+            info_id,
+            source: clonk_engine::JoinPlayerSource::Resource(player_core),
+            by_client: at_client,
+        })
+        .expect_err("a deleted completed player path must fail closed");
+    main_assert!(matches!(
+        error,
+        clonk_engine::EngineError::MissingPlayerResource {
+            resource_id: 66,
+            ..
+        }
+    ));
+    main_assert!(app.engine.players().all(|player| player.player_info_id() != info_id));
+    main_assert!(!app.control_player_infos.get(info_id).test_value().is_joined());
+}
+
+#[test]
 fn unknown_loadable_resource_join_stalls_until_resource_completion() {
     let mut app = new_synthetic_running_sandbox_app();
     let (manager, event_tx) = NetworkManager::test_stub();

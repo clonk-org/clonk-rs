@@ -606,7 +606,7 @@ impl GameApp {
                 .resource
                 .as_ref()
                 .filter(|_| player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0)
-                .and_then(|resource| self.admission_resources.complete_path(resource.id))
+                .and_then(|resource| self.admission_resources.complete_player_path(resource))
                 .map(|path| {
                     if let Some(icon) = load_network_player_big_icon(path) {
                         LobbyRosterIcon::Raster(

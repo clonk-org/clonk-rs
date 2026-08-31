@@ -2495,7 +2495,7 @@ impl GameApp {
         let joins = self
             .control_player_infos
             .issue_unjoined_players(client_id, |core| {
-                resources.complete_path(core.id).and_then(|path| {
+                resources.complete_player_path(core).and_then(|path| {
                     clonk_engine::LegacyCString::from_bytes(path_to_legacy_bytes(path))
                 })
             });
@@ -8218,7 +8218,7 @@ impl GameApp {
         let pending_player_big_icon = match &join.source {
             clonk_engine::JoinPlayerSource::Resource(core) => self
                 .admission_resources
-                .complete_path(core.id)
+                .complete_player_path(core)
                 .and_then(|path| {
                     if locally_controlled {
                         load_local_player_big_icon(path)
@@ -8260,7 +8260,7 @@ impl GameApp {
         let joined_player_file = match &join.source {
             clonk_engine::JoinPlayerSource::Resource(core) => self
                 .admission_resources
-                .complete_path(core.id)
+                .complete_player_path(core)
                 .map(|path| path.to_string_lossy().into_owned())
                 .or_else(|| {
                     // The replay branch reads the player out of the scenario
@@ -8311,7 +8311,7 @@ impl GameApp {
                 // ID on the authoring host too, after PreExecute releases it.
                 if let Some(path) = self
                     .admission_resources
-                    .complete_path(core.id)
+                    .complete_player_path(core)
                     .map(Path::to_path_buf)
                 {
                     if !self.begin_player_list_join(&info, joined_player_file.as_deref()) {
@@ -8321,7 +8321,10 @@ impl GameApp {
                         Ok(file) => Some(file),
                         Err(error) => {
                             tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
-                            return Ok(());
+                            return Err(EngineError::MissingPlayerResource {
+                                resource_id: core.id,
+                                detail: error.to_string(),
+                            });
                         }
                     }
                 } else if self.records.playback.is_some() {
@@ -8336,7 +8339,10 @@ impl GameApp {
                         }
                     }
                 } else {
-                    return Ok(());
+                    return Err(EngineError::MissingPlayerResource {
+                        resource_id: core.id,
+                        detail: "completed player path is unavailable".to_string(),
+                    });
                 }
             }
             clonk_engine::JoinPlayerSource::Embedded(_)
@@ -10280,7 +10286,7 @@ impl GameApp {
                     None
                 } else {
                     self.admission_resources
-                        .complete_path(resource.id)
+                        .complete_player_path(&resource)
                         .map(Path::to_path_buf)
                 }
             } else if configured.as_os_str().is_empty() {
@@ -10420,8 +10426,12 @@ impl GameApp {
                         );
                         return false;
                     }
-                    self.admission_resources
-                        .complete_path(resource_id)
+                    source.info
+                        .resource
+                        .as_ref()
+                        .and_then(|resource| {
+                            self.admission_resources.complete_player_path(resource)
+                        })
                         .map(Path::to_path_buf)
                 } else {
                     (!configured_empty).then(|| {
