@@ -3745,6 +3745,8 @@ pub enum EngineError {
     UnknownDefinition(String),
     #[error("player {0} already exists")]
     PlayerAlreadyExists(i32),
+    #[error("player resource {resource_id} is unavailable: {detail}")]
+    MissingPlayerResource { resource_id: i32, detail: String },
     #[error("This scenario is designed for a maximum of {maximum} players.")]
     TooManyPlayers { maximum: i32 },
     #[error("unknown player {0}")]

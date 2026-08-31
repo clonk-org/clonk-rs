@@ -14814,6 +14814,7 @@ fn network_host_own_join_binds_the_local_presentation_to_its_player() {
         filename: LegacyCString::from_bytes(b"Host.c4p".to_vec()).test_value(),
         ..clonk_engine::NetworkResourceCore::default()
     };
+    app.admission_resources.register_lobby_resource(&core);
     app.admission_resources
         .mark_complete(resource_id, player_path.clone());
     let info_id = 1;

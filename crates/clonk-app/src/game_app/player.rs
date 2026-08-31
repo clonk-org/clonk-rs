@@ -81,7 +81,7 @@ impl GameApp {
         }
         if let Some(path) = info.resource.as_ref().and_then(|resource| {
             self.admission_resources
-                .complete_path(resource.id)
+                .complete_player_path(resource)
                 .map(Path::to_path_buf)
         }) {
             return Some(path);
@@ -1023,7 +1023,7 @@ impl GameApp {
             let has_resource = info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0;
             let complete_path = info.resource.as_ref().and_then(|resource| {
                 self.admission_resources
-                    .complete_path(resource.id)
+                    .complete_player_path(resource)
                     .map(Path::to_path_buf)
             });
             if let Some(path) = complete_path {
@@ -1120,7 +1120,7 @@ impl GameApp {
         let joins =
             self.control_player_infos
                 .issue_reserved_player_snapshots(client_id, players, |core| {
-                    resources.complete_path(core.id).and_then(|path| {
+                    resources.complete_player_path(core).and_then(|path| {
                         clonk_engine::LegacyCString::from_bytes(path_to_legacy_bytes(path))
                     })
                 });

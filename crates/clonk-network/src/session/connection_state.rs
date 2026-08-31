@@ -1047,10 +1047,32 @@ pub(crate) fn load_authoritative_player_resources(
             crate::client_bootstrap::clear_player_resource(player);
             continue;
         };
+        let existing_core = backend
+            .as_deref()
+            .and_then(|backend| backend.core(core.id))
+            .or_else(|| catalog.resource_core(core.id))
+            .cloned();
+        let already_registered = resource_is_registered(catalog, backend.as_deref(), core.id);
         // AddByCore returns an existing ID before comparing cores or probing
         // local files (src/C4Network2Res.cpp:1473-1477).
-        if resource_is_registered(catalog, backend.as_deref(), core.id) {
+        let replace_stale = existing_core
+            .as_ref()
+            .map_or(already_registered, |existing| {
+                !already_registered || existing != core
+            });
+        if already_registered && !replace_stale {
             continue;
+        }
+        // The C++ list is keyed by ID, but a reused ID can leave a stale
+        // round resource in the Rust filesystem backend after its catalog
+        // entry has expired. Remove that stale registration before resolving
+        // the authoritative player core, otherwise no completion event can
+        // reach the exact-core admission gate.
+        if replace_stale {
+            catalog.forget_resource(core.id);
+            if let Some(backend) = backend.as_deref_mut() {
+                backend.forget_resource(core.id);
+            }
         }
         let registered = resolver
             .resolve(crate::ClientBootstrapResourceRole::Player, core)

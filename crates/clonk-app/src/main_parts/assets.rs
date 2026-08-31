@@ -6060,6 +6060,26 @@ impl AdmissionResourceStore {
         }
     }
 
+    /// Resolves a completed player resource only when the registry still
+    /// carries the exact core named by the synchronized join. Resource IDs are
+    /// shared by scenario, dynamic, and player resources, so an ID-only lookup
+    /// can return an unrelated round file (C4Control.cpp:758-764).
+    ///
+    /// A completion marker whose path has disappeared is not usable for a
+    /// player join. Returning `None` keeps the control in the admission gate
+    /// instead of letting one peer continue without the player.
+    pub(crate) fn complete_player_path(
+        &self,
+        core: &clonk_engine::NetworkResourceCore,
+    ) -> Option<&Path> {
+        (core.resource_type == clonk_network::HostResourceType::Player as u8).then_some(())?;
+        (self.resource_cores.get(&core.id) == Some(core)).then_some(())?;
+        match self.resources.get(&core.id) {
+            Some(AdmissionResourceState::Complete { path, .. }) if path.exists() => Some(path),
+            _ => None,
+        }
+    }
+
     /// Resolve the newest official resource in a C4Network2Res derivation
     /// chain rooted at a PlayerInfo resource.
     pub(crate) fn derivation_target(&self, root_resource_id: i32) -> Option<i32> {
@@ -6168,28 +6188,33 @@ pub(crate) fn pending_admission_resource(
                 info_id,
                 source: clonk_engine::JoinPlayerSource::Resource(core),
                 ..
-            }) if clients.contains(*at_client) => (matches!(
-                resources.ensure_by_core(core),
-                AdmissionResourceState::Loading { .. }
-            ) && !aborted_player_joins
-                .contains(&(core.id, *info_id)))
-            .then(|| {
-                let player_name = controls
-                    .iter()
-                    .filter_map(|candidate| match candidate {
-                        NetworkControl::PlayerInfo(info) => Some(&info.players),
-                        _ => None,
-                    })
-                    .flatten()
-                    .find(|player| player.id == *info_id)
-                    .map(|player| legacy_presentation_text(player.name.as_bytes()))
-                    .filter(|name| !name.is_empty());
-                PendingAdmissionResource {
-                    core: core.clone(),
-                    info_id: *info_id,
-                    player_name,
-                }
-            }),
+            }) if clients.contains(*at_client) => {
+                let state = resources.ensure_by_core(core).clone();
+                (match state {
+                    AdmissionResourceState::Loading { .. } => true,
+                    AdmissionResourceState::Complete { .. } => {
+                        resources.complete_player_path(core).is_none()
+                    }
+                    AdmissionResourceState::Unavailable(_) => false,
+                } && !aborted_player_joins.contains(&(core.id, *info_id)))
+                .then(|| {
+                    let player_name = controls
+                        .iter()
+                        .filter_map(|candidate| match candidate {
+                            NetworkControl::PlayerInfo(info) => Some(&info.players),
+                            _ => None,
+                        })
+                        .flatten()
+                        .find(|player| player.id == *info_id)
+                        .map(|player| legacy_presentation_text(player.name.as_bytes()))
+                        .filter(|name| !name.is_empty());
+                    PendingAdmissionResource {
+                        core: core.clone(),
+                        info_id: *info_id,
+                        player_name,
+                    }
+                })
+            }
             _ => None,
         };
         if pending.is_none() {
