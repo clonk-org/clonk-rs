@@ -4,6 +4,24 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.5] - 2026-08-31
+
+### Bug fixes
+
+- Reserve advertiser test TCP port before startup (#1429)
+- Isolate merge-group concurrency lanes (#1426)
+- Repair collection scenario runtime failures (#1432)
+- Return equidistant objects from the FindObject closest walk (#1423)
+- Rejoin restart-restored script players in the network lobby (#1421)
+
+### Continuous integration
+
+- Check dependency licenses before merge queue (#1427)
+
+### Testing
+
+- Pin the Western sack pickup row against its shipped guards (#1428)
+
 ## [0.21.4] - 2026-08-30
 
 ### Bug fixes
