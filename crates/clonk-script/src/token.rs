@@ -31,7 +31,6 @@ pub enum TokenKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keyword {
-    Func,
     Global,
     Private,
     Protected,
@@ -61,7 +60,6 @@ impl Keyword {
     /// — fall back to this lexeme.
     pub fn lexeme(self) -> &'static str {
         match self {
-            Keyword::Func => "func",
             Keyword::Global => "global",
             Keyword::Private => "private",
             Keyword::Protected => "protected",

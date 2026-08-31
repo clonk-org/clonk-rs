@@ -704,7 +704,11 @@ impl<'a> Lexer<'a> {
             return self.lex_stupid_func_label(lexeme.to_owned(), line, column);
         }
         let kind = match lexeme {
-            "func" => TokenKind::Keyword(Keyword::Func),
+            // C4Aul tokenizes `func` as ATT_IDTF. The parser recognizes the
+            // declaration shape where a function header is required, while
+            // expression/variable positions keep the spelling available as
+            // an ordinary binding (C4AulParse.cpp:1975-2006,
+            // C4AulParse.cpp:3256-3258).
             "global" => TokenKind::Keyword(Keyword::Global),
             "private" => TokenKind::Keyword(Keyword::Private),
             "protected" => TokenKind::Keyword(Keyword::Protected),

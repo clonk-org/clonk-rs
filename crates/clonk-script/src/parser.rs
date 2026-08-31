@@ -276,10 +276,10 @@ impl<'a> Parser<'a> {
             AccessLevel::Public
         };
 
-        if !self.check_keyword(Keyword::Func)? {
+        if !self.check_function_declaration_start()? {
             return self.parse_old_style_function_recovering(access);
         }
-        self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
+        self.expect_func_keyword("expected 'func' declaration")?;
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
         let (name, name_token) = self.expect_identifier("expected function name")?;
         self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
@@ -442,12 +442,13 @@ impl<'a> Parser<'a> {
         match &self.peek()?.kind {
             TokenKind::Eof | TokenKind::Directive(_) => return Ok(true),
             TokenKind::Keyword(
-                Keyword::Private
-                | Keyword::Protected
-                | Keyword::Public
-                | Keyword::Global
-                | Keyword::Func,
+                Keyword::Private | Keyword::Protected | Keyword::Public | Keyword::Global,
             ) => return Ok(true),
+            TokenKind::Identifier(name) if name == "func" => {
+                if self.check_function_declaration_start()? {
+                    return Ok(true);
+                }
+            }
             TokenKind::Identifier(_) | TokenKind::C4Id(_) => {}
             TokenKind::Keyword(keyword) if *keyword != Keyword::Nil => {}
             _ => return Ok(false),
@@ -1418,6 +1419,17 @@ impl<'a> Parser<'a> {
                 let base_target = Self::expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Index(Box::new(base_target), index))
             }
+            // AB_Inc1/AB_Dec1 mutate through the operand reference and leave
+            // that same reference on the stack (C4AulExec.cpp:450-454), so a
+            // parenthesized prefix changer remains an assignable target.
+            Expr::PreIncrement(expr) => Ok(AssignmentTarget::PrefixChange {
+                target: Box::new(Self::expression_to_assignment_target(*expr, eq_token)?),
+                delta: 1,
+            }),
+            Expr::PreDecrement(expr) => Ok(AssignmentTarget::PrefixChange {
+                target: Box::new(Self::expression_to_assignment_target(*expr, eq_token)?),
+                delta: -1,
+            }),
             Expr::ArrayAppend(base) => Ok(AssignmentTarget::ArrayAppend(base)),
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are assignable lvalues
             // Local() and Var() without arguments default to slot 0
@@ -1503,41 +1515,6 @@ impl<'a> Parser<'a> {
                 "invalid assignment target",
                 eq_token.line,
                 eq_token.column,
-            )),
-        }
-    }
-
-    fn validate_lvalue(&self, expr: &Expr, token: &Token) -> Result<(), ParseError> {
-        match expr {
-            Expr::Variable(_)
-            | Expr::Property(_, _)
-            | Expr::Index(_, _)
-            | Expr::ArrayAppend(_) => Ok(()),
-            // Prefix increment/decrement return lvalues (like in C++)
-            // This allows patterns like ++++i or --(--i)
-            Expr::PreIncrement(_) | Expr::PreDecrement(_) => Ok(()),
-            // Special cases: Local/LocalN/Var/EffectVar are valid for increment/decrement
-            // Also allow any function call (for reference-returning functions)
-            Expr::Call { callee, is_optional, .. } => {
-                if let Expr::Variable(_) = **callee {
-                    if !is_optional {
-                        // Allow any non-optional function call to be used with increment/decrement
-                        // This supports both built-in functions (Local, Var, etc.) and
-                        // user-defined reference-returning functions (func &)
-                        return Ok(());
-                    }
-                }
-                Err(ParseError::new(
-                    "increment/decrement requires an lvalue (variable, property, index, Local(n), or Var(n))",
-                    token.line,
-                    token.column,
-                ))
-            }
-            Expr::GlobalCall { .. } => Ok(()),
-            _ => Err(ParseError::new(
-                "increment/decrement requires an lvalue (variable, property, index, Local(n), or Var(n))",
-                token.line,
-                token.column,
             )),
         }
     }
@@ -1939,14 +1916,12 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Unary(UnaryOp::BitwiseNot, Box::new(expr)));
         }
         // Prefix increment/decrement
-        if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
+        if self.consume_if_symbol(Symbol::PlusPlus)?.is_some() {
             let expr = self.parse_unary()?;
-            self.validate_lvalue(&expr, &token)?;
             return Ok(Expr::PreIncrement(Box::new(expr)));
         }
-        if let Some(token) = self.consume_if_symbol(Symbol::MinusMinus)? {
+        if self.consume_if_symbol(Symbol::MinusMinus)?.is_some() {
             let expr = self.parse_unary()?;
-            self.validate_lvalue(&expr, &token)?;
             return Ok(Expr::PreDecrement(Box::new(expr)));
         }
         self.parse_postfix()
@@ -1972,11 +1947,9 @@ impl<'a> Parser<'a> {
                 };
             } else if let Some(operation) = self.parse_navigation_operation()? {
                 expr = Self::apply_navigation_operation(expr, operation);
-            } else if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
-                self.validate_lvalue(&expr, &token)?;
+            } else if self.consume_if_symbol(Symbol::PlusPlus)?.is_some() {
                 expr = Expr::PostIncrement(Box::new(expr));
-            } else if let Some(token) = self.consume_if_symbol(Symbol::MinusMinus)? {
-                self.validate_lvalue(&expr, &token)?;
+            } else if self.consume_if_symbol(Symbol::MinusMinus)?.is_some() {
                 expr = Expr::PostDecrement(Box::new(expr));
             } else {
                 break;
@@ -2351,6 +2324,46 @@ impl<'a> Parser<'a> {
         } else {
             Ok(None)
         }
+    }
+
+    fn consume_if_func_keyword(&mut self) -> Result<Option<Token>, ParseError> {
+        let token = self.peek()?.clone();
+        if matches!(token.kind, TokenKind::Identifier(ref name) if name == "func") {
+            return Ok(Some(self.consume()?));
+        }
+        Ok(None)
+    }
+
+    /// The lexer keeps `func` as an identifier because C4Aul has no reserved
+    /// word table. Only the declaration shape gives it keyword meaning.
+    fn check_function_declaration_start(&mut self) -> Result<bool, ParseError> {
+        self.begin_speculative();
+        let result = (|| {
+            if self.consume_if_func_keyword()?.is_none() {
+                return Ok(false);
+            }
+            self.consume_if_symbol(Symbol::Ampersand)?;
+            if !Self::is_identifier_name_token(&self.peek()?.kind) {
+                return Ok(false);
+            }
+            self.consume()?;
+            self.check_symbol(Symbol::LParen)
+        })();
+        self.reset_speculative();
+        result
+    }
+
+    fn expect_func_keyword(&mut self, message: &str) -> Result<(), ParseError> {
+        let token = self.peek()?.clone();
+        if matches!(token.kind, TokenKind::Identifier(ref name) if name == "func") {
+            self.consume()?;
+            return Ok(());
+        }
+        Err(ParseError::new(
+            message.to_string(),
+            token.line,
+            token.column,
+        ))
     }
 
     fn consume_if_symbol(&mut self, symbol: Symbol) -> Result<Option<Token>, ParseError> {

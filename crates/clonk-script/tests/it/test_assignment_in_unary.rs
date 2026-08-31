@@ -156,20 +156,52 @@ crate::support::compile_cases! {
 }
 
 #[test]
-fn increment_not_affected() {
-    // ++x = y should still be invalid (pre-increment doesn't return lvalue in this context)
-    // This ensures our fix doesn't break increment/decrement behavior
-    let source = r#"func Test() { var x; ++x = 42; }"#;
+fn prefix_increment_assignment_target_is_a_reference() {
+    // C++'s AB_Inc1 mutates through and leaves its operand reference on the
+    // stack, while changer operators retain reference operands
+    // (C4AulExec.cpp:450-454; C4AulParse.cpp:2998-3000).
+    let source = r#"func Test() { var x; ++x = 42; return x; }"#;
+    let script = clonk_script::Script::compile(source).expect("prefix target compiles");
+    assert!(script.parse_diagnostics().is_empty());
+
+    let mut engine = clonk_script::Engine::new();
+    engine.add_script(script);
+    assert_eq!(
+        engine.call("Test", &[]).expect("prefix target executes"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn invalid_prefix_changer_operand_is_deferred_to_runtime() {
+    // C4AulParse.cpp:2902-2931 emits prefix changers without checking their
+    // operand's lvalue kind; the executor performs that validation when the
+    // changer runs. This preserves the valid declaration after the bad call.
+    let source = r#"
+        func Test() { ++(1); return 7; }
+        func Ok() { return 9; }
+    "#;
     let script = clonk_script::Script::compile(source)
-        .expect("the invalid function body is quarantined instead of aborting the script");
-    assert!(!script.parse_diagnostics().is_empty());
+        .expect("C++-valid invalid changer operand must compile");
+    assert!(
+        script.parse_diagnostics().is_empty(),
+        "runtime-invalid changer must not quarantine its function: {:?}",
+        script.parse_diagnostics()
+    );
 
     let mut engine = clonk_script::Engine::new();
     engine.add_script(script);
     let error = engine
         .call("Test", &[])
-        .expect_err("calling the quarantined function must surface its parse error");
-    assert!(error.to_string().contains("parse error"));
+        .expect_err("invalid prefix operand must fail when executed");
+    assert!(
+        !error.to_string().contains("parse error"),
+        "invalid operand was rejected during parsing: {error}"
+    );
+    assert_eq!(
+        engine.call("Ok", &[]).expect("later declaration survives"),
+        Value::Int(9)
+    );
 }
 
 // Complex RHS: !x = a + b
