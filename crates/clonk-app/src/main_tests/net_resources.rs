@@ -2178,8 +2178,6 @@ fn resource_join_record_copies_player_group_for_replay() {
     let output_path = directory.path().join("001-Resource.c4s");
     let mut app = new_state_only_running_sandbox_app();
     install_test_recording_template(&mut app, output_path.clone());
-    app.admission_resources.mark_complete(17, player_path);
-    app.start_recording(true).test_value();
     let core = netresources_fixture!(
         resource_resource_type_id_loadable_filename:
             clonk_network::HostResourceType::Player as u8,
@@ -2188,6 +2186,9 @@ fn resource_join_record_copies_player_group_for_replay() {
             LegacyCString::from_bytes(b"Players/Alice.c4p".to_vec()).test_value(),
             clonk_engine::NetworkResourceCore::default(),
     );
+    app.admission_resources.register_lobby_resource(&core);
+    app.admission_resources.mark_complete(17, player_path);
+    app.start_recording(true).test_value();
     let packet = clonk_engine::ControlPacket::JoinPlayer(netresources_fixture!(
         join_player_filename_at_client_info_id_source:
             LegacyCString::from_bytes(b"Alice.c4p".to_vec()).test_value(),

@@ -8327,6 +8327,13 @@ impl GameApp {
                             });
                         }
                     }
+                } else if !core.loadable {
+                    tracing::warn!(
+                        info_id = join.info_id,
+                        resource_id = core.id,
+                        "ignoring join for unavailable unloadable player resource"
+                    );
+                    return Ok(());
                 } else if self.records.playback.is_some() {
                     if !self.begin_player_list_join(&info, joined_player_file.as_deref()) {
                         return Ok(());

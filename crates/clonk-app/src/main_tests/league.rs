@@ -1505,8 +1505,6 @@ async fn league_streamed_player_strip_and_record_name_match_cpp_bytes() {
     roster.add_child("Alice.c4i", nested_crew).test_value();
     player_group.add_child("Roster.c4f", roster).test_value();
     fs::write(&player_path, player_group.pack().unwrap()).test_value();
-    app.admission_resources
-        .mark_complete(17, player_path.clone());
     let core = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 17,
@@ -1514,6 +1512,9 @@ async fn league_streamed_player_strip_and_record_name_match_cpp_bytes() {
         filename: LegacyCString::from_bytes(b"Players/Alice.c4p".to_vec()).test_value(),
         ..clonk_engine::NetworkResourceCore::default()
     };
+    app.admission_resources.register_lobby_resource(&core);
+    app.admission_resources
+        .mark_complete(17, player_path.clone());
     let packet = clonk_engine::ControlPacket::JoinPlayer(clonk_engine::JoinPlayerControlData {
         filename: LegacyCString::from_bytes(b"Alice.c4p".to_vec()).test_value(),
         at_client: 0,
