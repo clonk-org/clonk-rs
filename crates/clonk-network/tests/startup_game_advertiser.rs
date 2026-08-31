@@ -250,6 +250,13 @@ fn a_host_that_cannot_join_the_discovery_group_still_serves_its_reference() {
 fn disabled_reference_server_keeps_discovery_only_advertiser_clean() {
     let discovery_reservation = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
     let discovery_port = discovery_reservation.local_addr().unwrap().port();
+    // Keep the TCP reservation while the advertiser starts. TCP and UDP have
+    // separate namespaces, so this does not prevent the discovery socket from
+    // binding. An advertiser that opens a TCP listener on the discovery port
+    // instead fails to start, preserving the assertion below without a
+    // post-start port-reuse race.
+    let tcp_reservation = std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, discovery_port))
+        .expect("the TCP reservation must be available");
     drop(discovery_reservation);
 
     let advertiser = NetworkGameAdvertiser::start(
@@ -260,14 +267,12 @@ fn disabled_reference_server_keeps_discovery_only_advertiser_clean() {
         },
         advertised_game(),
     )
-    .unwrap();
+    .expect("discovery-only advertising must not create a TCP listener");
 
     assert_eq!(advertiser.reference_addr().port(), 0);
-    let tcp = std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, discovery_port))
-        .expect("discovery-only advertising must not create a TCP listener");
     advertiser.update(&advertised_game());
-    drop(tcp);
     drop(advertiser);
+    drop(tcp_reservation);
 }
 
 fn http_request(reference_port: u16, request: &[u8]) -> Vec<u8> {
