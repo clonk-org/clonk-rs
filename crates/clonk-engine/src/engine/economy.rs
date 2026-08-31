@@ -1059,7 +1059,7 @@ impl Engine {
                 self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
             } else {
                 let max_breath = self.object_physical(idx).breath;
-                let take = max_breath - self.objects[idx].state.breath;
+                let take = max_breath.wrapping_sub(self.objects[idx].state.breath);
                 if take > self.object_physical(idx).breath / 2 {
                     let _ = tolerate_script_error(self.call_object_function(
                         idx,
@@ -1067,7 +1067,8 @@ impl Engine {
                         Vec::new(),
                     ))?;
                 }
-                self.objects[idx].state.breath += take;
+                let breath = &mut self.objects[idx].state.breath;
+                *breath = breath.wrapping_add(take);
             }
         }
 

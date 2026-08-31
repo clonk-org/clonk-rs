@@ -4182,7 +4182,7 @@ impl AudioContext {
                     continue;
                 }
             };
-            let handle = match self.system.load_sound(&bytes) {
+            let handle = match self.system.load_sound_owned(bytes) {
                 Ok(handle) => handle,
                 Err(error) => {
                     self.missing_sounds.insert(missing_key);
@@ -4207,7 +4207,8 @@ impl AudioContext {
                 self.remove_sound_instances_matching(|info| {
                     info.sample_name == candidate.file_name
                 });
-                self.playable_sounds.remove(old_index);
+                let removed = self.playable_sounds.remove(old_index);
+                self.loaded_sounds.remove(&removed.sample_key);
             }
             let sample_order = self.next_sound_sample_order;
             self.next_sound_sample_order = self

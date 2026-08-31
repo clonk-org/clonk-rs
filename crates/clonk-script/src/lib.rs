@@ -33,10 +33,10 @@ pub use crate::value::{
 pub use crate::vm::{
     active_direct_exec_diagnostic_frames, caller_host_identity, caller_is_temporary_script,
     caller_origin_strictness, caller_strictness, caller_uses_engine_scope, caller_var_slots,
-    clear_active_object_references, data_string, start_call_trace, start_script_profiler,
-    stop_script_profiler, value_cell, with_diagnostic_object_formatter, CallerVarSlots,
-    HostCallArg, HostCallerStrictness, LocalCells, ObjectReferenceSweep, ScriptHostIdentity,
-    ScriptProfileEntry, ValueCell, ValueReference,
+    clear_active_object_references, data_string, set_value_cell, start_call_trace,
+    start_script_profiler, stop_script_profiler, value_cell, with_diagnostic_object_formatter,
+    CallerVarSlots, HostCallArg, HostCallerStrictness, LocalCells, ObjectReferenceSweep,
+    ScriptHostIdentity, ScriptProfileEntry, ValueCell, ValueReference,
 };
 
 mod value;

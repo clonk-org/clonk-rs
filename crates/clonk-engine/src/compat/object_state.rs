@@ -5693,7 +5693,13 @@ pub(crate) fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
         if overlay_id <= 0 {
             let definition_id = resolved_definition.expect("resolved definition present");
 
-            if context.definition_metadata(&definition_id).is_none() {
+            let Some(metadata) = context.definition_metadata(&definition_id) else {
+                return Ok(Value::Bool(false));
+            };
+            if graphics_name
+                .as_deref()
+                .is_some_and(|name| !metadata.has_named_graphics(name))
+            {
                 return Ok(Value::Bool(false));
             }
             let color_by_owner = context.world.definition_color_by_owner(&definition_id);
@@ -5770,10 +5776,6 @@ pub(crate) fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(true));
         }
 
-        let Some(object) = context.object_scope_mut(object_id) else {
-            return Ok(Value::Bool(false));
-        };
-
         if overlay_id < 0 {
             return Ok(Value::Bool(false));
         }
@@ -5785,6 +5787,23 @@ pub(crate) fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
                 Some(mode) => mode,
                 None => return Ok(Value::Bool(false)),
             }
+        };
+
+        if let Some(definition_id) = definition.as_deref() {
+            let Some(metadata) = context.definition_metadata(definition_id) else {
+                return Ok(Value::Bool(false));
+            };
+            if mode != GraphicsOverlayMode::Object
+                && graphics_name
+                    .as_deref()
+                    .is_some_and(|name| !metadata.has_named_graphics(name))
+            {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        let Some(object) = context.object_scope_mut(object_id) else {
+            return Ok(Value::Bool(false));
         };
 
         if mode == GraphicsOverlayMode::Object && overlay_object.is_none() {

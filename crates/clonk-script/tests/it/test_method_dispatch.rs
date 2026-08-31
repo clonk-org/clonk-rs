@@ -303,3 +303,47 @@ fn arrow_func_ref_result_writes_through_the_dispatch_reference() {
     );
     assert_eq!(*slot.borrow(), Value::Int(1));
 }
+
+#[test]
+fn precreated_dispatch_reference_joins_the_active_removal_index() {
+    // A native host may retain a C4V_pC4Value before script execution and
+    // return it as a `func &` result later. AB_CALL installs that reference in
+    // the active stack before evaluating AB_Set's right operand
+    // (C4AulExec.cpp:858-865,1290-1299), so AssignRemoval must reach it.
+    let slot = clonk_script::value_cell(Value::Object(7));
+    let reference = clonk_script::ValueReference::from_cell(Rc::clone(&slot));
+    let increment_slot = clonk_script::value_cell(Value::Int(0));
+    let increment_reference = clonk_script::ValueReference::from_cell(Rc::clone(&increment_slot));
+    let observed_during_sweep = Rc::new(std::cell::RefCell::new(None));
+    let mut engine = Engine::new();
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        global func Probe(target) {
+            target->RetainedSlot() = (target->SweepSlot() = 1);
+            return 1;
+        }
+        "#,
+    );
+    {
+        let slot = Rc::clone(&slot);
+        let observed_during_sweep = Rc::clone(&observed_during_sweep);
+        engine.register_method_reference_dispatch(Rc::new(move |args| match &args[1] {
+            Value::String(name) if name.as_ref() == "RetainedSlot" => Ok(reference.clone()),
+            Value::String(name) if name.as_ref() == "SweepSlot" => {
+                clear_active_object_references(7);
+                *observed_during_sweep.borrow_mut() = Some(slot.borrow().clone());
+                Ok(increment_reference.clone())
+            }
+            method => panic!("unexpected method reference dispatch: {method:?}"),
+        }));
+    }
+
+    assert_eq!(
+        engine
+            .call("Probe", &[Value::Object(9)])
+            .expect("dispatch assignment succeeds"),
+        Value::Int(1)
+    );
+    assert_eq!(*observed_during_sweep.borrow(), Some(Value::Nil));
+}

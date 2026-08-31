@@ -228,6 +228,11 @@ fn sweep_probe_engine() -> Engine {
         clear_active_object_references(9);
         Ok(Value::Nil)
     });
+    engine.register_host_function("Retain", |args| {
+        let mut map = ValueMap::new();
+        map.recycle_value_slot(args.first().cloned().unwrap_or(Value::Nil));
+        Ok(Value::Proplist(map))
+    });
     engine.register_host_function("Nine", |_| Ok(Value::Object(9)));
     engine.register_host_function("Fresh7", |_| Ok(Value::Object(7)));
     engine.register_host_function("Len", |args| {
@@ -361,5 +366,25 @@ func Test(object target) {
 "#
         ),
         Value::Array(vec![Value::Array(vec![Value::Nil])])
+    );
+}
+
+#[test]
+fn assign_removal_clears_a_retained_slot_in_an_unnamed_parameter() {
+    // Surplus arguments live in the native Pars array and remain reachable
+    // through Par() (C4AulExec.cpp:62-63,1127-1140). C4ValueHash's removed
+    // mapped slots remain registered C4Values too (C4Value.cpp:78-99), even
+    // when the map has no visible entries.
+    assert_eq!(
+        run_sweep_probe(
+            r#"#strict 3
+func Surplus() {
+  Clear7();
+  return HiddenValues(Par(0));
+}
+func Test(object target) { return Surplus(Retain(target)); }
+"#
+        ),
+        Value::Array(vec![Value::Nil])
     );
 }

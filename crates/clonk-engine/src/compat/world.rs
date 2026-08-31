@@ -627,6 +627,10 @@ impl DefCoreValueStore {
 pub(crate) struct DefinitionMetadata {
     /// DefCore `Name` (FnGetName's def form, C4Script.cpp:992-1005).
     pub name: String,
+    /// Case-insensitive keys for the definition's additional graphics.
+    /// The default graphic is represented by a null name and is deliberately
+    /// not stored here (C4DefGraphics::Get, C4DefGraphics.cpp:221-229).
+    pub graphics_names: Vec<String>,
     /// Canonical names of successfully decoded `Portrait*.*` graphics.
     /// C4PortraitGraphics::Get compares these case-insensitively.
     pub portrait_names: Vec<String>,
@@ -713,6 +717,13 @@ pub(crate) struct DefinitionMetadata {
 }
 
 impl DefinitionMetadata {
+    pub(crate) fn has_named_graphics(&self, name: &str) -> bool {
+        let key = clonk_resources::material::c4_name_key(name);
+        self.graphics_names
+            .iter()
+            .any(|candidate| candidate == &key)
+    }
+
     pub(crate) fn contact_density(&self) -> i32 {
         self.contact_density.unwrap_or(crate::CONTACT_DENSITY_SOLID)
     }

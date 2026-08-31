@@ -116,6 +116,7 @@ shard_modules!(
     get_act_map_val,
     get_entrance,
     global_call,
+    goldwipfcaves_breath,
     hazard_death_relaunch,
     literal_zero_strictness,
     manifest_definitions,

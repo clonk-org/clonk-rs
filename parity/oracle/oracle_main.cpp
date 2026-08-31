@@ -74,6 +74,12 @@
 //   * `C4Object::Enter`, `Exit` and `Collect` are mechanically extracted in
 //     full; a two-object scaffold with configurable script callbacks records
 //     their exact call order, rollback and post-callback Status re-checks.
+//   * C4Object::ExecLife's breathable-supply block is mechanically extracted;
+//     the Goldwipfcaves raw Breath pair records the overflowing delta and the
+//     DeepBreath-before-add callback boundary.
+//   * C4DefGraphics::Get, C4Object::SetGraphics, and the complete FnSetGraphics
+//     script host are mechanically extracted; missing base and overlay names
+//     must return false before changing an already-selected named graphic.
 //   * `C4Shape::ContactCheck` is mechanically extracted in full; a 24x16
 //     material grid with configurable open borders records its per-vertex
 //     contact masks, materials and counts.
@@ -823,6 +829,397 @@ static void printEffectCallbackConversionCase()
            effectCallStrict3Reference.carrierMutated);
 }
 } // namespace effect_position_oracle
+
+// --- ExecLife breathable supply: exact production block --------------------
+// gen_golden.sh extracts pinned C4Object.cpp:915-919 unchanged. The first row
+// has no DeepBreath callback, like the exact Goldwipfcaves content, so the
+// final += overflows back to the raw physical maximum. The second callback
+// records the old raw state, changes the current physical maximum, and clamps
+// raw Breath to a nonzero sentinel. Subtracting that sentinel from the final
+// state exposes the production local's actual target-compiler value, and only
+// C4Object.cpp:919's post-callback += produces the recorded final state.
+namespace breath_refill_oracle
+{
+inline constexpr char PSF_DeepBreath[] = "~DeepBreath";
+inline constexpr int32_t CallbackPhysicalBreath = 7;
+inline constexpr int32_t CallbackRawBreath = 7;
+
+struct C4PhysicalInfo
+{
+    int32_t Breath{};
+};
+
+struct C4Object
+{
+    C4PhysicalInfo Physical;
+    int32_t Breath{};
+    bool DeepBreathDefined{};
+    int32_t DeepBreathCallAttempts{};
+    int32_t DeepBreathCalls{};
+    int32_t CallbackBreath{};
+    int32_t CallbackBreathAfter{};
+    int32_t CallbackOrder{};
+    bool CallbackNameMatches{};
+
+    C4PhysicalInfo *GetPhysical() { return &Physical; }
+
+    int32_t Call(const char *function)
+    {
+        CallbackNameMatches = std::string_view(function) == PSF_DeepBreath;
+        if (!CallbackNameMatches) return 0;
+        ++DeepBreathCallAttempts;
+        if (!DeepBreathDefined) return 0;
+        ++DeepBreathCalls;
+        CallbackBreath = Breath;
+        CallbackOrder = CallbackOrder * 10 + 1;
+        Physical.Breath = CallbackPhysicalBreath;
+        Breath = CallbackRawBreath;
+        CallbackBreathAfter = Breath;
+        return 0;
+    }
+
+    void ExecuteBreathSupply()
+    {
+#include "object_breath_supply.inc"
+    }
+
+    void ObserveCompletedSupply()
+    {
+        CallbackOrder = CallbackOrder * 10 + 2;
+    }
+};
+
+static void printRow(const char *name, bool callbackDefined)
+{
+    C4Object object;
+    object.DeepBreathDefined = callbackDefined;
+    object.Physical.Breath = -2009260032;
+    object.Breath = 2147483647;
+    const int32_t physicalBefore = object.Physical.Breath;
+    const int32_t stateBefore = object.Breath;
+    const int32_t physicalHalf = physicalBefore / 2;
+
+    object.ExecuteBreathSupply();
+    object.ObserveCompletedSupply();
+    const int32_t addendBefore = callbackDefined ? object.CallbackBreathAfter : stateBefore;
+    const uint32_t observedBreathDeltaBits = static_cast<uint32_t>(object.Breath)
+        - static_cast<uint32_t>(addendBefore);
+    assert(observedBreathDeltaBits <= static_cast<uint32_t>(INT32_MAX));
+    const int32_t observedBreathDelta = static_cast<int32_t>(observedBreathDeltaBits);
+
+    printf("{\"name\":\"%s\",\"callback_defined\":%d,"
+           "\"physical_before\":%d,\"state_before\":%d,"
+           "\"take\":%d,\"physical_half\":%d,"
+           "\"deep_breath_condition\":%d,\"deep_breath_call_attempts\":%d,"
+           "\"deep_breath_calls\":%d,"
+           "\"callback_name_matches\":%d,\"callback_breath\":%d,"
+           "\"callback_breath_after\":%d,\"callback_order\":%d,"
+           "\"physical_after\":%d,"
+           "\"state_after\":%d}",
+           name, callbackDefined ? 1 : 0, physicalBefore, stateBefore,
+           observedBreathDelta, physicalHalf,
+           object.DeepBreathCallAttempts != 0, object.DeepBreathCallAttempts,
+           object.DeepBreathCalls,
+           object.CallbackNameMatches ? 1 : 0, object.CallbackBreath,
+           object.CallbackBreathAfter, object.CallbackOrder,
+           object.Physical.Breath, object.Breath);
+}
+
+static void printCases()
+{
+    printf("\"breath_refill_callback_order\":[");
+    printRow("goldwipfcaves_missing_callback", false);
+    printf(",");
+    printRow("goldwipfcaves_mutating_callback", true);
+    printf("]");
+}
+} // namespace breath_refill_oracle
+
+// --- SetGraphics missing-name rejection: exact production paths ------------
+// gen_golden.sh extracts all of C4DefGraphics::Get, the base
+// C4Object::SetGraphics overload, and FnSetGraphics. The small types below
+// supply only the state those bodies touch. Each row establishes a known named
+// graphic through FnSetGraphics itself, then records the state before and after
+// a missing lookup. This makes the early return and absence of mutation
+// independently visible for the base and overlay paths.
+namespace set_graphics_missing_lookup_oracle
+{
+using C4ID = int32_t;
+using C4ValueInt = int32_t;
+
+struct C4Def;
+struct C4Object;
+class C4AdditionalDefGraphics;
+
+class C4DefGraphics
+{
+protected:
+    C4AdditionalDefGraphics *pNext{};
+
+public:
+    C4Def *pDef{};
+
+    explicit C4DefGraphics(C4Def *definition = nullptr) : pDef(definition) {}
+    virtual ~C4DefGraphics() = default;
+    virtual const char *GetName() { return nullptr; }
+    C4DefGraphics *Get(const char *szGrpName);
+    void SetNext(C4AdditionalDefGraphics *next) { pNext = next; }
+};
+
+class C4AdditionalDefGraphics final : public C4DefGraphics
+{
+    std::string Name;
+
+public:
+    C4AdditionalDefGraphics(C4Def *definition, const char *name)
+        : C4DefGraphics(definition), Name(name) {}
+
+    const char *GetName() override { return Name.c_str(); }
+};
+
+struct C4Def
+{
+    C4ID id{};
+    C4DefGraphics Graphics;
+
+    explicit C4Def(C4ID definitionId) : id(definitionId), Graphics(this) {}
+};
+
+#include "def_graphics_get.inc"
+
+class C4GraphicsOverlay
+{
+public:
+    enum Mode
+    {
+        MODE_None = 0,
+        MODE_Base = 1,
+        MODE_Action = 2,
+        MODE_Picture = 3,
+        MODE_IngamePicture = 4,
+        MODE_Object = 5,
+        MODE_ExtraGraphics = 6,
+    };
+
+private:
+    Mode CurrentMode{MODE_None};
+    C4DefGraphics *SourceGraphics{};
+    C4Object *OverlayObject{};
+    int32_t ID{};
+
+    void Set(Mode mode, C4DefGraphics *graphics, C4Object *overlayObject)
+    {
+        CurrentMode = mode;
+        SourceGraphics = graphics;
+        OverlayObject = overlayObject;
+    }
+
+public:
+    void SetAsBase(C4DefGraphics *graphics, uint32_t)
+    {
+        Set(MODE_Base, graphics, nullptr);
+    }
+
+    void SetAsAction(C4DefGraphics *graphics, const char *, uint32_t)
+    {
+        Set(MODE_Action, graphics, nullptr);
+    }
+
+    void SetAsIngamePicture(C4DefGraphics *graphics, uint32_t)
+    {
+        Set(MODE_IngamePicture, graphics, nullptr);
+    }
+
+    void SetAsPicture(C4DefGraphics *graphics, uint32_t)
+    {
+        Set(MODE_Picture, graphics, nullptr);
+    }
+
+    void SetAsObject(C4Object *object, uint32_t)
+    {
+        Set(MODE_Object, nullptr, object);
+    }
+
+    void SetAsExtraGraphics(C4DefGraphics *graphics, uint32_t)
+    {
+        Set(MODE_ExtraGraphics, graphics, nullptr);
+    }
+
+    bool IsValid(const C4Object *) const
+    {
+        if (CurrentMode == MODE_Object) return OverlayObject != nullptr;
+        return SourceGraphics != nullptr;
+    }
+
+    void SetID(int32_t id) { ID = id; }
+    int32_t GetID() const { return ID; }
+    Mode GetMode() const { return CurrentMode; }
+    C4DefGraphics *GetGfx() const { return SourceGraphics; }
+};
+
+struct C4Object
+{
+    int32_t Status{1};
+    C4Def *Def{};
+    C4DefGraphics *pGraphics{};
+    std::vector<std::unique_ptr<C4GraphicsOverlay>> GraphicsOverlays;
+
+    explicit C4Object(C4Def *definition)
+        : Def(definition), pGraphics(&definition->Graphics) {}
+
+    bool SetGraphics(const char *szGraphicsName, C4Def *pSourceDef);
+    void UpdateGraphics(bool) {}
+
+    C4GraphicsOverlay *GetGraphicsOverlay(int32_t id, bool create)
+    {
+        for (const auto &overlay : GraphicsOverlays)
+            if (overlay->GetID() == id) return overlay.get();
+        if (!create) return nullptr;
+        auto overlay = std::make_unique<C4GraphicsOverlay>();
+        overlay->SetID(id);
+        C4GraphicsOverlay *result = overlay.get();
+        GraphicsOverlays.push_back(std::move(overlay));
+        return result;
+    }
+
+    bool RemoveGraphicsOverlay(int32_t id)
+    {
+        const auto before = GraphicsOverlays.size();
+        std::erase_if(GraphicsOverlays, [id](const auto &overlay) {
+            return overlay->GetID() == id;
+        });
+        return GraphicsOverlays.size() != before;
+    }
+};
+
+#include "object_set_graphics.inc"
+
+struct C4String
+{
+    const char *Value{};
+};
+
+struct C4AulContext
+{
+    C4Object *Obj{};
+};
+
+static C4Def *RegisteredSourceDefinition{};
+
+static C4Def *C4Id2Def(C4ID id)
+{
+    if (RegisteredSourceDefinition && RegisteredSourceDefinition->id == id)
+        return RegisteredSourceDefinition;
+    return nullptr;
+}
+
+static const char *FnStringPar(C4String *string)
+{
+    return string ? string->Value : nullptr;
+}
+
+// FnSetGraphics' negative-overlay diagnostic is outside these rows. Discard
+// logging without pulling the production logging stack into the fixture.
+#define LogNTr(...) ((void)0)
+#include "script_fn_set_graphics.inc"
+#undef LogNTr
+
+static const C4GraphicsOverlay *firstOverlay(const C4Object &object)
+{
+    return object.GraphicsOverlays.empty() ? nullptr : object.GraphicsOverlays.front().get();
+}
+
+static const char *baseName(const C4Object &object)
+{
+    return object.pGraphics ? object.pGraphics->GetName() : nullptr;
+}
+
+static const char *overlayName(const C4Object &object)
+{
+    const C4GraphicsOverlay *overlay = firstOverlay(object);
+    return overlay && overlay->GetGfx() ? overlay->GetGfx()->GetName() : nullptr;
+}
+
+static void printNullableName(const char *name)
+{
+    if (name)
+        printf("\"%s\"", name);
+    else
+        printf("null");
+}
+
+static void printNullableMode(const C4GraphicsOverlay *overlay)
+{
+    if (overlay)
+        printf("%d", static_cast<int>(overlay->GetMode()));
+    else
+        printf("null");
+}
+
+static void printRow(const char *name, bool overlayCase)
+{
+    C4Def definition(0x53474658);
+    C4AdditionalDefGraphics known(&definition, "Known");
+    definition.Graphics.SetNext(&known);
+    RegisteredSourceDefinition = &definition;
+
+    C4Object object(&definition);
+    C4AulContext context{&object};
+    C4String knownName{"Known"};
+    C4String missingName{"Missing"};
+    const int32_t overlayId = overlayCase ? 1 : 0;
+    const C4ID sourceDefinition = overlayCase ? definition.id : 0;
+    const auto overlayMode = static_cast<C4ValueInt>(C4GraphicsOverlay::MODE_Base);
+    const bool setup = FnSetGraphics(&context, &knownName, &object, sourceDefinition,
+                                     overlayId, overlayMode, nullptr, 0, nullptr);
+    assert(setup);
+
+    const char *baseBefore = baseName(object);
+    const std::string baseBeforeCopy = baseBefore ? baseBefore : "";
+    const char *overlayBefore = overlayName(object);
+    const std::string overlayBeforeCopy = overlayBefore ? overlayBefore : "";
+    const std::size_t overlayCountBefore = object.GraphicsOverlays.size();
+    const C4GraphicsOverlay *overlayStateBefore = firstOverlay(object);
+    const std::optional<int> overlayModeBefore = overlayStateBefore
+        ? std::optional<int>{static_cast<int>(overlayStateBefore->GetMode())}
+        : std::nullopt;
+
+    const bool result = FnSetGraphics(&context, &missingName, &object, sourceDefinition,
+                                      overlayId, overlayMode, nullptr, 0, nullptr);
+    const char *baseAfter = baseName(object);
+    const char *overlayAfter = overlayName(object);
+    const C4GraphicsOverlay *overlayStateAfter = firstOverlay(object);
+
+    printf("{\"name\":\"%s\",\"result\":%d,\"base_name_before\":", name, result ? 1 : 0);
+    printNullableName(baseBefore ? baseBeforeCopy.c_str() : nullptr);
+    printf(",\"base_name_after\":");
+    printNullableName(baseAfter);
+    printf(",\"overlay_count_before\":%zu,\"overlay_count_after\":%zu,"
+           "\"overlay_name_before\":",
+           overlayCountBefore, object.GraphicsOverlays.size());
+    printNullableName(overlayBefore ? overlayBeforeCopy.c_str() : nullptr);
+    printf(",\"overlay_name_after\":");
+    printNullableName(overlayAfter);
+    printf(",\"overlay_mode_before\":");
+    if (overlayModeBefore)
+        printf("%d", *overlayModeBefore);
+    else
+        printf("null");
+    printf(",\"overlay_mode_after\":");
+    printNullableMode(overlayStateAfter);
+    printf("}");
+}
+
+static void printCases()
+{
+    printf("\"set_graphics_missing_lookup\":[");
+    printRow("base_missing_name", false);
+    printf(",");
+    printRow("overlay_missing_name", true);
+    printf("]");
+    RegisteredSourceDefinition = nullptr;
+}
+} // namespace set_graphics_missing_lookup_oracle
 
 // --- BlastFree: exact production bodies ------------------------------------
 // gen_golden.sh extracts ClearPix, BlastFreePix, and BlastFree unchanged from
@@ -16388,6 +16785,21 @@ int main()
     // on that warning path; strict integer and reference declarations reject
     // before the callback body can mutate or alias the carrier.
     effect_position_oracle::printEffectCallbackConversionCase();
+    printf(",\n");
+
+    // 10e. Exact C4Object::ExecLife breathable-supply block
+    //      (C4Object.cpp:915-919). The malformed Goldwipfcaves physical and
+    //      saved raw state overflow the signed subtraction on the pinned
+    //      target. The missing-callback row pins the overflowing final +=;
+    //      callback-side physical and raw-state mutations independently pin
+    //      its position after the delta calculation and before that +=.
+    breath_refill_oracle::printCases();
+    printf(",\n");
+
+    // 10f. Exact named-graphics lookup, base setter, and SetGraphics script
+    //      host. A known named selection is established first; both missing
+    //      lookup paths must then return false without changing that state.
+    set_graphics_missing_lookup_oracle::printCases();
     printf(",\n");
 
     // 11. C4Landscape::_PathFree coarse-cell occupancy. The edge-water case

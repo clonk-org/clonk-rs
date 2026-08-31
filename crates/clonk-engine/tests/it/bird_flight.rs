@@ -5,12 +5,24 @@
 
 use crate::support::real_scenario::{join_local_player, prepare_installed_scenario};
 use crate::support::EngineTestExt;
-use clonk_engine::{CommandDirection, Engine, ObjectId, ObjectUpdate, SpawnConfig, Vector2};
+use clonk_core::log_target::SCRIPT_DEBUG_LOG_TARGET;
+use clonk_engine::{
+    CommandDirection, EffectState, Engine, ObjectId, ObjectUpdate, SpawnConfig, Vector2,
+};
 use clonk_script::Value;
+use std::fmt;
+use std::sync::{Arc, Mutex};
+use tracing::field::{Field, Visit};
+use tracing::{subscriber, Level};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use tracing_subscriber::registry::Registry;
 
 /// Wipfrace declares `Animal=BIRD=10;` (Scenario.txt:56), so InitAnimals
 /// places a real flock over generated terrain.
 const BIRD_SCENARIO: &str = "Races.c4f/Wipfrace.c4s";
+/// S2Stylands overloads `BIRD` with a folder-local definition whose Activity
+/// callback owns combat and energy behavior rather than stock bird steering.
+const CUSTOM_BIRD_SCENARIO: &str = "Collection.c4f/Knights.c4f/S2Stylands.c4s";
 const APPEND: &str = "BirdFlight.c";
 /// `[Physical] Float=200` becomes the DFA_FLOAT per-axis velocity bound
 /// `FIXED100(200)` = 2.0 px/frame (C4Object.cpp:5284-5285).
@@ -37,6 +49,216 @@ fn tick(engine: &mut Engine, frames: u32) {
     for _ in 0..frames {
         crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
+}
+
+#[derive(Clone)]
+struct ScriptWarningLayer {
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl<S> Layer<S> for ScriptWarningLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        if *event.metadata().level() != Level::WARN
+            || event.metadata().target() != SCRIPT_DEBUG_LOG_TARGET
+        {
+            return;
+        }
+        let mut visitor = ScriptWarningVisitor::default();
+        event.record(&mut visitor);
+        if let Some(message) = visitor.message {
+            crate::support::TestValueExt::test_value(self.messages.lock()).push(message);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ScriptWarningVisitor {
+    message: Option<String>,
+}
+
+impl Visit for ScriptWarningVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{value:?}").trim_matches('"').to_owned());
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(value.to_owned());
+        }
+    }
+}
+
+fn capture_script_warnings<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = Registry::default().with(ScriptWarningLayer {
+        messages: Arc::clone(&messages),
+    });
+    let result = subscriber::with_default(subscriber, run);
+    let captured = crate::support::TestValueExt::test_value(messages.lock()).clone();
+    (result, captured)
+}
+
+#[test]
+fn folder_local_bird_activity_runs_without_stock_flight_steering() {
+    let prepared = prepare_installed_scenario(CUSTOM_BIRD_SCENARIO, 0);
+    let mut engine = prepared.instantiate();
+    let mut authored = prepared.instantiate_without_system_script(APPEND);
+    join_local_player(&mut engine, "S2Stylands bird callback");
+    join_local_player(&mut authored, "S2Stylands bird callback");
+    let bird = *crate::support::TestValueExt::test_value(birds(&engine).first());
+    let authored_bird = *crate::support::TestValueExt::test_value(birds(&authored).first());
+    let index = engine.test_object_index(bird);
+    let authored_index = authored.test_object_index(authored_bird);
+    let rng_before = engine.debug_rng_clone().count;
+    let authored_rng_before = authored.debug_rng_clone().count;
+
+    engine.call_test_object_function(index, "Activity", Vec::new());
+    authored.call_test_object_function(authored_index, "Activity", Vec::new());
+
+    assert_eq!(
+        local_int(&engine, bird, "actCnt"),
+        local_int(&authored, authored_bird, "actCnt"),
+        "the folder-local BIRD::Activity callback must remain in the overload chain"
+    );
+    assert_eq!(local_int(&engine, bird, "actCnt"), Some(1));
+    assert!(
+        engine
+            .test_object_snapshot(bird)
+            .effects
+            .iter()
+            .all(|effect| effect.name != "BirdFlight"),
+        "the stock controller must not attach to an incompatible BIRD"
+    );
+    assert_eq!(
+        engine.debug_rng_clone().count - rng_before,
+        authored.debug_rng_clone().count - authored_rng_before,
+        "rejecting an incompatible bird must not consume stock steering draws"
+    );
+
+    let (_, warnings) = capture_script_warnings(|| {
+        tick(&mut engine, 600);
+        tick(&mut authored, 600);
+    });
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| !warning.contains("BirdFlight")),
+        "the delegated folder-local callbacks must not fail over 600 frames: {warnings:?}"
+    );
+    assert_eq!(
+        local_int(&engine, bird, "actCnt"),
+        local_int(&authored, authored_bird, "actCnt"),
+        "the authored periodic callback state stays aligned with the control"
+    );
+    assert!(
+        local_int(&engine, bird, "actCnt").is_some_and(|count| count > 1),
+        "the 600-frame window exercises the authored periodic Activity callback"
+    );
+    assert_eq!(
+        engine.debug_rng_clone().count,
+        authored.debug_rng_clone().count,
+        "the compatibility append must not perturb the scenario RNG ledger"
+    );
+    let controlled = engine.test_object_snapshot(bird);
+    let authored = authored.test_object_snapshot(authored_bird);
+    assert_eq!(controlled.position, authored.position);
+    assert_eq!(controlled.fixed_velocity, authored.fixed_velocity);
+    assert_eq!(controlled.energy, authored.energy);
+}
+
+#[test]
+fn folder_local_bird_rejects_new_and_removes_restored_stock_flight_effects() {
+    let prepared = prepare_installed_scenario(CUSTOM_BIRD_SCENARIO, 0);
+    let mut engine = prepared.instantiate();
+    join_local_player(&mut engine, "S2Stylands stale bird controller");
+    let bird = *crate::support::TestValueExt::test_value(birds(&engine).first());
+    let index = engine.test_object_index(bird);
+
+    assert_eq!(
+        engine.call_test_object_function(
+            index,
+            "FxBirdFlightStart",
+            vec![Value::Object(bird.as_u64()), Value::Int(1), Value::Int(1),],
+        ),
+        Value::Int(1),
+        "temporary Start remains a no-op during effect suspension and restore"
+    );
+    assert_eq!(
+        local_int(&engine, bird, "flight_compatible"),
+        None,
+        "temporary Start must not materialize the definition classification"
+    );
+    assert_eq!(
+        engine.call_test_object_function(
+            index,
+            "FxBirdFlightStart",
+            vec![Value::Object(bird.as_u64()), Value::Int(1), Value::Int(0),],
+        ),
+        Value::Int(-1),
+        "a fresh effect must be denied before it can seed stock steering state"
+    );
+    assert_eq!(
+        local_int(&engine, bird, "flight_compatible"),
+        Some(-1),
+        "the folder-local definition classification is cached on the bird"
+    );
+
+    // Older saves can carry a BirdFlight effect without the compatibility
+    // cache. Restore that exact shape: loaded effects have already completed
+    // Start, so Timer is the last line of defence against stale steering.
+    let mut state = engine.capture_state();
+    let saved_bird = crate::support::TestValueExt::test_value(
+        state
+            .objects
+            .iter_mut()
+            .find(|object| object.snapshot.id == bird),
+    );
+    saved_bird.snapshot.local_vars.remove("flight_compatible");
+    let mut stale = EffectState::new("BirdFlight")
+        .with_priority(1)
+        .with_interval(1)
+        .with_command_target(Some(bird.as_u64() as i32))
+        .with_command_id(Some("BIRD"));
+    stale.start_dispatched = true;
+    saved_bird.snapshot.effects.push(stale);
+    crate::support::TestValueExt::test_value(engine.restore_state(&state));
+    assert!(
+        engine
+            .test_object_snapshot(bird)
+            .effects
+            .iter()
+            .any(|effect| effect.name == "BirdFlight"),
+        "the restored pre-fix save starts with the stale controller"
+    );
+
+    tick(&mut engine, 1);
+
+    assert_eq!(
+        engine
+            .test_object_snapshot(bird)
+            .effects
+            .iter()
+            .find(|effect| effect.name == "BirdFlight")
+            .map(|effect| effect.priority),
+        Some(0),
+        "the first timer callback marks the stale incompatible effect dead"
+    );
+    assert_eq!(local_int(&engine, bird, "flight_compatible"), Some(-1));
+
+    tick(&mut engine, 1);
+    assert!(
+        engine
+            .test_object_snapshot(bird)
+            .effects
+            .iter()
+            .all(|effect| effect.name != "BirdFlight"),
+        "the next live-list pass unlinks the dead stale effect"
+    );
 }
 
 /// The controller has to reach birds that arrive as loaded saved objects and

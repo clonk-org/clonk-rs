@@ -750,6 +750,12 @@ impl ValueMapStorage {
 #[derive(Clone, Default)]
 pub struct ValueMap(Arc<ValueMapStorage>);
 
+#[derive(Clone, Copy)]
+pub(crate) enum ValueMapReferenceChange {
+    Removed,
+    Added,
+}
+
 impl fmt::Debug for ValueMap {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct Entries<'a>(&'a ValueMap);
@@ -865,17 +871,19 @@ impl ValueMap {
     /// Assigns through a C4ValueHash-owned string slot. Nonnil -> nil erases
     /// the entry, while missing/already-nil -> nil remains present because
     /// C4Value::Set returns before CheckRemoveFromMap for an unchanged nil.
+    #[cfg(test)]
     pub(crate) fn assign(&mut self, key: String, value: Value) {
-        if matches!(value, Value::Nil)
-            && self
-                .get(&key)
-                .is_some_and(|current| !matches!(current, Value::Nil))
-        {
-            self.shift_remove(&key);
-            self.recycle_value_slot(Value::Nil);
-        } else {
-            self.insert_key(Value::from(key), value);
-        }
+        self.assign_recording(key, value, |_, _| {});
+    }
+
+    pub(crate) fn assign_recording(
+        &mut self,
+        key: String,
+        value: Value,
+        record: impl FnMut(ValueMapReferenceChange, &Value),
+    ) {
+        let index = self.string_index(&key);
+        self.assign_at_recording(index, Value::from(key), value, record);
     }
 
     pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
@@ -933,17 +941,55 @@ impl ValueMap {
     }
 
     /// Arbitrary-key form of [`Self::assign`].
+    #[cfg(test)]
     pub(crate) fn assign_key(&mut self, key: Value, value: Value) {
-        if matches!(value, Value::Nil)
-            && self
-                .get_key(&key)
-                .is_some_and(|current| !matches!(current, Value::Nil))
-        {
-            self.shift_remove_key(&key);
-            self.recycle_value_slot(Value::Nil);
-        } else {
-            self.insert_key(key, value);
+        self.assign_key_recording(key, value, |_, _| {});
+    }
+
+    pub(crate) fn assign_key_recording(
+        &mut self,
+        key: Value,
+        value: Value,
+        record: impl FnMut(ValueMapReferenceChange, &Value),
+    ) {
+        let index = self.0.lookup_index(&key);
+        self.assign_at_recording(index, key, value, record);
+    }
+
+    fn assign_at_recording(
+        &mut self,
+        index: Option<usize>,
+        key: Value,
+        value: Value,
+        mut record: impl FnMut(ValueMapReferenceChange, &Value),
+    ) {
+        let storage = Arc::make_mut(&mut self.0);
+        if let Some(index) = index {
+            if matches!(value, Value::Nil) && !matches!(storage.nodes[index].value, Value::Nil) {
+                let node = storage.remove(index);
+                record(ValueMapReferenceChange::Removed, &node.key);
+                record(ValueMapReferenceChange::Removed, &node.value);
+                storage.empty_values.push(Value::Nil);
+            } else {
+                let node = &mut storage.nodes[index];
+                record(ValueMapReferenceChange::Removed, &node.value);
+                record(ValueMapReferenceChange::Added, &value);
+                node.value = value;
+            }
+            return;
         }
+
+        if let Some(recycled) = storage.empty_values.pop() {
+            record(ValueMapReferenceChange::Removed, &recycled);
+            if matches!(value, Value::Nil) && !matches!(recycled, Value::Nil) {
+                storage.empty_values.push(Value::Nil);
+                return;
+            }
+        }
+
+        record(ValueMapReferenceChange::Added, &key);
+        record(ValueMapReferenceChange::Added, &value);
+        storage.push(key, value);
     }
 
     /// Assign a retained `C4V_C4ID(0)` mapped value through C4Value::Set.
@@ -951,22 +997,29 @@ impl ValueMap {
     /// `C4V_Any(0)` slot: Set canonicalizes it and CheckRemoveFromMap erases
     /// the entry. The only surviving case is Set's exact data/type early
     /// return when the destination slot already contains a retained zero ID.
-    pub(crate) fn assign_key_zero_c4id(&mut self, key: Value) {
-        if self
-            .get_key(&key)
-            .is_some_and(|current| matches!(current, Value::C4Id(id) if c4_id_raw(id) == 0))
-        {
-            return;
-        }
-
-        if self.shift_remove_key(&key).is_some() {
-            self.recycle_value_slot(Value::Nil);
-            return;
-        }
-
+    pub(crate) fn assign_key_zero_c4id_recording(
+        &mut self,
+        key: Value,
+        mut record: impl FnMut(ValueMapReferenceChange, &Value),
+    ) {
+        let index = self.0.lookup_index(&key);
         let storage = Arc::make_mut(&mut self.0);
+        if let Some(index) = index {
+            if matches!(&storage.nodes[index].value, Value::C4Id(id) if c4_id_raw(id) == 0) {
+                return;
+            }
+            let node = storage.remove(index);
+            record(ValueMapReferenceChange::Removed, &node.key);
+            record(ValueMapReferenceChange::Removed, &node.value);
+            storage.empty_values.push(Value::Nil);
+            return;
+        }
+
         if let Some(recycled) = storage.empty_values.pop() {
+            record(ValueMapReferenceChange::Removed, &recycled);
             if matches!(&recycled, Value::C4Id(id) if c4_id_raw(id) == 0) {
+                record(ValueMapReferenceChange::Added, &key);
+                record(ValueMapReferenceChange::Added, &recycled);
                 storage.push(key, recycled);
             } else {
                 storage.empty_values.push(Value::Nil);
@@ -979,18 +1032,37 @@ impl ValueMap {
     /// String-key counterpart used by `map.property = retained_id_zero`.
     /// Preserve the native literal-string lookup fallback before delegating
     /// the missing-slot case to the arbitrary-key implementation.
-    pub(crate) fn assign_zero_c4id(&mut self, key: String) {
-        if self
-            .get(&key)
-            .is_some_and(|current| matches!(current, Value::C4Id(id) if c4_id_raw(id) == 0))
-        {
+    pub(crate) fn assign_zero_c4id_recording(
+        &mut self,
+        key: String,
+        mut record: impl FnMut(ValueMapReferenceChange, &Value),
+    ) {
+        let index = self.string_index(&key);
+        let storage = Arc::make_mut(&mut self.0);
+        if let Some(index) = index {
+            if matches!(&storage.nodes[index].value, Value::C4Id(id) if c4_id_raw(id) == 0) {
+                return;
+            }
+            let node = storage.remove(index);
+            record(ValueMapReferenceChange::Removed, &node.key);
+            record(ValueMapReferenceChange::Removed, &node.value);
+            storage.empty_values.push(Value::Nil);
             return;
         }
-        if self.shift_remove(&key).is_some() {
-            self.recycle_value_slot(Value::Nil);
-            return;
+
+        if let Some(recycled) = storage.empty_values.pop() {
+            record(ValueMapReferenceChange::Removed, &recycled);
+            if matches!(&recycled, Value::C4Id(id) if c4_id_raw(id) == 0) {
+                let key = Value::from(key);
+                record(ValueMapReferenceChange::Added, &key);
+                record(ValueMapReferenceChange::Added, &recycled);
+                storage.push(key, recycled);
+            } else {
+                storage.empty_values.push(Value::Nil);
+            }
+        } else {
+            storage.empty_values.push(Value::Nil);
         }
-        self.assign_key_zero_c4id(Value::from(key));
     }
 
     pub fn shift_remove_key(&mut self, key: &Value) -> Option<Value> {
@@ -1355,9 +1427,13 @@ impl Value {
         match self {
             Self::Object(id) => *id != 0,
             Self::Array(values) => values.iter().any(Self::contains_any_object_reference),
-            Self::Proplist(entries) => entries.iter().any(|(key, value)| {
-                key.contains_any_object_reference() || value.contains_any_object_reference()
-            }),
+            Self::Proplist(entries) => {
+                entries.iter().any(|(key, value)| {
+                    key.contains_any_object_reference() || value.contains_any_object_reference()
+                }) || entries
+                    .hidden_values()
+                    .any(Self::contains_any_object_reference)
+            }
             Self::Int(_)
             | Self::Bool(_)
             | Self::RawBool(_)

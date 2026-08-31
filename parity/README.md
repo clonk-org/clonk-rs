@@ -54,6 +54,8 @@ inventory in prose:
 | `scenario_sections` | complete `C4GameSave::SaveScenarioSections` plus the `C4ScenarioSection` constructor and accessors that build the list it walks (`src/C4GameSave.cpp:111-137`; `src/C4Scenario.cpp:555-566,649-657`) | the exact-save section sweep runs in **reverse** construction order, deletes the current section without re-adding it, and discards `Add`'s result |
 | `contents_list_order` | complete `C4ObjectList::Add`, `Remove`, `GetLink`, `RemoveLink`, `InsertLink`, and `ShiftContents` bodies (`src/C4ObjectList.cpp:110-268,310-318,614-636,815-831`) | exact category/id insertion, StaticBack/line/unsorted exceptions, tail-add, link-preserving rotation, fresh-link reinsertion, and iterator repair |
 | `container_lifecycle` | complete `C4Object::Enter`, `Exit`, and `Collect` bodies (`src/C4Object.cpp:1532-1637,5693-5717`) | callback and reentrant mutation order, both containment directions, controller transfer, final status, and raw fixed motion |
+| `breath_refill_callback_order` | mechanically extracted breathable-supply block (`src/C4Object.cpp:915-919`) | Goldwipfcaves' raw `physical=-2009260032`, `state=2147483647` pair both without its missing DeepBreath callback (pinning the overflowing final `+=`) and with a state-mutating probe (pinning the condition and callback-before-add ordering) |
+| `set_graphics_missing_lookup` | complete `C4DefGraphics::Get`, base `C4Object::SetGraphics`, and `FnSetGraphics` bodies (`src/C4DefGraphics.cpp:221-229`; `src/C4Object.cpp:5894-5910`; `src/C4Script.cpp:4372-4442`) | a missing named base or overlay graphic returns false without changing an already-selected known named graphic or overlay |
 | `contact_action_bottom_flight` | complete bottom `DFA_FLIGHT` arm of `C4Object::ContactAction` + action helpers | the `(OCF_HitSpeed4 \|\| fDisabled)` FlatUp gate, including low-speed disabled actions |
 | `contact_action_top_side_flight` | complete top/left/right `DFA_FLIGHT` arms + action helpers + unresolved-flight tail | the `(OCF_HitSpeed3 \|\| fDisabled)` Tumble gates, exact transient wall kicks, enabled Hangle/Scale controls, and final slide-free state |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
@@ -273,8 +275,9 @@ construction rules and examples:
   `SortRank`, `SortByList` and `WildcardMatch` are the real ones. That link is
   also why the C4Strings helpers are no longer lifted — the copies would be
   duplicate symbols beside the real translation unit — and why the oracle is
-  built at `-std=c++23` with `-DZLIB_CONST`; both were verified to reproduce the
-  committed golden byte-for-byte before this section was added. SHA1 is stubbed,
+  built at `-std=c++23` with `-fwrapv` and `-DZLIB_CONST`. The wrapping flag
+  defines LegacyClonk's intentional signed-overflow arithmetic for GCC/Clang
+  invocations that honor it. SHA1 is stubbed,
   reached only by the `Original` author signature that no section verifies.
   `Sort` reorders the in-memory entry list, so this section needs no file bytes
   and touches none of the three host-dependent values a group rewrite would —
@@ -339,7 +342,7 @@ cargo nextest run -p clonk-engine-unit-tests --test engine_inline \
 cargo xtask parity verify
 
 # Regenerate the golden after changing the C++ primitives or oracle coverage
-# (requires a C++20 compiler; honours $CXX, defaults to clang++):
+# (requires a C++23 compiler; honours $CXX, defaults to clang++):
 parity/oracle/gen_golden.sh
 #   or:
 cargo xtask parity record

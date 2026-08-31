@@ -23,6 +23,11 @@ impl Engine {
                         id.clone(),
                         DefinitionMetadata {
                             name: definition.name().to_string(),
+                            graphics_names: definition
+                                .sprite_variant_keys()
+                                .into_iter()
+                                .map(|name| clonk_resources::material::c4_name_key(&name))
+                                .collect(),
                             portrait_names: definition
                                 .portrait_graphics_names()
                                 .map(str::to_string)

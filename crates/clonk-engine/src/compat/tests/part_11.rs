@@ -2969,10 +2969,19 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let object_context = idle_object_scope(object_id)
             .with_graphics_overlays(Vec::new())
             .with_base_graphics(None);
+        let world = HostWorldContext::default().with_definition_metadata(Rc::new(HashMap::from([
+            (
+                "CLNK".to_string(),
+                DefinitionMetadata {
+                    graphics_names: vec![clonk_resources::material::c4_name_key("Default")],
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ])));
 
         let (result, outcome) = with_compat_context!(
             Some(object_context),
-            HostWorldContext::default(),
+            world,
             100,
             || {
                 set_graphics(&[
@@ -2995,6 +3004,36 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         assert_eq!(overlay.mode, GraphicsOverlayMode::Action);
         assert_eq!(overlay.definition.as_deref(), Some("CLNK"));
         assert_eq!(overlay.action.as_deref(), Some("Walk"));
+    }
+
+    #[test]
+    fn set_graphics_rejects_missing_named_overlay_graphics_without_update() {
+        // FnSetGraphics resolves the named C4DefGraphics before it creates or
+        // changes an overlay and returns false on a missing name
+        // (C4Script.cpp:4393-4395).
+        let object_id = ObjectId::new(42);
+        let world = HostWorldContext::default().with_definition_metadata(Rc::new(HashMap::from([
+            ("LADR".to_string(), DefinitionMetadata::default()),
+        ])));
+        let object_context = idle_object_scope(object_id)
+            .with_graphics_overlays(Vec::new())
+            .with_base_graphics(None);
+
+        let (result, outcome) = with_compat_context!(Some(object_context), world, 100, || {
+            set_graphics(&[
+                v_string("Part4W".into()),
+                NIL,
+                v_id("LADR".into()),
+                INT_1,
+                v_int(GraphicsOverlayMode::Base as i32),
+            ])
+        });
+
+        assert_eq!(result.expect("SetGraphics returns a value"), FALSE);
+        assert!(
+            outcome.object_update.is_none(),
+            "a failed lookup must not create or mutate an overlay"
+        );
     }
 
     #[test]
@@ -3027,7 +3066,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         // SetObjDrawTransform applied before a graphics refresh.
         let object_id = ObjectId::new(9);
         let mut existing = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
-            .with_definition(Some("Clonk".into()))
+            .with_definition(Some("CLNK".into()))
             .with_transform(Some(DrawTransform::from_components(2.0, 3.0, 4.0, 5.0)));
         existing.color_modulation = 0x0012_3456;
         existing.phase = 7;
@@ -3035,16 +3074,19 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let object_context = idle_object_scope(object_id)
             .with_graphics_overlays(vec![existing])
             .with_base_graphics(None);
+        let world = HostWorldContext::default().with_definition_metadata(Rc::new(HashMap::from([
+            ("CLNK".to_string(), DefinitionMetadata::default()),
+        ])));
 
         let (result, outcome) = with_compat_context!(
             Some(object_context),
-            HostWorldContext::default(),
+            world,
             100,
             || {
                 set_graphics(&[
                     NIL,
                     NIL,
-                    v_id("Clonk".into()),
+                    v_id("CLNK".into()),
                     INT_1,
                     v_int(GraphicsOverlayMode::IngamePicture as i32),
                 ])
@@ -3079,19 +3121,22 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         // return();` (content/Knights.c4d/Crew.c4d/Knight.c4d/Script.c:1214).
         let object_id = ObjectId::new(11);
         let existing = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
-            .with_definition(Some("Clonk".into()))
+            .with_definition(Some("CLNK".into()))
             .with_action(Some("Pointer".into()));
 
         let object_context = idle_object_scope(object_id)
             .with_graphics_overlays(vec![existing])
             .with_base_graphics(None);
+        let world = HostWorldContext::default().with_definition_metadata(Rc::new(HashMap::from([
+            ("CLNK".to_string(), DefinitionMetadata::default()),
+        ])));
 
         // Two identical calls in one scope: the second changes nothing.
         let call = || {
             set_graphics(&[
                 NIL,
                 NIL,
-                v_id("Clonk".into()),
+                v_id("CLNK".into()),
                 INT_1,
                 v_int(GraphicsOverlayMode::Action as i32),
                 v_string("Pointer".into()),
@@ -3099,7 +3144,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         };
         let (results, _outcome) = with_compat_context!(
             Some(object_context),
-            HostWorldContext::default(),
+            world,
             100,
             || -> Result<Vec<Value>, RuntimeError> { Ok(vec![call()?, call()?]) },
         );
@@ -3148,7 +3193,13 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let definitions = {
             let mut map = HashMap::new();
             map.insert("CLON".to_string(), DefinitionMetadata::default());
-            map.insert("BRIK".to_string(), DefinitionMetadata::default());
+            map.insert(
+                "BRIK".to_string(),
+                DefinitionMetadata {
+                    graphics_names: vec![clonk_resources::material::c4_name_key("Alt")],
+                    ..DefinitionMetadata::default()
+                },
+            );
             map
         };
         let world = HostWorldContext::with_landscape(
@@ -3180,6 +3231,38 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         assert_eq!(base.definition, "BRIK");
         assert_eq!(base.graphics_name.as_deref(), Some("Alt"));
         assert_eq!(base.blit_mode, 0);
+    }
+
+    #[test]
+    fn set_graphics_rejects_missing_named_base_graphics_without_update() {
+        // C4DefGraphics::Get returns null for an unknown named graphic
+        // (C4DefGraphics.cpp:221-229), so C4Object::SetGraphics returns false
+        // before changing pGraphics or calling UpdateGraphics
+        // (C4Object.cpp:5894-5910; C4Script.cpp:4440-4442).
+        let object_id = ObjectId::new(11);
+        let world = HostWorldContext::with_landscape(
+            vec![fixture_world_object(object_id, "LADR")],
+            None,
+            HashMap::from([("LADR".to_string(), DefinitionMetadata::default())]),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            100,
+            false,
+        );
+
+        let (result, outcome) = with_compat_context!(
+            Some(idle_object_scope(object_id).with_base_graphics(None)),
+            world,
+            100,
+            || { set_graphics(&[v_string("Part4W".into()), NIL, NIL, INT_0]) },
+        );
+
+        assert_eq!(result.expect("SetGraphics returns a value"), FALSE);
+        assert!(
+            outcome.object_update.is_none(),
+            "a failed lookup must not mutate graphics or queue an update"
+        );
     }
 
     #[test]

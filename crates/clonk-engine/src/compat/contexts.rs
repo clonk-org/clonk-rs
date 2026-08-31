@@ -3233,7 +3233,7 @@ fn call_world_object_function_with_options(
         with_host_context_mut((), |context| {
             for (name, value) in &stored_locals {
                 let slot = context.foreign_local_cell(target, name);
-                *slot.borrow_mut() = value.clone();
+                clonk_script::set_value_cell(&slot, value.clone());
             }
         });
     }
@@ -5974,7 +5974,7 @@ impl EffectHostContext {
         for ((object, name), cell) in &self.foreign_local_cells {
             if *object == target {
                 if let Some(value) = locals.get(name) {
-                    *cell.borrow_mut() = value.clone();
+                    clonk_script::set_value_cell(cell, value.clone());
                 }
             }
         }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use clonk_script::{value_cell, Engine, Value, ValueCell};
+use clonk_script::{clear_active_object_references, value_cell, Engine, Value, ValueCell};
 
 type CellTable = Rc<RefCell<HashMap<(u64, String), ValueCell>>>;
 
@@ -55,6 +55,42 @@ fn cross_object_localn_reads_and_writes_through_the_host_cell() {
             .map(|cell| cell.borrow().clone()),
         Some(Value::Int(90)),
         "the write went through the host cell"
+    );
+}
+
+#[test]
+fn foreign_local_lvalue_is_registered_before_its_rhs_removes_an_object() {
+    // AB_ARRAYA keeps the foreign object's live C4Value reference while the
+    // right operand runs. AssignRemoval must therefore reach an object stored
+    // elsewhere in that same local before AB_SET writes the selected element
+    // (C4AulExec.cpp:858-865; C4Object.cpp:312).
+    let (mut engine, cells) = engine_with_stub_hook();
+    let foreign = value_cell(Value::Array(vec![Value::Object(7), Value::Int(0)]));
+    cells
+        .borrow_mut()
+        .insert((9, "held".to_string()), Rc::clone(&foreign));
+    engine.register_host_function("Remove", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    crate::support::load_script(
+        &mut engine,
+        "#strict 3\n\
+         public func Probe(target) {\n\
+             LocalN(\"held\", target)[1] = Remove();\n\
+             return LocalN(\"held\", target);\n\
+         }",
+    );
+
+    assert_eq!(
+        engine
+            .call("Probe", &[Value::Object(9)])
+            .expect("foreign local assignment succeeds"),
+        Value::Array(vec![Value::Nil, Value::Int(1)])
+    );
+    assert_eq!(
+        *foreign.borrow(),
+        Value::Array(vec![Value::Nil, Value::Int(1)])
     );
 }
 

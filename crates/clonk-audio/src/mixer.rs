@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -10,7 +8,9 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use crate::decoder::{decode_audio, AudioDecodeError, DecodedAudio, MusicStream};
+use crate::decoder::{
+    decode_audio_bounded_for_output, AudioDecodeError, MusicStream, SharedAudioData,
+};
 use crate::voice::{VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE};
 use crate::voice_echo::{VoiceEchoReference, VoiceEchoTap};
 
@@ -20,6 +20,11 @@ const MAXIMUM_MUSIC_VOLUME: f32 = 80.0;
 const MAXIMUM_SOUND_VOLUME: f32 = 100.0;
 const MAXIMUM_PANNING_VOLUME: f32 = 192.0;
 const MAXIMUM_SOUND_INPUT: f32 = SDL_MIXER_MAX_VOLUME / MAXIMUM_SOUND_VOLUME;
+/// About 12.7 minutes of stereo 44.1 kHz f32 PCM. C4 keeps successfully
+/// decoded effects resident, so bound their aggregate lifetime rather than
+/// allowing an authored catalog to exhaust the process address space.
+const MAX_RETAINED_SOUND_PCM_BYTES: usize = 256 * 1024 * 1024;
+const STEREO_PCM_FRAME_BYTES: usize = std::mem::size_of::<[f32; 2]>();
 
 fn sdl_mixer_volume_step(volume: f32, maximum: f32) -> i32 {
     // C++ passes std::lrint's integer result to SDL_mixer. The process never
@@ -333,6 +338,20 @@ impl AudioSystem {
         }
     }
 
+    #[cfg(feature = "test-hooks")]
+    pub fn new_deferred_null_with_sound_pcm_limit(max_channels: usize, limit_bytes: usize) -> Self {
+        let mixer = Arc::new(AudioMixer::new_with_sound_pcm_limit(
+            44_100,
+            max_channels,
+            limit_bytes,
+        ));
+        let backend = Arc::new(DeferredNullBackend::new(mixer.clone()));
+        Self {
+            mixer,
+            _backend: Backend::DeferredNull(backend),
+        }
+    }
+
     fn ensure_backend_running(&self) {
         if let Backend::DeferredNull(backend) = &self._backend {
             backend.ensure_running();
@@ -341,6 +360,11 @@ impl AudioSystem {
 
     pub fn load_sound(&self, data: &[u8]) -> Result<SoundHandle, AudioError> {
         let id = self.mixer.load_sound(data)?;
+        Ok(SoundHandle::new(self.mixer.clone(), id))
+    }
+
+    pub fn load_sound_owned(&self, data: Vec<u8>) -> Result<SoundHandle, AudioError> {
+        let id = self.mixer.load_sound_owned(data)?;
         Ok(SoundHandle::new(self.mixer.clone(), id))
     }
 
@@ -877,15 +901,87 @@ impl Drop for NullBackend {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+struct BorrowedSoundLoadProbe {
+    guard_attempted: std::sync::mpsc::Sender<()>,
+    copy_started: Arc<AtomicBool>,
+}
+
 #[derive(Clone)]
 pub struct AudioMixer {
     state: Arc<Mutex<MixerState>>,
+    sound_pcm_budget: Arc<SoundPcmBudget>,
     channel_finished: Arc<RwLock<Option<ChannelFinished>>>,
     #[cfg(test)]
     channel_slot_probe_count: Arc<AtomicUsize>,
+    #[cfg(test)]
+    borrowed_sound_load_probe: Arc<Mutex<Option<BorrowedSoundLoadProbe>>>,
     sample_rate: u32,
     resampling_mode: ResamplingMode,
     inert: bool,
+}
+
+#[derive(Debug)]
+struct SoundPcmBudget {
+    limit_bytes: usize,
+    retained_bytes: AtomicUsize,
+    load_guard: Mutex<()>,
+}
+
+impl SoundPcmBudget {
+    fn new(limit_bytes: usize) -> Self {
+        Self {
+            limit_bytes,
+            retained_bytes: AtomicUsize::new(0),
+            load_guard: Mutex::new(()),
+        }
+    }
+
+    fn remaining_bytes(&self) -> usize {
+        self.limit_bytes
+            .saturating_sub(self.retained_bytes.load(Ordering::Acquire))
+    }
+
+    fn reserve(self: &Arc<Self>, bytes: usize) -> Result<SoundPcmReservation, AudioDecodeError> {
+        let mut current = self.retained_bytes.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(bytes)
+                .filter(|next| *next <= self.limit_bytes)
+                .ok_or(AudioDecodeError::DecodedAudioTooLarge)?;
+            match self.retained_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(SoundPcmReservation {
+                        budget: self.clone(),
+                        bytes,
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SoundPcmReservation {
+    budget: Arc<SoundPcmBudget>,
+    bytes: usize,
+}
+
+impl Drop for SoundPcmReservation {
+    fn drop(&mut self) {
+        let previous = self
+            .budget
+            .retained_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+        debug_assert!(previous >= self.bytes);
+    }
 }
 
 struct MixerState {
@@ -912,13 +1008,14 @@ struct MixerState {
 #[derive(Debug)]
 struct AudioClip {
     frames: Arc<Vec<[f32; 2]>>,
+    _reservation: SoundPcmReservation,
 }
 
 /// A loaded music object retains the compressed source, as C4's SDL_mixer
 /// backend does. The first prepared decoder makes `play_music` cheap; replay
 /// constructs another bounded decoder from the same source.
 struct MusicAsset {
-    source: Arc<[u8]>,
+    source: SharedAudioData,
     prepared: Mutex<Option<MusicStream>>,
 }
 
@@ -1005,11 +1102,34 @@ impl AudioMixer {
         max_channels: usize,
         resampling_mode: ResamplingMode,
     ) -> Self {
-        Self::new_inner(sample_rate, max_channels, resampling_mode, false)
+        Self::new_inner(
+            sample_rate,
+            max_channels,
+            resampling_mode,
+            false,
+            MAX_RETAINED_SOUND_PCM_BYTES,
+        )
     }
 
     fn new_inert(resampling_mode: ResamplingMode) -> Self {
-        Self::new_inner(44_100, 0, resampling_mode, true)
+        Self::new_inner(
+            44_100,
+            0,
+            resampling_mode,
+            true,
+            MAX_RETAINED_SOUND_PCM_BYTES,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn new_with_sound_pcm_limit(sample_rate: u32, max_channels: usize, limit_bytes: usize) -> Self {
+        Self::new_inner(
+            sample_rate,
+            max_channels,
+            ResamplingMode::Default,
+            false,
+            limit_bytes,
+        )
     }
 
     fn new_inner(
@@ -1017,6 +1137,7 @@ impl AudioMixer {
         max_channels: usize,
         resampling_mode: ResamplingMode,
         inert: bool,
+        sound_pcm_limit_bytes: usize,
     ) -> Self {
         let state = MixerState {
             sounds: HashMap::new(),
@@ -1034,9 +1155,12 @@ impl AudioMixer {
         };
         Self {
             state: Arc::new(Mutex::new(state)),
+            sound_pcm_budget: Arc::new(SoundPcmBudget::new(sound_pcm_limit_bytes)),
             channel_finished: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             channel_slot_probe_count: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            borrowed_sound_load_probe: Arc::new(Mutex::new(None)),
             sample_rate,
             resampling_mode,
             inert,
@@ -1051,8 +1175,47 @@ impl AudioMixer {
         if self.inert {
             return Ok(INERT_SOUND_ID);
         }
-        let decoded = decode_audio(data)?;
-        let clip = self.prepare_clip(decoded);
+        #[cfg(test)]
+        let probe = self.borrowed_sound_load_probe.lock().unwrap().clone();
+        self.load_sound_with_source(|| {
+            #[cfg(test)]
+            if let Some(probe) = &probe {
+                probe.copy_started.store(true, Ordering::Release);
+            }
+            SharedAudioData::try_from_slice(data)
+        })
+    }
+
+    pub(crate) fn load_sound_owned(&self, data: Vec<u8>) -> Result<SoundId, AudioError> {
+        if self.inert {
+            return Ok(INERT_SOUND_ID);
+        }
+        self.load_sound_with_source(|| Ok(SharedAudioData::from_owned(data)))
+    }
+
+    fn load_sound_with_source(
+        &self,
+        source: impl FnOnce() -> Result<SharedAudioData, AudioDecodeError>,
+    ) -> Result<SoundId, AudioError> {
+        #[cfg(test)]
+        if let Some(probe) = self.borrowed_sound_load_probe.lock().unwrap().as_ref() {
+            let _ = probe.guard_attempted.send(());
+        }
+        let load_guard = self.sound_pcm_budget.load_guard.lock().unwrap();
+        let data = source()?;
+        let max_output_frames = self.sound_pcm_budget.remaining_bytes() / STEREO_PCM_FRAME_BYTES;
+        let decoded = decode_audio_bounded_for_output(data, self.sample_rate, max_output_frames)?;
+        let retained_bytes = decoded
+            .frames
+            .capacity()
+            .checked_mul(STEREO_PCM_FRAME_BYTES)
+            .ok_or(AudioDecodeError::DecodedAudioTooLarge)?;
+        let reservation = self.sound_pcm_budget.reserve(retained_bytes)?;
+        let clip = Arc::new(AudioClip {
+            frames: Arc::new(decoded.frames),
+            _reservation: reservation,
+        });
+        drop(load_guard);
         let mut state = self.state.lock().unwrap();
         let id = SoundId(state.next_sound_id);
         state.next_sound_id += 1;
@@ -1060,18 +1223,26 @@ impl AudioMixer {
         Ok(id)
     }
 
+    #[cfg(test)]
+    fn retained_sound_pcm_bytes(&self) -> usize {
+        self.sound_pcm_budget.retained_bytes.load(Ordering::Acquire)
+    }
+
     pub(crate) fn load_music(&self, data: &[u8]) -> Result<MusicId, AudioError> {
         if self.inert {
             return Ok(INERT_MUSIC_ID);
         }
-        self.load_music_owned(data.to_vec())
+        self.load_music_source(SharedAudioData::try_from_slice(data)?)
     }
 
     pub(crate) fn load_music_owned(&self, data: Vec<u8>) -> Result<MusicId, AudioError> {
         if self.inert {
             return Ok(INERT_MUSIC_ID);
         }
-        let source: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+        self.load_music_source(SharedAudioData::from_owned(data))
+    }
+
+    fn load_music_source(&self, source: SharedAudioData) -> Result<MusicId, AudioError> {
         // Opening validates the format and performs only bounded decoder
         // initialization. In particular, MIDI parses its event schedule but
         // does not synthesize a duration-sized PCM vector.
@@ -1429,22 +1600,6 @@ impl AudioMixer {
         } else {
             *guard = None;
         }
-    }
-
-    fn prepare_clip(&self, decoded: DecodedAudio) -> Arc<AudioClip> {
-        let frames = if decoded.sample_rate == self.sample_rate || decoded.sample_rate == 0 {
-            decoded.frames
-        } else {
-            resample_frames(
-                &decoded.frames,
-                decoded.sample_rate,
-                self.sample_rate,
-                self.resampling_mode,
-            )
-        };
-        Arc::new(AudioClip {
-            frames: Arc::new(frames),
-        })
     }
 
     fn mix_into_channels<T>(&self, output: &mut [T], output_channels: usize)
@@ -1965,6 +2120,7 @@ impl ChannelPlayback {
     }
 }
 
+#[cfg(test)]
 fn resample_frames(
     frames: &[[f32; 2]],
     source_rate: u32,
@@ -1980,6 +2136,7 @@ fn resample_frames(
     }
 }
 
+#[cfg(test)]
 fn resample_frames_linear(
     frames: &[[f32; 2]],
     source_rate: u32,
@@ -2033,6 +2190,27 @@ mod tests {
                 let value = (sample * i16::MAX as f32 * 0.25) as i16;
                 writer.write_sample(value).unwrap();
                 writer.write_sample(value).unwrap();
+            }
+        }
+        cursor.into_inner()
+    }
+
+    fn float_stereo_wave(sample_rate: u32, frames: &[[f32; 2]]) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(
+                &mut cursor,
+                hound::WavSpec {
+                    channels: 2,
+                    sample_rate,
+                    bits_per_sample: 32,
+                    sample_format: hound::SampleFormat::Float,
+                },
+            )
+            .unwrap();
+            for frame in frames {
+                writer.write_sample(frame[0]).unwrap();
+                writer.write_sample(frame[1]).unwrap();
             }
         }
         cursor.into_inner()
@@ -2265,6 +2443,90 @@ mod tests {
             AudioSystem::new_null(1).resampling_mode(),
             ResamplingMode::Default
         );
+    }
+
+    #[test]
+    fn bounded_sound_decode_matches_the_existing_resampler() {
+        let data = generate_sine_wave(10, 440.0, 22_050);
+        let decoded = crate::decoder::decode_audio(&data).unwrap();
+        let expected = resample_frames(
+            &decoded.frames,
+            decoded.sample_rate,
+            44_100,
+            ResamplingMode::Default,
+        );
+        let bounded = decode_audio_bounded_for_output(
+            SharedAudioData::from_owned(data),
+            44_100,
+            expected.len(),
+        )
+        .unwrap();
+
+        assert_eq!(bounded.sample_rate, 44_100);
+        assert_eq!(bounded.frames, expected);
+    }
+
+    #[test]
+    fn bounded_sound_decode_matches_the_existing_resampler_at_a_non_integral_rate() {
+        let data = generate_sine_wave(10, 440.0, 44_100);
+        let decoded = crate::decoder::decode_audio(&data).unwrap();
+        let expected = resample_frames(
+            &decoded.frames,
+            decoded.sample_rate,
+            48_000,
+            ResamplingMode::Default,
+        );
+        let bounded = decode_audio_bounded_for_output(
+            SharedAudioData::from_owned(data),
+            48_000,
+            expected.len(),
+        )
+        .unwrap();
+
+        assert_eq!(bounded.sample_rate, 48_000);
+        assert_eq!(bounded.frames, expected);
+    }
+
+    #[test]
+    fn bounded_sound_decode_matches_eager_length_at_floating_point_edges() {
+        for (source_rate, source_frames) in [(123, 41), (243, 27)] {
+            let data = float_stereo_wave(source_rate, &vec![[0.25, -0.25]; source_frames]);
+            let decoded = crate::decoder::decode_audio(&data).unwrap();
+            let expected = resample_frames(
+                &decoded.frames,
+                decoded.sample_rate,
+                44_100,
+                ResamplingMode::Default,
+            );
+            let bounded = decode_audio_bounded_for_output(
+                SharedAudioData::from_owned(data),
+                44_100,
+                expected.len() + 1,
+            )
+            .unwrap();
+
+            assert_eq!(bounded.frames, expected, "source rate {source_rate}");
+        }
+    }
+
+    #[test]
+    fn equal_rate_bounded_sound_decode_preserves_float_pcm_bits() {
+        let data = float_stereo_wave(44_100, &[[0.0, -0.0], [f32::NAN, f32::INFINITY]]);
+        let expected = crate::decoder::decode_audio(&data).unwrap();
+        let bounded = decode_audio_bounded_for_output(
+            SharedAudioData::from_owned(data),
+            44_100,
+            expected.frames.len(),
+        )
+        .unwrap();
+
+        let bits = |frames: &[[f32; 2]]| {
+            frames
+                .iter()
+                .map(|frame| [frame[0].to_bits(), frame[1].to_bits()])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&bounded.frames), bits(&expected.frames));
     }
 
     fn rms(samples: &[f32]) -> f64 {
@@ -2936,6 +3198,70 @@ mod tests {
         assert!(mixer.channel_is_playing(channel));
         mixer.halt_channel(channel);
         assert!(!mixer.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn decoded_sound_budget_stays_charged_while_a_channel_retains_the_clip() {
+        let data = generate_sine_wave(10, 440.0, 44_100);
+        let decoded_bytes = 441 * std::mem::size_of::<[f32; 2]>();
+        let mixer = AudioMixer::new_with_sound_pcm_limit(44_100, 1, decoded_bytes);
+        let sound_id = mixer.load_sound(&data).unwrap();
+        let channel = mixer.play_sound(sound_id, true).unwrap();
+        mixer.unload_sound(sound_id);
+
+        assert_eq!(mixer.retained_sound_pcm_bytes(), decoded_bytes);
+        assert!(matches!(
+            mixer.load_sound(&data),
+            Err(AudioError::Decode(AudioDecodeError::DecodedAudioTooLarge))
+        ));
+
+        mixer.halt_channel(channel);
+        assert_eq!(mixer.retained_sound_pcm_bytes(), 0);
+        assert!(mixer.load_sound(&data).is_ok());
+    }
+
+    #[test]
+    fn borrowed_sound_source_copy_waits_for_the_serialized_load_guard() {
+        let mixer = Arc::new(AudioMixer::new(44_100, 1));
+        let load_guard = mixer.sound_pcm_budget.load_guard.lock().unwrap();
+        let (guard_attempted_tx, guard_attempted_rx) = std::sync::mpsc::channel();
+        let copy_started = Arc::new(AtomicBool::new(false));
+        *mixer.borrowed_sound_load_probe.lock().unwrap() = Some(BorrowedSoundLoadProbe {
+            guard_attempted: guard_attempted_tx,
+            copy_started: copy_started.clone(),
+        });
+
+        let loader_mixer = mixer.clone();
+        let data = generate_sine_wave(10, 440.0, 44_100);
+        let loader = std::thread::spawn(move || loader_mixer.load_sound(&data));
+
+        guard_attempted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("borrowed load attempts to acquire the serialization guard");
+        assert!(!copy_started.load(Ordering::Acquire));
+
+        drop(load_guard);
+        let sound_id = loader.join().unwrap().unwrap();
+        assert!(copy_started.load(Ordering::Acquire));
+        mixer.unload_sound(sound_id);
+    }
+
+    #[test]
+    fn owned_sound_source_acquires_the_serialized_load_guard_once() {
+        let mixer = Arc::new(AudioMixer::new(44_100, 1));
+        let data = generate_sine_wave(10, 440.0, 44_100);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let loader_mixer = mixer.clone();
+        let loader = std::thread::spawn(move || {
+            let _ = result_tx.send(loader_mixer.load_sound_owned(data));
+        });
+
+        let sound_id = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("owned sound load must not lock the serialization guard twice")
+            .unwrap();
+        loader.join().unwrap();
+        mixer.unload_sound(sound_id);
     }
 
     #[test]

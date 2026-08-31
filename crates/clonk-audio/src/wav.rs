@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use crate::decoder::AudioDecodeError;
+use crate::decoder::{AudioDecodeError, SharedAudioData};
 
 const WAVE_FORMAT_PCM: u16 = 0x0001;
 const WAVE_FORMAT_ADPCM: u16 = 0x0002;
@@ -51,7 +49,7 @@ enum WavDecoder {
 }
 
 impl WavStream {
-    pub(crate) fn new(data: Arc<[u8]>) -> Result<Self, AudioDecodeError> {
+    pub(crate) fn new(data: SharedAudioData) -> Result<Self, AudioDecodeError> {
         // Keep every WAV family on the same checked RIFF path so eager sound
         // effects and streaming music reject malformed inputs consistently.
         let decoder = parsed_wav_stream(data)?;
@@ -101,7 +99,7 @@ enum RawPcmSampleKind {
 }
 
 struct RawPcmWavStream {
-    data: Arc<[u8]>,
+    data: SharedAudioData,
     position: usize,
     end: usize,
     sample_rate: u32,
@@ -111,7 +109,7 @@ struct RawPcmWavStream {
 }
 
 impl RawPcmWavStream {
-    fn new(data: Arc<[u8]>, parsed: &ParsedWave) -> Result<Self, AudioDecodeError> {
+    fn new(data: SharedAudioData, parsed: &ParsedWave) -> Result<Self, AudioDecodeError> {
         let (sample_kind, bytes_per_sample): (RawPcmSampleKind, usize) =
             match (parsed.effective_format, parsed.bits_per_sample) {
                 (WAVE_FORMAT_PCM, 8) => (RawPcmSampleKind::Int8, 1),
@@ -205,7 +203,7 @@ enum LawKind {
 }
 
 struct LawWavStream {
-    data: Arc<[u8]>,
+    data: SharedAudioData,
     position: usize,
     end: usize,
     sample_rate: u32,
@@ -241,7 +239,7 @@ enum AdpcmCodec {
 }
 
 struct AdpcmWavStream {
-    data: Arc<[u8]>,
+    data: SharedAudioData,
     position: usize,
     end: usize,
     sample_rate: u32,
@@ -306,7 +304,7 @@ struct ParsedWave {
     data_end: usize,
 }
 
-fn parsed_wav_stream(data: Arc<[u8]>) -> Result<WavDecoder, AudioDecodeError> {
+fn parsed_wav_stream(data: SharedAudioData) -> Result<WavDecoder, AudioDecodeError> {
     let parsed = parse_wave(data.as_ref())?;
     match parsed.effective_format {
         WAVE_FORMAT_PCM | WAVE_FORMAT_IEEE_FLOAT => {
