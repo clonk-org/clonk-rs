@@ -234,13 +234,11 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # The queue admits one candidate at a time. Only the non-cancelling cache
-    # producer shares a rolling lane; post-merge diagnostics can cancel their
-    # own rolling predecessors but must not cancel required queue rows.
+    # Every required queue row uses a run-scoped lane. The non-cancelling cache
+    # producer and cancellable post-merge diagnostics retain their rolling
+    # lanes in rust.yml; sharing either here could cancel a required row.
     concurrency:
-      group: >-
-        ${{ github.event_name == 'merge_group' && matrix.name == 'app 2+7/12' && 'linux-landing-cache-rolling'
-          || format('landing-linux-{0}-{1}', github.run_id, matrix.name) }}
+      group: ${{ format('landing-linux-{0}-{1}', github.run_id, matrix.name) }}
       cancel-in-progress: ${{ github.event_name == 'merge_group' }}
     defaults:
       run:
@@ -447,12 +445,11 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 15
-    # The runtime/quality row may preempt the rolling trusted-main producer. The
-    # network row uses a run-scoped lane so both smoke poles execute concurrently.
+    # Every required smoke row uses a run-scoped lane. The non-cancelling
+    # Windows cache producer retains its rolling lane in rust.yml; sharing it
+    # here could let a later queue request cancel a required row.
     concurrency:
-      group: >-
-        ${{ github.event_name == 'merge_group' && matrix.name == 'runtime and quality' && 'windows-landing-cache-rolling'
-          || format('landing-windows-{0}-{1}', github.run_id, matrix.name) }}
+      group: ${{ format('landing-windows-{0}-{1}', github.run_id, matrix.name) }}
       cancel-in-progress: ${{ github.event_name == 'merge_group' }}
     defaults:
       run:

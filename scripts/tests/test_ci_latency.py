@@ -426,22 +426,17 @@ class CiLatencyTests(unittest.TestCase):
         )
         self.assertIn("restore-keys:", cache)
 
-    def test_merge_group_rows_share_only_non_cancelling_cache_lanes(self):
+    def test_merge_group_rows_use_run_scoped_lanes(self):
         landing = LANDING.read_text(encoding="utf-8")
         main = MAIN.read_text(encoding="utf-8")
 
-        shared_lanes = {
-            "linux-landing-cache-rolling": "app 2+7/12",
-            "windows-landing-cache-rolling": "runtime and quality",
-        }
-        self.assertEqual(
-            set(re.findall(r"\b[a-z0-9-]+-rolling\b", landing)),
-            set(shared_lanes),
+        cache_lanes = (
+            "linux-landing-cache-rolling",
+            "windows-landing-cache-rolling",
         )
-        for group, claimant in shared_lanes.items():
+        for group in cache_lanes:
             with self.subTest(group=group):
-                self.assertEqual(landing.count(group), 1)
-                self.assertIn(claimant, landing)
+                self.assertNotIn(group, landing)
                 producer_group = (
                     f'group: "{group.removesuffix("rolling")}'
                     "${{ (github.event_name == 'workflow_dispatch' || "
@@ -453,32 +448,22 @@ class CiLatencyTests(unittest.TestCase):
         linux_job = landing[
             landing.index("  linux:") : landing.index("  windows-smoke:")
         ]
-        linux_rows = set(re.findall(r"(?m)^          - name: (.+)$", linux_job))
-        self.assertIn("app 2+7/12", linux_rows)
-        self.assertIn(
-            "matrix.name == 'app 2+7/12' && 'linux-landing-cache-rolling'",
-            landing,
-        )
-        self.assertIn(
-            "matrix.name == 'runtime and quality' && "
-            "'windows-landing-cache-rolling'",
-            landing,
-        )
-
-        self.assertIn(
-            "format('landing-linux-{0}-{1}', github.run_id, matrix.name)",
-            landing,
-        )
-        self.assertIn(
-            "format('landing-windows-{0}-{1}', github.run_id, matrix.name)",
-            landing,
-        )
-        self.assertEqual(
-            landing.count(
-                "cancel-in-progress: ${{ github.event_name == 'merge_group' }}"
-            ),
-            2,
-        )
+        windows_job = landing[
+            landing.index("  windows-smoke:") : landing.index("  landing-gate:")
+        ]
+        for job, platform in ((linux_job, "linux"), (windows_job, "windows")):
+            with self.subTest(platform=platform):
+                self.assertIn(
+                    "group: ${{ format('landing-"
+                    + platform
+                    + "-{0}-{1}', github.run_id, matrix.name) }}",
+                    job,
+                )
+                self.assertNotRegex(job, r"\b[a-z0-9-]+-rolling\b")
+                self.assertIn(
+                    "cancel-in-progress: ${{ github.event_name == 'merge_group' }}",
+                    job,
+                )
 
     def test_normal_workspace_is_an_exhaustive_compile_time_partition(self):
         workflow = LANDING.read_text(encoding="utf-8")
