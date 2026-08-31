@@ -28,6 +28,42 @@ def workspace_packages():
     return tuple(packages_by_id[member] for member in metadata["workspace_members"])
 
 
+def resolved_features(package_name):
+    """The features cargo actually turns on for a package in the locked graph.
+
+    `Cargo.lock` records an optional dependency as soon as a feature mentions
+    it, even weakly: flate2's default `runtime_detection` carries
+    `zlib-rs?/std`, so from flate2 1.1.10 on zlib-rs is a locked edge of a
+    build that never compiles it. Only the resolved feature set says which
+    backend reaches the binary.
+    """
+    completed = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--format-version",
+            "1",
+            "--locked",
+        ],
+        cwd=REPOSITORY,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    metadata = json.loads(completed.stdout)
+    names = {package["id"]: package["name"] for package in metadata["packages"]}
+    features = [
+        set(node["features"])
+        for node in metadata["resolve"]["nodes"]
+        if names[node["id"]] == package_name
+    ]
+    if len(features) != 1:
+        raise AssertionError(
+            f"expected one resolved {package_name} package, found {len(features)}"
+        )
+    return features[0]
+
+
 def metadata_dependency_location(dependency):
     section = {
         None: "dependencies",
@@ -212,16 +248,39 @@ class ZipDependencyContractTests(unittest.TestCase):
 
         flate2_dependencies = locked_dependency_names(flate2_package)
         self.assertIn("miniz_oxide", flate2_dependencies)
+        # zlib-rs is deliberately not listed here: flate2 locks it through a
+        # weak feature reference without compiling it, so the backend in the
+        # binary is pinned by resolved features below, not by this edge.
         self.assertTrue(
             {
                 "libz-sys",
                 "libz-ng-sys",
                 "cloudflare-zlib-sys",
-                "zlib-rs",
             }.isdisjoint(flate2_dependencies),
             flate2_dependencies,
         )
         self.assertNotIn("zopfli", locked_dependency_names(zip_package))
+
+    def test_flate2_resolves_to_the_pure_rust_backend(self):
+        # A C zlib would make the shipped binaries depend on a system library
+        # and change what deflate emits; the pure-Rust backend keeps both the
+        # build and the compressed bytes ours.
+        features = resolved_features("flate2")
+        self.assertIn("rust_backend", features)
+        self.assertIn("miniz_oxide", features)
+        self.assertTrue(
+            {
+                "any_c_zlib",
+                "any_zlib",
+                "cloudflare_zlib",
+                "zlib",
+                "zlib-default",
+                "zlib-ng",
+                "zlib-ng-compat",
+                "zlib-rs",
+            }.isdisjoint(features),
+            features,
+        )
 
 if __name__ == "__main__":
     unittest.main()
