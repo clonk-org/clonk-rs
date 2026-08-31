@@ -174,4 +174,5 @@ shard_modules!(
     spawn_container_order,
     virtual_player_harness,
     weather_audio,
+    western_sack_pickup,
 );
