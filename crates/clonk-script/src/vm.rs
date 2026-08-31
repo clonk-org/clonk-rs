@@ -6185,10 +6185,10 @@ impl<'a> Vm<'a> {
                     match init_clause {
                         ForInit::VarDecls(decls) => {
                             for (name, init_expr) in decls {
-                                let tracked = match init_expr {
-                                    Some(expr) => self.evaluate_tracked(expr, env, depth)?,
-                                    None => TrackedValue::runtime(Value::Nil),
+                                let Some(expr) = init_expr else {
+                                    continue;
                                 };
+                                let tracked = self.evaluate_tracked(expr, env, depth)?;
                                 env.assign_function_var_tracked(name, tracked)?;
                             }
                         }
@@ -12015,12 +12015,10 @@ impl CompiledFunctionBuilder {
                         match init {
                             ForInit::VarDecls(declarations) => {
                                 for (name, value) in declarations {
-                                    match value {
-                                        Some(value) => self.compile_expression(value)?,
-                                        None => self.push_instruction(
-                                            CompiledInstruction::Literal(Literal::Nil),
-                                        ),
-                                    }
+                                    let Some(value) = value else {
+                                        continue;
+                                    };
+                                    self.compile_expression(value)?;
                                     let slot = *self.function_var_slots.get(name)?;
                                     self.pop_instruction(CompiledInstruction::Store(slot))?;
                                 }

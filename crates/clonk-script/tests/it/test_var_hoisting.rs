@@ -59,6 +59,30 @@ eval_cases! {
                  return i;\n\
              }" => Value::Int(3);
 
+    // C4AulParseState::Parse_Var emits AB_IVARN only when `=` follows
+    // (C4AulParse.cpp:3252-3283), so this declaration must leave the value
+    // from the preceding loop intact.
+    for_init_var_without_initializer_preserves_existing_value:
+            "func Test() {\n\
+                 var total = 0;\n\
+                 for (var i = 0; i < 3; i++) total += 1;\n\
+                 for (var i; i < 5; i++) total += 10;\n\
+                 return total;\n\
+             }" => Value::Int(23);
+
+    // A continue keeps this function on the AST-walk VM path, which must
+    // preserve the same function-scoped value as the compiled path.
+    for_init_var_without_initializer_preserves_existing_value_in_ast_vm:
+            "func Test() {\n\
+                 var total = 0;\n\
+                 for (var i = 0; i < 3; i++) {\n\
+                     if (false) continue;\n\
+                     total += 1;\n\
+                 }\n\
+                 for (var i; i < 5; i++) total += 10;\n\
+                 return total;\n\
+             }" => Value::Int(23);
+
     array_for_in_binder_inside_if_keeps_its_final_item_after_the_block:
             "#strict\n\
              func Test() {\n\
