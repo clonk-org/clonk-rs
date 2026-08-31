@@ -14595,6 +14595,76 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_player_info_replaces_a_stale_catalog_only_core() {
+        let directories = SessionResourceDirectories::new();
+        let stale_dynamic = network_core!(resource_type: crate::HostResourceType::Dynamic as u8,
+        id: 1 << 17,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        contents_crc: 0x8bd6_88e8,
+        chunk_size: 5,
+        filename: c4(b"Dynamic.c4s"));
+        let player = directories.root.join("Returning.c4p");
+        let mut group = MutableGroup::new("Returning.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"returning player".to_vec(), 1, false)
+            .test_value();
+        fs::write(&player, group.pack().unwrap()).test_value();
+        let publication = crate::build_host_resource_core(
+            &player,
+            directories.root.join("published-returning"),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                stale_dynamic.id,
+                c4(b"Returning.c4p"),
+                "Client",
+            ),
+        )
+        .test_value();
+        let mut state = empty_client_resource_state(7, directories.client.clone());
+        assert!(state
+            .catalog
+            .register(crate::ResourceRegistration::from_core(
+                &stale_dynamic,
+                true,
+                false,
+            )));
+        assert_eq!(
+            state.backend.as_ref().test_value().core(stale_dynamic.id),
+            None
+        );
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(publication.core.id, vec![player.clone()]);
+        state.retain_resource_resolver(crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        ));
+        let mut info = clonk_engine::PlayerInfoControlData {
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(publication.core.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state.load_authoritative_player_resources(&mut info),
+            vec![(player, publication.core.clone())]
+        );
+        assert!(state.catalog.contains_resource(publication.core.id));
+        assert_eq!(
+            state
+                .backend
+                .as_ref()
+                .test_value()
+                .core(publication.core.id),
+            Some(&publication.core)
+        );
+    }
+
+    #[test]
     fn pending_join_data_excludes_clients_already_marked_for_removal() {
         let mut clients = BTreeMap::new();
         let mut receivers = Vec::new();
