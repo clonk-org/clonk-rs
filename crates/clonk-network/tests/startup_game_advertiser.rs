@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv6Addr, SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -7,6 +7,7 @@ use clonk_network::{
     NetworkAddress, NetworkGameAdvertiser, NetworkGameAdvertiserConfig, NetworkGameReference,
     NetworkProtocol,
 };
+use socket2::{Domain, Protocol, Socket, Type};
 
 fn advertised_game() -> NetworkGameReference {
     NetworkGameReference {
@@ -248,9 +249,7 @@ fn a_host_that_cannot_join_the_discovery_group_still_serves_its_reference() {
 
 #[test]
 fn disabled_reference_server_keeps_discovery_only_advertiser_clean() {
-    let discovery_reservation = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
-    let discovery_port = discovery_reservation.local_addr().unwrap().port();
-    drop(discovery_reservation);
+    let (tcp_reservation, discovery_reservation, discovery_port) = reserve_discovery_port();
 
     let advertiser = NetworkGameAdvertiser::start(
         NetworkGameAdvertiserConfig {
@@ -260,14 +259,35 @@ fn disabled_reference_server_keeps_discovery_only_advertiser_clean() {
         },
         advertised_game(),
     )
-    .unwrap();
+    .expect("discovery-only advertising must not create a TCP listener");
 
     assert_eq!(advertiser.reference_addr().port(), 0);
-    let tcp = std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, discovery_port))
-        .expect("discovery-only advertising must not create a TCP listener");
     advertiser.update(&advertised_game());
-    drop(tcp);
     drop(advertiser);
+    drop(discovery_reservation);
+    drop(tcp_reservation);
+}
+
+fn reserve_discovery_port() -> (std::net::TcpListener, Socket, u16) {
+    loop {
+        // Keep the TCP guard exclusive while the advertiser starts. The UDP
+        // reservation uses the same reuse options as the production socket,
+        // so it can stay open until startup has completed.
+        let tcp_reservation = std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, 0)).unwrap();
+        let discovery_port = tcp_reservation.local_addr().unwrap().port();
+        let discovery_reservation =
+            Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        discovery_reservation.set_only_v6(false).unwrap();
+        discovery_reservation.set_reuse_address(true).unwrap();
+        #[cfg(unix)]
+        discovery_reservation.set_reuse_port(true).unwrap();
+        let address = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), discovery_port);
+        match discovery_reservation.bind(&address.into()) {
+            Ok(()) => return (tcp_reservation, discovery_reservation, discovery_port),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("the UDP reservation must be available: {error}"),
+        }
+    }
 }
 
 fn http_request(reference_port: u16, request: &[u8]) -> Vec<u8> {
