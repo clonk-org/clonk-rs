@@ -53,6 +53,27 @@ jobs:
             exit 1
           fi
 
+  # The generated license index follows Cargo.lock. Run its hermetic freshness
+  # check while the pull request is still in admission, so a dependency bump
+  # cannot first fail after it has occupied a merge-queue slot. Renovate stays
+  # read-only: the maintainer or bot must commit regenerated output separately.
+  dependency-license-corpus:
+    name: Dependency license corpus
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify dependency license corpus
+        run: python3 -m unittest discover --buffer -s scripts/tests -p 'test_dependency_licenses.py'
+
   # Keep admission to one long runner. An ordinary merge group uses at most 20
   # runners across its short context resolver, Linux shards, and Windows rows.
   pull-request-quality:
@@ -536,6 +557,7 @@ jobs:
       actions: read
     needs:
       - pull-request-title
+      - dependency-license-corpus
       - pull-request-quality
       - release-context
       - release-prebuild
@@ -551,6 +573,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           TITLE_RESULT: ${{ needs.pull-request-title.result }}
+          LICENSE_CORPUS_RESULT: ${{ needs.dependency-license-corpus.result }}
           QUALITY_RESULT: ${{ needs.pull-request-quality.result }}
           RELEASE_CONTEXT_RESULT: ${{ needs.release-context.result }}
           RELEASE_PREBUILD_RESULT: ${{ needs.release-prebuild.result }}
@@ -571,6 +594,7 @@ jobs:
 
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             require_result title "$TITLE_RESULT" success
+            require_result license-corpus "$LICENSE_CORPUS_RESULT" success
             require_result quality "$QUALITY_RESULT" success
             require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
             require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
@@ -580,6 +604,7 @@ jobs:
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" skipped
           elif [[ "$EVENT_NAME" == "merge_group" ]]; then
             require_result title "$TITLE_RESULT" skipped
+            require_result license-corpus "$LICENSE_CORPUS_RESULT" skipped
             require_result quality "$QUALITY_RESULT" skipped
             require_result release-context "$RELEASE_CONTEXT_RESULT" success
             case "$IS_RELEASE" in
@@ -602,6 +627,7 @@ jobs:
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
           else
             require_result title "$TITLE_RESULT" skipped
+            require_result license-corpus "$LICENSE_CORPUS_RESULT" skipped
             require_result quality "$QUALITY_RESULT" skipped
             require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
             require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
