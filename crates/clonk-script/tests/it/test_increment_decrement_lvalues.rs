@@ -30,6 +30,66 @@ crate::support::compile_cases! {
 }
 
 run_cases! {
+    indexed_post_decrement_mutates_the_condition_operand:
+    // AB_Dec1_Postfix copies the old integer result, then decrements the
+    // referenced array element (C4AulExec.cpp:482-489). CMC class setup uses
+    // this shape as `while (aEntry[1]--)`.
+            r#"
+                #strict
+                func Test()
+                {
+                    var entries = [[0, 3]], iterations = 0, final;
+                    for (var entry in entries)
+                    {
+                        while (entry[1]-- && iterations < 8) iterations++;
+                        final = entry[1];
+                    }
+                    return [iterations, final];
+                }
+            "#,
+        "Test", &[] =>
+        clonk_script::Value::Array(vec![
+            clonk_script::Value::Int(3),
+            clonk_script::Value::Int(-1),
+        ]);
+
+    chained_prefix_counters_reuse_the_inner_reference:
+    // C++ AB_Inc1/AB_Dec1 mutate the C4V_pC4Value on the stack and leave that
+    // same reference for the next prefix operator (C4AulExec.cpp:449-459).
+    // The reference-returning operand must therefore run once, while each
+    // prefix operator still applies its own mutation.
+            r#"
+                #strict
+                local value, calls;
+
+                func & Slot()
+                {
+                    calls++;
+                    return value;
+                }
+
+                func Test()
+                {
+                    value = 40;
+                    calls = 0;
+                    var increased = ++++Slot();
+                    var increase_calls = calls;
+
+                    value = -40;
+                    calls = 0;
+                    var decreased = --(--Slot());
+                    return [increased, increase_calls, decreased, calls, value];
+                }
+            "#,
+        "Test", &[] =>
+        clonk_script::Value::Array(vec![
+            clonk_script::Value::Int(42),
+            clonk_script::Value::Int(1),
+            clonk_script::Value::Int(-42),
+            clonk_script::Value::Int(1),
+            clonk_script::Value::Int(-42),
+        ]);
+
     increment_resolves_side_effectful_var_lvalue_once:
     // C++ compiles the operand to one C4Value reference and AB_Inc1 mutates
     // that reference in place (C4AulExec.cpp:450-454). ComboMenu::CheckSpells

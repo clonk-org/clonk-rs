@@ -11,7 +11,9 @@
 # (src/C4SolidMaskBitmap.h), the mechanically extracted container
 # CopyMotion/GetSpeed/ObjectComCancelAttach helpers, complete
 # C4Object::DigOutMaterialCast and landscape BlastFree methods, and the
-# bottom/top/side-flight C4Object::ContactAction
+# breathable-supply block from C4Object::ExecLife, complete named-graphics
+# lookup and SetGraphics script-host paths, the bottom/top/side-flight
+# C4Object::ContactAction
 # arms, plus C4PlayerList::GetCount and Join's player-capacity gate, and the
 # complete callback-bearing C4Effect lifecycle. The Rust side
 # (crates/clonk-engine/src/parity_differential.rs) diffs against the committed
@@ -71,6 +73,45 @@ awk '
 # 3. Mechanically lift complete production method bodies. The standalone
 #    oracle supplies only their surrounding state scaffolding; branch/loop/RNG
 #    order executes byte-for-byte from src/ rather than from a transcription.
+# C4Object::ExecLife's breathable-supply block is deliberately smaller than a
+# complete method: the five production lines are the whole arithmetic/callback
+# ordering contract, while the surrounding supply/material gates are covered
+# independently. Bound the extract to ExecLife so a matching comment elsewhere
+# cannot silently become the oracle.
+awk '
+  /^bool C4Object::ExecLife\(\)$/ { in_exec_life = 1 }
+  in_exec_life && /^}$/ { exit 1 }
+  in_exec_life && /^[[:space:]]*\/\/ Take breath$/ { p = 1 }
+  p { print }
+  p && /^[[:space:]]*Breath \+= takebreath;$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_breath_supply.inc"
+
+# SetGraphics must reject a missing named graphic before changing either the
+# object's active base graphics or its overlay list. Lift the complete lookup,
+# base setter, and script host so the oracle executes the same early returns as
+# C++ content rather than a transcription of their expected result.
+awk '
+  /^C4DefGraphics \*C4DefGraphics::Get\(const char \*szGrpName\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4DefGraphics.cpp" > "$gen/def_graphics_get.inc"
+
+awk '
+  /^bool C4Object::SetGraphics\(const char \*szGraphicsName, C4Def \*pSourceDef\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_set_graphics.inc"
+
+awk '
+  /^static bool FnSetGraphics\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Script.cpp" > "$gen/script_fn_set_graphics.inc"
+
 awk '
   /^void C4Landscape::ExecuteScan\(/ { p = 1 }
   p { print }
@@ -1818,8 +1859,13 @@ STUB
 #     sections are unaffected by the bump.
 # `-DZLIB_CONST`: StdGzCompressedFile.cpp:108,275 assign a `const uint8_t *` to
 #     zlib's `Bytef *`, which only compiles under zlib's const-correct typing.
+# `-fwrapv`: LegacyClonk relies on two's-complement wrapping for signed script
+#     and object state. In particular, the mechanically extracted ExecLife
+#     breath subtraction/addition intentionally crosses i32 bounds; make that
+#     behavior defined for GCC/Clang invocations that honor this flag rather
+#     than inheriting C++ signed-overflow undefined behavior.
 cxx="${CXX:-clang++}"
-"$cxx" -std=c++23 -O0 -DZLIB_CONST \
+"$cxx" -std=c++23 -O0 -fwrapv -DZLIB_CONST \
   -Wno-dangling-else \
   -I"$gen" -I"$src" \
   "$here/oracle_main.cpp" "$gen/sine_table.cpp" "$gen/stdsha1_stub.cpp" \

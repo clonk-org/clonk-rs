@@ -13,6 +13,7 @@
 //! DirectExec's temporary context setup, `C4Effect::Execute`, C4AulScriptFunc's engine-call
 //! forwarding and script-context setup, `FnGetX`/`FnGetY`,
 //! `C4Object::DigOutMaterialCast`,
+//! C4Object::ExecLife's breathable-supply block,
 //! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
 //! `BlastFreePix`, `BlastFree`, `ExecuteScan`, and `DoScan` bodies and the
 //! `C4SGame::ConvertGoals`, `C4Game::InitRules`/`InitGoals`, and
@@ -2904,9 +2905,297 @@ fn rust_player_join_capacity(case: &Value, case_index: usize) {
     );
 }
 
+fn rust_breath_refill_callback_order(case: &Value, case_index: usize) {
+    const SECTION: &str = "breath_refill_callback_order";
+    const CALLBACK_PHYSICAL_BREATH: i32 = 7;
+
+    let name = case["name"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{SECTION} row {case_index} is missing its name"));
+    let callback_defined = match name {
+        "goldwipfcaves_missing_callback" => false,
+        "goldwipfcaves_mutating_callback" => true,
+        other => panic!("{SECTION} row {case_index} has unexpected name {other}"),
+    };
+    assert_eq!(
+        i(case, "callback_defined"),
+        callback_defined as i64,
+        "{SECTION} row {case_index} callback availability"
+    );
+    let physical_before = i(case, "physical_before") as i32;
+    let state_before = i(case, "state_before") as i32;
+    assert_eq!(
+        (physical_before, state_before),
+        (-2_009_260_032, i32::MAX),
+        "{SECTION} row {case_index} must retain the exact Goldwipfcaves raw pair"
+    );
+
+    let mut source = String::from(
+        r#"#strict 3
+local deep_breath_calls, callback_breath, callback_breath_after, callback_order;
+
+public func ResetBreathProbe()
+{
+    deep_breath_calls = callback_breath = callback_breath_after = callback_order = 0;
+    return 1;
+}
+"#,
+    );
+    if callback_defined {
+        // The callback observes the live raw Breath before C4Object.cpp:919,
+        // then changes the physical maximum and clamps raw Breath to a nonzero
+        // sentinel through the real DoBreath host (C4Script.cpp:502-506;
+        // C4Object.cpp:1406-1413). Assigning the delta or either maximum cannot
+        // reproduce the later post-callback +=.
+        source.push_str(
+            r#"
+
+protected func DeepBreath()
+{
+    callback_order = callback_order * 10 + 1;
+    deep_breath_calls += 1;
+    callback_breath = GetObjectVal("Breath");
+    SetPhysical("Breath", 7, 2);
+    DoBreath(0);
+    callback_breath_after = GetObjectVal("Breath");
+    return 1;
+}
+"#,
+        );
+    }
+    source.push_str(
+        r#"
+
+public func ObserveCompletedSupply()
+{
+    callback_order = callback_order * 10 + 2;
+    return [
+        deep_breath_calls, callback_breath, callback_breath_after,
+        callback_order, GetObjectVal("Breath")
+    ];
+}
+"#,
+    );
+    let mut definition =
+        Definition::from_script("BRTH", "Breath refill callback-order oracle", &source)
+            .expect("breath-refill oracle definition compiles");
+    definition.set_c4_callback_convention(true);
+    definition.set_physical(PhysicalInfo {
+        breath: physical_before,
+        ..PhysicalInfo::default()
+    });
+
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("breath-refill oracle definition registers");
+    let mut spawn = SpawnConfig::new("BRTH")
+        .with_alive(true)
+        .with_category(CATEGORY_LIVING);
+    spawn.breath = Some(state_before);
+    let object = engine
+        .spawn_object(spawn)
+        .expect("breath-refill oracle object spawns");
+    let object_index = engine
+        .find_object_index(object)
+        .expect("breath-refill oracle object remains");
+    engine
+        .call_object_function(object_index, "ResetBreathProbe", Vec::new())
+        .expect("breath-refill oracle probe resets");
+
+    // Frame five selects the exact breathable-supply arm without also running
+    // the Tick3, Tick10, Tick35, or Tick255 ExecLife arms.
+    engine
+        .exec_object_life(object_index, 5)
+        .expect("breath-refill oracle life step succeeds");
+    let trace = engine
+        .call_object_function(object_index, "ObserveCompletedSupply", Vec::new())
+        .expect("breath-refill oracle trace reads");
+    let trace = match trace {
+        ScriptValue::Array(values) => values
+            .into_iter()
+            .map(|value| match value {
+                ScriptValue::Int(value) => value,
+                ScriptValue::Bool(value) => i32::from(value),
+                ScriptValue::RawBool(value) => i32::from(value != 0),
+                other => panic!("{SECTION} trace contains unexpected value {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("{SECTION} trace is not an array: {other:?}"),
+    };
+    assert_eq!(
+        trace.len(),
+        5,
+        "{SECTION} trace must contain calls, callback breaths, order, and final breath"
+    );
+
+    let state_after = engine.objects[object_index].state.breath;
+    assert_eq!(
+        trace[4], state_after,
+        "{SECTION} post-block script observation must match engine state"
+    );
+    let physical_after = engine.object_physical(object_index).breath;
+    let expected_physical_after = if callback_defined {
+        CALLBACK_PHYSICAL_BREATH
+    } else {
+        physical_before
+    };
+    assert_eq!(
+        physical_after, expected_physical_after,
+        "{SECTION} row {case_index} callback-dependent physical state"
+    );
+    let addend_before = if callback_defined {
+        trace[2]
+    } else {
+        state_before
+    };
+    let deep_breath_condition = physical_before.wrapping_sub(state_before) > physical_before / 2;
+
+    let rust = serde_json::json!({
+        "name": name,
+        "callback_defined": i32::from(callback_defined),
+        "physical_before": physical_before,
+        "state_before": state_before,
+        "take": state_after.wrapping_sub(addend_before),
+        "physical_half": physical_before / 2,
+        "deep_breath_condition": i32::from(deep_breath_condition),
+        "deep_breath_call_attempts": i32::from(deep_breath_condition),
+        "deep_breath_calls": trace[0],
+        "callback_name_matches": i32::from(deep_breath_condition),
+        "callback_breath": trace[1],
+        "callback_breath_after": trace[2],
+        "callback_order": trace[3],
+        "physical_after": physical_after,
+        "state_after": state_after,
+    });
+    expect_json_eq(SECTION, case_index, "row", case.clone(), rust);
+}
+
+fn rust_set_graphics_missing_lookup(case: &Value, case_index: usize) {
+    const SECTION: &str = "set_graphics_missing_lookup";
+    const SCRIPT: &str = r#"#strict 3
+public func SelectKnownBase() { return SetGraphics("Known"); }
+public func SelectMissingBase() { return SetGraphics("Missing"); }
+public func SelectKnownOverlay()
+{
+    return SetGraphics("Known", this, GetID(), 1, GFXOV_MODE_Base);
+}
+public func SelectMissingOverlay()
+{
+    return SetGraphics("Missing", this, GetID(), 1, GFXOV_MODE_Base);
+}
+"#;
+
+    let name = case["name"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{SECTION} row {case_index} is missing its name"));
+    let (setup_function, missing_function) = match name {
+        "base_missing_name" => ("SelectKnownBase", "SelectMissingBase"),
+        "overlay_missing_name" => ("SelectKnownOverlay", "SelectMissingOverlay"),
+        other => panic!("{SECTION} row {case_index} has unexpected name {other}"),
+    };
+
+    let mut definition = Definition::from_script("SGFX", "SetGraphics lookup oracle", SCRIPT)
+        .expect("SetGraphics lookup oracle compiles");
+    definition.set_c4_callback_convention(true);
+    definition.set_sprite_image(Some(solid_mask_sprite(255)));
+    definition.set_sprite_variants(HashMap::from([(
+        clonk_resources::material::c4_name_key("Known"),
+        solid_mask_sprite(255),
+    )]));
+
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("SetGraphics lookup oracle registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("SGFX"))
+        .expect("SetGraphics lookup oracle object spawns");
+    let object_index = engine
+        .find_object_index(object)
+        .expect("SetGraphics lookup oracle object remains");
+    let setup_result = engine
+        .call_object_function(object_index, setup_function, Vec::new())
+        .expect("SetGraphics lookup oracle setup succeeds");
+    assert!(
+        matches!(
+            setup_result,
+            ScriptValue::Bool(true) | ScriptValue::RawBool(1)
+        ),
+        "{SECTION} row {case_index} must establish its known graphics first: {setup_result:?}"
+    );
+
+    let state_before = engine.objects[object_index].state.clone();
+    let missing_result = engine
+        .call_object_function(object_index, missing_function, Vec::new())
+        .expect("missing SetGraphics lookup returns normally");
+    let result = match missing_result {
+        ScriptValue::Bool(value) => i32::from(value),
+        ScriptValue::RawBool(value) => i32::from(value != 0),
+        ScriptValue::Int(value) => value,
+        other => panic!("{SECTION} row {case_index} returned unexpected value {other:?}"),
+    };
+    let state_after = &engine.objects[object_index].state;
+    let overlay_before = state_before.graphics_overlays.first();
+    let overlay_after = state_after.graphics_overlays.first();
+    let rust = serde_json::json!({
+        "name": name,
+        "result": result,
+        "base_name_before": state_before
+            .base_graphics
+            .as_ref()
+            .and_then(|graphics| graphics.graphics_name.as_deref()),
+        "base_name_after": state_after
+            .base_graphics
+            .as_ref()
+            .and_then(|graphics| graphics.graphics_name.as_deref()),
+        "overlay_count_before": state_before.graphics_overlays.len(),
+        "overlay_count_after": state_after.graphics_overlays.len(),
+        "overlay_name_before": overlay_before.and_then(|overlay| overlay.graphics_name.as_deref()),
+        "overlay_name_after": overlay_after.and_then(|overlay| overlay.graphics_name.as_deref()),
+        "overlay_mode_before": overlay_before.map(|overlay| overlay.mode as i32),
+        "overlay_mode_after": overlay_after.map(|overlay| overlay.mode as i32),
+    });
+    expect_json_eq(SECTION, case_index, "row", case.clone(), rust);
+}
+
 #[test]
 fn parity_differential_matches_cpp_golden() {
     let golden = load_golden();
+
+    // C4DefGraphics.cpp:221-229, C4Object.cpp:5894-5910, and
+    // C4Script.cpp:4372-4442. Both rows first select an existing named graphic
+    // through the real SetGraphics script host, then prove that a missing base
+    // or overlay name returns false without changing the established state.
+    let set_graphics_missing_cases = golden["set_graphics_missing_lookup"]
+        .as_array()
+        .expect("set_graphics_missing_lookup is a C++ oracle array");
+    assert_eq!(
+        set_graphics_missing_cases.len(),
+        2,
+        "set_graphics_missing_lookup must retain base and overlay rows"
+    );
+    for (case_index, case) in set_graphics_missing_cases.iter().enumerate() {
+        rust_set_graphics_missing_lookup(case, case_index);
+    }
+
+    // C4Object.cpp:915-919. The oracle mechanically extracts the complete
+    // breathable-supply block and runs the exact malformed Goldwipfcaves raw
+    // pair. The missing-callback row pins the overflowing final +=; the second
+    // row changes both the physical maximum and raw state in DeepBreath, making
+    // the pre-callback delta and callback-before-add ordering independently
+    // observable.
+    let breath_refill_cases = golden["breath_refill_callback_order"]
+        .as_array()
+        .expect("breath_refill_callback_order is a C++ oracle array");
+    assert_eq!(
+        breath_refill_cases.len(),
+        2,
+        "breath_refill_callback_order must retain both exact raw-pair rows"
+    );
+    for (case_index, case) in breath_refill_cases.iter().enumerate() {
+        rust_breath_refill_callback_order(case, case_index);
+    }
 
     // C4SGame::ConvertGoals and C4Game::InitRules/InitGoals
     // (oracle-src-pinned src/C4Scenario.cpp:506-556;

@@ -1,4 +1,5 @@
-use rustc_hash::FxHashMap;
+use indexmap::IndexSet;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -21,7 +22,7 @@ use crate::error::{RuntimeCallFrame, RuntimeError};
 use crate::lookup_profile;
 use crate::value::{
     c4_id_text, c4_string_bytes, c4_string_from_bytes, c4_strings_equal, C4StringValue, C4VType,
-    Literal, Value, ValueMap,
+    Literal, Value, ValueMap, ValueMapReferenceChange,
 };
 
 /// Maximum script call-stack depth, matching C++ `MAX_CONTEXT_STACK`
@@ -90,11 +91,13 @@ thread_local! {
     /// selected native declares fewer. A cross-host dispatch consumes this
     /// one-shot override at the actual callee boundary.
     static CALL_PARAMETER_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
-    /// Live C4Value cells in every suspended C4Aul frame. AssignRemoval
-    /// synchronously clears the equivalent intrusive C++ reference list
-    /// (C4Object.cpp:312).
-    static ACTIVE_OBJECT_REFERENCE_CELLS: RefCell<Vec<Vec<Weak<RefCell<Value>>>>> = const {
-        RefCell::new(Vec::new())
+    /// Number of suspended C4Aul frames sharing the current removal index.
+    static ACTIVE_OBJECT_REFERENCE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    /// Weak reverse links from each referenced object to the active C4Value
+    /// cells that may contain it. This mirrors C++'s intrusive FirstRef lists
+    /// without making the execution registry an owner of script values.
+    static ACTIVE_OBJECT_REFERENCE_INDEX: RefCell<Option<ActiveObjectReferenceIndex>> = const {
+        RefCell::new(None)
     };
     /// Shared object/global tables already discovered by an active frame.
     /// Entries retain their `Rc` owners so allocator address reuse cannot make
@@ -128,6 +131,12 @@ thread_local! {
     static RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static OBJECT_REFERENCE_TABLE_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static ACTIVE_OBJECT_REFERENCE_SWEEP_VISITS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static OBJECT_REFERENCE_INDEX_VALUE_VISITS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static OBJECT_REFERENCE_PENDING_PRUNE_VISITS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static GENERIC_HOST_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
@@ -179,6 +188,9 @@ test_counter_accessors! {
     fn reset_diagnostic_frame_string_allocations, diagnostic_frame_string_allocations => DIAGNOSTIC_FRAME_STRING_ALLOCATIONS;
     fn reset_runtime_container_registration_traversals, runtime_container_registration_traversals => RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS;
     fn reset_object_reference_table_traversals, object_reference_table_traversals => OBJECT_REFERENCE_TABLE_TRAVERSALS;
+    fn reset_active_object_reference_sweep_visits, active_object_reference_sweep_visits => ACTIVE_OBJECT_REFERENCE_SWEEP_VISITS;
+    fn reset_object_reference_index_value_visits, object_reference_index_value_visits => OBJECT_REFERENCE_INDEX_VALUE_VISITS;
+    fn reset_object_reference_pending_prune_visits, object_reference_pending_prune_visits => OBJECT_REFERENCE_PENDING_PRUNE_VISITS;
     fn reset_generic_host_resolutions, generic_host_resolutions => GENERIC_HOST_RESOLUTIONS;
     fn reset_direct_binding_allocations, direct_binding_allocations => DIRECT_BINDING_ALLOCATIONS;
     fn reset_nested_generic_script_resolutions, nested_generic_script_resolutions => NESTED_GENERIC_SCRIPT_RESOLUTIONS;
@@ -352,28 +364,28 @@ struct FrameLocals {
 }
 
 type FrameLocalMap = Rc<FrameLocals>;
+type FxIndexSet<T> = IndexSet<T, FxBuildHasher>;
 
 pub fn value_cell(value: Value) -> ValueCell {
     let cell = Rc::new(RefCell::new(value));
-    ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
-        // A cell created by a nested call can escape into a persistent global
-        // table. Register it with the outermost frame, which spans the whole
-        // re-entrant execution and is the last frame to leave.
-        if let Some(frame) = frames.borrow_mut().first_mut() {
-            frame.push(Rc::downgrade(&cell));
-        }
-    });
+    register_active_object_reference_cell(&cell);
     cell
 }
 
+/// Replace a shared C4Value cell while keeping the active AssignRemoval index
+/// aware of object references introduced by an embedding host.
+#[doc(hidden)]
+pub fn set_value_cell(cell: &ValueCell, value: Value) {
+    *cell.borrow_mut() = value;
+    register_active_object_reference_cell(cell);
+}
+
 fn register_shared_object_reference_cells(cells: impl IntoIterator<Item = Weak<RefCell<Value>>>) {
-    ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
-        frames
-            .borrow_mut()
-            .first_mut()
-            .expect("shared-table discovery runs inside a reference guard")
-            .extend(cells);
-    });
+    for cell in cells {
+        if let Some(cell) = cell.upgrade() {
+            ensure_active_object_reference_cell_registered(&cell);
+        }
+    }
 }
 
 /// Clear one object's references from every active C4Aul value cell, like
@@ -395,18 +407,28 @@ impl ObjectReferenceSweep {
     #[doc(hidden)]
     pub fn active(object_id: u64) -> Self {
         let mut sweep = Self { object_id };
-        ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
-            let frames = frames.borrow();
-            let mut seen = std::collections::HashSet::new();
-            for weak in frames.iter().flat_map(|frame| frame.iter()) {
-                let Some(cell) = weak.upgrade() else {
-                    continue;
-                };
-                if seen.insert(Rc::as_ptr(&cell)) {
-                    sweep.clear_value(&mut cell.borrow_mut());
-                }
-            }
+        let cells = ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            index
+                .borrow_mut()
+                .as_mut()
+                .and_then(|index| {
+                    index.prune_pending();
+                    index.take_cells_for_object(object_id)
+                })
+                .unwrap_or_default()
         });
+        for weak in cells.into_values() {
+            let Some(cell) = weak.upgrade() else {
+                continue;
+            };
+            #[cfg(test)]
+            ACTIVE_OBJECT_REFERENCE_SWEEP_VISITS.with(|count| count.set(count.get() + 1));
+            {
+                let mut value = cell.borrow_mut();
+                sweep.clear_value(&mut value);
+            }
+            refresh_active_object_reference_cell_after_sweep(&cell, object_id);
+        }
         ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow_mut().push(object_id));
         sweep
     }
@@ -468,6 +490,368 @@ struct ObjectState {
 #[derive(Default)]
 struct ActiveObjectReferenceTables {
     object_states: SmallVec<[(ObjectState, usize); 4]>,
+}
+
+#[derive(Default)]
+struct ActiveObjectReferenceIndex {
+    cells_by_object: FxHashMap<u64, FxHashMap<usize, Weak<RefCell<Value>>>>,
+    memberships_by_cell: FxHashMap<usize, ActiveObjectReferenceMembership>,
+    frame_addresses: Vec<FxHashSet<usize>>,
+    pending_prune: FxIndexSet<usize>,
+    deferred_prune: FxIndexSet<usize>,
+}
+
+struct ActiveObjectReferenceMembership {
+    cell: Weak<RefCell<Value>>,
+    object_counts: FxHashMap<u64, usize>,
+}
+
+impl ActiveObjectReferenceIndex {
+    fn enter_frame(&mut self) {
+        self.prune_pending();
+        self.frame_addresses.push(FxHashSet::default());
+    }
+
+    fn leave_frame(&mut self) {
+        let addresses = self
+            .frame_addresses
+            .pop()
+            .expect("the active reference frame was entered");
+        for address in addresses {
+            let dead = self
+                .memberships_by_cell
+                .get(&address)
+                .is_none_or(|membership| membership.cell.upgrade().is_none());
+            if dead {
+                self.remove_cell(address);
+            } else {
+                // The environment owning this cell drops immediately after
+                // its guard. Recheck at the next nested entry or sweep; cells
+                // that escaped into globals remain live and indexed.
+                self.enqueue_pending_prune(address);
+            }
+        }
+    }
+
+    fn register(&mut self, cell: &ValueCell) {
+        let mut object_counts = FxHashMap::default();
+        collect_object_reference_counts(&cell.borrow(), &mut object_counts);
+        self.register_counts(cell, object_counts);
+    }
+
+    fn ensure_registered(&mut self, cell: &ValueCell) {
+        // Discovery may avoid a recursive walk only while the exact Rc is
+        // still indexed. Whole-cell writes use `register` (embedding hosts
+        // use `set_value_cell`), and path writes apply their recorded delta.
+        // Upgrading the Weak before ptr_eq keeps allocator address reuse from
+        // making a later cell look like the departed owner of this slot.
+        let address = Rc::as_ptr(cell) as usize;
+        let already_tracked = self
+            .memberships_by_cell
+            .get(&address)
+            .is_some_and(|membership| {
+                membership
+                    .cell
+                    .upgrade()
+                    .is_some_and(|registered| Rc::ptr_eq(&registered, cell))
+            });
+        if already_tracked {
+            self.touch(address, true);
+        } else {
+            self.register(cell);
+        }
+    }
+
+    fn register_counts(&mut self, cell: &ValueCell, object_counts: FxHashMap<u64, usize>) {
+        let address = Rc::as_ptr(cell) as usize;
+        let already_tracked = self
+            .memberships_by_cell
+            .get(&address)
+            .is_some_and(|membership| {
+                membership
+                    .cell
+                    .upgrade()
+                    .is_some_and(|registered| Rc::ptr_eq(&registered, cell))
+            });
+        if let Some(membership) = self.memberships_by_cell.remove(&address) {
+            for object_id in membership.object_counts.into_keys() {
+                self.remove_link(object_id, address);
+            }
+        }
+        if object_counts.is_empty() {
+            self.clear_pending_prune(address);
+            self.forget_address(address);
+            return;
+        }
+        self.touch(address, already_tracked);
+        let weak = Rc::downgrade(cell);
+        for object_id in object_counts.keys() {
+            self.cells_by_object
+                .entry(*object_id)
+                .or_default()
+                .insert(address, weak.clone());
+        }
+        self.memberships_by_cell.insert(
+            address,
+            ActiveObjectReferenceMembership {
+                cell: weak,
+                object_counts,
+            },
+        );
+    }
+
+    fn apply_delta(&mut self, cell: &ValueCell, delta: ObjectReferenceDelta) {
+        let address = Rc::as_ptr(cell) as usize;
+        let mut membership = self
+            .memberships_by_cell
+            .remove(&address)
+            .unwrap_or_else(|| ActiveObjectReferenceMembership {
+                cell: Rc::downgrade(cell),
+                object_counts: FxHashMap::default(),
+            });
+        let already_tracked = membership
+            .cell
+            .upgrade()
+            .is_some_and(|registered| Rc::ptr_eq(&registered, cell));
+        membership.cell = Rc::downgrade(cell);
+        self.touch(address, already_tracked);
+
+        for (object_id, removed) in delta.removed {
+            let current = membership
+                .object_counts
+                .get(&object_id)
+                .copied()
+                .unwrap_or(0);
+            debug_assert!(
+                current >= removed,
+                "path-write delta removed {removed} references to object {object_id}, but the root index held {current}"
+            );
+            if current <= removed {
+                membership.object_counts.remove(&object_id);
+                self.remove_link(object_id, address);
+            } else {
+                membership
+                    .object_counts
+                    .insert(object_id, current - removed);
+            }
+        }
+        for (object_id, added) in delta.added {
+            if added == 0 {
+                continue;
+            }
+            let count = membership.object_counts.entry(object_id).or_default();
+            if *count == 0 {
+                self.cells_by_object
+                    .entry(object_id)
+                    .or_default()
+                    .insert(address, membership.cell.clone());
+            }
+            *count = count.saturating_add(added);
+        }
+
+        if membership.object_counts.is_empty() {
+            self.forget_address(address);
+        } else {
+            self.memberships_by_cell.insert(address, membership);
+        }
+    }
+
+    fn touch(&mut self, address: usize, already_tracked: bool) {
+        self.clear_pending_prune(address);
+        if already_tracked
+            && self
+                .frame_addresses
+                .iter()
+                .any(|frame| frame.contains(&address))
+        {
+            return;
+        }
+        if let Some(frame) = self.frame_addresses.last_mut() {
+            frame.insert(address);
+        }
+    }
+
+    fn prune_pending(&mut self) {
+        if self.pending_prune.is_empty() {
+            std::mem::swap(&mut self.pending_prune, &mut self.deferred_prune);
+        }
+        let Some(address) = self.pending_prune.pop() else {
+            return;
+        };
+        #[cfg(test)]
+        OBJECT_REFERENCE_PENDING_PRUNE_VISITS.with(|count| count.set(count.get() + 1));
+        let dead = self
+            .memberships_by_cell
+            .get(&address)
+            .is_none_or(|membership| membership.cell.upgrade().is_none());
+        if dead {
+            self.remove_cell(address);
+        } else {
+            // Inspect one escaped owner per lifecycle event. Moving a live
+            // cell into the next round keeps AssignRemoval independent of
+            // the number of pending weak entries while still revisiting it
+            // after its host owner releases it.
+            self.deferred_prune.insert(address);
+        }
+    }
+
+    fn take_cells_for_object(
+        &mut self,
+        object_id: u64,
+    ) -> Option<FxHashMap<usize, Weak<RefCell<Value>>>> {
+        let cells = self.cells_by_object.remove(&object_id)?;
+        let mut emptied = Vec::new();
+        for address in cells.keys().copied() {
+            if let Some(membership) = self.memberships_by_cell.get_mut(&address) {
+                membership.object_counts.remove(&object_id);
+                if membership.object_counts.is_empty() {
+                    emptied.push(address);
+                }
+            }
+        }
+        for address in emptied {
+            self.remove_cell(address);
+        }
+        Some(cells)
+    }
+
+    fn remove_cell(&mut self, address: usize) {
+        let Some(membership) = self.memberships_by_cell.remove(&address) else {
+            self.clear_pending_prune(address);
+            self.forget_address(address);
+            return;
+        };
+        for object_id in membership.object_counts.into_keys() {
+            self.remove_link(object_id, address);
+        }
+        self.clear_pending_prune(address);
+        self.forget_address(address);
+    }
+
+    fn remove_link(&mut self, object_id: u64, address: usize) {
+        let empty = self
+            .cells_by_object
+            .get_mut(&object_id)
+            .is_some_and(|cells| {
+                cells.remove(&address);
+                cells.is_empty()
+            });
+        if empty {
+            self.cells_by_object.remove(&object_id);
+        }
+    }
+
+    fn forget_address(&mut self, address: usize) {
+        for frame in &mut self.frame_addresses {
+            frame.remove(&address);
+        }
+    }
+
+    fn enqueue_pending_prune(&mut self, address: usize) {
+        // New arrivals wait for the next round. Otherwise a steady stream of
+        // nested escapes can keep the current set nonempty forever and starve
+        // older cells that were deferred after a live check.
+        self.pending_prune.swap_remove(&address);
+        self.deferred_prune.insert(address);
+    }
+
+    fn clear_pending_prune(&mut self, address: usize) {
+        self.pending_prune.swap_remove(&address);
+        self.deferred_prune.swap_remove(&address);
+    }
+
+    #[cfg(test)]
+    fn pending_prune_count(&self) -> usize {
+        self.pending_prune.len() + self.deferred_prune.len()
+    }
+}
+
+type ObjectReferenceCounts = FxHashMap<u64, usize>;
+
+#[derive(Default)]
+struct ObjectReferenceDelta {
+    removed: ObjectReferenceCounts,
+    added: ObjectReferenceCounts,
+}
+
+impl ObjectReferenceDelta {
+    fn remove_value(&mut self, value: &Value) {
+        collect_object_reference_counts(value, &mut self.removed);
+    }
+
+    fn add_value(&mut self, value: &Value) {
+        collect_object_reference_counts(value, &mut self.added);
+    }
+}
+
+fn collect_object_reference_counts(value: &Value, object_counts: &mut ObjectReferenceCounts) {
+    #[cfg(test)]
+    OBJECT_REFERENCE_INDEX_VALUE_VISITS.with(|count| count.set(count.get() + 1));
+    match value {
+        Value::Object(object_id) if *object_id != 0 => {
+            *object_counts.entry(*object_id).or_default() += 1;
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_object_reference_counts(value, object_counts);
+            }
+        }
+        Value::Proplist(entries) => {
+            for (key, value) in entries {
+                collect_object_reference_counts(key, object_counts);
+                collect_object_reference_counts(value, object_counts);
+            }
+            for value in entries.hidden_values() {
+                collect_object_reference_counts(value, object_counts);
+            }
+        }
+        Value::Object(_) => {}
+        Value::Int(_)
+        | Value::Bool(_)
+        | Value::RawBool(_)
+        | Value::String(_)
+        | Value::C4Id(_)
+        | Value::Nil => {}
+    }
+}
+
+fn register_active_object_reference_cell(cell: &ValueCell) {
+    ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+        if let Some(index) = index.borrow_mut().as_mut() {
+            index.register(cell);
+        }
+    });
+}
+
+fn refresh_active_object_reference_cell_after_sweep(cell: &ValueCell, swept_object_id: u64) {
+    // Clearing one referenced object can destroy a containing map node and
+    // therefore remove other object-valued C4Values from that same cell. Scan
+    // only the cell selected by FirstRef, after releasing its mutable borrow,
+    // and rebuild its reverse links from the resulting value.
+    let mut object_counts = FxHashMap::default();
+    collect_object_reference_counts(&cell.borrow(), &mut object_counts);
+    object_counts.remove(&swept_object_id);
+    ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+        if let Some(index) = index.borrow_mut().as_mut() {
+            index.register_counts(cell, object_counts);
+        }
+    });
+}
+
+fn ensure_active_object_reference_cell_registered(cell: &ValueCell) {
+    ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+        if let Some(index) = index.borrow_mut().as_mut() {
+            index.ensure_registered(cell);
+        }
+    });
+}
+
+fn apply_active_object_reference_delta(cell: &ValueCell, delta: ObjectReferenceDelta) {
+    ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+        if let Some(index) = index.borrow_mut().as_mut() {
+            index.apply_delta(cell, delta);
+        }
+    });
 }
 
 impl ActiveObjectReferenceTables {
@@ -1278,6 +1662,7 @@ impl CallerVarSlots {
         let cell = frame_slot_cell(&self.0, index);
         notify_legacy_path_pins_before_cell_write(&cell, None, false);
         *cell.borrow_mut() = value;
+        register_active_object_reference_cell(&cell);
     }
 }
 
@@ -1644,18 +2029,50 @@ fn c4_set_copy_value_into(value: Value, destination_is_same_zero_id: bool) -> Va
 }
 
 fn c4_map_assign_set(map: &mut ValueMap, key: Value, value: Value) {
+    c4_map_assign_set_recording(map, key, value, None);
+}
+
+fn c4_map_assign_set_recording(
+    map: &mut ValueMap,
+    key: Value,
+    value: Value,
+    mut reference_delta: Option<&mut ObjectReferenceDelta>,
+) {
+    let mut record = |change, value: &Value| {
+        let Some(delta) = reference_delta.as_deref_mut() else {
+            return;
+        };
+        match change {
+            ValueMapReferenceChange::Removed => delta.remove_value(value),
+            ValueMapReferenceChange::Added => delta.add_value(value),
+        }
+    };
     if c4_set_copy_is_zero_id(&value) {
-        map.assign_key_zero_c4id(key);
+        map.assign_key_zero_c4id_recording(key, &mut record);
     } else {
-        map.assign_key(key, value);
+        map.assign_key_recording(key, value, &mut record);
     }
 }
 
-fn c4_map_assign_property_set(map: &mut ValueMap, key: String, value: Value) {
+fn c4_map_assign_property_set_recording(
+    map: &mut ValueMap,
+    key: String,
+    value: Value,
+    mut reference_delta: Option<&mut ObjectReferenceDelta>,
+) {
+    let mut record = |change, value: &Value| {
+        let Some(delta) = reference_delta.as_deref_mut() else {
+            return;
+        };
+        match change {
+            ValueMapReferenceChange::Removed => delta.remove_value(value),
+            ValueMapReferenceChange::Added => delta.add_value(value),
+        }
+    };
     if c4_set_copy_is_zero_id(&value) {
-        map.assign_zero_c4id(key);
+        map.assign_zero_c4id_recording(key, &mut record);
     } else {
-        map.assign(key, value);
+        map.assign_recording(key, value, &mut record);
     }
 }
 
@@ -1803,6 +2220,7 @@ impl Binding {
                     preserves_container,
                 );
                 *value.borrow_mut() = tracked.value;
+                register_active_object_reference_cell(value);
                 *identity.borrow_mut() = tracked.identity;
                 Ok(())
             }
@@ -1870,11 +2288,20 @@ impl ValueReference {
     }
 
     fn into_lvalue(self) -> LValueRef {
+        self.0.ensure_active_object_reference_cell_registered();
         self.0
     }
 }
 
 impl LValueRef {
+    fn ensure_active_object_reference_cell_registered(&self) {
+        match self {
+            Self::Cell { value, .. } => ensure_active_object_reference_cell_registered(value),
+            Self::Path { root, .. } => ensure_active_object_reference_cell_registered(root),
+            Self::HostPath { .. } => {}
+        }
+    }
+
     fn collect_object_reference_cells(&self, cells: &mut Vec<Weak<RefCell<Value>>>) {
         match self {
             Self::Cell { value, .. } => cells.push(Rc::downgrade(value)),
@@ -2162,6 +2589,7 @@ impl LValueRef {
                     preserves_container,
                 );
                 *value.borrow_mut() = tracked.value;
+                register_active_object_reference_cell(value);
                 if let Some(identity) = identity {
                     *identity.borrow_mut() = tracked.identity;
                 }
@@ -2198,7 +2626,17 @@ impl LValueRef {
                     .zip(replacement_identity.as_ref())
                     .is_some_and(|(current, replacement)| current == replacement);
                 notify_legacy_path_pins_before_path_write(root, segments, preserves_container);
-                write_path(&mut root.borrow_mut(), segments, value)?;
+                let mut reference_delta = ACTIVE_OBJECT_REFERENCE_INDEX
+                    .with(|index| index.borrow().is_some().then(ObjectReferenceDelta::default));
+                write_path_recording(
+                    &mut root.borrow_mut(),
+                    segments,
+                    value,
+                    reference_delta.as_mut(),
+                )?;
+                if let Some(reference_delta) = reference_delta {
+                    apply_active_object_reference_delta(root, reference_delta);
+                }
                 if let Some(identity) = root_identity {
                     // Move the old identity out rather than cloning it:
                     // `RawIdentity` is a recursive tree, so a clone here costs
@@ -2364,44 +2802,64 @@ struct ActiveObjectReferenceCellsGuard {
 }
 
 impl ActiveObjectReferenceCellsGuard {
-    fn enter(env: &Environment, vm: &Vm<'_>) -> Self {
-        let outermost = ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
-            let mut frames = frames.borrow_mut();
-            let outermost = frames.is_empty();
-            frames.push(Vec::new());
+    fn enter_frame() -> Self {
+        let outermost = ACTIVE_OBJECT_REFERENCE_DEPTH.with(|depth| {
+            let outermost = depth.get() == 0;
+            depth.set(depth.get() + 1);
             outermost
         });
         if outermost {
             ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow_mut().clear());
+            ACTIVE_OBJECT_REFERENCE_INDEX
+                .with(|index| *index.borrow_mut() = Some(ActiveObjectReferenceIndex::default()));
             ACTIVE_OBJECT_REFERENCE_TABLES
                 .with(|tables| *tables.borrow_mut() = Some(ActiveObjectReferenceTables::default()));
         }
-        let guard = Self { outermost };
-        let cells = env.object_reference_cells(vm);
-        ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
-            frames
+        ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            index
                 .borrow_mut()
-                .last_mut()
-                .expect("the reference guard frame was just installed")
-                .extend(cells);
+                .as_mut()
+                .expect("the reference index was installed")
+                .enter_frame();
         });
+        Self { outermost }
+    }
+
+    #[cfg(test)]
+    fn enter(env: &Environment, vm: &Vm<'_>) -> Self {
+        let guard = Self::enter_frame();
+        guard.register_environment(env, vm);
         guard
+    }
+
+    fn register_environment(&self, env: &Environment, vm: &Vm<'_>) {
+        let cells = env.object_reference_cells(vm);
+        register_shared_object_reference_cells(cells);
     }
 }
 
 impl Drop for ActiveObjectReferenceCellsGuard {
     fn drop(&mut self) {
-        let depth = ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| frames.borrow().len());
+        let depth = ACTIVE_OBJECT_REFERENCE_DEPTH.with(Cell::get);
         ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| {
             if let Some(tables) = tables.borrow_mut().as_mut() {
                 tables.leave_depth(depth);
             }
         });
-        ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
-            frames.borrow_mut().pop();
+        ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            index
+                .borrow_mut()
+                .as_mut()
+                .expect("the reference index remains installed through frame exit")
+                .leave_frame();
+        });
+        ACTIVE_OBJECT_REFERENCE_DEPTH.with(|active_depth| {
+            debug_assert_eq!(active_depth.get(), depth);
+            active_depth.set(depth.saturating_sub(1));
         });
         if self.outermost {
             ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow_mut().clear());
+            ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| *index.borrow_mut() = None);
             ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| *tables.borrow_mut() = None);
         }
     }
@@ -3002,16 +3460,35 @@ fn write_path(
     segments: &[PathSegment],
     new_value: Value,
 ) -> Result<(), RuntimeError> {
+    write_path_recording(value, segments, new_value, None)
+}
+
+fn write_path_recording(
+    value: &mut Value,
+    segments: &[PathSegment],
+    new_value: Value,
+    reference_delta: Option<&mut ObjectReferenceDelta>,
+) -> Result<(), RuntimeError> {
     let Some((segment, rest)) = segments.split_first() else {
         let same_destination = c4_set_copy_is_zero_id(&new_value) && c4_set_copy_is_zero_id(value);
-        *value = c4_set_copy_value_into(new_value, same_destination);
+        let replacement = c4_set_copy_value_into(new_value, same_destination);
+        if let Some(delta) = reference_delta {
+            delta.remove_value(value);
+            delta.add_value(&replacement);
+        }
+        *value = replacement;
         return Ok(());
     };
 
     match (value, segment) {
         (Value::Proplist(entries), PathSegment::Property(property)) => {
             if rest.is_empty() {
-                c4_map_assign_property_set(entries, property.clone(), new_value);
+                c4_map_assign_property_set_recording(
+                    entries,
+                    property.clone(),
+                    new_value,
+                    reference_delta,
+                );
                 Ok(())
             } else {
                 let Some(next) = entries.get_mut(property) else {
@@ -3019,7 +3496,7 @@ fn write_path(
                         "cannot access property '{property}' on nil"
                     )));
                 };
-                write_path(next, rest, new_value)
+                write_path_recording(next, rest, new_value, reference_delta)
             }
         }
         (other, PathSegment::Property(property)) => Err(RuntimeError::new(format!(
@@ -3037,15 +3514,20 @@ fn write_path(
             if rest.is_empty() {
                 let same_destination =
                     c4_set_copy_is_zero_id(&new_value) && c4_set_copy_is_zero_id(&elements[index]);
-                elements[index] = c4_set_copy_value_into(new_value, same_destination);
+                let replacement = c4_set_copy_value_into(new_value, same_destination);
+                if let Some(delta) = reference_delta {
+                    delta.remove_value(&elements[index]);
+                    delta.add_value(&replacement);
+                }
+                elements[index] = replacement;
                 Ok(())
             } else {
-                write_path(&mut elements[index], rest, new_value)
+                write_path_recording(&mut elements[index], rest, new_value, reference_delta)
             }
         }
         (Value::Proplist(entries), PathSegment::Index(key)) => {
             if rest.is_empty() {
-                c4_map_assign_set(entries, key.clone(), new_value);
+                c4_map_assign_set_recording(entries, key.clone(), new_value, reference_delta);
                 Ok(())
             } else {
                 let Some(next) = entries.get_key_mut(key) else {
@@ -3053,7 +3535,7 @@ fn write_path(
                         "cannot access map key {key} on nil"
                     )));
                 };
-                write_path(next, rest, new_value)
+                write_path_recording(next, rest, new_value, reference_delta)
             }
         }
         (other, PathSegment::Index(_)) => Err(RuntimeError::new(format!(
@@ -3822,6 +4304,7 @@ impl<'a> Vm<'a> {
     }
 
     fn tracked_cell(&self, cell: ValueCell) -> LValueRef {
+        ensure_active_object_reference_cell_registered(&cell);
         let identity = self.identity_for_cell(&cell);
         LValueRef::tracked_cell(cell, identity)
     }
@@ -4337,6 +4820,7 @@ impl<'a> Vm<'a> {
         let mut diagnostic = diagnostics.then(|| {
             ScriptDiagnosticGuard::enter_direct(self.direct_exec_diagnostic_frame(context), true)
         });
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
         let mut env = Environment::new_with_params(&[], &[], strict_level, object_state.clone())?;
         env.temporary_script = true;
         env.definition_context = matches!(&self.this_value, Value::Object(id) if *id != 0);
@@ -4344,7 +4828,7 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
-        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter(&env, self);
+        _object_reference_cells.register_environment(&env, self);
         let value = self.evaluate(&expr, &mut env, 0)?;
         if let Some(diagnostic) = &mut diagnostic {
             diagnostic.returned(&value);
@@ -4383,6 +4867,7 @@ impl<'a> Vm<'a> {
         let mut diagnostic = diagnostics.then(|| {
             ScriptDiagnosticGuard::enter_direct(self.direct_exec_diagnostic_frame(context), true)
         });
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
         let mut env = Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
         env.temporary_script = true;
         env.definition_context = matches!(&self.this_value, Value::Object(id) if *id != 0);
@@ -4390,7 +4875,7 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
-        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter(&env, self);
+        _object_reference_cells.register_environment(&env, self);
         let value = self.evaluate(&expr, &mut env, 0)?;
         if let Some(diagnostic) = &mut diagnostic {
             diagnostic.returned(&value);
@@ -4418,6 +4903,7 @@ impl<'a> Vm<'a> {
             self.eval_direct_exec_diagnostic_frame(self.definition_context),
             false,
         );
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
         let mut env = Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
         env.temporary_script = true;
         let has_object = matches!(&self.this_value, Value::Object(id) if *id != 0);
@@ -4428,7 +4914,7 @@ impl<'a> Vm<'a> {
                 env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
             }
         }
-        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter(&env, self);
+        _object_reference_cells.register_environment(&env, self);
         let value = self.evaluate(&expr, &mut env, depth)?;
         diagnostic.returned(&value);
         Ok(value)
@@ -5000,6 +5486,11 @@ impl<'a> Vm<'a> {
             .compiled
             .get_or_init(|| CompiledFunctionCache::new(function));
         let compiled = compiled_cache.validated(function, target.validate_compiled_source);
+        // The callee's parameter bindings allocate C4Value cells while the
+        // caller remains active. Enter its frame before constructing that
+        // environment so their cleanup is charged to the callee, not the
+        // long-lived caller.
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
         let mut env = Environment::new_with_params(
             &function.params,
             &args,
@@ -5108,7 +5599,7 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
-        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter(&env, self);
+        _object_reference_cells.register_environment(&env, self);
 
         let result = if let Some(compiled) = compiled {
             match compiled.execute(self, &env, depth)? {
@@ -6459,6 +6950,8 @@ impl<'a> Vm<'a> {
                                 self.eval_direct_exec_diagnostic_frame(env.definition_context),
                                 false,
                             );
+                            let _object_reference_cells =
+                                ActiveObjectReferenceCellsGuard::enter_frame();
                             let mut exec_env = Environment::new_with_params(
                                 &[],
                                 &[],
@@ -6475,6 +6968,7 @@ impl<'a> Vm<'a> {
                                     self.identity_for_cell(&cell),
                                 );
                             }
+                            _object_reference_cells.register_environment(&exec_env, self);
                             // Runtime errors propagate (fPassErrors=true,
                             // C4Script.cpp:4514).
                             let value = self.evaluate(&expr, &mut exec_env, depth + 1)?;
@@ -7364,7 +7858,23 @@ impl<'a> Vm<'a> {
         return_old: bool,
         operation: &str,
     ) -> Result<ReturnValue, RuntimeError> {
-        let reference = if Self::expression_contains_array_append(expr) {
+        let reference = if let Expr::PreIncrement(inner) | Expr::PreDecrement(inner) = expr {
+            let (inner_delta, inner_operation) = if matches!(expr, Expr::PreIncrement(_)) {
+                (1, "increment")
+            } else {
+                (-1, "decrement")
+            };
+            match self.update_counter_raw(inner, env, inner_delta, false, inner_operation)? {
+                ReturnValue::Reference(reference) => reference,
+                ReturnValue::Value(value) => {
+                    let operator = if delta > 0 { "++" } else { "--" };
+                    return Err(RuntimeError::new(format!(
+                        "operator \"{operator}\": got \"{}\", but expected \"int&\"!",
+                        Self::c4v_type_name(value.value.c4v_type())
+                    )));
+                }
+            }
+        } else if Self::expression_contains_array_append(expr) {
             match self.evaluate_reference_or_value(expr, env, 0)? {
                 ReturnValue::Reference(reference) => reference,
                 ReturnValue::Value(value) => {
@@ -8318,6 +8828,7 @@ impl<'a> Vm<'a> {
                     ),
                     false,
                 );
+                let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
                 let mut exec_env = Environment::new_with_params(
                     &[],
                     &[],
@@ -8326,6 +8837,7 @@ impl<'a> Vm<'a> {
                 )?;
                 exec_env.engine_scope = true;
                 exec_env.temporary_script = true;
+                _object_reference_cells.register_environment(&exec_env, self);
                 let tracked = self.evaluate_tracked(&expr, &mut exec_env, depth + 1)?;
                 diagnostic.returned(&tracked.value);
                 Ok(ReturnValue::Value(tracked))
@@ -12571,7 +13083,7 @@ impl Environment {
         for (_, binding) in &self.named_parameters {
             binding.collect_object_reference_cells(&mut cells);
         }
-        let depth = ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| frames.borrow().len());
+        let depth = ACTIVE_OBJECT_REFERENCE_DEPTH.with(Cell::get);
         let scan_object_state = ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| {
             tables
                 .borrow_mut()
@@ -12799,6 +13311,513 @@ mod tests {
     }
 
     #[test]
+    fn active_object_reference_sweep_visits_only_cells_for_removed_object() {
+        // C++ clears only the removed object's intrusive FirstRef list
+        // (C4Object.cpp:312), independent of unrelated live C4Values.
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _guard = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let target = value_cell(Value::Nil);
+        LValueRef::cell(Rc::clone(&target))
+            .write(Value::Object(7))
+            .expect("target assignment succeeds");
+        let _unrelated = (0..128)
+            .map(|value| value_cell(Value::Int(value)))
+            .collect::<Vec<_>>();
+        reset_active_object_reference_sweep_visits();
+
+        clear_active_object_references(7);
+
+        check_eq!(*target.borrow() => Value::Nil);
+        check_eq!(active_object_reference_sweep_visits() => 1);
+    }
+
+    #[test]
+    fn active_object_reference_index_replaces_and_prunes_memberships() {
+        // C++ moves a C4Value between intrusive FirstRef lists on assignment
+        // and unlinks it on destruction (C4Value.cpp:104-140). Overwrites and
+        // completed nested frames therefore cannot leave old object IDs or
+        // one dead link per call in the active index.
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let survivor = value_cell(Value::Object(7));
+        LValueRef::cell(Rc::clone(&survivor))
+            .write(Value::Object(9))
+            .expect("overwrite succeeds");
+        reset_active_object_reference_sweep_visits();
+
+        clear_active_object_references(7);
+
+        check_eq!(active_object_reference_sweep_visits() => 0);
+        check_eq!(*survivor.borrow() => Value::Object(9));
+
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            let finished_frame_cells = (0..64)
+                .map(|_| value_cell(Value::Object(11)))
+                .collect::<Vec<_>>();
+            check_eq!(finished_frame_cells.len() => 64);
+        }
+        let _live = value_cell(Value::Object(12));
+        let stale_links = ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            index
+                .borrow()
+                .as_ref()
+                .and_then(|index| index.cells_by_object.get(&11))
+                .map_or(0, FxHashMap::len)
+        });
+
+        check_eq!(stale_links => 0);
+    }
+
+    #[test]
+    fn nested_call_temporaries_do_not_accumulate_in_outer_frame_bookkeeping() {
+        // A script call constructs its parameter cells before it begins
+        // executing its body. Those short-lived cells belong to the callee's
+        // frame, even while a long-running caller remains active. C++ unlinks
+        // the corresponding C4Value from its intrusive object list when that
+        // temporary is destroyed (C4Value.cpp:104-140).
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("ActiveFrameAddressCount", |_| {
+            let count = ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+                index
+                    .borrow()
+                    .as_ref()
+                    .and_then(|index| index.frame_addresses.last())
+                    .map_or(0, FxHashSet::len)
+            });
+            Ok(Value::Int(count as i32))
+        });
+        engine.register_host_function("ObjectValue", |_| Ok(Value::Object(7)));
+        engine
+            .load_script(
+                "
+                    func Leaf(value) { return value; }
+                    func Outer() {
+                        var index = 0;
+                        var before = ActiveFrameAddressCount();
+                        while (index < 512) {
+                            Leaf(ObjectValue());
+                            ++index;
+                        }
+                        return ActiveFrameAddressCount() - before;
+                    }
+                ",
+            )
+            .expect("script loads");
+
+        check_eq!(engine.call("Outer", &[]).expect("outer call succeeds") => Value::Int(0));
+    }
+
+    #[test]
+    fn repeated_eval_temporaries_do_not_accumulate_in_outer_frame_bookkeeping() {
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("ActiveFrameAddressCount", |_| {
+            let count = ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+                index
+                    .borrow()
+                    .as_ref()
+                    .and_then(|index| index.frame_addresses.last())
+                    .map_or(0, FxHashSet::len)
+            });
+            Ok(Value::Int(count as i32))
+        });
+        engine.register_host_function("ObjectValue", |_| Ok(Value::Object(7)));
+        engine
+            .load_script(
+                r#"
+                    func Outer() {
+                        var index = 0;
+                        var before = ActiveFrameAddressCount();
+                        while (index < 512) {
+                            eval("Var(0) = ObjectValue()");
+                            ++index;
+                        }
+                        return ActiveFrameAddressCount() - before;
+                    }
+                "#,
+            )
+            .expect("script loads");
+
+        check_eq!(engine.call("Outer", &[]).expect("outer call succeeds") => Value::Int(0));
+    }
+
+    #[test]
+    fn shared_cell_tracked_by_an_ancestor_is_not_queued_for_nested_pruning() {
+        let functions = FxHashMap::default();
+        let globals = crate::engine::new_global_variables();
+        globals
+            .borrow_mut()
+            .insert("shared".to_owned(), value_cell(Value::Object(7)));
+        let vm = test_vm(&functions, &[]).with_global_variables(Some(&globals));
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        }
+        let (frame_addresses, pending) = ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            let index = index.borrow();
+            let index = index.as_ref().expect("outer guard keeps the index active");
+            (
+                index
+                    .frame_addresses
+                    .iter()
+                    .map(FxHashSet::len)
+                    .sum::<usize>(),
+                index.pending_prune_count(),
+            )
+        });
+
+        check_eq!(frame_addresses => 1);
+        check_eq!(pending => 0);
+    }
+
+    #[test]
+    fn path_write_updates_one_subtree_without_rescanning_its_root() {
+        // AB_SET writes through the addressed C4Value, not every sibling in
+        // its owning array (C4AulExec.cpp:858-865). Reverse-index maintenance
+        // must keep that property; a whole-root scan restores the quadratic
+        // element-assignment cost fixed in clonk-org/clonk-rs#759.
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _guard = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let root = value_cell(Value::Array(
+            std::iter::once(Value::Object(7))
+                .chain((1..128).map(Value::Int))
+                .collect(),
+        ));
+        let element = LValueRef::cell(Rc::clone(&root))
+            .append(PathSegment::Index(Value::Int(0)))
+            .expect("array element is an lvalue");
+        reset_object_reference_index_value_visits();
+
+        element
+            .write(Value::Nil)
+            .expect("element overwrite succeeds");
+
+        check!(
+            object_reference_index_value_visits() <= 2,
+            "only the replaced and replacement values should be indexed"
+        );
+        reset_active_object_reference_sweep_visits();
+        clear_active_object_references(7);
+        check_eq!(active_object_reference_sweep_visits() => 0);
+    }
+
+    #[test]
+    fn path_write_counts_duplicate_object_references_in_sibling_values() {
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _guard = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let root = value_cell(Value::Array(vec![Value::Object(7), Value::Object(7)]));
+        let first = LValueRef::cell(Rc::clone(&root))
+            .append(PathSegment::Index(Value::Int(0)))
+            .expect("first array element is an lvalue");
+
+        first.write(Value::Nil).expect("element overwrite succeeds");
+        reset_active_object_reference_sweep_visits();
+        clear_active_object_references(7);
+
+        check_eq!(active_object_reference_sweep_visits() => 1);
+        check_eq!(*root.borrow() => Value::Array(vec![Value::Nil, Value::Nil]));
+    }
+
+    #[test]
+    fn map_path_writes_update_key_and_recycled_slot_counts() {
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _guard = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+
+        let mut keyed = ValueMap::new();
+        keyed.insert_key(Value::Object(7), Value::Int(1));
+        let keyed = value_cell(Value::Proplist(keyed));
+        LValueRef::cell(Rc::clone(&keyed))
+            .append(PathSegment::Index(Value::Object(7)))
+            .expect("object-keyed entry is an lvalue")
+            .write(Value::Nil)
+            .expect("nil removes the keyed entry");
+
+        let mut recycled = ValueMap::new();
+        recycled.recycle_value_slot(Value::Object(9));
+        let recycled = value_cell(Value::Proplist(recycled));
+        LValueRef::cell(Rc::clone(&recycled))
+            .append(PathSegment::Property("fresh".to_owned()))
+            .expect("map property is an lvalue")
+            .write(Value::Int(1))
+            .expect("new property reuses the retained slot");
+
+        reset_active_object_reference_sweep_visits();
+        clear_active_object_references(7);
+        clear_active_object_references(9);
+
+        check_eq!(active_object_reference_sweep_visits() => 0);
+    }
+
+    #[test]
+    fn map_path_removal_does_not_reindex_an_equal_successor() {
+        // AssignRemoval can make two keys in one native hash bucket compare
+        // equal. Removing the first node must not count the already-indexed
+        // successor again (C4ValueHash.cpp:49-75,117-136).
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _guard = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+
+        let mut collapsing = ValueMap::new();
+        collapsing.insert_key(Value::Array(vec![Value::Bool(true)]), Value::Object(7));
+        collapsing.insert_key(Value::Array(vec![Value::RawBool(2)]), Value::Object(7));
+        let empty = ValueMap::new();
+        let mut outer = ValueMap::new();
+        outer.insert_key(Value::Proplist(collapsing), Value::Object(9));
+        outer.insert_key(Value::Proplist(empty.clone()), Value::Object(9));
+        let root = value_cell(Value::Proplist(outer));
+
+        clear_active_object_references(7);
+        for _ in 0..2 {
+            LValueRef::cell(Rc::clone(&root))
+                .append(PathSegment::Index(Value::Proplist(empty.clone())))
+                .expect("equal map key remains addressable")
+                .write(Value::Nil)
+                .expect("nil removes one equal entry");
+        }
+
+        reset_active_object_reference_sweep_visits();
+        clear_active_object_references(9);
+
+        check_eq!(active_object_reference_sweep_visits() => 0);
+    }
+
+    #[test]
+    fn map_node_removal_unlinks_other_object_references_from_the_swept_cell() {
+        // Removing a directly object-valued map entry destroys that node's
+        // key C4Value too, which unlinks it from its own FirstRef list
+        // (C4Value.cpp:78-99; C4Object.cpp:312).
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _guard = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let mut map = ValueMap::new();
+        map.insert_key(Value::Object(9), Value::Object(7));
+        let root = value_cell(Value::Proplist(map));
+        let address = Rc::as_ptr(&root) as usize;
+        reset_active_object_reference_sweep_visits();
+
+        clear_active_object_references(7);
+
+        check_eq!(active_object_reference_sweep_visits() => 1);
+        let (seven_bucket, nine_bucket, has_membership) =
+            ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+                let index = index.borrow();
+                let index = index.as_ref().expect("the guard installs the index");
+                (
+                    index.cells_by_object.contains_key(&7),
+                    index.cells_by_object.contains_key(&9),
+                    index.memberships_by_cell.contains_key(&address),
+                )
+            });
+        check!(!seven_bucket);
+        check!(!nine_bucket);
+        check!(!has_membership);
+
+        reset_active_object_reference_sweep_visits();
+        clear_active_object_references(9);
+
+        check_eq!(active_object_reference_sweep_visits() => 0);
+        let root = root.borrow();
+        let Value::Proplist(map) = &*root else {
+            panic!("the swept cell remains a map");
+        };
+        check_eq!(map.len() => 0);
+        check_eq!(map.hidden_values().cloned().collect::<Vec<_>>() => vec![Value::Nil]);
+    }
+
+    #[test]
+    fn zero_object_does_not_create_a_reverse_index_bucket() {
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _guard = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+
+        let _zero = value_cell(Value::Object(0));
+        let has_zero_bucket = ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            index
+                .borrow()
+                .as_ref()
+                .is_some_and(|index| index.cells_by_object.contains_key(&0))
+        });
+
+        check!(!has_zero_bucket);
+    }
+
+    #[test]
+    fn escaped_cell_remains_pending_while_its_owner_is_alive() {
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let escaped;
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            escaped = value_cell(Value::Object(7));
+        }
+        reset_object_reference_pending_prune_visits();
+
+        {
+            let _next = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        }
+        let pending = ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            index
+                .borrow()
+                .as_ref()
+                .map_or(0, ActiveObjectReferenceIndex::pending_prune_count)
+        });
+
+        check_eq!(object_reference_pending_prune_visits() => 1);
+        check_eq!(pending => 1);
+        check_eq!(*escaped.borrow() => Value::Object(7));
+    }
+
+    #[test]
+    fn released_escaped_cell_is_removed_from_reverse_buckets_and_frame_sets() {
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let retained;
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            retained = value_cell(Value::Object(7));
+        }
+        {
+            let _recheck = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        }
+        drop(retained);
+        {
+            let _cleanup = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        }
+        let (bucket_cells, memberships, frame_addresses, pending) = ACTIVE_OBJECT_REFERENCE_INDEX
+            .with(|index| {
+                let index = index.borrow();
+                let index = index.as_ref().expect("outer guard keeps the index active");
+                (
+                    index.cells_by_object.get(&7).map_or(0, FxHashMap::len),
+                    index.memberships_by_cell.len(),
+                    index
+                        .frame_addresses
+                        .iter()
+                        .map(FxHashSet::len)
+                        .sum::<usize>(),
+                    index.pending_prune_count(),
+                )
+            });
+
+        check_eq!(bucket_cells => 0);
+        check_eq!(memberships => 0);
+        check_eq!(frame_addresses => 0);
+        check_eq!(pending => 0);
+    }
+
+    #[test]
+    fn pending_pruning_checks_one_escaped_cell_per_removal_and_drains_after_release() {
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let mut retained = Vec::new();
+        for object_id in 1..=64 {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            retained.push(value_cell(Value::Object(object_id)));
+        }
+        reset_object_reference_pending_prune_visits();
+
+        clear_active_object_references(999);
+
+        check!(
+            object_reference_pending_prune_visits() <= 1,
+            "one removal must not scan every live escaped reference"
+        );
+        drop(retained);
+        for _ in 0..128 {
+            let _cleanup = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        }
+        let (buckets, memberships, frame_addresses, pending) =
+            ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+                let index = index.borrow();
+                let index = index.as_ref().expect("outer guard keeps the index active");
+                (
+                    index.cells_by_object.len(),
+                    index.memberships_by_cell.len(),
+                    index
+                        .frame_addresses
+                        .iter()
+                        .map(FxHashSet::len)
+                        .sum::<usize>(),
+                    index.pending_prune_count(),
+                )
+            });
+
+        check_eq!(buckets => 0);
+        check_eq!(memberships => 0);
+        check_eq!(frame_addresses => 0);
+        check_eq!(pending => 0);
+    }
+
+    #[test]
+    fn sustained_new_escapes_do_not_starve_an_older_released_cell() {
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let released;
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            released = value_cell(Value::Object(1));
+        }
+        let mut retained_arrivals = Vec::new();
+        {
+            // Recheck the older cell while it is live, then add the first of
+            // a sustained stream before releasing the older owner.
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            retained_arrivals.push(value_cell(Value::Object(2)));
+        }
+        drop(released);
+        for object_id in 3..=66 {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            retained_arrivals.push(value_cell(Value::Object(object_id)));
+        }
+        let older_bucket = ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            index
+                .borrow()
+                .as_ref()
+                .and_then(|index| index.cells_by_object.get(&1))
+                .map_or(0, FxHashMap::len)
+        });
+
+        check_eq!(older_bucket => 0);
+        check_eq!(retained_arrivals.len() => 65);
+    }
+
+    #[test]
     fn nested_calls_scan_shared_object_reference_state_once() {
         // C++ attaches every live C4Value to one process-global intrusive
         // FirstRef list, so AB_CALL only adds its frame values
@@ -12827,6 +13846,108 @@ mod tests {
 
         check_eq!(result => Value::Object(7));
         check_eq!(object_reference_table_traversals() => 4);
+    }
+
+    #[test]
+    fn nested_frame_does_not_reindex_an_unchanged_shared_global_cell() {
+        // C++ links an existing C4Value into FirstRef once; entering AB_CALL
+        // does not recursively revisit the value (C4Value.cpp:104-140;
+        // C4AulExec.cpp:1217-1223). Keep counting the recursive value walk,
+        // rather than table enumeration, so a relink hidden behind the same
+        // global-table traversal remains visible.
+        let functions = FxHashMap::default();
+        let globals = crate::engine::new_global_variables();
+        let shared = value_cell(Value::Array(
+            std::iter::once(Value::Object(7))
+                .chain((0..128).map(Value::Int))
+                .collect(),
+        ));
+        globals
+            .borrow_mut()
+            .insert("shared".to_owned(), Rc::clone(&shared));
+        let vm = test_vm(&functions, &[]).with_global_variables(Some(&globals));
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        reset_object_reference_index_value_visits();
+
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        }
+
+        check!(
+            object_reference_index_value_visits() <= MAX_CALL_PARAMETERS,
+            "only the object-free fixed call slots may need rediscovery; the unchanged 129-value global must not be recursively reindexed"
+        );
+        check_eq!(*shared.borrow() => Value::Array(
+            std::iter::once(Value::Object(7))
+                .chain((0..128).map(Value::Int))
+                .collect()
+        ));
+
+        set_value_cell(
+            &shared,
+            Value::Array(
+                std::iter::once(Value::Object(9))
+                    .chain((0..128).map(Value::Int))
+                    .collect(),
+            ),
+        );
+        reset_object_reference_index_value_visits();
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        }
+        check!(
+            object_reference_index_value_visits() <= MAX_CALL_PARAMETERS,
+            "set_value_cell must refresh once, then leave the unchanged global eligible for O(1) discovery"
+        );
+        clear_active_object_references(7);
+        check!(
+            matches!(&*shared.borrow(), Value::Array(values) if matches!(values.first(), Some(Value::Object(9))))
+        );
+        clear_active_object_references(9);
+        check!(
+            matches!(&*shared.borrow(), Value::Array(values) if matches!(values.first(), Some(Value::Nil)))
+        );
+    }
+
+    #[test]
+    fn cell_discovery_rebuilds_a_stale_weak_registration_at_the_same_address_key() {
+        let functions = FxHashMap::default();
+        let vm = test_vm(&functions, &[]);
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _guard = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        let departed = Rc::new(RefCell::new(Value::Object(7)));
+        let stale = Rc::downgrade(&departed);
+        drop(departed);
+        let current = Rc::new(RefCell::new(Value::Object(9)));
+        let address = Rc::as_ptr(&current) as usize;
+        ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+            let mut index = index.borrow_mut();
+            let index = index.as_mut().expect("the guard installs the index");
+            index
+                .cells_by_object
+                .entry(7)
+                .or_default()
+                .insert(address, stale.clone());
+            index.memberships_by_cell.insert(
+                address,
+                ActiveObjectReferenceMembership {
+                    cell: stale,
+                    object_counts: FxHashMap::from_iter([(7, 1)]),
+                },
+            );
+        });
+        reset_object_reference_index_value_visits();
+
+        ensure_active_object_reference_cell_registered(&current);
+
+        check_eq!(object_reference_index_value_visits() => 1);
+        clear_active_object_references(7);
+        check_eq!(*current.borrow() => Value::Object(9));
+        clear_active_object_references(9);
+        check_eq!(*current.borrow() => Value::Nil);
     }
 
     #[test]

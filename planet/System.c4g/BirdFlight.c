@@ -48,8 +48,33 @@ local flight_cruise;    // target speed, hundredths of a pixel per frame
 local flight_agility;   // per-frame velocity step clamp, hundredths
 local flight_urgency;   // extra agility while escaping, counts itself down
 local flight_alarm;     // startle level 0..100, rises at once and decays slowly
+local flight_compatible; // 0 = unknown, 1 = stock BIRD, -1 = folder-local BIRD
 
 private func FlightThinkInterval() { return(8); }
+
+// #appendto resolves by ID and therefore also reaches folder-local BIRD
+// definitions. Only definitions carrying both stock AI locals implement the
+// state contract this controller replaces. Inspect declarations rather than
+// values because both locals are unset on a fresh stock bird.
+private func FlightHasDeclaredLocal(string name)
+{
+  var count = GetObjectVal("LocalNamed",, this());
+  for (var index; index < count; index++)
+    if (GetObjectVal("LocalNamed",, this(), index * 3 + 1) eq name) return(1);
+  return(0);
+}
+
+private func FlightHasStockBirdState()
+{
+  if (!flight_compatible)
+  {
+    if (FlightHasDeclaredLocal("Bait") && FlightHasDeclaredLocal("pNest"))
+      flight_compatible = 1;
+    else
+      flight_compatible = -1;
+  }
+  return(flight_compatible > 0);
+}
 
 /* Installation */
 
@@ -66,6 +91,7 @@ private func FlightEnsure()
 public func FxBirdFlightStart(object target, int fxnum, int temp)
 {
   if (temp) return(1);
+  if (!FlightHasStockBirdState()) return(-1);
   // Seed from whatever the shipped Initialize/Birth already picked, so the
   // one Random(2) they spend still decides which way this bird sets off.
   flight_heading = 90;
@@ -79,6 +105,9 @@ public func FxBirdFlightStart(object target, int fxnum, int temp)
 
 public func FxBirdFlightTimer(object target, int fxnum, int time)
 {
+  // Saves made before the compatibility gate can still carry this effect on
+  // a folder-local BIRD. Returning -1 removes it before it can steer a frame.
+  if (!FlightHasStockBirdState()) return(-1);
   // Think on a stagger so a flock does not sample the world in lockstep.
   if (!((FrameCounter() + ObjectNumber()) % FlightThinkInterval())) FlightThink();
   FlightStep();
@@ -255,6 +284,7 @@ private func FlightTurnToward(int from, int to, int max_step)
 // what the steering statements DO is different.
 protected func Activity()
 {
+  if (!FlightHasStockBirdState()) return(_inherited());
   FlightEnsure();
 
   if (!Random(25)) Sound("Raven*");
@@ -309,6 +339,7 @@ protected func Activity()
 // ComDir to a pure axis. Steer instead; the actuator owns the facing flip.
 public func TurnRight()
 {
+  if (!FlightHasStockBirdState()) return(_inherited());
   if (Stuck() || (GetAction() ne "Fly" && GetAction() ne "Turn")) return();
   flight_heading = FlightTurnToward(flight_heading, 90, 55);
   flight_urgency = 3;
@@ -317,6 +348,7 @@ public func TurnRight()
 
 public func TurnLeft()
 {
+  if (!FlightHasStockBirdState()) return(_inherited());
   if (Stuck() || (GetAction() ne "Fly" && GetAction() ne "Turn")) return();
   flight_heading = FlightTurnToward(flight_heading, 270, 55);
   flight_urgency = 3;
@@ -331,6 +363,7 @@ public func TurnLeft()
 // short-circuit that only spends the second draw when the first lands on 0.
 protected func ContactLeft()
 {
+  if (!FlightHasStockBirdState()) return(_inherited());
   if (GetEffect("PossessionSpell", this())) return();
   flight_heading = FlightTurnToward(flight_heading, 90, 120);
   flight_urgency = 8;
@@ -340,6 +373,7 @@ protected func ContactLeft()
 
 protected func ContactRight()
 {
+  if (!FlightHasStockBirdState()) return(_inherited());
   if (GetEffect("PossessionSpell", this())) return();
   flight_heading = FlightTurnToward(flight_heading, 270, 120);
   flight_urgency = 8;
@@ -349,6 +383,7 @@ protected func ContactRight()
 
 protected func ContactTop()
 {
+  if (!FlightHasStockBirdState()) return(_inherited());
   if (GetEffect("PossessionSpell", this())) return();
   flight_heading = FlightTurnToward(flight_heading, 180, 120);
   flight_urgency = 8;
@@ -357,6 +392,7 @@ protected func ContactTop()
 
 protected func ContactBottom()
 {
+  if (!FlightHasStockBirdState()) return(_inherited());
   if (GetEffect("PossessionSpell", this())) return();
   flight_heading = FlightTurnToward(flight_heading, 0, 120);
   flight_urgency = 8;
@@ -368,6 +404,7 @@ protected func ContactBottom()
 // install the controller on saved birds that never ran Initialize.
 protected func Survive()
 {
+  if (!FlightHasStockBirdState()) return(_inherited());
   FlightEnsure();
 
   if (GetEffect("PossessionSpell", this())) return();

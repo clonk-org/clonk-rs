@@ -2840,6 +2840,47 @@ fn exec_life_breath_restores_with_supply() {
     unit_assert_eq!(engine.objects[idx].state.breath => 50_000);
 }
 
+#[test]
+fn exec_life_breath_refill_adds_precomputed_take_after_deep_breath() {
+    // Native computes takebreath from the old value, calls DeepBreath, then
+    // adds the precomputed delta to the callback-mutated live Breath
+    // (C4Object.cpp:911-920). Assigning the physical maximum would erase the
+    // callback's synchronous DoBreath write.
+    let script = r#"#strict
+local deep_breath_calls;
+func DeepBreath() {
+    deep_breath_calls++;
+    DoBreath(1);
+}
+"#;
+    let mut definition = test_definition("Diver", "Diver", script);
+    definition.set_physical(PhysicalInfo {
+        breath: 50_000,
+        energy: 50_000,
+        ..PhysicalInfo::default()
+    });
+
+    let mut engine = Engine::with_seed(77);
+    engine.register_test_definition(definition);
+    let id = spawn_fixture!(engine, "Diver", with_alive: true, with_energy: 50);
+    let idx = engine.test_object_index(id);
+    engine.objects[idx].state.breath = 10_000;
+
+    for _ in 0..5 {
+        engine.tick_without_snapshot().test_value();
+    }
+
+    unit_assert_eq!(
+        engine.objects[idx].state.local_vars.get("deep_breath_calls") =>
+        Some(&Value::Int(1))
+    );
+    unit_assert_eq!(
+        engine.objects[idx].state.breath =>
+        51_000,
+        "the callback's +1000 remains before the precomputed +40000"
+    );
+}
+
 fn exec_life_material_landscape(
     width: u32,
     height: u32,

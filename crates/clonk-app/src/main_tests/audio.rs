@@ -459,6 +459,91 @@ fn invalid_sound_override_keeps_previous_decoded_sample() {
 }
 
 #[test]
+fn sound_budget_rejection_keeps_the_previous_sample_and_instance() {
+    let dir = tempdir();
+    let global = dir.path().join("Sound.c4g");
+    let replacement = dir.path().join("Replacement.c4d");
+    fs::create_dir_all(&global).test_value();
+    fs::create_dir_all(&replacement).test_value();
+    fs::write(global.join("Elevator.wav"), silent_pcm_wav(10)).test_value();
+    fs::write(replacement.join("ELEVATOR.WAV"), silent_pcm_wav(20)).test_value();
+
+    let decoded_bytes = 441 * std::mem::size_of::<[f32; 2]>();
+    let mut audio = AudioContext::try_new(
+        audio_fixture!(audio_sound_enabled_menu_sound_enabled_max_channels: false, true, 2),
+    )
+    .test_value();
+    audio.system =
+        AudioSystem::new_deferred_null_with_sound_pcm_limit(2, decoded_bytes);
+    audio.resolver.global = collect_sound_libraries_for_path(&global);
+    audio.refresh_sound_catalog();
+
+    let snapshot = make_snapshot(Vec::new(), Vec::new());
+    let key = SoundInstanceKey::new("Elevator", None);
+    audio.start_lobby_elevator(&snapshot);
+    let old_channel = audio.active_channels[&key].channel.test_value();
+    let old_sample_order = audio.active_channels[&key].sample_order;
+
+    // C4SoundSystem::LoadEffects appends only successfully decoded samples
+    // before removing a case-insensitive predecessor (C4SoundSystem.cpp:106-136).
+    let replacement_group = Group::open(&replacement).test_value();
+    audio.register_definition_sounds("REPLACEMENT", &replacement_group);
+
+    main_assert_eq!(audio.available_sound_samples() => ["elevator.wav"]);
+    let resolved = audio
+        .ensure_sound_with_key("ELEVATOR")
+        .expect("validated catalog lookup")
+        .test_value();
+    main_assert_eq!(resolved.handle.duration_ms() => Some(10));
+    main_assert_eq!(resolved.sample_order => old_sample_order);
+    main_assert_eq!(audio.active_channels[&key].channel => Some(old_channel));
+    main_assert!(audio.system.channel_is_playing(old_channel));
+    main_assert!(audio.missing_sounds.iter().any(|marker| {
+        marker.starts_with("asset::") && marker.contains("elevator.wav")
+    }));
+}
+
+#[test]
+fn successful_sound_replacements_release_each_old_sample_before_the_next_decode() {
+    let dir = tempdir();
+    let global = dir.path().join("Sound.c4g");
+    let replacements = dir.path().join("Replacement.c4d");
+    fs::create_dir_all(&global).test_value();
+    fs::create_dir_all(&replacements).test_value();
+    for file_name in ["Alpha.wav", "Beta.wav"] {
+        fs::write(global.join(file_name), silent_pcm_wav(10)).test_value();
+    }
+    for file_name in ["ALPHA.WAV", "BETA.WAV"] {
+        fs::write(replacements.join(file_name), silent_pcm_wav(10)).test_value();
+    }
+
+    let clip_bytes = 441 * std::mem::size_of::<[f32; 2]>();
+    let mut audio = empty_test_audio_context();
+    audio.system = AudioSystem::new_deferred_null_with_sound_pcm_limit(2, clip_bytes * 3);
+    audio.resolver.global = collect_sound_libraries_for_path(&global);
+    audio.refresh_sound_catalog();
+    main_assert_eq!(audio.available_sound_samples() => ["alpha.wav", "beta.wav"]);
+
+    // C4SoundSystem::LoadEffects appends one replacement and erases its
+    // case-insensitive predecessor before loading the next candidate
+    // (C4SoundSystem.cpp:106-136). Three clip slots therefore suffice for two
+    // resident samples and both sequential replacements.
+    let replacement_group = Group::open(&replacements).test_value();
+    audio.register_definition_sounds("REPLACEMENTS", &replacement_group);
+
+    for name in ["Alpha", "Beta"] {
+        let resolved = audio
+            .ensure_sound_with_key(name)
+            .expect("validated catalog lookup")
+            .test_value();
+        main_assert!(resolved.sample_key.contains("replacement.c4d"), "{name} retained its global sample instead of the successful replacement");
+    }
+    main_assert!(!audio.missing_sounds.iter().any(|marker| {
+        marker.starts_with("asset::") && marker.contains("replacement.c4d")
+    }));
+}
+
+#[test]
 fn unreadable_sound_override_keeps_previous_decoded_sample() {
     let dir = tempdir();
     let global = dir.path().join("Sound.c4g");

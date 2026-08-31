@@ -908,7 +908,7 @@ fn register_global_declarations_inner(
                     .entry(var_decl.name.clone())
                     .or_insert_with(|| crate::vm::value_cell(Value::Nil))
                     .clone();
-                *cell.borrow_mut() = value;
+                crate::vm::set_value_cell(&cell, value);
                 if globals_consts.is_none() {
                     fallback_constants.insert(var_decl.name.clone());
                     fallback_mutables.remove(&var_decl.name);

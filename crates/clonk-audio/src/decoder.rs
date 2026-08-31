@@ -35,6 +35,12 @@ pub enum AudioDecodeError {
     MidiDecoderError(String),
     #[error("tracker decoder error: {0}")]
     TrackerDecoderError(String),
+    #[error("decoded audio exceeds the retained sound budget")]
+    DecodedAudioTooLarge,
+    #[error("failed to allocate decoded audio within the retained sound budget")]
+    DecodedAudioAllocationFailed,
+    #[error("failed to allocate an owned copy of the audio source")]
+    AudioSourceAllocationFailed,
     #[error("io error")]
     IoError(#[from] std::io::Error),
 }
@@ -52,6 +58,41 @@ impl AudioDecodeError {
             Self::TrackerDecoderError(message) => message.contains("libxmp library not found"),
             _ => false,
         }
+    }
+}
+
+/// Cheaply cloned ownership of compressed audio bytes. Owned callers retain
+/// their `Vec` allocation, while borrowed callers get an explicitly fallible
+/// copy instead of an infallible allocation hidden in `Arc::from`.
+#[derive(Clone, Debug)]
+pub(crate) struct SharedAudioData(Arc<Vec<u8>>);
+
+impl SharedAudioData {
+    pub(crate) fn from_owned(data: Vec<u8>) -> Self {
+        Self(Arc::new(data))
+    }
+
+    pub(crate) fn try_from_slice(data: &[u8]) -> Result<Self, AudioDecodeError> {
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(data.len())
+            .map_err(|_| AudioDecodeError::AudioSourceAllocationFailed)?;
+        owned.extend_from_slice(data);
+        Ok(Self::from_owned(owned))
+    }
+}
+
+impl AsRef<[u8]> for SharedAudioData {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl std::ops::Deref for SharedAudioData {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
     }
 }
 
@@ -76,6 +117,51 @@ pub(crate) fn decode_audio_for_output(
     retry_mpeg_layer3_candidates(data, original_error, |offset| decode_mp3(&data[offset..]))
 }
 
+/// Decode a sound at its mixer rate without ever collecting more than
+/// `max_output_frames` of stereo PCM. The extra one-frame read distinguishes
+/// an exact-fit stream from one that would exceed the caller's retained pool.
+pub(crate) fn decode_audio_bounded_for_output(
+    data: SharedAudioData,
+    output_sample_rate: u32,
+    max_output_frames: usize,
+) -> Result<DecodedAudio, AudioDecodeError> {
+    const READ_FRAMES: usize = 4_096;
+
+    let mut stream = MusicStream::open_for_sound(data, output_sample_rate)?;
+    let mut frames = Vec::new();
+    let mut buffer = [[0.0_f32; 2]; READ_FRAMES];
+    loop {
+        let remaining = max_output_frames.saturating_sub(frames.len());
+        let requested = remaining.saturating_add(1).min(READ_FRAMES);
+        let count = stream.read_frames(&mut buffer[..requested])?;
+        if count == 0 {
+            return Ok(DecodedAudio {
+                frames,
+                sample_rate: output_sample_rate,
+            });
+        }
+        if count > remaining {
+            return Err(AudioDecodeError::DecodedAudioTooLarge);
+        }
+
+        let required = frames
+            .len()
+            .checked_add(count)
+            .ok_or(AudioDecodeError::DecodedAudioTooLarge)?;
+        if required > frames.capacity() {
+            let doubled = frames.capacity().saturating_mul(2);
+            let target = required.max(doubled).min(max_output_frames);
+            frames
+                .try_reserve_exact(target.saturating_sub(frames.len()))
+                .map_err(|_| AudioDecodeError::DecodedAudioAllocationFailed)?;
+            if frames.capacity() > max_output_frames {
+                return Err(AudioDecodeError::DecodedAudioTooLarge);
+            }
+        }
+        frames.extend_from_slice(&buffer[..count]);
+    }
+}
+
 fn decode_audio_for_output_direct(
     data: &[u8],
     output_sample_rate: u32,
@@ -94,22 +180,47 @@ fn decode_audio_for_output_direct(
 /// stream's lifetime, while decoded PCM is limited to the codec's current
 /// packet plus the two frames needed for linear interpolation.
 pub(crate) struct MusicStream {
-    data: Arc<[u8]>,
+    data: SharedAudioData,
     output_sample_rate: u32,
+    purpose: StreamPurpose,
     decoder: MusicDecoder,
 }
 
 impl MusicStream {
-    pub(crate) fn open(data: Arc<[u8]>, output_sample_rate: u32) -> Result<Self, AudioDecodeError> {
+    pub(crate) fn open(
+        data: SharedAudioData,
+        output_sample_rate: u32,
+    ) -> Result<Self, AudioDecodeError> {
         if output_sample_rate == 0 {
             return Err(AudioDecodeError::InvalidData(
                 "music output sample rate is zero",
             ));
         }
-        let decoder = MusicDecoder::open(data.clone(), output_sample_rate)?;
+        Self::open_with_purpose(data, output_sample_rate, StreamPurpose::Music)
+    }
+
+    fn open_for_sound(
+        data: SharedAudioData,
+        output_sample_rate: u32,
+    ) -> Result<Self, AudioDecodeError> {
+        if output_sample_rate == 0 {
+            return Err(AudioDecodeError::InvalidData(
+                "sound output sample rate is zero",
+            ));
+        }
+        Self::open_with_purpose(data, output_sample_rate, StreamPurpose::Sound)
+    }
+
+    fn open_with_purpose(
+        data: SharedAudioData,
+        output_sample_rate: u32,
+        purpose: StreamPurpose,
+    ) -> Result<Self, AudioDecodeError> {
+        let decoder = MusicDecoder::open(data.clone(), output_sample_rate, purpose)?;
         Ok(Self {
             data,
             output_sample_rate,
+            purpose,
             decoder,
         })
     }
@@ -126,7 +237,8 @@ impl MusicStream {
         if self.decoder.restart()? {
             return Ok(());
         }
-        self.decoder = MusicDecoder::open(self.data.clone(), self.output_sample_rate)?;
+        self.decoder =
+            MusicDecoder::open(self.data.clone(), self.output_sample_rate, self.purpose)?;
         Ok(())
     }
 
@@ -144,14 +256,33 @@ impl MusicStream {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StreamPurpose {
+    Music,
+    Sound,
+}
+
+const CLASSIC_SOUND_SOURCE_SAMPLE_RATE: u32 = 44_100;
+
+fn sound_source_sample_rate(format: AudioFormat, output_sample_rate: u32) -> u32 {
+    match format {
+        AudioFormat::Midi | AudioFormat::Tracker => CLASSIC_SOUND_SOURCE_SAMPLE_RATE,
+        AudioFormat::Wav | AudioFormat::Ogg | AudioFormat::Mp3 => output_sample_rate,
+    }
+}
+
 enum MusicDecoder {
     Pcm(Box<PcmStream>),
     Midi(crate::fluidsynth::MidiStream),
 }
 
 impl MusicDecoder {
-    fn open(data: Arc<[u8]>, output_sample_rate: u32) -> Result<Self, AudioDecodeError> {
-        let original_error = match Self::open_direct(data.clone(), output_sample_rate) {
+    fn open(
+        data: SharedAudioData,
+        output_sample_rate: u32,
+        purpose: StreamPurpose,
+    ) -> Result<Self, AudioDecodeError> {
+        let original_error = match Self::open_direct(data.clone(), output_sample_rate, purpose) {
             Ok(decoder) => return Ok(decoder),
             Err(error) => error,
         };
@@ -161,36 +292,62 @@ impl MusicDecoder {
                 PcmSource::Mp3(Box::new(Mp3MusicStream::new_at(
                     retry_data.clone(),
                     offset,
+                    purpose,
                 )?)),
                 output_sample_rate,
+                purpose,
             )?)))
         })
     }
 
-    fn open_direct(data: Arc<[u8]>, output_sample_rate: u32) -> Result<Self, AudioDecodeError> {
-        match detect_format(data.as_ref())? {
+    fn open_direct(
+        data: SharedAudioData,
+        output_sample_rate: u32,
+        purpose: StreamPurpose,
+    ) -> Result<Self, AudioDecodeError> {
+        let format = detect_format(data.as_ref())?;
+        let source_sample_rate = match purpose {
+            StreamPurpose::Music => output_sample_rate,
+            StreamPurpose::Sound => sound_source_sample_rate(format, output_sample_rate),
+        };
+        match format {
             AudioFormat::Wav => Ok(Self::Pcm(Box::new(PcmStream::new(
                 PcmSource::Wav(WavStream::new(data)?),
                 output_sample_rate,
+                purpose,
             )?))),
             AudioFormat::Ogg => Ok(Self::Pcm(Box::new(PcmStream::new(
-                PcmSource::Ogg(Box::new(OggMusicStream::new(data)?)),
+                PcmSource::Ogg(Box::new(OggMusicStream::new(data, purpose)?)),
                 output_sample_rate,
+                purpose,
             )?))),
             AudioFormat::Mp3 => Ok(Self::Pcm(Box::new(PcmStream::new(
-                PcmSource::Mp3(Box::new(Mp3MusicStream::new(data)?)),
+                PcmSource::Mp3(Box::new(Mp3MusicStream::new(data, purpose)?)),
                 output_sample_rate,
+                purpose,
             )?))),
-            AudioFormat::Midi => Ok(Self::Midi(crate::fluidsynth::MidiStream::new(
-                data.as_ref(),
-                output_sample_rate,
-            )?)),
+            AudioFormat::Midi => {
+                let stream = crate::fluidsynth::MidiStream::new(data.as_ref(), source_sample_rate)?;
+                if source_sample_rate == output_sample_rate {
+                    Ok(Self::Midi(stream))
+                } else {
+                    Ok(Self::Pcm(Box::new(PcmStream::new(
+                        PcmSource::Midi(Box::new(MidiMusicStream::new(
+                            stream,
+                            source_sample_rate,
+                        )?)),
+                        output_sample_rate,
+                        purpose,
+                    )?)))
+                }
+            }
             AudioFormat::Tracker => Ok(Self::Pcm(Box::new(PcmStream::new(
                 PcmSource::Tracker(Box::new(crate::tracker::TrackerStream::new(
                     data.as_ref(),
-                    output_sample_rate,
+                    source_sample_rate,
                 )?)),
                 output_sample_rate,
+                purpose,
             )?))),
         }
     }
@@ -231,80 +388,242 @@ impl MusicDecoder {
     }
 }
 
-/// Stateful linear resampling over a pull-based source. Keeping the current
-/// and next source frames is sufficient to exactly match the eager converter,
-/// including its last-frame extension and ceil-rounded output length.
+/// Stateful linear resampling over a pull-based source. Music preserves the
+/// existing exact-rational stream mapping, while bounded sound decoding uses
+/// the eager converter's floating-point mapping and ceil-rounded length.
 struct PcmStream {
     source: PcmSource,
-    source_sample_rate: u32,
-    output_sample_rate: u32,
     current: Option<[f32; 2]>,
     next: Option<[f32; 2]>,
-    current_index: u128,
-    output_index: u128,
+    resampling: ResamplingState,
+}
+
+enum ResamplingState {
+    RationalMusic {
+        source_sample_rate: u32,
+        output_sample_rate: u32,
+        current_index: u128,
+        output_index: u128,
+    },
+    EagerSound {
+        output_to_source_ratio: f64,
+        output_len: Option<usize>,
+        resampling: bool,
+        current_index: usize,
+        output_index: usize,
+    },
 }
 
 impl PcmStream {
-    fn new(mut source: PcmSource, output_sample_rate: u32) -> Result<Self, AudioDecodeError> {
+    fn new(
+        mut source: PcmSource,
+        output_sample_rate: u32,
+        purpose: StreamPurpose,
+    ) -> Result<Self, AudioDecodeError> {
         let source_sample_rate = source.sample_rate();
         if source_sample_rate == 0 {
             return Err(AudioDecodeError::InvalidData(
                 "music source sample rate is zero",
             ));
         }
+        let output_to_source_ratio = f64::from(output_sample_rate) / f64::from(source_sample_rate);
         let current = source.next_frame()?;
         let next = if current.is_some() {
             source.next_frame()?
         } else {
             None
         };
+        let resampling = match purpose {
+            StreamPurpose::Music => ResamplingState::RationalMusic {
+                source_sample_rate,
+                output_sample_rate,
+                current_index: 0,
+                output_index: 0,
+            },
+            StreamPurpose::Sound => ResamplingState::EagerSound {
+                output_to_source_ratio,
+                output_len: initial_eager_output_len(
+                    current.is_some(),
+                    next.is_some(),
+                    output_to_source_ratio,
+                ),
+                resampling: output_sample_rate != source_sample_rate,
+                current_index: 0,
+                output_index: 0,
+            },
+        };
         Ok(Self {
             source,
-            source_sample_rate,
-            output_sample_rate,
             current,
             next,
-            current_index: 0,
-            output_index: 0,
+            resampling,
         })
     }
 
     fn read_frames(&mut self, output: &mut [[f32; 2]]) -> Result<usize, AudioDecodeError> {
+        match &mut self.resampling {
+            ResamplingState::RationalMusic {
+                source_sample_rate,
+                output_sample_rate,
+                current_index,
+                output_index,
+            } => Self::read_rational_music_frames(
+                &mut self.source,
+                &mut self.current,
+                &mut self.next,
+                *source_sample_rate,
+                *output_sample_rate,
+                current_index,
+                output_index,
+                output,
+            ),
+            ResamplingState::EagerSound {
+                output_to_source_ratio,
+                output_len,
+                resampling,
+                current_index,
+                output_index,
+            } => Self::read_eager_sound_frames(
+                &mut self.source,
+                &mut self.current,
+                &mut self.next,
+                *output_to_source_ratio,
+                output_len,
+                *resampling,
+                current_index,
+                output_index,
+                output,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_rational_music_frames(
+        source: &mut PcmSource,
+        current: &mut Option<[f32; 2]>,
+        next: &mut Option<[f32; 2]>,
+        source_sample_rate: u32,
+        output_sample_rate: u32,
+        current_index: &mut u128,
+        output_index: &mut u128,
+        output: &mut [[f32; 2]],
+    ) -> Result<usize, AudioDecodeError> {
         let mut written = 0;
         while written < output.len() {
-            let scaled_position = self
-                .output_index
-                .checked_mul(u128::from(self.source_sample_rate))
+            let scaled_position = output_index
+                .checked_mul(u128::from(source_sample_rate))
                 .ok_or(AudioDecodeError::DecoderError(
                     "music resampler position overflow",
                 ))?;
-            let desired_index = scaled_position / u128::from(self.output_sample_rate);
+            let desired_index = scaled_position / u128::from(output_sample_rate);
 
-            while self.current_index < desired_index {
-                self.current = self.next.take();
-                self.current_index += 1;
-                let Some(_) = self.current else {
+            while *current_index < desired_index {
+                *current = next.take();
+                *current_index =
+                    current_index
+                        .checked_add(1)
+                        .ok_or(AudioDecodeError::DecoderError(
+                            "music resampler position overflow",
+                        ))?;
+                if current.is_none() {
                     return Ok(written);
-                };
-                self.next = self.source.next_frame()?;
+                }
+                *next = source.next_frame()?;
             }
 
-            let Some(current) = self.current else {
+            let Some(current_frame) = *current else {
                 break;
             };
-            let next = self.next.unwrap_or(current);
-            let remainder = scaled_position % u128::from(self.output_sample_rate);
-            let fraction = remainder as f64 / f64::from(self.output_sample_rate);
+            let next_frame = next.unwrap_or(current_frame);
+            let remainder = scaled_position % u128::from(output_sample_rate);
+            let fraction = remainder as f64 / f64::from(output_sample_rate);
             output[written] = [
-                current[0] + (next[0] - current[0]) * fraction as f32,
-                current[1] + (next[1] - current[1]) * fraction as f32,
+                current_frame[0] + (next_frame[0] - current_frame[0]) * fraction as f32,
+                current_frame[1] + (next_frame[1] - current_frame[1]) * fraction as f32,
             ];
-            self.output_index =
-                self.output_index
-                    .checked_add(1)
-                    .ok_or(AudioDecodeError::DecoderError(
-                        "music resampler output position overflow",
-                    ))?;
+            *output_index = output_index
+                .checked_add(1)
+                .ok_or(AudioDecodeError::DecoderError(
+                    "music resampler output position overflow",
+                ))?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_eager_sound_frames(
+        source: &mut PcmSource,
+        current: &mut Option<[f32; 2]>,
+        next: &mut Option<[f32; 2]>,
+        output_to_source_ratio: f64,
+        output_len: &mut Option<usize>,
+        resampling: bool,
+        current_index: &mut usize,
+        output_index: &mut usize,
+        output: &mut [[f32; 2]],
+    ) -> Result<usize, AudioDecodeError> {
+        let mut written = 0;
+        while written < output.len() {
+            if output_len.is_some_and(|len| *output_index >= len) {
+                break;
+            }
+            // Preserve the eager SFX converter's exact floating-point
+            // operation order: ratio first, then output index divided by it.
+            let source_position = *output_index as f64 / output_to_source_ratio;
+            let desired_index = source_position.floor() as usize;
+
+            while *current_index < desired_index {
+                let Some(next_frame) = next.take() else {
+                    break;
+                };
+                *current = Some(next_frame);
+                *current_index =
+                    current_index
+                        .checked_add(1)
+                        .ok_or(AudioDecodeError::DecoderError(
+                            "sound resampler position overflow",
+                        ))?;
+                *next = source.next_frame()?;
+                if next.is_none() {
+                    let source_frames =
+                        current_index
+                            .checked_add(1)
+                            .ok_or(AudioDecodeError::DecoderError(
+                                "sound resampler position overflow",
+                            ))?;
+                    *output_len = Some(resampled_output_len(source_frames, output_to_source_ratio));
+                }
+            }
+
+            if output_len.is_some_and(|len| *output_index >= len) {
+                break;
+            }
+            let (current_frame, next_frame) = if *current_index == desired_index {
+                let Some(current_frame) = *current else {
+                    break;
+                };
+                (current_frame, next.unwrap_or(current_frame))
+            } else {
+                // The eager converter uses silence when floating-point ceil
+                // produces an output position just past the final source
+                // frame.
+                ([0.0, 0.0], [0.0, 0.0])
+            };
+            let fraction = source_position - desired_index as f64;
+            output[written] = if resampling {
+                [
+                    current_frame[0] + (next_frame[0] - current_frame[0]) * fraction as f32,
+                    current_frame[1] + (next_frame[1] - current_frame[1]) * fraction as f32,
+                ]
+            } else {
+                current_frame
+            };
+            *output_index = output_index
+                .checked_add(1)
+                .ok_or(AudioDecodeError::DecoderError(
+                    "sound resampler output position overflow",
+                ))?;
             written += 1;
         }
         Ok(written)
@@ -320,8 +639,31 @@ impl PcmStream {
         } else {
             None
         };
-        self.current_index = 0;
-        self.output_index = 0;
+        match &mut self.resampling {
+            ResamplingState::RationalMusic {
+                current_index,
+                output_index,
+                ..
+            } => {
+                *current_index = 0;
+                *output_index = 0;
+            }
+            ResamplingState::EagerSound {
+                output_to_source_ratio,
+                output_len,
+                current_index,
+                output_index,
+                ..
+            } => {
+                *output_len = initial_eager_output_len(
+                    self.current.is_some(),
+                    self.next.is_some(),
+                    *output_to_source_ratio,
+                );
+                *current_index = 0;
+                *output_index = 0;
+            }
+        }
         Ok(true)
     }
 
@@ -339,10 +681,27 @@ impl PcmStream {
     }
 }
 
+fn initial_eager_output_len(
+    has_current: bool,
+    has_next: bool,
+    output_to_source_ratio: f64,
+) -> Option<usize> {
+    match (has_current, has_next) {
+        (false, _) => Some(0),
+        (true, false) => Some(resampled_output_len(1, output_to_source_ratio)),
+        (true, true) => None,
+    }
+}
+
+fn resampled_output_len(source_frames: usize, output_to_source_ratio: f64) -> usize {
+    (source_frames as f64 * output_to_source_ratio).ceil() as usize
+}
+
 enum PcmSource {
     Wav(WavStream),
     Ogg(Box<OggMusicStream>),
     Mp3(Box<Mp3MusicStream>),
+    Midi(Box<MidiMusicStream>),
     Tracker(Box<crate::tracker::TrackerStream>),
 }
 
@@ -352,6 +711,7 @@ impl PcmSource {
             Self::Wav(stream) => stream.sample_rate(),
             Self::Ogg(stream) => stream.sample_rate,
             Self::Mp3(stream) => stream.sample_rate,
+            Self::Midi(stream) => stream.sample_rate,
             Self::Tracker(stream) => stream.sample_rate(),
         }
     }
@@ -361,12 +721,17 @@ impl PcmSource {
             Self::Wav(stream) => stream.next_frame(),
             Self::Ogg(stream) => stream.next_frame(),
             Self::Mp3(stream) => stream.next_frame(),
+            Self::Midi(stream) => stream.next_frame(),
             Self::Tracker(stream) => stream.next_frame(),
         }
     }
 
     fn restart(&mut self) -> Result<bool, AudioDecodeError> {
         match self {
+            Self::Midi(stream) => {
+                stream.restart()?;
+                Ok(true)
+            }
             Self::Tracker(stream) => {
                 stream.restart()?;
                 Ok(true)
@@ -381,6 +746,7 @@ impl PcmSource {
             Self::Wav(stream) => stream.buffered_frames(),
             Self::Ogg(stream) => stream.buffered_frames(),
             Self::Mp3(stream) => stream.buffered_frames(),
+            Self::Midi(stream) => stream.buffered_frames(),
             Self::Tracker(stream) => stream.buffered_frames(),
         }
     }
@@ -391,13 +757,73 @@ impl PcmSource {
             Self::Wav(stream) => stream.peak_buffered_frames(),
             Self::Ogg(stream) => stream.peak_packet_frames,
             Self::Mp3(stream) => stream.peak_packet_frames,
+            Self::Midi(stream) => stream.buffered_frames(),
             Self::Tracker(stream) => stream.peak_buffered_frames(),
         }
     }
 }
 
+/// Frame-at-a-time adapter used only when a synthesized 44.1 kHz sound must
+/// pass through the streaming output resampler. Refilling in blocks preserves
+/// the old eager decoder's FluidSynth call shape without retaining whole PCM.
+struct MidiMusicStream {
+    stream: crate::fluidsynth::MidiStream,
+    sample_rate: u32,
+    buffer: Vec<[f32; 2]>,
+    buffer_offset: usize,
+    buffer_len: usize,
+}
+
+impl MidiMusicStream {
+    const BUFFER_FRAMES: usize = 4_096;
+
+    fn new(
+        stream: crate::fluidsynth::MidiStream,
+        sample_rate: u32,
+    ) -> Result<Self, AudioDecodeError> {
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(Self::BUFFER_FRAMES)
+            .map_err(|_| AudioDecodeError::DecodedAudioAllocationFailed)?;
+        buffer.resize(Self::BUFFER_FRAMES, [0.0, 0.0]);
+        Ok(Self {
+            stream,
+            sample_rate,
+            buffer,
+            buffer_offset: 0,
+            buffer_len: 0,
+        })
+    }
+
+    fn next_frame(&mut self) -> Result<Option<[f32; 2]>, AudioDecodeError> {
+        if self.buffer_offset == self.buffer_len {
+            self.buffer_len = self.stream.read_frames(&mut self.buffer)?;
+            self.buffer_offset = 0;
+            if self.buffer_len == 0 {
+                return Ok(None);
+            }
+        }
+        let frame = self.buffer[self.buffer_offset];
+        self.buffer_offset += 1;
+        Ok(Some(frame))
+    }
+
+    fn restart(&mut self) -> Result<(), AudioDecodeError> {
+        self.stream.restart()?;
+        self.buffer_offset = 0;
+        self.buffer_len = 0;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn buffered_frames(&self) -> usize {
+        self.buffer.capacity()
+    }
+}
+
 struct OggMusicStream {
-    reader: OggStreamReader<Cursor<Arc<[u8]>>>,
+    reader: OggStreamReader<Cursor<SharedAudioData>>,
+    purpose: StreamPurpose,
     sample_rate: u32,
     channels: usize,
     packet: Vec<i16>,
@@ -407,7 +833,7 @@ struct OggMusicStream {
 }
 
 impl OggMusicStream {
-    fn new(data: Arc<[u8]>) -> Result<Self, AudioDecodeError> {
+    fn new(data: SharedAudioData, purpose: StreamPurpose) -> Result<Self, AudioDecodeError> {
         let reader = OggStreamReader::new(Cursor::new(data))
             .map_err(|_| AudioDecodeError::InvalidData("invalid OGG header"))?;
         let sample_rate = reader.ident_hdr.audio_sample_rate;
@@ -420,6 +846,7 @@ impl OggMusicStream {
         }
         Ok(Self {
             reader,
+            purpose,
             sample_rate,
             channels,
             packet: Vec::new(),
@@ -436,6 +863,7 @@ impl OggMusicStream {
                 self.packet_offset += self.channels;
                 return Ok(Some(stereo_i16_frame(
                     &self.packet[start..start + self.channels],
+                    self.purpose,
                 )));
             }
             let Some(packet) = self
@@ -542,6 +970,7 @@ impl<'s> MpegAudioDecoder<'s> {
 /// stays flat no matter how long the track runs.
 struct Mp3MusicStream {
     decoder: MpegAudioDecoder<'static>,
+    purpose: StreamPurpose,
     sample_rate: u32,
     channels: usize,
     packet: Vec<i16>,
@@ -551,15 +980,20 @@ struct Mp3MusicStream {
 }
 
 impl Mp3MusicStream {
-    fn new(data: Arc<[u8]>) -> Result<Self, AudioDecodeError> {
-        Self::new_at(data, 0)
+    fn new(data: SharedAudioData, purpose: StreamPurpose) -> Result<Self, AudioDecodeError> {
+        Self::new_at(data, 0, purpose)
     }
 
-    fn new_at(data: Arc<[u8]>, offset: usize) -> Result<Self, AudioDecodeError> {
+    fn new_at(
+        data: SharedAudioData,
+        offset: usize,
+        purpose: StreamPurpose,
+    ) -> Result<Self, AudioDecodeError> {
         let mut cursor = Cursor::new(data);
         cursor.set_position(offset as u64);
         let mut stream = Self {
             decoder: MpegAudioDecoder::open(Box::new(cursor))?,
+            purpose,
             sample_rate: 0,
             channels: 0,
             packet: Vec::new(),
@@ -577,19 +1011,7 @@ impl Mp3MusicStream {
         let Some((sample_rate, channels)) = self.decoder.next_packet(&mut self.packet)? else {
             return Ok(false);
         };
-        if sample_rate == 0 {
-            return Err(AudioDecodeError::InvalidData("MP3 sample rate is zero"));
-        }
-        if self.sample_rate != 0 && self.sample_rate != sample_rate {
-            return Err(AudioDecodeError::InvalidData(
-                "MP3 sample rate changes within stream",
-            ));
-        }
-        if channels == 0 {
-            return Err(AudioDecodeError::InvalidData("MP3 channel count is zero"));
-        }
-        self.sample_rate = sample_rate;
-        self.channels = channels;
+        self.update_packet_format(sample_rate, channels)?;
         self.packet_offset = 0;
         #[cfg(test)]
         {
@@ -600,6 +1022,30 @@ impl Mp3MusicStream {
         Ok(true)
     }
 
+    fn update_packet_format(
+        &mut self,
+        sample_rate: u32,
+        channels: usize,
+    ) -> Result<(), AudioDecodeError> {
+        if sample_rate == 0 {
+            return Err(AudioDecodeError::InvalidData("MP3 sample rate is zero"));
+        }
+        if channels == 0 {
+            return Err(AudioDecodeError::InvalidData("MP3 channel count is zero"));
+        }
+        match self.sample_rate {
+            0 => self.sample_rate = sample_rate,
+            previous if previous != sample_rate && matches!(self.purpose, StreamPurpose::Music) => {
+                return Err(AudioDecodeError::InvalidData(
+                    "MP3 sample rate changes within stream",
+                ));
+            }
+            _ => {}
+        }
+        self.channels = channels;
+        Ok(())
+    }
+
     fn next_frame(&mut self) -> Result<Option<[f32; 2]>, AudioDecodeError> {
         loop {
             if self.packet.len().saturating_sub(self.packet_offset) >= self.channels {
@@ -607,6 +1053,7 @@ impl Mp3MusicStream {
                 self.packet_offset += self.channels;
                 return Ok(Some(stereo_i16_frame(
                     &self.packet[start..start + self.channels],
+                    self.purpose,
                 )));
             }
             if !self.load_packet()? {
@@ -621,28 +1068,58 @@ impl Mp3MusicStream {
     }
 }
 
-fn stereo_i16_frame(samples: &[i16]) -> [f32; 2] {
-    let mut left = f32::from(samples[0]);
-    if samples.len() == 1 {
-        let mono = left / f32::from(i16::MAX);
-        return [mono, mono];
-    }
-    let mut right = f32::from(samples[1]);
-    let mut left_count = 1_usize;
-    let mut right_count = 1_usize;
-    for (index, sample) in samples[2..].iter().enumerate() {
-        if index % 2 == 0 {
-            left += f32::from(*sample);
-            left_count += 1;
-        } else {
-            right += f32::from(*sample);
-            right_count += 1;
+fn stereo_i16_frame(samples: &[i16], purpose: StreamPurpose) -> [f32; 2] {
+    match purpose {
+        StreamPurpose::Music => {
+            let mut left = f32::from(samples[0]);
+            if samples.len() == 1 {
+                let mono = left / f32::from(i16::MAX);
+                return [mono, mono];
+            }
+            let mut right = f32::from(samples[1]);
+            let mut left_count = 1_usize;
+            let mut right_count = 1_usize;
+            for (index, sample) in samples[2..].iter().enumerate() {
+                if index % 2 == 0 {
+                    left += f32::from(*sample);
+                    left_count += 1;
+                } else {
+                    right += f32::from(*sample);
+                    right_count += 1;
+                }
+            }
+            [
+                left / left_count as f32 / f32::from(i16::MAX),
+                right / right_count as f32 / f32::from(i16::MAX),
+            ]
+        }
+        StreamPurpose::Sound => {
+            let normalize = |sample| f32::from(sample) / f32::from(i16::MAX);
+            let mut left = normalize(samples[0]);
+            if samples.len() == 1 {
+                return [left, left];
+            }
+            let mut right = normalize(samples[1]);
+            let mut left_count = 1_usize;
+            let mut right_count = 1_usize;
+            for (index, sample) in samples[2..].iter().enumerate() {
+                if index % 2 == 0 {
+                    left += normalize(*sample);
+                    left_count += 1;
+                } else {
+                    right += normalize(*sample);
+                    right_count += 1;
+                }
+            }
+            if left_count > 1 {
+                left /= left_count as f32;
+            }
+            if right_count > 1 {
+                right /= right_count as f32;
+            }
+            [left, right]
         }
     }
-    [
-        left / left_count as f32 / f32::from(i16::MAX),
-        right / right_count as f32 / f32::from(i16::MAX),
-    ]
 }
 
 #[cfg(test)]
@@ -712,7 +1189,7 @@ fn detect_format(data: &[u8]) -> Result<AudioFormat, AudioDecodeError> {
 }
 
 fn decode_wav(data: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
-    let source: Arc<[u8]> = Arc::from(data);
+    let source = SharedAudioData::try_from_slice(data)?;
     let mut stream = WavStream::new(source)?;
     let sample_rate = stream.sample_rate();
     let mut frames = Vec::new();
@@ -857,7 +1334,7 @@ mod tests {
             "silent fixture decoded to non-silent PCM"
         );
 
-        let source: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+        let source = SharedAudioData::from_owned(data);
         let mut music =
             MusicStream::open(source, decoded.sample_rate).expect("MP3 music stream opens");
         let mut streamed = Vec::new();
@@ -872,6 +1349,91 @@ mod tests {
         assert_eq!(
             streamed, decoded.frames,
             "streamed MP3 PCM diverged from the whole-file decode"
+        );
+    }
+
+    #[test]
+    fn mp3_stream_retains_the_first_packet_rate_and_updates_channels() {
+        let data = silent_mpeg_layer3_frame().repeat(4);
+        let mut stream =
+            Mp3MusicStream::new(SharedAudioData::from_owned(data), StreamPurpose::Sound)
+                .expect("MP3 stream opens");
+        assert_eq!(stream.sample_rate, 8_000);
+        assert_eq!(stream.channels, 1);
+
+        stream
+            .update_packet_format(11_025, 2)
+            .expect("later nonzero packet format is accepted");
+
+        assert_eq!(stream.sample_rate, 8_000);
+        assert_eq!(stream.channels, 2);
+    }
+
+    #[test]
+    fn mp3_music_stream_rejects_a_later_sample_rate_change() {
+        let data = silent_mpeg_layer3_frame().repeat(4);
+        let mut stream =
+            Mp3MusicStream::new(SharedAudioData::from_owned(data), StreamPurpose::Music)
+                .expect("MP3 stream opens");
+
+        assert!(matches!(
+            stream.update_packet_format(11_025, 2),
+            Err(AudioDecodeError::InvalidData(
+                "MP3 sample rate changes within stream"
+            ))
+        ));
+    }
+
+    #[test]
+    fn bounded_sound_decode_rejects_the_first_frame_past_its_limit() {
+        let data = mono_pcm16_wav(44_100, &[0, 1, 2, 3]);
+        let result = decode_audio_bounded_for_output(SharedAudioData::from_owned(data), 44_100, 3);
+
+        assert!(matches!(
+            result,
+            Err(AudioDecodeError::DecodedAudioTooLarge)
+        ));
+    }
+
+    #[test]
+    fn bounded_sound_uses_the_classic_render_rate_for_synthesized_formats() {
+        for format in [AudioFormat::Midi, AudioFormat::Tracker] {
+            assert_eq!(sound_source_sample_rate(format, 48_000), 44_100);
+        }
+        for format in [AudioFormat::Wav, AudioFormat::Ogg, AudioFormat::Mp3] {
+            assert_eq!(sound_source_sample_rate(format, 48_000), 48_000);
+        }
+    }
+
+    #[test]
+    fn owned_audio_source_shares_the_original_vec_allocation() {
+        let mut data = Vec::with_capacity(64);
+        data.extend_from_slice(b"owned decoder source");
+        let allocation = data.as_ptr();
+
+        let shared = SharedAudioData::from_owned(data);
+
+        assert_eq!(shared.as_ref().as_ptr(), allocation);
+    }
+
+    #[test]
+    fn streaming_multichannel_i16_downmix_matches_eager_conversion() {
+        let samples = [i16::MAX, i16::MAX, i16::MIN, i16::MIN, 1, 1];
+        let eager = convert_interleaved_i16_to_stereo(&samples, 6).unwrap();
+
+        assert_eq!(stereo_i16_frame(&samples, StreamPurpose::Sound), eager[0]);
+    }
+
+    #[test]
+    fn music_multichannel_i16_downmix_preserves_streaming_rounding() {
+        let samples = [i16::MIN, 0, i16::MIN, 0, -30_000, 0];
+        let expected_left = (f32::from(samples[0]) + f32::from(samples[2]) + f32::from(samples[4]))
+            / 3.0
+            / f32::from(i16::MAX);
+
+        assert_eq!(
+            stereo_i16_frame(&samples, StreamPurpose::Music)[0],
+            expected_left
         );
     }
 
@@ -999,7 +1561,7 @@ mod tests {
         assert_eq!(decoded.sample_rate, clean.sample_rate);
         assert_eq!(decoded.frames, clean.frames);
 
-        let source: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+        let source = SharedAudioData::from_owned(data);
         let mut music = MusicStream::open(source, 8_000)
             .expect("music stream recovers the same later MP3 frame");
         let mut output = [[0.0_f32; 2]; 1];
@@ -1013,7 +1575,7 @@ mod tests {
             Err(AudioDecodeError::UnsupportedFormat)
         ));
         assert!(matches!(
-            MusicStream::open(Arc::from(false_sync.as_slice()), 8_000),
+            MusicStream::open(SharedAudioData::try_from_slice(false_sync).unwrap(), 8_000),
             Err(AudioDecodeError::UnsupportedFormat)
         ));
 
@@ -1024,7 +1586,7 @@ mod tests {
             Err(AudioDecodeError::InvalidData("invalid WAV header"))
         ));
         assert!(matches!(
-            MusicStream::open(Arc::from(malformed_wav.into_boxed_slice()), 8_000),
+            MusicStream::open(SharedAudioData::from_owned(malformed_wav), 8_000),
             Err(AudioDecodeError::InvalidData("invalid WAV header"))
         ));
 
@@ -1070,7 +1632,7 @@ mod tests {
         id3.resize(10 + id3_payload_len, 0);
         id3.extend_from_slice(&clean_mp3);
         assert!(decode_audio(&id3).is_ok());
-        assert!(MusicStream::open(Arc::from(id3.into_boxed_slice()), 8_000).is_ok());
+        assert!(MusicStream::open(SharedAudioData::from_owned(id3), 8_000).is_ok());
 
         for len in 0..=4 {
             let short = vec![0_u8; len];
@@ -1086,7 +1648,7 @@ mod tests {
 
     #[test]
     fn music_stream_resamples_in_bounded_chunks_and_restarts() {
-        let source: Arc<[u8]> = Arc::from(mono_pcm16_wav(2, &[0, i16::MAX]).into_boxed_slice());
+        let source = SharedAudioData::from_owned(mono_pcm16_wav(2, &[0, i16::MAX]));
         let mut stream = MusicStream::open(source, 4).unwrap();
         assert_eq!(stream.buffered_frames(), 2);
         assert_eq!(stream.peak_buffered_frames(), 2);
@@ -1102,8 +1664,28 @@ mod tests {
     }
 
     #[test]
+    fn music_stream_preserves_rational_resampling_at_non_integral_rates() {
+        let mut samples = vec![0_i16; 443];
+        samples[440] = i16::MIN;
+        samples[441] = -1;
+        let source = SharedAudioData::from_owned(mono_pcm16_wav(44_100, &samples));
+        let mut stream = MusicStream::open(source, 48_000).unwrap();
+        let mut output = [[0.0_f32; 2]; 481];
+
+        assert_eq!(stream.read_frames(&mut output).unwrap(), output.len());
+        let expected = f32::from(-1_i16) / f32::from(i16::MAX);
+        assert_eq!(output[480], [expected; 2]);
+
+        let source = SharedAudioData::from_owned(mono_pcm16_wav(11_025, &[0; 147]));
+        let mut stream = MusicStream::open(source, 24_000).unwrap();
+        let mut output = [[0.0_f32; 2]; 321];
+        assert_eq!(stream.read_frames(&mut output).unwrap(), 320);
+        assert_eq!(stream.read_frames(&mut output).unwrap(), 0);
+    }
+
+    #[test]
     fn compressed_wav_music_streams_in_bounded_blocks_and_resamples() {
-        let source: Arc<[u8]> = Arc::from(mono_ima_adpcm_wav(2, 0, [0x11; 4]).into_boxed_slice());
+        let source = SharedAudioData::from_owned(mono_ima_adpcm_wav(2, 0, [0x11; 4]));
         let mut stream = MusicStream::open(source, 4).unwrap();
         assert_eq!(stream.buffered_frames(), 11);
         assert_eq!(stream.peak_buffered_frames(), 11);
