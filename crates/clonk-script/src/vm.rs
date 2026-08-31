@@ -9788,6 +9788,14 @@ impl<'a> Vm<'a> {
                 reference.detach_container_identity_if_shared();
                 reference.append(PathSegment::Index(index))
             }
+            AssignmentTarget::PrefixChange { target, delta } => {
+                let reference = self.assignment_target_to_lvalue(env, target, depth)?;
+                let _operand_slot = ValueStackReservation::reserve(1)?;
+                let operation = if *delta > 0 { "increment" } else { "decrement" };
+                let old_value = Self::counter_operand(reference.read()?, operation)?;
+                reference.write(Value::Int(old_value.wrapping_add(*delta)))?;
+                Ok(reference)
+            }
             AssignmentTarget::ArrayAppend(base) => {
                 match self.evaluate_array_append(base, env, depth)? {
                     ReturnValue::Reference(reference) => Ok(reference),
@@ -11035,6 +11043,14 @@ impl<'a> Vm<'a> {
                     index.clone(),
                 ))
             }
+            Expr::PreIncrement(expr) => Ok(AssignmentTarget::PrefixChange {
+                target: Box::new(Self::expr_to_assignment_target(expr)?),
+                delta: 1,
+            }),
+            Expr::PreDecrement(expr) => Ok(AssignmentTarget::PrefixChange {
+                target: Box::new(Self::expr_to_assignment_target(expr)?),
+                delta: -1,
+            }),
             Expr::ArrayAppend(base) => Ok(AssignmentTarget::ArrayAppend(base.clone())),
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are valid for increment/decrement
             Expr::Call {

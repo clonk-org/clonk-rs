@@ -30,6 +30,56 @@ crate::support::compile_cases! {
 }
 
 run_cases! {
+    parenthesized_prefix_increment_can_be_compound_assignment_target:
+        // C++ keeps the reference returned by AB_Inc1, so a parenthesized
+        // prefix increment remains a valid changer target
+        // (C4AulExec.cpp:450-454; C4AulParse.cpp:2998-3000).
+            r#"
+                #strict
+                func Test()
+                {
+                    var j = 0;
+                    var n = 3;
+                    var teams = [10, 20, 30];
+                    teams[((++j) %= n)] = 42;
+                    return [j, teams];
+                }
+            "#,
+        "Test", &[] =>
+        clonk_script::Value::Array(vec![
+            clonk_script::Value::Int(1),
+            clonk_script::Value::Array(vec![
+                clonk_script::Value::Int(10),
+                clonk_script::Value::Int(42),
+                clonk_script::Value::Int(30),
+            ]),
+        ]);
+
+    parenthesized_prefix_decrement_can_be_compound_assignment_target:
+        // C++ keeps the reference returned by AB_Dec1, so a parenthesized
+        // prefix decrement remains a valid changer target
+        // (C4AulExec.cpp:450-454; C4AulParse.cpp:2998-3000).
+            r#"
+                #strict
+                func Test()
+                {
+                    var j = 4;
+                    var n = 3;
+                    var teams = [10, 20, 30];
+                    teams[((--j) %= n)] = 42;
+                    return [j, teams];
+                }
+            "#,
+        "Test", &[] =>
+        clonk_script::Value::Array(vec![
+            clonk_script::Value::Int(0),
+            clonk_script::Value::Array(vec![
+                clonk_script::Value::Int(42),
+                clonk_script::Value::Int(20),
+                clonk_script::Value::Int(30),
+            ]),
+        ]);
+
     indexed_post_decrement_mutates_the_condition_operand:
     // AB_Dec1_Postfix copies the old integer result, then decrements the
     // referenced array element (C4AulExec.cpp:482-489). CMC class setup uses

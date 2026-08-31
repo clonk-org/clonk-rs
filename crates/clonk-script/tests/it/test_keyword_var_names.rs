@@ -13,6 +13,14 @@ run_cases! {
         global func Probe() {
             var func, objhgt = 5;
             return objhgt + 2;
+    }
+"#, "Probe", &[] => Value::Int(7);
+
+    func_keyword_binding_can_be_read_and_reassigned: r#"
+        func Test() {
+            var func = "BuyItem";
+            func = "BuyPack";
+            return func;
         }
-    "#, "Probe", &[] => Value::Int(7);
+    "#, "Test", &[] => Value::String("BuyPack".into());
 }

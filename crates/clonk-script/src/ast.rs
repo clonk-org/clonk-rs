@@ -576,6 +576,12 @@ pub enum AssignmentTarget {
     Variable(String),
     Property(Box<AssignmentTarget>, String),
     Index(Box<AssignmentTarget>, IndexOperand), // arr[index] as lvalue
+    /// Prefix increment/decrement leaves the modified reference on C4Aul's
+    /// value stack, so it can itself be the target of a changer operator.
+    PrefixChange {
+        target: Box<AssignmentTarget>,
+        delta: i32,
+    },
     /// `expression[]`: AB_ARRAY_APPEND operates on the current stack value.
     /// A referenced array yields its new last-slot reference; a self-owned
     /// temporary loses that reference with its container and collapses to nil.
