@@ -1519,41 +1519,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn validate_lvalue(&self, expr: &Expr, token: &Token) -> Result<(), ParseError> {
-        match expr {
-            Expr::Variable(_)
-            | Expr::Property(_, _)
-            | Expr::Index(_, _)
-            | Expr::ArrayAppend(_) => Ok(()),
-            // Prefix increment/decrement return lvalues (like in C++)
-            // This allows patterns like ++++i or --(--i)
-            Expr::PreIncrement(_) | Expr::PreDecrement(_) => Ok(()),
-            // Special cases: Local/LocalN/Var/EffectVar are valid for increment/decrement
-            // Also allow any function call (for reference-returning functions)
-            Expr::Call { callee, is_optional, .. } => {
-                if let Expr::Variable(_) = **callee {
-                    if !is_optional {
-                        // Allow any non-optional function call to be used with increment/decrement
-                        // This supports both built-in functions (Local, Var, etc.) and
-                        // user-defined reference-returning functions (func &)
-                        return Ok(());
-                    }
-                }
-                Err(ParseError::new(
-                    "increment/decrement requires an lvalue (variable, property, index, Local(n), or Var(n))",
-                    token.line,
-                    token.column,
-                ))
-            }
-            Expr::GlobalCall { .. } => Ok(()),
-            _ => Err(ParseError::new(
-                "increment/decrement requires an lvalue (variable, property, index, Local(n), or Var(n))",
-                token.line,
-                token.column,
-            )),
-        }
-    }
-
     fn assignment_target_contains_array_append(target: &AssignmentTarget) -> bool {
         match target {
             AssignmentTarget::ArrayAppend(_) => true,
@@ -1951,14 +1916,12 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Unary(UnaryOp::BitwiseNot, Box::new(expr)));
         }
         // Prefix increment/decrement
-        if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
+        if self.consume_if_symbol(Symbol::PlusPlus)?.is_some() {
             let expr = self.parse_unary()?;
-            self.validate_lvalue(&expr, &token)?;
             return Ok(Expr::PreIncrement(Box::new(expr)));
         }
-        if let Some(token) = self.consume_if_symbol(Symbol::MinusMinus)? {
+        if self.consume_if_symbol(Symbol::MinusMinus)?.is_some() {
             let expr = self.parse_unary()?;
-            self.validate_lvalue(&expr, &token)?;
             return Ok(Expr::PreDecrement(Box::new(expr)));
         }
         self.parse_postfix()
@@ -1984,11 +1947,9 @@ impl<'a> Parser<'a> {
                 };
             } else if let Some(operation) = self.parse_navigation_operation()? {
                 expr = Self::apply_navigation_operation(expr, operation);
-            } else if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
-                self.validate_lvalue(&expr, &token)?;
+            } else if self.consume_if_symbol(Symbol::PlusPlus)?.is_some() {
                 expr = Expr::PostIncrement(Box::new(expr));
-            } else if let Some(token) = self.consume_if_symbol(Symbol::MinusMinus)? {
-                self.validate_lvalue(&expr, &token)?;
+            } else if self.consume_if_symbol(Symbol::MinusMinus)?.is_some() {
                 expr = Expr::PostDecrement(Box::new(expr));
             } else {
                 break;

@@ -172,6 +172,38 @@ fn prefix_increment_assignment_target_is_a_reference() {
     );
 }
 
+#[test]
+fn invalid_prefix_changer_operand_is_deferred_to_runtime() {
+    // C4AulParse.cpp:2902-2931 emits prefix changers without checking their
+    // operand's lvalue kind; the executor performs that validation when the
+    // changer runs. This preserves the valid declaration after the bad call.
+    let source = r#"
+        func Test() { ++(1); return 7; }
+        func Ok() { return 9; }
+    "#;
+    let script = clonk_script::Script::compile(source)
+        .expect("C++-valid invalid changer operand must compile");
+    assert!(
+        script.parse_diagnostics().is_empty(),
+        "runtime-invalid changer must not quarantine its function: {:?}",
+        script.parse_diagnostics()
+    );
+
+    let mut engine = clonk_script::Engine::new();
+    engine.add_script(script);
+    let error = engine
+        .call("Test", &[])
+        .expect_err("invalid prefix operand must fail when executed");
+    assert!(
+        !error.to_string().contains("parse error"),
+        "invalid operand was rejected during parsing: {error}"
+    );
+    assert_eq!(
+        engine.call("Ok", &[]).expect("later declaration survives"),
+        Value::Int(9)
+    );
+}
+
 // Complex RHS: !x = a + b
 crate::support::compile_cases! {
     not_with_complex_assignment: r#"func Test() { var x, a = 1, b = 2; if(!x = a + b) return 1; }"#;
