@@ -189,6 +189,44 @@ class MergeQueueGateTests(unittest.TestCase):
         self.assertNotIn("continue-on-error:", quality)
         self.assertNotRegex(quality, r"(?m)^        if:")
 
+    def test_dependency_license_freshness_runs_before_queue_admission(self):
+        freshness = job_block(LANDING, "dependency-license-corpus")
+        gate = job_block(LANDING, "landing-gate")
+        script = step_script(LANDING, "Enforce landing results")
+
+        self.assertRegex(
+            freshness,
+            r"(?m)^    if: github\.event_name == 'pull_request'$",
+        )
+        self.assertIn("name: Dependency license corpus", freshness)
+        self.assertIn("runs-on: ubuntu-latest", freshness)
+        self.assertIn("timeout-minutes: 5", freshness)
+        self.assertIn(
+            "uses: actions/checkout@"
+            "3d3c42e5aac5ba805825da76410c181273ba90b1",
+            freshness,
+        )
+        self.assertIn("fetch-depth: 1", freshness)
+        self.assertIn("persist-credentials: false", freshness)
+        self.assertRegex(
+            freshness,
+            r"(?m)^        run: python3 -m unittest discover --buffer -s scripts/tests "
+            r"-p 'test_dependency_licenses\.py'$",
+        )
+        self.assertRegex(gate, r"(?m)^      - dependency-license-corpus$")
+        self.assertIn(
+            "LICENSE_CORPUS_RESULT: ${{ needs.dependency-license-corpus.result }}",
+            gate,
+        )
+        self.assertEqual(
+            script.count('require_result license-corpus "$LICENSE_CORPUS_RESULT" success'),
+            1,
+        )
+        self.assertEqual(
+            script.count('require_result license-corpus "$LICENSE_CORPUS_RESULT" skipped'),
+            2,
+        )
+
     def test_landing_gate_requires_pull_request_quality_only_during_admission(self):
         gate = job_block(LANDING, "landing-gate")
         script = step_script(LANDING, "Enforce landing results")
@@ -215,7 +253,7 @@ class MergeQueueGateTests(unittest.TestCase):
         gate = job_block(LANDING, "landing-gate")
         self.assertIn("name: Landing gate", gate)
         self.assertIn("if: always()", gate)
-        for job in ("pull-request-title", *QUEUE_JOBS):
+        for job in ("pull-request-title", "dependency-license-corpus", *QUEUE_JOBS):
             with self.subTest(job=job):
                 self.assertRegex(gate, rf"(?m)^      - {re.escape(job)}$")
 
@@ -237,6 +275,7 @@ class MergeQueueGateTests(unittest.TestCase):
             "EVENT_NAME": "merge_group",
             "TITLE_RESULT": "skipped",
             "QUALITY_RESULT": "skipped",
+            "LICENSE_CORPUS_RESULT": "skipped",
             "RELEASE_CONTEXT_RESULT": "success",
             "RELEASE_PREBUILD_RESULT": "skipped",
             "RELEASE_BUILD_RESULT": "skipped",
@@ -253,6 +292,7 @@ class MergeQueueGateTests(unittest.TestCase):
                     "EVENT_NAME": "pull_request",
                     "TITLE_RESULT": "success",
                     "QUALITY_RESULT": "success",
+                    "LICENSE_CORPUS_RESULT": "success",
                     "RELEASE_CONTEXT_RESULT": "skipped",
                     "RELEASE_PREBUILD_RESULT": "skipped",
                     "IS_RELEASE": "",
@@ -267,6 +307,7 @@ class MergeQueueGateTests(unittest.TestCase):
                     "EVENT_NAME": "pull_request",
                     "TITLE_RESULT": "success",
                     "QUALITY_RESULT": "failure",
+                    "LICENSE_CORPUS_RESULT": "success",
                     "RELEASE_CONTEXT_RESULT": "skipped",
                     "RELEASE_PREBUILD_RESULT": "skipped",
                     "IS_RELEASE": "",
@@ -282,10 +323,16 @@ class MergeQueueGateTests(unittest.TestCase):
                 1,
             ),
             (
+                "merge group unexpectedly ran dependency license corpus check",
+                {"LICENSE_CORPUS_RESULT": "success"},
+                1,
+            ),
+            (
                 "workflow dispatch",
                 {
                     "EVENT_NAME": "workflow_dispatch",
                     "RELEASE_CONTEXT_RESULT": "skipped",
+                    "LICENSE_CORPUS_RESULT": "skipped",
                     "IS_RELEASE": "",
                 },
                 0,
@@ -295,6 +342,7 @@ class MergeQueueGateTests(unittest.TestCase):
                 {
                     "EVENT_NAME": "workflow_dispatch",
                     "QUALITY_RESULT": "success",
+                    "LICENSE_CORPUS_RESULT": "success",
                     "RELEASE_CONTEXT_RESULT": "skipped",
                     "IS_RELEASE": "",
                 },
