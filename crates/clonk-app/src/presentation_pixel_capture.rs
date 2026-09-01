@@ -967,6 +967,58 @@ fn render_runtime_layout_frame(
     Ok(RuntimeLayoutFrame { png, commands })
 }
 
+fn runtime_capture_global_message_elements(
+    app: &crate::GameApp,
+    viewport: &clonk_frontend::ActiveViewportProjection,
+    fonts: &clonk_frontend::ClonkFontSet,
+    case_id: &str,
+) -> Result<Vec<crate::presentation_layout::LayoutElement>> {
+    let mut elements = Vec::new();
+    for (index, message) in app
+        .snapshot
+        .hud
+        .messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.kind,
+                clonk_engine::MessageKind::Global | clonk_engine::MessageKind::GlobalPlayer
+            ) && message
+                .portrait
+                .as_deref()
+                .is_some_and(|portrait| !portrait.is_empty())
+                && (message.kind != clonk_engine::MessageKind::GlobalPlayer
+                    || message.player == Some(viewport.owner))
+        })
+        .enumerate()
+    {
+        let mut message = message.clone();
+        for line in &mut message.lines {
+            *line = crate::c4_presentation_text(line);
+        }
+        let font_images = crate::resolve_message_font_images(
+            &app.engine,
+            &message,
+            app.script_text_spec_resources(),
+        );
+        let message_layout = crate::game_message::global_message_presentation_layout(
+            &fonts.text,
+            viewport.rect,
+            &message,
+            message.frame_decoration.as_ref(),
+            &font_images,
+        )
+        .map_err(|detail| anyhow::anyhow!("{case_id} message layout failed: {detail}"))?;
+        elements.extend(
+            crate::presentation_layout_producers::runtime_global_message_elements(
+                index,
+                &message_layout,
+            ),
+        );
+    }
+    Ok(elements)
+}
+
 fn render_runtime_layout_capture(
     app: &mut crate::GameApp,
     case: PixelCaptureCase,
@@ -1058,48 +1110,12 @@ fn render_runtime_layout_capture(
                 &rendered.commands,
                 fonts,
             )?;
-            for (index, message) in app
-                .snapshot
-                .hud
-                .messages
-                .iter()
-                .filter(|message| {
-                    matches!(
-                        message.kind,
-                        clonk_engine::MessageKind::Global | clonk_engine::MessageKind::GlobalPlayer
-                    ) && message
-                        .portrait
-                        .as_deref()
-                        .is_some_and(|portrait| !portrait.is_empty())
-                        && (message.kind != clonk_engine::MessageKind::GlobalPlayer
-                            || message.player == Some(owner))
-                })
-                .enumerate()
-            {
-                let mut message = message.clone();
-                for line in &mut message.lines {
-                    *line = crate::c4_presentation_text(line);
-                }
-                let font_images = crate::resolve_message_font_images(
-                    &app.engine,
-                    &message,
-                    app.script_text_spec_resources(),
-                );
-                let message_layout = crate::game_message::global_message_presentation_layout(
-                    &fonts.text,
-                    viewport.rect,
-                    &message,
-                    message.frame_decoration.as_ref(),
-                    &font_images,
-                )
-                .map_err(|detail| anyhow::anyhow!("object-menu message layout failed: {detail}"))?;
-                elements.extend(
-                    crate::presentation_layout_producers::runtime_global_message_elements(
-                        index,
-                        &message_layout,
-                    ),
-                );
-            }
+            elements.extend(runtime_capture_global_message_elements(
+                app,
+                viewport,
+                fonts,
+                case.id(),
+            )?);
             elements
         }
         PixelCaptureCase::Hud | PixelCaptureCase::Gameplay => Vec::new(),

@@ -1157,16 +1157,22 @@ class PinAndGitTests(unittest.TestCase):
             by_id["object-menu"]["seeds"]["presentation"]["trace_sha256"],
             "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6",
         )
-        fixture_content_tree = MODULE.tree_oid(
-            REPOSITORY / "content", MODULE.FIXTURE_CONTENT_COMMIT
-        )
         for spec in validated:
             self.assertEqual(spec["player_sha256"], MODULE.PLAYER_SHA256)
-            self.assertEqual(spec["scenario"]["content_tree"], fixture_content_tree)
             self.assertEqual(
                 spec["runtime_resources"]["cpp"],
                 MODULE.PINNED_CPP_RUNTIME_RESOURCES,
             )
+
+    def test_tracked_case_specs_bind_the_pinned_fixture_content_tree(self):
+        specs = MODULE.load_json(REPOSITORY / MODULE.CASE_SPECS_SOURCE_PATH)
+        fixture_content_tree = MODULE.tree_oid(
+            REPOSITORY / "content", MODULE.FIXTURE_CONTENT_COMMIT
+        )
+
+        for spec in specs:
+            with self.subTest(case=spec["id"]):
+                self.assertEqual(spec["scenario"]["content_tree"], fixture_content_tree)
 
     def test_real_history_keeps_source_gitlink_distinct_from_profile_fixture(self):
         self.assertEqual(
