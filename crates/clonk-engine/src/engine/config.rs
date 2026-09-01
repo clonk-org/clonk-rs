@@ -514,6 +514,10 @@ impl Engine {
         self.scenario_values = Rc::new(values);
     }
 
+    pub(crate) fn legacy_weather_init(&self) -> scenario::LegacyWeatherInit {
+        self.scenario_values.legacy_weather_init()
+    }
+
     pub(crate) fn set_legacy_string_table(&mut self, strings: HashMap<i32, String>) {
         let registrations = clonk_script::new_string_registrations();
         let mut ids = strings.keys().copied().collect::<Vec<_>>();
