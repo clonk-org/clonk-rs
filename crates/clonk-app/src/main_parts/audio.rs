@@ -2717,6 +2717,37 @@ pub(crate) fn reconnect_audio_context(engine: &mut Engine, audio: Option<&Shared
     engine.configure_synchronous_sound_host(audio.map(SharedAudioContext::handle));
 }
 
+pub(crate) fn runtime_audio_system(
+    options: &AudioOptions,
+    resampling_mode: ResamplingMode,
+    device_independent_capture: bool,
+) -> Result<AudioSystem, AudioError> {
+    if device_independent_capture {
+        return Ok(AudioSystem::new_null_with_resampling(
+            options.max_channels,
+            resampling_mode,
+        ));
+    }
+
+    #[cfg(test)]
+    {
+        let audio_resources_enabled = options.sound_enabled
+            || options.music_enabled
+            || options.menu_music_enabled
+            || options.menu_sound_enabled
+            || options.voice_enabled;
+        Ok(if audio_resources_enabled {
+            AudioSystem::new_null_with_resampling(options.max_channels, resampling_mode)
+        } else {
+            AudioSystem::new_deferred_null_with_resampling(options.max_channels, resampling_mode)
+        })
+    }
+    #[cfg(not(test))]
+    {
+        AudioSystem::new_with_resampling(options.max_channels, resampling_mode)
+    }
+}
+
 impl AudioContext {
     fn sound_instance_now(&self) -> Instant {
         #[cfg(any(test, feature = "presentation-capture"))]
@@ -2759,20 +2790,18 @@ impl AudioContext {
         } else {
             ResamplingMode::Default
         };
+        #[cfg(feature = "presentation-capture")]
+        let device_independent_capture =
+            crate::presentation_pixel_capture::capture_or_discovery_requested();
+        #[cfg(not(feature = "presentation-capture"))]
+        let device_independent_capture = false;
         #[cfg(test)]
         let audio_resources_enabled = options.sound_enabled
             || options.music_enabled
             || options.menu_music_enabled
             || options.menu_sound_enabled
             || options.voice_enabled;
-        #[cfg(test)]
-        let system = if audio_resources_enabled {
-            AudioSystem::new_null_with_resampling(options.max_channels, resampling_mode)
-        } else {
-            AudioSystem::new_deferred_null_with_resampling(options.max_channels, resampling_mode)
-        };
-        #[cfg(not(test))]
-        let system = AudioSystem::new_with_resampling(options.max_channels, resampling_mode)?;
+        let system = runtime_audio_system(&options, resampling_mode, device_independent_capture)?;
         #[cfg(test)]
         let (resolver, music_resolver) = if audio_resources_enabled {
             (
