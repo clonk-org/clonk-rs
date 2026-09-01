@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-2/rust/artifacts/network-lobby.png",
+    "sha256": "1a334d9875a14f88b7746fa97542dbc44ae925ff8b19ddbbf7e35ef763b7d129"
+  },
+  "case_id": "network-lobby",
+  "comparator": {
+    "binary_sha256": "e9a401c3186ea5394ac435065beb7c4e4d7dfe140d7eb47f323a47adca9fede6",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "pixel",
+  "reference": {
+    "path": "run-2/cpp/artifacts/network-lobby.png",
+    "sha256": "b706758453274ec5d7fd110d319c3dfd144e5e21fc37d4b37a7e3ae6b96fb3c7"
+  },
+  "run_id": "run-2",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"network-lobby\",\"comparison\":\"pixel\",\"status\":\"match\"}\n"
+}

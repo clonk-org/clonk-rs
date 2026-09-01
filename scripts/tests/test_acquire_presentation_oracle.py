@@ -1330,22 +1330,11 @@ class PinAndGitTests(unittest.TestCase):
 
 
 class InventoryAndPngTests(unittest.TestCase):
-    def test_repository_contract_stays_pending_until_capture_evidence_exists(self):
+    def test_repository_contract_holds_accepted_presentation_evidence(self):
         manifest = MODULE.load_json(REPOSITORY / MODULE.CAPTURE_MANIFEST_SOURCE_PATH)
-        self.assertTrue(all(screen["status"] == "pending" for screen in manifest["screens"]))
-        self.assertTrue(all("evidence" not in screen for screen in manifest["screens"]))
-
         profile = MODULE.load_json(REPOSITORY / "compat/profile.json")
-        lifecycle = [
-            (entry["kind"], entry["value"], entry["status"])
-            for entry in profile["promise"]["presentation"]["evidence"]
-            if entry["value"]
-            in {"clonk-org/clonk-rs#587", MODULE.FINAL_PRESENTATION_GATE_EVIDENCE}
-        ]
-        self.assertEqual(
-            lifecycle,
-            [("issue", "clonk-org/clonk-rs#587", "pending")],
-        )
+
+        MODULE._validate_final_presentation_lifecycle(manifest, profile)
 
     def test_case_inventory_requires_all_thirteen_and_exactly_eleven_layout_cases(self):
         MODULE.validate_case_inventory(EXPECTED_CASE_IDS, EXPECTED_LAYOUT_IDS)
@@ -2721,26 +2710,33 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
         )
         original = MODULE.compat_profile_contract_value_sha256(profile)
         evidence = profile["promise"]["presentation"]["evidence"]
-        index = next(
-            index
-            for index, entry in enumerate(evidence)
-            if entry["value"] == "clonk-org/clonk-rs#587"
+        lifecycle = next(
+            entry
+            for entry in evidence
+            if entry["value"] == MODULE.FINAL_PRESENTATION_GATE_EVIDENCE
         )
-        pending = copy.deepcopy(evidence[index])
-        evidence[index] = {
-            "kind": "test",
-            "value": MODULE.FINAL_PRESENTATION_GATE_EVIDENCE,
-            "status": "held",
-            "note": "Required current capture landing row.",
-        }
-        self.assertEqual(MODULE.compat_profile_contract_value_sha256(profile), original)
-        evidence.append(pending)
+        pending_profile = copy.deepcopy(profile)
+        pending = next(
+            entry
+            for entry in pending_profile["promise"]["presentation"]["evidence"]
+            if entry["value"] == MODULE.FINAL_PRESENTATION_GATE_EVIDENCE
+        )
+        pending.update(
+            {
+                "kind": "issue",
+                "value": "clonk-org/clonk-rs#587",
+                "status": "pending",
+                "note": "Capture evidence remains pending.",
+            }
+        )
+        self.assertEqual(
+            MODULE.compat_profile_contract_value_sha256(pending_profile), original
+        )
+        evidence.append(copy.deepcopy(pending))
         with self.assertRaisesRegex(MODULE.AcquisitionFailure, "exactly one.*lifecycle"):
             MODULE.compat_profile_contract_value_sha256(profile)
         evidence.pop()
-        invalid = json.loads(
-            (REPOSITORY / "compat/profile.json").read_text(encoding="utf-8")
-        )
+        invalid = copy.deepcopy(pending_profile)
         invalid_entry = next(
             entry
             for entry in invalid["promise"]["presentation"]["evidence"]
@@ -2751,6 +2747,7 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
             MODULE.AcquisitionFailure, "identity/status drift"
         ):
             MODULE.compat_profile_contract_value_sha256(invalid)
+        self.assertEqual(lifecycle["status"], "held")
         profile["promise"]["presentation"]["statement"] += " changed"
         self.assertNotEqual(
             MODULE.compat_profile_contract_value_sha256(profile),

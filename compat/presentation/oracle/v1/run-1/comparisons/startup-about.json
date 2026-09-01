@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-1/rust/artifacts/startup-about.layout.json",
+    "sha256": "b8eb1194dbd9ca10ab9a1935825e327b7870a071951bf63f4d3a664dcb6b970e"
+  },
+  "case_id": "startup-about",
+  "comparator": {
+    "binary_sha256": "e9a401c3186ea5394ac435065beb7c4e4d7dfe140d7eb47f323a47adca9fede6",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "layout",
+  "reference": {
+    "path": "run-1/cpp/artifacts/startup-about.layout.json",
+    "sha256": "5cc8b9e5f4241bda80138d0a990ca558124f5b1d5135c015629a3542f0092280"
+  },
+  "run_id": "run-1",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"startup-about\",\"comparison\":\"layout\",\"status\":\"match\"}\n"
+}

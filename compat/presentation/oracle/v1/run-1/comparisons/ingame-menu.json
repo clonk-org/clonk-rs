@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-1/rust/artifacts/ingame-menu.layout.json",
+    "sha256": "3d0ecde9f19e2a17286626dbac9af51a2c796f26dc7e412722610be285b2edff"
+  },
+  "case_id": "ingame-menu",
+  "comparator": {
+    "binary_sha256": "e9a401c3186ea5394ac435065beb7c4e4d7dfe140d7eb47f323a47adca9fede6",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "layout",
+  "reference": {
+    "path": "run-1/cpp/artifacts/ingame-menu.layout.json",
+    "sha256": "3d0ecde9f19e2a17286626dbac9af51a2c796f26dc7e412722610be285b2edff"
+  },
+  "run_id": "run-1",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"ingame-menu\",\"comparison\":\"layout\",\"status\":\"match\"}\n"
+}

@@ -1,5 +1,5 @@
 {
-  "note": "The screens a compatibility session promises to render like the oracle, and the terms on which a capture pair may be compared. The presentation promise in profile.json names clonk-org/clonk-rs#587 as pending evidence, and this file is the detail behind it. Screens whose artwork or branding is port-authored are compared on the `layout` term rather than pixel equality - see `comparison_terms` and `port_assets`, decided in clonk-org/clonk-rs#1298.",
+  "note": "The screens a compatibility session promises to render like the oracle, and the terms on which each accepted capture pair is compared. The presentation gate retains and revalidates this evidence. Screens whose artwork or branding is port-authored are compared on the `layout` term rather than pixel equality - see `comparison_terms` and `port_assets`, decided in clonk-org/clonk-rs#1298.",
   "capture": {
     "resolution": "1280x720",
     "scale": 100,
@@ -22,7 +22,11 @@
       "id": "startup-main",
       "area": "startup",
       "description": "Startup root menu.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-main.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-main.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "branding"
@@ -32,7 +36,11 @@
       "id": "startup-scenario-selection",
       "area": "startup",
       "description": "Scenario selection subtree, including the folder listing and the selected-scenario panel.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-scenario-selection.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-scenario-selection.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "super-resolved-startup-art"
@@ -42,7 +50,11 @@
       "id": "startup-network-browser",
       "area": "startup",
       "description": "Network game browser.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-network-browser.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-network-browser.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "super-resolved-startup-art"
@@ -52,7 +64,11 @@
       "id": "startup-player-selection",
       "area": "startup",
       "description": "Player selection subtree.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-player-selection.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-player-selection.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "super-resolved-startup-art"
@@ -62,7 +78,11 @@
       "id": "startup-options",
       "area": "startup",
       "description": "Options sheets.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "super-resolved-startup-art"
@@ -72,7 +92,11 @@
       "id": "startup-about",
       "area": "startup",
       "description": "About/update subtree.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-about.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-about.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "branding"
@@ -82,21 +106,33 @@
       "id": "network-lobby",
       "area": "lobby",
       "description": "Network start/lobby screen with its client and player lists.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/network-lobby.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/network-lobby.png"
+      },
       "comparison": "pixel"
     },
     {
       "id": "loader",
       "area": "loader",
       "description": "Scenario loader screen with its progress bar and process log.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/loader.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/loader.png"
+      },
       "comparison": "pixel"
     },
     {
       "id": "hud",
       "area": "hud",
       "description": "In-game upper board, message board and crew portraits.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/hud.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/hud.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "branding"
@@ -106,7 +142,11 @@
       "id": "ingame-menu",
       "area": "menus",
       "description": "In-game main-menu subtree.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/ingame-menu.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/ingame-menu.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "branding"
@@ -116,7 +156,11 @@
       "id": "object-menu",
       "area": "menus",
       "description": "Object-menu subtree, including the extra bar and tooltips.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/object-menu.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/object-menu.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "branding"
@@ -126,7 +170,11 @@
       "id": "gameplay",
       "area": "gameplay",
       "description": "Representative gameplay frame at a pinned scenario and frame number.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/gameplay.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/gameplay.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "branding"
@@ -136,7 +184,11 @@
       "id": "evaluation",
       "area": "evaluation",
       "description": "Round evaluation screen.",
-      "status": "pending",
+      "status": "captured",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/evaluation.layout.json",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/evaluation.layout.json"
+      },
       "comparison": "layout",
       "port_assets": [
         "branding"

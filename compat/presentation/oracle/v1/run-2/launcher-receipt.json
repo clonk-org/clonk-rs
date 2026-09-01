@@ -1,0 +1,118 @@
+{
+  "case_specs_sha256": "ae5c447c34f284b04d4a3f89854fec3e44a0a752af42fc09572a84d0575bb93c",
+  "engine_receipts": {
+    "cpp": [
+      {
+        "case_id": "startup-main",
+        "sha256": "02fe838e795c939c8910ce2f359349f1fde7bc2730ee8b9bdf6462788c81db78"
+      },
+      {
+        "case_id": "startup-scenario-selection",
+        "sha256": "9cb1f4e100437d2296379442170f481a502e1df1d5873ab5fc6eb7bfe7da1042"
+      },
+      {
+        "case_id": "startup-network-browser",
+        "sha256": "a5c79d9a365e7b58fbd05f2026a673efcbd323202e5f9a50227196930caa6d2f"
+      },
+      {
+        "case_id": "startup-player-selection",
+        "sha256": "f8fcf2240264aef298ec257be4f1dfcf93754dfa8cedba3edda80963ee5fe301"
+      },
+      {
+        "case_id": "startup-options",
+        "sha256": "ba6bf5baa636aaae0888179bd122b287fe67ae0ca06de2b652f622ac8f56da49"
+      },
+      {
+        "case_id": "startup-about",
+        "sha256": "9df7c2c18addf27f47361c34c23b2d21114f977d4f72c27e8ea9a0814c3d805b"
+      },
+      {
+        "case_id": "network-lobby",
+        "sha256": "ae7e37838b8c68cbfea745408c5d714a6da8e63624be39318bdc5b809659f895"
+      },
+      {
+        "case_id": "loader",
+        "sha256": "47b8e5e380b08726239adfb7b587ce5bc05084f070d198dd03efcb1b2fda226b"
+      },
+      {
+        "case_id": "hud",
+        "sha256": "329d0de2f608ef7cd98c02312b8c8541c444490cde2ce26bf6fd895db7fd89c5"
+      },
+      {
+        "case_id": "ingame-menu",
+        "sha256": "c701b115759c39ddef2e82f92c6c3709683ccb2a7e3a84f8cfb4ab1d7efb0b4b"
+      },
+      {
+        "case_id": "object-menu",
+        "sha256": "9c22cf3fccc04dc0e343cfe3a54169750bfce9d09520dcc3c64a1315598238c9"
+      },
+      {
+        "case_id": "gameplay",
+        "sha256": "7ca407c85461553592b08fe50a8707cc9d4f8d0e38a823524ce7ef28a5a73c69"
+      },
+      {
+        "case_id": "evaluation",
+        "sha256": "4cb49b982b8f44f7c8c4ebcddb57e71465628e2e13cc22bff314dd18e01bb73e"
+      }
+    ],
+    "rust": [
+      {
+        "case_id": "startup-main",
+        "sha256": "6960b092e6422b66e492669f3964dea61e38e78ea03677e2f55fe37d290f2136"
+      },
+      {
+        "case_id": "startup-scenario-selection",
+        "sha256": "a44f84f20de5d2cac46435f0b1a811a0c3962246900f052e178d53bba7e1231e"
+      },
+      {
+        "case_id": "startup-network-browser",
+        "sha256": "657583cf15b8c1a4cb7999746de19ce5d6542a4d01b646e9a3081aba4c7c9dc4"
+      },
+      {
+        "case_id": "startup-player-selection",
+        "sha256": "4aee378df9686a81e3e144c94ec13fd2658ff4ca0cc056da5d72080d61be0388"
+      },
+      {
+        "case_id": "startup-options",
+        "sha256": "674e65439454692320954b156ed49c9c92f43b3563f966bd04724344445c2bd5"
+      },
+      {
+        "case_id": "startup-about",
+        "sha256": "46e1c9ba74352e0e667c06c6d63d7c3850c6571a759800deab3c3126cfe19c68"
+      },
+      {
+        "case_id": "network-lobby",
+        "sha256": "5c4e8604478c1cd42cb51324594db5976800c8fa445cff2e90323807ce132ba0"
+      },
+      {
+        "case_id": "loader",
+        "sha256": "c41231cc959f79463cdf8cd4f937479c46afcf140cf6029b8f9e112f303370dd"
+      },
+      {
+        "case_id": "hud",
+        "sha256": "26fa089ad392c3ecea600569183c5429acc4d53d17ab601282eeb3dd98927812"
+      },
+      {
+        "case_id": "ingame-menu",
+        "sha256": "09eb2fa8e0508025c62617ce1156fd2fc60ba4b24f1d29ae85fd720a498e6ac9"
+      },
+      {
+        "case_id": "object-menu",
+        "sha256": "998b93c61730952d158b2fd7e383b974a6fe3850f14123f9aed50a86386b2dc6"
+      },
+      {
+        "case_id": "gameplay",
+        "sha256": "23dfd691fc77d58fc6e98ee151218b7e47be0c0cc3a34d382a80e6c760b737b1"
+      },
+      {
+        "case_id": "evaluation",
+        "sha256": "0ca669db15062821857dc69287e6030aff88a3efa2c9df70fba5d28be81070cc"
+      }
+    ]
+  },
+  "launcher_sha256": "ccc94264aeafc6caf9202adcf21d68e3a39e8315fb7ee09ac1b9a34b8694c52c",
+  "launches_sha256": "caf131d4e2bd9d46092649e1499a43dc6dbe0a99fca2a270133b50c79c0b8f01",
+  "nonce": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
+  "run_id": "run-2",
+  "schema": "clonk-rs/presentation-launcher-receipt/v2"
+}

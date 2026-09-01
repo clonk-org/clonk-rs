@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-2/rust/artifacts/startup-scenario-selection.layout.json",
+    "sha256": "277b5938987214748f8974cf9f4dbe916286edb728017631c5e7da566fa53ea4"
+  },
+  "case_id": "startup-scenario-selection",
+  "comparator": {
+    "binary_sha256": "e9a401c3186ea5394ac435065beb7c4e4d7dfe140d7eb47f323a47adca9fede6",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "layout",
+  "reference": {
+    "path": "run-2/cpp/artifacts/startup-scenario-selection.layout.json",
+    "sha256": "277b5938987214748f8974cf9f4dbe916286edb728017631c5e7da566fa53ea4"
+  },
+  "run_id": "run-2",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"startup-scenario-selection\",\"comparison\":\"layout\",\"status\":\"match\"}\n"
+}

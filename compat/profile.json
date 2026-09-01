@@ -170,10 +170,10 @@
           "note": "Options, viewport, and GUI pixel parity against the C++ F9 captures."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#587",
-          "status": "pending",
-          "note": "C++/Rust presentation capture diffs for all thirteen screens have not yet been acquired and accepted. The six startup screens and five runtime screens carrying the Clonk Rust logo use the layout term approved by clonk-org/clonk-rs#1298; network-lobby and loader use the pixel term."
+          "kind": "test",
+          "value": ".github/workflows/landing.yml (presentation captures)",
+          "status": "held",
+          "note": "The landing gate revalidates accepted C++/Rust evidence for all thirteen screens: six startup screens with port-authored branding or art and five runtime screens carrying the Clonk Rust logo use the layout term approved by clonk-org/clonk-rs#1298, while network-lobby and loader use the pixel term."
         },
         {
           "kind": "issue",
