@@ -3766,19 +3766,19 @@ def verify_current_rust(
             source_inventory,
         ),
     )
-    runtime_binary = output_directory / "builds/rust/binary"
+    retained_binary = output_directory / "builds/rust/binary"
     _copy_regular_file(
         built_binary,
-        runtime_binary,
+        retained_binary,
         "current Rust executable",
     )
     try:
-        runtime_binary.chmod(0o755)
+        retained_binary.chmod(0o755)
     except OSError as error:
         raise AcquisitionFailure(
             f"could not make copied current Rust executable runnable: {error}"
         ) from error
-    binary_sha256 = _sha256_file(runtime_binary)
+    binary_sha256 = _sha256_file(retained_binary)
     config_sha256 = _sha256_file(output_directory / "inputs/rust.config")
     player_sha256 = _sha256_file(output_directory / PLAYER_RETAINED_PATH)
     network_sha256 = _sha256_file(
@@ -3812,6 +3812,20 @@ def verify_current_rust(
         runtime_content_identity["tree"] == content_tree,
         "current Rust runtime content tree differs from pinned fixture content",
     )
+    runtime_binary = rust_runtime_root / "target" / target_profile / (
+        "clonk-app.exe" if os.name == "nt" else "clonk-app"
+    )
+    _copy_regular_file(
+        retained_binary,
+        runtime_binary,
+        "current Rust capture executable",
+    )
+    try:
+        runtime_binary.chmod(0o755)
+    except OSError as error:
+        raise AcquisitionFailure(
+            f"could not make staged current Rust executable runnable: {error}"
+        ) from error
     _install_rust_player_discovery_fixture(output_directory, rust_runtime_root)
 
     run_summaries = []
@@ -4566,6 +4580,12 @@ def _capture_command(
         )
     _require(engine == "rust", f"unsupported capture engine: {engine}")
     source_root = rust_source_root or candidate_root / "work/rust-source"
+    try:
+        runtime_binaries[engine].relative_to(source_root)
+    except ValueError as error:
+        raise AcquisitionFailure(
+            "Rust capture executable must remain beneath the staged install root"
+        ) from error
     _require(runtime_resources is not None, "Rust runtime resource identity is missing")
     _validate_staged_rust_runtime_resources(source_root, runtime_resources)
     _require(

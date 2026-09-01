@@ -1680,7 +1680,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
             ):
                 MODULE._capture_command(
                     candidate,
-                    {"rust": candidate / "clonk-app"},
+                    {"rust": rust_source / "target/release/clonk-app"},
                     engine="rust",
                     case_id="gameplay",
                     runtime_resources=expected,
@@ -2236,6 +2236,30 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                         ],
                     )
                     self.assertEqual(cwd, candidate / "inputs")
+
+    def test_rust_capture_binary_stays_beneath_the_staged_install_root(self):
+        candidate = Path("/tmp/presentation-candidate")
+        rust_source = candidate / "work/rust-source"
+        with (
+            mock.patch.object(MODULE, "_validate_staged_rust_runtime_resources"),
+            mock.patch.object(MODULE, "_validate_staged_cpp_runtime_content"),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.AcquisitionFailure,
+                "Rust capture executable.*staged install root",
+            ):
+                MODULE._capture_command(
+                    candidate,
+                    {"rust": candidate / "builds/rust/binary"},
+                    engine="rust",
+                    case_id="gameplay",
+                    runtime_resources=synthetic_runtime_resources()["rust"],
+                    runtime_content_resources={
+                        group: {"tree": "a" * 40, "manifest_sha256": "b" * 64}
+                        for group in MODULE.CPP_RUNTIME_CONTENT_GROUPS
+                    },
+                    rust_source_root=rust_source,
+                )
 
     def test_live_comparator_is_no_args_and_requires_the_exact_success_receipt(self):
         with tempfile.TemporaryDirectory() as temporary:
