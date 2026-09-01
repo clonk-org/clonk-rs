@@ -3,8 +3,8 @@
     "cpp": {
       "binary": {
         "path": "builds/cpp/binary",
-        "sha256": "6d4f75f095ef27d58cce776ab2ca97fb2ae7dc0b3a5ea97fa59561019ce04942",
-        "size_bytes": 17196424
+        "sha256": "61283c59e264cd9dfa0165ea9f6aa5e33c3cb3ba87983b65407eaf727add3f73",
+        "size_bytes": 17201192
       },
       "capture_patch_sha256": "e2b84c1a8c4db811f819bd0ddeb3a7f988f2412cb8cd9b7a9db7540ba30c17de",
       "producer": "legacyclonk-capture-patch-v1",
@@ -68,7 +68,7 @@
     "rust": {
       "binary": {
         "path": "builds/rust/binary",
-        "sha256": "e9a401c3186ea5394ac435065beb7c4e4d7dfe140d7eb47f323a47adca9fede6",
+        "sha256": "4215b4a1afd2a4bfddf09ebd3b90c18707450d9c29cc12dde18f99881d7934c1",
         "size_bytes": 47966080
       },
       "capture_patch_sha256": null,
@@ -98,7 +98,7 @@
         ],
         "sha256": "5dd31be0efc425f25b94fa67ac7f908edf76c6d36213b4310c7bad49ac0f55a6"
       },
-      "source_tree": "a6f50039d4a0381febbfc5e889755b137f80bdea"
+      "source_tree": "19faffb7abfa90216b20d71cea53040fb89fdf47"
     }
   },
   "case_specs": [
@@ -946,7 +946,7 @@
           "id": "startup-main",
           "receipt": {
             "path": "run-1/comparisons/startup-main.json",
-            "sha256": "1cf9252f996ecc6d879c67ce545bc927d13cd8a6bf4e233787ba82ea76424e1d",
+            "sha256": "718303027293478ef7d75e33acadc8ad60e1aa12760fd6548cc6f177dcf21d00",
             "size_bytes": 776
           },
           "reference": {
@@ -965,7 +965,7 @@
           "id": "startup-scenario-selection",
           "receipt": {
             "path": "run-1/comparisons/startup-scenario-selection.json",
-            "sha256": "8361c9b5fc9c1fec70b8654c1e7f1f174e0c849cf58a0f57e84d97f7f246bee5",
+            "sha256": "d292d612487cf7d8d5db2ba80b6d9c7bd45240f937b97c5a2745fb88244103ce",
             "size_bytes": 832
           },
           "reference": {
@@ -984,7 +984,7 @@
           "id": "startup-network-browser",
           "receipt": {
             "path": "run-1/comparisons/startup-network-browser.json",
-            "sha256": "29c3805475f82c2af57b397a0fec7a78aad9e47c7e34f0fff40d6df958620fe1",
+            "sha256": "0bddc30a722c0455ec81669532bc6d102a42a3c033f963f3a1c2c9671629b76e",
             "size_bytes": 820
           },
           "reference": {
@@ -1003,7 +1003,7 @@
           "id": "startup-player-selection",
           "receipt": {
             "path": "run-1/comparisons/startup-player-selection.json",
-            "sha256": "9f1464f0a51de7841291a57bf501e9b348f61303532694a3a01b8b3615747845",
+            "sha256": "aaec73f2fe5a1c24beb8664b31049399e403dbb38f9ebc00f4042bacb90a9289",
             "size_bytes": 824
           },
           "reference": {
@@ -1022,7 +1022,7 @@
           "id": "startup-options",
           "receipt": {
             "path": "run-1/comparisons/startup-options.json",
-            "sha256": "b7c30ecdfa9efa1ccca1c251d3c4ef86db0caaffeb9fed8ae00c36517ace3848",
+            "sha256": "68697e844d02bb16de952482d8de86570f1b3cf3d7a2424150e03d5c970d1fe0",
             "size_bytes": 788
           },
           "reference": {
@@ -1041,7 +1041,7 @@
           "id": "startup-about",
           "receipt": {
             "path": "run-1/comparisons/startup-about.json",
-            "sha256": "8eeab678db2b538213484c4c72cfd143874d292d41f3719c359d99fbac03e93f",
+            "sha256": "4ca792363152839e21616553b89ac24d8e5a72aba5fa7e4a20c610fe037476b4",
             "size_bytes": 780
           },
           "reference": {
@@ -1060,7 +1060,7 @@
           "id": "network-lobby",
           "receipt": {
             "path": "run-1/comparisons/network-lobby.json",
-            "sha256": "bb3665d8475d70078502099b8b5e1bfe38fe0c8ab5aeae0b7479ada51077b83f",
+            "sha256": "a04d2433f222786bfa7fd5e4c8537e6ce0bef8590d2de707cf362c618a3db707",
             "size_bytes": 762
           },
           "reference": {
@@ -1079,7 +1079,7 @@
           "id": "loader",
           "receipt": {
             "path": "run-1/comparisons/loader.json",
-            "sha256": "87a9cc00dcc6cb1c0ad9213fc8327eb971d3ad57b2db686f880ad0b2456d8e49",
+            "sha256": "7c0e3181c99f51301cbfbe49436e2b0d03348cbcd653bacbaafc36ca4fa68d84",
             "size_bytes": 734
           },
           "reference": {
@@ -1098,7 +1098,7 @@
           "id": "hud",
           "receipt": {
             "path": "run-1/comparisons/hud.json",
-            "sha256": "9232523ebd189e7b9652e1a5f14e4adcba94ef60fb6a6572e93c94564ae93e83",
+            "sha256": "c5421c233ad693a71c50fb6c59c030cd13cf3f7ff4401d07e8942672bcd7225b",
             "size_bytes": 740
           },
           "reference": {
@@ -1117,7 +1117,7 @@
           "id": "ingame-menu",
           "receipt": {
             "path": "run-1/comparisons/ingame-menu.json",
-            "sha256": "d9e10404d3876bfe10b602c7fc8567aed0bd294e58d9eb10b3d397993791ca7a",
+            "sha256": "e59453d4fecae987510d639f43e6ac05e2577fcc7cf00ddb46a9ba094f76307c",
             "size_bytes": 772
           },
           "reference": {
@@ -1136,7 +1136,7 @@
           "id": "object-menu",
           "receipt": {
             "path": "run-1/comparisons/object-menu.json",
-            "sha256": "a9c9a6322e74c4b8885cbf8086dc92f7a52ef2f123cd99ea47d59f0629faad8b",
+            "sha256": "19775d05eacc21d678cb4e6f67a7dda77767450a4b7a02e51f18f3d9934fc6b1",
             "size_bytes": 772
           },
           "reference": {
@@ -1155,7 +1155,7 @@
           "id": "gameplay",
           "receipt": {
             "path": "run-1/comparisons/gameplay.json",
-            "sha256": "311dd7913f7e66074c1a1c436d5a0721f3eec6053b71aede65c90a694a5c71cb",
+            "sha256": "73aa98c40e6920b9d6b0d1a3fee63335778eb1e8391ec232fde9a23c04af62c4",
             "size_bytes": 760
           },
           "reference": {
@@ -1174,7 +1174,7 @@
           "id": "evaluation",
           "receipt": {
             "path": "run-1/comparisons/evaluation.json",
-            "sha256": "de58476f4d9081677f6149bda69c3f4a56e9e3ccf5d3c109756ee94f818314e4",
+            "sha256": "de0e6b05c61656c1019b6a448a7fc429240440545762edf5a744ff15cecef6ee",
             "size_bytes": 768
           },
           "reference": {
@@ -1198,7 +1198,7 @@
           "id": "startup-main",
           "receipt": {
             "path": "run-2/comparisons/startup-main.json",
-            "sha256": "6072d93ad94503a0ffb305b18c443c616db0879eb7135a149d212dca8487c133",
+            "sha256": "f25e3a281e01d183e3ca8367c72aa7d96af4e099b4b922a8690942e22e399f00",
             "size_bytes": 776
           },
           "reference": {
@@ -1217,7 +1217,7 @@
           "id": "startup-scenario-selection",
           "receipt": {
             "path": "run-2/comparisons/startup-scenario-selection.json",
-            "sha256": "dbe2a28d10588d2e89abd48286e974699b52829f37503a50121375d7645c8662",
+            "sha256": "6971ec23f3f0d04af7a7defe9e50a0bf971a8a5264aa6028228af3a78e0f6980",
             "size_bytes": 832
           },
           "reference": {
@@ -1236,7 +1236,7 @@
           "id": "startup-network-browser",
           "receipt": {
             "path": "run-2/comparisons/startup-network-browser.json",
-            "sha256": "1e2776b95de499f8133e6e83150526ae023ea3b8087e6e3bf9bcc62b1ef5b99a",
+            "sha256": "21bae895ebaf51343d72ea78b69b6807d719dc1885014214dfc5a78566d3bd2d",
             "size_bytes": 820
           },
           "reference": {
@@ -1255,7 +1255,7 @@
           "id": "startup-player-selection",
           "receipt": {
             "path": "run-2/comparisons/startup-player-selection.json",
-            "sha256": "48a50b8aeded5769232b1921f4d24b022afeba2043bea1bd5ec0ded8a6cc14d4",
+            "sha256": "dd82143b83eb544abb2892bef4f14a5032b04cdd19a073b11095b9303ce4e086",
             "size_bytes": 824
           },
           "reference": {
@@ -1274,7 +1274,7 @@
           "id": "startup-options",
           "receipt": {
             "path": "run-2/comparisons/startup-options.json",
-            "sha256": "37b9d5f861556fd2d73e07512262942ed983b285a9e9b7a9afa9cbe949cbc0a3",
+            "sha256": "d7dc8b5c1b8893441dbc83110e22fb340e8c516cb66b6db4185af750896ccb2c",
             "size_bytes": 788
           },
           "reference": {
@@ -1293,7 +1293,7 @@
           "id": "startup-about",
           "receipt": {
             "path": "run-2/comparisons/startup-about.json",
-            "sha256": "25dc3370ff61757e8cbc1e4148d7b33de58765224555358a1b570b02647c0d0f",
+            "sha256": "885af8c3f6f4668c9b15bf9a1203b84112ff4a745ee15fb5ee3e3bc20b013ab4",
             "size_bytes": 780
           },
           "reference": {
@@ -1312,7 +1312,7 @@
           "id": "network-lobby",
           "receipt": {
             "path": "run-2/comparisons/network-lobby.json",
-            "sha256": "4f426adab0fa061945061be976554aaacb6f52e12aa0fc1219ee076fe465666b",
+            "sha256": "cfc92c625629d45a9ce979f3711fc40377ff1b6768fc6a3cb11454008477e0f3",
             "size_bytes": 762
           },
           "reference": {
@@ -1331,7 +1331,7 @@
           "id": "loader",
           "receipt": {
             "path": "run-2/comparisons/loader.json",
-            "sha256": "a64ca62cebec23ba36081e22323dc6dd3c5035d9f7f446e142b1ddba4291de29",
+            "sha256": "837a9d11b3301625273ca39bbf0af726237b8ad06bf278a03fa25f922fe749a0",
             "size_bytes": 734
           },
           "reference": {
@@ -1350,7 +1350,7 @@
           "id": "hud",
           "receipt": {
             "path": "run-2/comparisons/hud.json",
-            "sha256": "6fb1f49f82042a5747d6f49d82cda3709e5c4e1d6b06250cb9fc61470ae391f9",
+            "sha256": "fd394b2f4909f1b0cd4722c13855b295806866b937fd7271572c0341637c182c",
             "size_bytes": 740
           },
           "reference": {
@@ -1369,7 +1369,7 @@
           "id": "ingame-menu",
           "receipt": {
             "path": "run-2/comparisons/ingame-menu.json",
-            "sha256": "f7c966a5fd81328c63ae7caaeb2292afcfaf99346a8bccdc13c92d1efefd290f",
+            "sha256": "b3786f56eb60f27254732a5e407a76f9f8cb513d5f14f3e85367235428793d78",
             "size_bytes": 772
           },
           "reference": {
@@ -1388,7 +1388,7 @@
           "id": "object-menu",
           "receipt": {
             "path": "run-2/comparisons/object-menu.json",
-            "sha256": "4e4c3bc9ae9671bb41048145c998c6070982d36d6639991c7363e931aeab34f4",
+            "sha256": "eaec6390aef29ea1104172363d51309f25f50e2cf25b9575d77df758a7694d30",
             "size_bytes": 772
           },
           "reference": {
@@ -1407,7 +1407,7 @@
           "id": "gameplay",
           "receipt": {
             "path": "run-2/comparisons/gameplay.json",
-            "sha256": "9d511421a67e257827c4d507efc6ebef5faec60bb54995bb03df822dcaa7149f",
+            "sha256": "f440648c260a8292e7d2dd5536ef95fb69363f88a06f4dd99f681f81e9e0dc28",
             "size_bytes": 760
           },
           "reference": {
@@ -1426,7 +1426,7 @@
           "id": "evaluation",
           "receipt": {
             "path": "run-2/comparisons/evaluation.json",
-            "sha256": "85a266cdd52f1376c8c00f91b28d24a8322f38f1e741f8a56de4f8601c4cd37a",
+            "sha256": "f50d01bda83b1cc7f3f0b8a0984bc6043c034d7fd19ab456ef4827e9183d6ff3",
             "size_bytes": 768
           },
           "reference": {
@@ -1459,7 +1459,7 @@
     },
     "launcher": {
       "retained_path": "launcher/acquire_presentation_oracle.py",
-      "sha256": "ccc94264aeafc6caf9202adcf21d68e3a39e8315fb7ee09ac1b9a34b8694c52c",
+      "sha256": "b38482af2b5bc296e169e4f5b9ce8230685b25d913c549f0357095227223616f",
       "source_path": "scripts/acquire_presentation_oracle.py"
     },
     "normalization": {
@@ -1504,7 +1504,7 @@
     },
     "rust_source_inventory": {
       "path": "inputs/rust-source-inputs.json",
-      "sha256": "a907449d4a4dfdc87c66f92b53e223046581a7457a67f709153b19fcb83d6531",
+      "sha256": "cec260ae7e8f6ac0510c09ff108a4d026a9b1eb2d2c1cb89b20a61e782e065d7",
       "size_bytes": 297759
     }
   },
@@ -1523,24 +1523,24 @@
               "id": "startup-main",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:main",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/startup-main",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/startup-main",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1557,7 +1557,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-main.json",
-                "sha256": "48dbe36aedc8f3c0853b4e8139480881b77978fa04304ff6d904262143168234",
+                "sha256": "5087121e6f88087bb5a22a1110b8e8caf3e52df6333984b0ae14264e8f34f40f",
                 "size_bytes": 1846
               }
             },
@@ -1565,24 +1565,24 @@
               "id": "startup-scenario-selection",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:scen",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/startup-scenario-selection",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/startup-scenario-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1599,7 +1599,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-scenario-selection.json",
-                "sha256": "e1395e0dbb70687fbfb11392959285039932c9ecb39398e2101a272ada728064",
+                "sha256": "ee3dde0632508801b73a53c4ec4dbcab3e2547b52b47bfd3ca972e1e5db44d08",
                 "size_bytes": 1902
               }
             },
@@ -1607,24 +1607,24 @@
               "id": "startup-network-browser",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:net",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/startup-network-browser",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/startup-network-browser",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1641,7 +1641,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-network-browser.json",
-                "sha256": "28e6f8eb4f8f5566b82a9a191ae35860958a5bd4922c5f3b2493fab341e7a493",
+                "sha256": "decae287ef0b4f73b8f49afc6ff9db63e1a2d76478addc5b6294acd175ff543c",
                 "size_bytes": 1889
               }
             },
@@ -1649,24 +1649,24 @@
               "id": "startup-player-selection",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:plrsel",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/startup-player-selection",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/startup-player-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1683,7 +1683,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-player-selection.json",
-                "sha256": "6f29a8a022b8dc1d7dccca836d1df3f5ca9142acb78b7f7a96f149f1eb002145",
+                "sha256": "005ee857fe3ae4cfa329560149f1d4aea889a5b5f60bc0cdf6c3c0c074b7da70",
                 "size_bytes": 1893
               }
             },
@@ -1691,24 +1691,24 @@
               "id": "startup-options",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:options",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/startup-options",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/startup-options",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1725,7 +1725,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options.json",
-                "sha256": "bc52f8ceec28bb930eebfa425185785ff68f8aca29aaa62aae1f117539006208",
+                "sha256": "217660a761bf153369c7417ccb7086ad2808c5de0792f29cde77e011825eafaf",
                 "size_bytes": 1858
               }
             },
@@ -1733,24 +1733,24 @@
               "id": "startup-about",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:about",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/startup-about",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/startup-about",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1767,7 +1767,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-about.json",
-                "sha256": "6e859ba5baca19834ceedd1168ee0b622d369b2ed75e3fa350eda72e6d1d45e8",
+                "sha256": "7597d0a614770bf4952c288f04435cfcefe358222a36dd6f56bd9e910d687fba",
                 "size_bytes": 1851
               }
             },
@@ -1775,26 +1775,26 @@
               "id": "network-lobby",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
                   "/network",
                   "/lobby",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/network-lobby",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/network-lobby",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1811,7 +1811,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/network-lobby.json",
-                "sha256": "6763c1e2bbd221f729dead86e824a9a2f16d4d0d8d44ae708e45ddbc02d93bf6",
+                "sha256": "60da9c3d1b73c9fc9ab7f1a90fd9a58eae02e07a2f7cb0783d00181543a963b4",
                 "size_bytes": 1730
               }
             },
@@ -1819,24 +1819,24 @@
               "id": "loader",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/loader.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/loader",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/loader",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1853,7 +1853,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/loader.json",
-                "sha256": "50ecc722158a1a36eb5b91141be824bbb13eef9c7a519d9e802a924cae66b0a0",
+                "sha256": "3a72bf7e1db9e1845b419ac4b42a04f96d8739abb414185ebc03e8a9d31a8094",
                 "size_bytes": 1716
               }
             },
@@ -1861,24 +1861,24 @@
               "id": "hud",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/hud.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/hud",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/hud",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1895,7 +1895,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/hud.json",
-                "sha256": "57e24813f333f1ba211bfd6a0b8fb7861cd5e6ea163a3be9545324235ecc14c6",
+                "sha256": "5f3f29940cf94607d33211b646847da55268b36df03c5921efeb54435dc2d9bf",
                 "size_bytes": 1849
               }
             },
@@ -1903,24 +1903,24 @@
               "id": "ingame-menu",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/ingame-menu",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/ingame-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1937,7 +1937,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/ingame-menu.json",
-                "sha256": "60e4ffa341359537571ef50f8404dcb53bdf057dac7b58ca72b683d04c26f6b4",
+                "sha256": "8c0d278bdf095aaeef3adc050bd2d4f6d4a09b7694a9bd8c9d15a634c89f613a",
                 "size_bytes": 1886
               }
             },
@@ -1945,24 +1945,24 @@
               "id": "object-menu",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/object-menu",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/object-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1979,7 +1979,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/object-menu.json",
-                "sha256": "5bb0ba1e18458da8a654ec9fc152c161431d99392f9d82b76438532593e85fc6",
+                "sha256": "6cbdc46cf759aba72abf29d08181222457739058118a6e5802b131b0e989e36d",
                 "size_bytes": 1896
               }
             },
@@ -1987,24 +1987,24 @@
               "id": "gameplay",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/gameplay",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/gameplay",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2021,7 +2021,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/gameplay.json",
-                "sha256": "fefca12926f9b1e0253e7c62fa23dc390b62ad02579a8c62a404aea2ae3cc34d",
+                "sha256": "1682b6a07158aa8daf37a510e3598d5598535c1bf722f0ee805e9014ff38c3fa",
                 "size_bytes": 1866
               }
             },
@@ -2029,24 +2029,24 @@
               "id": "evaluation",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/cpp/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/cpp/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/cpp/evaluation",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/cpp/evaluation",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2063,7 +2063,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/evaluation.json",
-                "sha256": "6934bc0a90382cdc5d1f3995f2c9140b175df05e518410aa22f3da93e8360fc8",
+                "sha256": "cb73244aa26676b3806e2b0fa95a5210a6d89fabf4b2d1cac70f5fcab7dc8076",
                 "size_bytes": 1890
               }
             }
@@ -2075,27 +2075,27 @@
               "id": "startup-main",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/startup-main",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/startup-main",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2112,7 +2112,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-main.json",
-                "sha256": "990a5c12d232c6fd28a40da4706e94be87ec19fbc89dc56d242578f5ac9b8921",
+                "sha256": "7889fac451f54d295f75ddc6a129db8d8fc7515bbec9bf6210ecb0e841632fc7",
                 "size_bytes": 1847
               }
             },
@@ -2120,27 +2120,27 @@
               "id": "startup-scenario-selection",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/startup-scenario-selection",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/startup-scenario-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2157,7 +2157,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-scenario-selection.json",
-                "sha256": "24375f5ddf9abd1703e6f19657ecd3785f77091cf31f9762774112cdce7db0ce",
+                "sha256": "d188b4f3c458400bf1c093cc9d03898d7f845ed237d478d94ca4b788564e230f",
                 "size_bytes": 1903
               }
             },
@@ -2165,27 +2165,27 @@
               "id": "startup-network-browser",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/startup-network-browser",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/startup-network-browser",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2202,7 +2202,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-network-browser.json",
-                "sha256": "35405d462925dde3dbee5971d362ad9956889c4e788a3846a340ba3935c132f9",
+                "sha256": "fc0caafc526abc9585e638a2c21b29feb66ea12a78114e337c1da67f35ec1454",
                 "size_bytes": 1890
               }
             },
@@ -2210,27 +2210,27 @@
               "id": "startup-player-selection",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/startup-player-selection",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/startup-player-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2247,7 +2247,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-player-selection.json",
-                "sha256": "9c57668d2e438caa0e0925df11a9d8426d65d29f7b0c593ad792b8fd67a914ea",
+                "sha256": "1129bd63f0dbb2d894753035b7f6e4cb99fdc514d56f16ce5ca4b2ecc8a141ef",
                 "size_bytes": 1895
               }
             },
@@ -2255,27 +2255,27 @@
               "id": "startup-options",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/startup-options",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/startup-options",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2292,7 +2292,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options.json",
-                "sha256": "be1fc531533ff2496626f4ebcf0b995b708770cc3006cc765fbec9e40b7f0b94",
+                "sha256": "a83209c1ace64b5879fdd08b5ac388d2bf4ad8bb71536d9bec98cbdb609625b5",
                 "size_bytes": 1859
               }
             },
@@ -2300,27 +2300,27 @@
               "id": "startup-about",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/startup-about",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/startup-about",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2337,7 +2337,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-about.json",
-                "sha256": "c07a7075c3d9de057aacb6aa29f5e0cda05f90e04b895da87da1ff3fb7431c8d",
+                "sha256": "01ce5c2c09ae7598a18b4d866296a9a30ff7866514ab16448b5a0dc736218274",
                 "size_bytes": 1852
               }
             },
@@ -2345,27 +2345,27 @@
               "id": "network-lobby",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/network-lobby",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/network-lobby",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2382,7 +2382,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/network-lobby.json",
-                "sha256": "474c1d11cd51dce9832c8794016c48c15b6f22f28ea8a6c4c3e257ef57c7ba10",
+                "sha256": "85aba19b34a71ca9e6f6e6bdf7875a8320167c71758111ce4aeb4e18a64521ec",
                 "size_bytes": 1730
               }
             },
@@ -2390,27 +2390,27 @@
               "id": "loader",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/loader.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/loader",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/loader",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2427,7 +2427,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/loader.json",
-                "sha256": "2adf99dc36b533fb577b4a6d7ce018c57b9b75ec739a805957c40c1f1ed5912a",
+                "sha256": "c1d0fed3dde1dafac43b05bd904bbcbc529b45108edb69b0eee256f5abbdcbd0",
                 "size_bytes": 1716
               }
             },
@@ -2435,27 +2435,27 @@
               "id": "hud",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/hud.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/hud",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/hud",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2472,7 +2472,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/hud.json",
-                "sha256": "6267353c80bedf1bb352f4e487b86fb17d776083e165c138ea9d22792da3146f",
+                "sha256": "981d9e1ef81198d9000a504ad385ca2a18f272715684dec382e2f2e2fe215c65",
                 "size_bytes": 1851
               }
             },
@@ -2480,27 +2480,27 @@
               "id": "ingame-menu",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/ingame-menu",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/ingame-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2517,7 +2517,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/ingame-menu.json",
-                "sha256": "8988daadfdf58d71e613303fc8b0f1d98f418f65a34fd65781d55ca14273c3bb",
+                "sha256": "e4c860119d9106756532c75410031d4856f080fba94fd10475cb54c0e8b3924c",
                 "size_bytes": 1888
               }
             },
@@ -2525,27 +2525,27 @@
               "id": "object-menu",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/object-menu",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/object-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2562,7 +2562,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/object-menu.json",
-                "sha256": "314db7bf53bbae0fd1b6c3edd940357cc2fa5fe56b79b5f6a3aeb6c99cb9bd42",
+                "sha256": "4958556d05796c9a6fe980c842662013dbe660a3cd371953cc9ed49e08acae11",
                 "size_bytes": 1898
               }
             },
@@ -2570,27 +2570,27 @@
               "id": "gameplay",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/gameplay",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/gameplay",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2607,7 +2607,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/gameplay.json",
-                "sha256": "7656afed775baf520ef4985cf3d5d428cde3876a0ddbd8c3594f9229901514dc",
+                "sha256": "6457021c026138b3ab5407261162f15c5ac7f7095fd36750d5b2fea79a9592fb",
                 "size_bytes": 1868
               }
             },
@@ -2615,27 +2615,27 @@
               "id": "evaluation",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-1/rust/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_NONCE": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-1/rust/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-1/rust/evaluation",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-1/rust/evaluation",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2652,7 +2652,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/evaluation.json",
-                "sha256": "0d67b55e94f3c6cd896e471eb2ed5b75b040af0e06c2a387511a1346329a708c",
+                "sha256": "2b5c739f02aa8bd13e36b7229b28a6e23c8e77cafac0863ae26d78d050321b53",
                 "size_bytes": 1892
               }
             }
@@ -2662,10 +2662,10 @@
       "id": "run-1",
       "launcher_receipt": {
         "path": "run-1/launcher-receipt.json",
-        "sha256": "8dec8829e37d8dc7f2ff265710497287470471ef82edd5bb516e0f6a3e5d76bc",
+        "sha256": "1744cf12cd895474b407f2e0acf6b074ff882e45caa7881a53db94040f2a23a6",
         "size_bytes": 4095
       },
-      "nonce": "a613434288a83a2c1ace25590cf32ea0cfc015d0a4b2904028a850271181d84c"
+      "nonce": "959986b70a8e33ecc78db11d7d77723cf0b88f338b0984fd3dc30f5c7b4556d2"
     },
     {
       "engines": {
@@ -2675,24 +2675,24 @@
               "id": "startup-main",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:main",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/startup-main",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/startup-main",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2709,7 +2709,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-main.json",
-                "sha256": "02fe838e795c939c8910ce2f359349f1fde7bc2730ee8b9bdf6462788c81db78",
+                "sha256": "c255b67bb9f1d5c20be849bc52ba0eecf6d85f11040656906a56ac91d7da71dc",
                 "size_bytes": 1846
               }
             },
@@ -2717,24 +2717,24 @@
               "id": "startup-scenario-selection",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:scen",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/startup-scenario-selection",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/startup-scenario-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2751,7 +2751,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-scenario-selection.json",
-                "sha256": "9cb1f4e100437d2296379442170f481a502e1df1d5873ab5fc6eb7bfe7da1042",
+                "sha256": "c4594b53a257f40ad12c229db543d64d36d78d2beb5bdecb234fc22bb31d4327",
                 "size_bytes": 1902
               }
             },
@@ -2759,24 +2759,24 @@
               "id": "startup-network-browser",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:net",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/startup-network-browser",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/startup-network-browser",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2793,7 +2793,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-network-browser.json",
-                "sha256": "a5c79d9a365e7b58fbd05f2026a673efcbd323202e5f9a50227196930caa6d2f",
+                "sha256": "1f5a75ab77485c1c20aec92bb31f1011d03302b0121550cde9c3c75b58e98f74",
                 "size_bytes": 1889
               }
             },
@@ -2801,24 +2801,24 @@
               "id": "startup-player-selection",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:plrsel",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/startup-player-selection",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/startup-player-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2835,7 +2835,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-player-selection.json",
-                "sha256": "f8fcf2240264aef298ec257be4f1dfcf93754dfa8cedba3edda80963ee5fe301",
+                "sha256": "8c669755d16efd62a3ebef87c8028cb3092dc967c53835dc83e04ac0ed24d7bc",
                 "size_bytes": 1893
               }
             },
@@ -2843,24 +2843,24 @@
               "id": "startup-options",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:options",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/startup-options",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/startup-options",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2877,7 +2877,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options.json",
-                "sha256": "ba6bf5baa636aaae0888179bd122b287fe67ae0ca06de2b652f622ac8f56da49",
+                "sha256": "aaf62925cd373a8c797fcc628db0b2ee5a2ee3e9bd0aa5c1fea0b9a2633cf390",
                 "size_bytes": 1858
               }
             },
@@ -2885,24 +2885,24 @@
               "id": "startup-about",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:about",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/startup-about",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/startup-about",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2919,7 +2919,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-about.json",
-                "sha256": "9df7c2c18addf27f47361c34c23b2d21114f977d4f72c27e8ea9a0814c3d805b",
+                "sha256": "5759b4b52e99b03f5c22c1d3e55c8986d3bcacdf732f47ca963ebe7cd0bb7b99",
                 "size_bytes": 1851
               }
             },
@@ -2927,26 +2927,26 @@
               "id": "network-lobby",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
                   "/network",
                   "/lobby",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/network-lobby",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/network-lobby",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2963,7 +2963,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/network-lobby.json",
-                "sha256": "ae7e37838b8c68cbfea745408c5d714a6da8e63624be39318bdc5b809659f895",
+                "sha256": "9e1abd8d1cc755f58629c71060fbd65874a0359780e04877153f1aae2b45d336",
                 "size_bytes": 1730
               }
             },
@@ -2971,24 +2971,24 @@
               "id": "loader",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/loader.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/loader",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/loader",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3005,7 +3005,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/loader.json",
-                "sha256": "47b8e5e380b08726239adfb7b587ce5bc05084f070d198dd03efcb1b2fda226b",
+                "sha256": "d322df794ad24907725d8049392f7138a64b0b33c06ec757f65c4aebf19c8b23",
                 "size_bytes": 1716
               }
             },
@@ -3013,24 +3013,24 @@
               "id": "hud",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/hud.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/hud",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/hud",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3047,7 +3047,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/hud.json",
-                "sha256": "329d0de2f608ef7cd98c02312b8c8541c444490cde2ce26bf6fd895db7fd89c5",
+                "sha256": "f6a6efea503084c622329f711c012f4d080e1c520f2e3ae4a733282abe359ba0",
                 "size_bytes": 1849
               }
             },
@@ -3055,24 +3055,24 @@
               "id": "ingame-menu",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/ingame-menu",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/ingame-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3089,7 +3089,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/ingame-menu.json",
-                "sha256": "c701b115759c39ddef2e82f92c6c3709683ccb2a7e3a84f8cfb4ab1d7efb0b4b",
+                "sha256": "fb31f984e3f88363b749859d76b71aadbff4ba82962789c60abacab79b800039",
                 "size_bytes": 1886
               }
             },
@@ -3097,24 +3097,24 @@
               "id": "object-menu",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/object-menu",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/object-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3131,7 +3131,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/object-menu.json",
-                "sha256": "9c22cf3fccc04dc0e343cfe3a54169750bfce9d09520dcc3c64a1315598238c9",
+                "sha256": "790e2e799fea95fe6b58fc71da497c1b5194e2cc7b60566657a021b4fd7fa425",
                 "size_bytes": 1896
               }
             },
@@ -3139,24 +3139,24 @@
               "id": "gameplay",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/gameplay",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/gameplay",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3173,7 +3173,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/gameplay.json",
-                "sha256": "7ca407c85461553592b08fe50a8707cc9d4f8d0e38a823524ce7ef28a5a73c69",
+                "sha256": "87f36cfa6231862f0b6cd727d889661c548d952105889c0724c54f9ea70e1a5d",
                 "size_bytes": 1866
               }
             },
@@ -3181,24 +3181,24 @@
               "id": "evaluation",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/cpp.config"
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/cpp.config"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/cpp/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/cpp/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/cpp/evaluation",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/cpp/evaluation",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3215,7 +3215,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/evaluation.json",
-                "sha256": "4cb49b982b8f44f7c8c4ebcddb57e71465628e2e13cc22bff314dd18e01bb73e",
+                "sha256": "88b2b87418ac6bd6255f0d58ca786dbf9b0b03bd6b77853b87b58606b2c65269",
                 "size_bytes": 1890
               }
             }
@@ -3227,27 +3227,27 @@
               "id": "startup-main",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/startup-main",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/startup-main",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3264,7 +3264,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-main.json",
-                "sha256": "6960b092e6422b66e492669f3964dea61e38e78ea03677e2f55fe37d290f2136",
+                "sha256": "f3b0df26f0bf73cdd30b3f5cd6124271e54dce84ccbc8855b1ec1be4564484bb",
                 "size_bytes": 1847
               }
             },
@@ -3272,27 +3272,27 @@
               "id": "startup-scenario-selection",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/startup-scenario-selection",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/startup-scenario-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3309,7 +3309,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-scenario-selection.json",
-                "sha256": "a44f84f20de5d2cac46435f0b1a811a0c3962246900f052e178d53bba7e1231e",
+                "sha256": "c1698daaf02b6ed23af88b3ccd5697663355e44f5cc880b2b1c4dda0c37e51d0",
                 "size_bytes": 1903
               }
             },
@@ -3317,27 +3317,27 @@
               "id": "startup-network-browser",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/startup-network-browser",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/startup-network-browser",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3354,7 +3354,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-network-browser.json",
-                "sha256": "657583cf15b8c1a4cb7999746de19ce5d6542a4d01b646e9a3081aba4c7c9dc4",
+                "sha256": "4a68837d37f5c171fb8bc7afaa0ec216fd2d7f197aa8bc19ca4077935464cef0",
                 "size_bytes": 1890
               }
             },
@@ -3362,27 +3362,27 @@
               "id": "startup-player-selection",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/startup-player-selection",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/startup-player-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3399,7 +3399,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-player-selection.json",
-                "sha256": "4aee378df9686a81e3e144c94ec13fd2658ff4ca0cc056da5d72080d61be0388",
+                "sha256": "48928d92a327edb1e2dd95be03cf937c54662de20d16629e50c20f8d33b07dfe",
                 "size_bytes": 1895
               }
             },
@@ -3407,27 +3407,27 @@
               "id": "startup-options",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/startup-options",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/startup-options",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3444,7 +3444,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options.json",
-                "sha256": "674e65439454692320954b156ed49c9c92f43b3563f966bd04724344445c2bd5",
+                "sha256": "bbc474056934a3042a845fccb4ac3b1c9baacf8e4c80071582674250051f4256",
                 "size_bytes": 1859
               }
             },
@@ -3452,27 +3452,27 @@
               "id": "startup-about",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/startup-about",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/startup-about",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3489,7 +3489,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-about.json",
-                "sha256": "46e1c9ba74352e0e667c06c6d63d7c3850c6571a759800deab3c3126cfe19c68",
+                "sha256": "c27a503684852e54d1b124f41ab7eb052ad6f631fdf734b36ec703774ed7cadc",
                 "size_bytes": 1852
               }
             },
@@ -3497,27 +3497,27 @@
               "id": "network-lobby",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/network-lobby",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/network-lobby",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3534,7 +3534,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/network-lobby.json",
-                "sha256": "5c4e8604478c1cd42cb51324594db5976800c8fa445cff2e90323807ce132ba0",
+                "sha256": "545d098acc71a3ce679f8325afa6e96e5955bcf7ba2f0c68a8d4742606de6e36",
                 "size_bytes": 1730
               }
             },
@@ -3542,27 +3542,27 @@
               "id": "loader",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/loader.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/loader",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/loader",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3579,7 +3579,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/loader.json",
-                "sha256": "c41231cc959f79463cdf8cd4f937479c46afcf140cf6029b8f9e112f303370dd",
+                "sha256": "87f75e83a924bc3ca1fecce380d324010fe78a05d3b3e2a7b0873e782b713031",
                 "size_bytes": 1716
               }
             },
@@ -3587,27 +3587,27 @@
               "id": "hud",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/hud.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/hud",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/hud",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3624,7 +3624,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/hud.json",
-                "sha256": "26fa089ad392c3ecea600569183c5429acc4d53d17ab601282eeb3dd98927812",
+                "sha256": "a276c90926bbae86be4d9766bb032f045d9ae4bdbe55ccd43e380f3526cfeb62",
                 "size_bytes": 1851
               }
             },
@@ -3632,27 +3632,27 @@
               "id": "ingame-menu",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/ingame-menu",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/ingame-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3669,7 +3669,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/ingame-menu.json",
-                "sha256": "09eb2fa8e0508025c62617ce1156fd2fc60ba4b24f1d29ae85fd720a498e6ac9",
+                "sha256": "cc257f2e93a7823f91650afaec56ad622161493e5ec97eace6c2a28c0cfd59dd",
                 "size_bytes": 1888
               }
             },
@@ -3677,27 +3677,27 @@
               "id": "object-menu",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/object-menu",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/object-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3714,7 +3714,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/object-menu.json",
-                "sha256": "998b93c61730952d158b2fd7e383b974a6fe3850f14123f9aed50a86386b2dc6",
+                "sha256": "9aef24984a02f210c0510079639da5b24fb397d429211bc029965fbc1be25c47",
                 "size_bytes": 1898
               }
             },
@@ -3722,27 +3722,27 @@
               "id": "gameplay",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/gameplay",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/gameplay",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3759,7 +3759,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/gameplay.json",
-                "sha256": "23dfd691fc77d58fc6e98ee151218b7e47be0c0cc3a34d382a80e6c760b737b1",
+                "sha256": "820926986a093ec73927751a8aef3d4e6fe74472bbb0bb3d6c58c5f4ce35abd2",
                 "size_bytes": 1868
               }
             },
@@ -3767,27 +3767,27 @@
               "id": "evaluation",
               "launch": {
                 "argv": [
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source/target/release/clonk-app",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust.config",
-                  "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/Presentation.c4p",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/rust-source",
+                "cwd": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/run-2/rust/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_NONCE": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/run-2/rust/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/inputs",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-presentation.g2MwBT/candidate/work/user-data/run-2/rust/evaluation",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-replacement-presentation.0lp6Sh/candidate/work/user-data/run-2/rust/evaluation",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3804,7 +3804,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/evaluation.json",
-                "sha256": "0ca669db15062821857dc69287e6030aff88a3efa2c9df70fba5d28be81070cc",
+                "sha256": "f1466571597168aa01fa772b23450927d88211844e558c39e177918bdc0c9e05",
                 "size_bytes": 1892
               }
             }
@@ -3814,10 +3814,10 @@
       "id": "run-2",
       "launcher_receipt": {
         "path": "run-2/launcher-receipt.json",
-        "sha256": "855aaf20f1cea9fb69592de8fa849ec72423787fcccc92ea0c0b0dcd13d05dcd",
+        "sha256": "d2e225469dfd07ccaf50a91d4aace6760c852026cfe2e052d5365296ba49b595",
         "size_bytes": 4095
       },
-      "nonce": "b334bd572819242e9b9c8fd99c76dd0f8f0fa4c5870ee53bf62be8fefc236b33"
+      "nonce": "2ed88addbee3070b8ddb2704e64838716c0562c342c75406e8d4aabb70054cd2"
     }
   ],
   "schema": "clonk-rs/presentation-oracle/v2",
@@ -3857,10 +3857,10 @@
       }
     },
     "rust": {
-      "commit": "a65159b4d3a76d1cb97aa5faf44dce2321d1bb2e",
+      "commit": "81400bd8506774744be650d49037a567339a2fc5",
       "planet_tree": "2ad84637f8dc368b318863dac590dc6d10fc6c63",
       "system_tree": "f5f3b643b8256ca0062f7858cc46ff17d239f18f",
-      "tree": "a6f50039d4a0381febbfc5e889755b137f80bdea"
+      "tree": "19faffb7abfa90216b20d71cea53040fb89fdf47"
     }
   }
 }
