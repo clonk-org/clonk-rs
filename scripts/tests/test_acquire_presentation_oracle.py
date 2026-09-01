@@ -1157,8 +1157,12 @@ class PinAndGitTests(unittest.TestCase):
             by_id["object-menu"]["seeds"]["presentation"]["trace_sha256"],
             "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6",
         )
+        fixture_content_tree = MODULE.tree_oid(
+            REPOSITORY / "content", MODULE.FIXTURE_CONTENT_COMMIT
+        )
         for spec in validated:
             self.assertEqual(spec["player_sha256"], MODULE.PLAYER_SHA256)
+            self.assertEqual(spec["scenario"]["content_tree"], fixture_content_tree)
             self.assertEqual(
                 spec["runtime_resources"]["cpp"],
                 MODULE.PINNED_CPP_RUNTIME_RESOURCES,
