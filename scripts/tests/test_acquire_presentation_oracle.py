@@ -1320,25 +1320,21 @@ class PinAndGitTests(unittest.TestCase):
             "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
         )
 
-    def test_provenance_can_revalidate_the_recorded_pre_evidence_rust_commit(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            oracle = Path(temporary) / "oracle"
-            subprocess.run(
-                ["git", "clone", "--quiet", "--shared", "--no-checkout", str(REPOSITORY), str(oracle)],
-                check=True,
-            )
-            run_git(oracle, "checkout", "--quiet", MODULE.ORACLE_SOURCE_COMMIT)
-            rust_revision = run_git(REPOSITORY, "rev-parse", "HEAD^")
+    def test_provenance_can_validate_the_squash_stable_current_source(self):
+        rust_revision = run_git(REPOSITORY, "rev-parse", "HEAD")
 
-            fields = MODULE.expected_provenance_fields(
-                oracle, rust_revision=rust_revision
-            )
+        fields = MODULE.expected_provenance_fields(
+            REPOSITORY,
+            rust_revision=rust_revision,
+            workspace=REPOSITORY,
+            require_oracle_head=False,
+        )
 
-            self.assertEqual(fields["rust_source_commit"], rust_revision)
-            self.assertEqual(
-                fields["rust_source_tree"],
-                run_git(REPOSITORY, "rev-parse", f"{rust_revision}^{{tree}}"),
-            )
+        self.assertEqual(fields["rust_source_commit"], rust_revision)
+        self.assertEqual(
+            fields["rust_source_tree"],
+            run_git(REPOSITORY, "rev-parse", f"{rust_revision}^{{tree}}"),
+        )
 
 
 class InventoryAndPngTests(unittest.TestCase):
