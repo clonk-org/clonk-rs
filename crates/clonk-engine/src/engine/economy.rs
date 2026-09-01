@@ -2851,6 +2851,7 @@ impl Engine {
         &mut self,
         init: &crate::scenario::LegacyWeatherInit,
     ) -> Result<(), EngineError> {
+        self.weather_initial_rain_gate = None;
         let season = init.season.evaluate(&mut self.rng);
         let year_speed = init.year_speed.evaluate(&mut self.rng);
         let climate = 100 - init.climate.evaluate(&mut self.rng) - 50;
@@ -2883,6 +2884,7 @@ impl Engine {
         self.environment.precipitation_strength = rain_base;
         if !init.no_initialize {
             let rain = init.rain.evaluate(&mut self.rng);
+            self.weather_initial_rain_gate = Some(rain);
             if rain != 0 {
                 let width = self
                     .landscape

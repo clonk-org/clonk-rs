@@ -29,6 +29,23 @@ impl Default for ScenarioValueStore {
 }
 
 impl ScenarioValueStore {
+    pub(crate) fn legacy_weather_init(&self) -> LegacyWeatherInit {
+        LegacyWeatherInit {
+            season: self.core.weather.start_season,
+            year_speed: self.core.weather.year_speed,
+            climate: self.core.weather.climate,
+            wind: self.core.weather.wind,
+            rain: self.core.weather.rain,
+            precipitation: self.core.weather.precipitation.clone(),
+            lightning: self.core.weather.lightning,
+            meteorite: self.core.disasters.meteorite,
+            volcano: self.core.disasters.volcano,
+            earthquake: self.core.disasters.earthquake,
+            no_initialize: self.core.head.no_initialize != 0,
+            no_gamma: self.core.weather.no_gamma,
+        }
+    }
+
     pub(in crate::scenario) fn with_section_head_defaults(mut self, context: &LegacyHead) -> Self {
         self.section_head_defaults = Some([
             context.forced_auto_context_menu,

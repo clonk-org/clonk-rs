@@ -1,0 +1,163 @@
+diff --git a/src/C4Weather.cpp b/src/C4Weather.cpp
+index 58f201ba2..7892cd5a1 100644
+--- a/src/C4Weather.cpp
++++ b/src/C4Weather.cpp
+@@ -35,6 +35,10 @@ C4Weather::~C4Weather()
+ 
+ void C4Weather::Init(bool fScenario)
+ {
++#ifdef USE_RUST_ENGINE_VALIDATION
++	RustEngineValidationInitialRainGate = 0;
++	RustEngineValidationInitialRainGateValid = false;
++#endif
+ 	if (fScenario)
+ 	{
+ 		// Season
+@@ -47,7 +51,13 @@ void C4Weather::Init(bool fScenario)
+ 		Wind = TargetWind = Game.C4S.Weather.Wind.Evaluate();
+ 		// Precipitation
+ 		if (!Game.C4S.Head.NoInitialize)
+-			if (Game.C4S.Weather.Rain.Evaluate())
++		{
++			const int32_t initial_rain_gate = Game.C4S.Weather.Rain.Evaluate();
++#ifdef USE_RUST_ENGINE_VALIDATION
++			RustEngineValidationInitialRainGate = initial_rain_gate;
++			RustEngineValidationInitialRainGateValid = true;
++#endif
++			if (initial_rain_gate)
+ 				for (int32_t iClouds = (std::min)(GBackWdt / 500, 5); iClouds > 0; iClouds--)
+ 				{
+ 					volatile int iWidth = GBackWdt / 15 + Random(320);
+@@ -56,6 +66,7 @@ void C4Weather::Init(bool fScenario)
+ 						Game.C4S.Weather.Rain.Evaluate(),
+ 						Game.C4S.Weather.Precipitation);
+ 				}
++		}
+ 		// Lightning
+ 		LightningLevel = Game.C4S.Weather.Lightning.Evaluate();
+ 		// Disasters
+@@ -191,6 +202,10 @@ void C4Weather::Default()
+ 	TemperatureRange = 30;
+ 	MeteoriteLevel = VolcanoLevel = EarthquakeLevel = LightningLevel = 0;
+ 	NoGamma = true;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	RustEngineValidationInitialRainGate = 0;
++	RustEngineValidationInitialRainGateValid = false;
++#endif
+ }
+ 
+ bool C4Weather::LaunchEarthquake(int32_t iX, int32_t iY)
+diff --git a/src/C4Weather.h b/src/C4Weather.h
+index b31eb4e4d..5dcc8b96f 100644
+--- a/src/C4Weather.h
++++ b/src/C4Weather.h
+@@ -34,6 +34,10 @@ public:
+ 	int32_t Temperature, TemperatureRange, Climate;
+ 	int32_t MeteoriteLevel, VolcanoLevel, EarthquakeLevel, LightningLevel;
+ 	bool NoGamma;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	int32_t RustEngineValidationInitialRainGate;
++	bool RustEngineValidationInitialRainGateValid;
++#endif
+ 
+ public:
+ 	void Default();
+diff --git a/src/rust/RustEngineBridge.cpp b/src/rust/RustEngineBridge.cpp
+index f76f6934e..1f65fd0d0 100644
+--- a/src/rust/RustEngineBridge.cpp
++++ b/src/rust/RustEngineBridge.cpp
+@@ -853,6 +853,77 @@ struct SnapshotBuffer {
+     std::vector<LcEngineNetworkPacketSnapshot> network_packet_raw;
+ };
+ 
++static_assert(
++    sizeof(LcEngineRuntimeWeatherSnapshot) == 240,
++    "LcEngineRuntimeWeatherSnapshot ABI must remain 240 bytes");
++
++LcEngineRuntimeScenarioValue CollectScenarioValue(const C4SVal &value) {
++    return {
++        value.Std,
++        value.Rnd,
++        value.Min,
++        value.Max,
++    };
++}
++
++LcEngineRuntimeWeatherSnapshot CollectWeatherSnapshot(const C4Game &game) {
++    LcEngineRuntimeWeatherSnapshot snapshot{};
++    snapshot.abi_version = LC_ENGINE_RUNTIME_WEATHER_ABI_VERSION;
++    snapshot.struct_size = sizeof(snapshot);
++    snapshot.tick_10 = game.iTick10;
++    snapshot.tick_35 = game.iTick35;
++    snapshot.tick_1000 = game.iTick1000;
++    snapshot.season = game.Weather.Season;
++    snapshot.year_speed = game.Weather.YearSpeed;
++    snapshot.season_delay = game.Weather.SeasonDelay;
++    snapshot.wind = game.Weather.Wind;
++    snapshot.wind_target = game.Weather.TargetWind;
++    snapshot.temperature = game.Weather.Temperature;
++    snapshot.temperature_range = game.Weather.TemperatureRange;
++    snapshot.climate = game.Weather.Climate;
++    snapshot.meteorite_level = game.Weather.MeteoriteLevel;
++    snapshot.volcano_level = game.Weather.VolcanoLevel;
++    snapshot.earthquake_level = game.Weather.EarthquakeLevel;
++    snapshot.lightning_level = game.Weather.LightningLevel;
++    snapshot.initial_rain_gate = game.Weather.RustEngineValidationInitialRainGate;
++    snapshot.start_season = CollectScenarioValue(game.C4S.Weather.StartSeason);
++    snapshot.scenario_year_speed = CollectScenarioValue(game.C4S.Weather.YearSpeed);
++    snapshot.scenario_climate = CollectScenarioValue(game.C4S.Weather.Climate);
++    snapshot.scenario_rain = CollectScenarioValue(game.C4S.Weather.Rain);
++    snapshot.scenario_lightning = CollectScenarioValue(game.C4S.Weather.Lightning);
++    snapshot.scenario_wind = CollectScenarioValue(game.C4S.Weather.Wind);
++    snapshot.scenario_meteorite = CollectScenarioValue(game.C4S.Disasters.Meteorite);
++    snapshot.scenario_volcano = CollectScenarioValue(game.C4S.Disasters.Volcano);
++    snapshot.scenario_earthquake = CollectScenarioValue(game.C4S.Disasters.Earthquake);
++    const char *precipitation = game.C4S.Weather.Precipitation;
++    size_t precipitation_length = 0;
++    while (precipitation_length < LC_ENGINE_RUNTIME_PRECIPITATION_CAPACITY &&
++           precipitation[precipitation_length] != '\0') {
++        ++precipitation_length;
++    }
++    if (precipitation_length != 0) {
++        std::memcpy(
++            snapshot.precipitation_material,
++            precipitation,
++            precipitation_length);
++    }
++    snapshot.precipitation_material_len =
++        static_cast<uint8_t>(precipitation_length);
++    snapshot.no_gamma = game.Weather.NoGamma ? 1u : 0u;
++    snapshot.no_initialize = game.C4S.Head.NoInitialize ? 1u : 0u;
++    snapshot.scenario_no_gamma = game.C4S.Weather.NoGamma ? 1u : 0u;
++    snapshot.initial_rain_gate_valid =
++        game.Weather.RustEngineValidationInitialRainGateValid ? 1u : 0u;
++    return snapshot;
++}
++
++void ApplyWeatherFaultInjection(LcEngineRuntimeWeatherSnapshot &snapshot) {
++    const char *fault = std::getenv("LC_RUST_ENGINE_RUNTIME_WEATHER_FAULT");
++    if (fault && std::strcmp(fault, "wind") == 0) {
++        ++snapshot.wind;
++    }
++}
++
+ std::mutex g_mutex;
+ uint64_t g_last_missing_warning_frame = std::numeric_limits<uint64_t>::max();
+ uint64_t g_last_container_warning_frame = std::numeric_limits<uint64_t>::max();
+@@ -2123,8 +2194,15 @@ void OnFrame(C4Game &game) {
+                 ApplyAuthoritativeRuntimeState(game);
+             }
+         } else {
++            LcEngineRuntimeWeatherSnapshot weather = CollectWeatherSnapshot(game);
++            ApplyWeatherFaultInjection(weather);
+             char *error_message = nullptr;
+-            if (!lc_engine_runtime_compare_snapshot(
++            if (!lc_engine_runtime_supply_weather_snapshot(
++                    g_runtime.get(),
++                    frame,
++                    &weather,
++                    &error_message) ||
++                !lc_engine_runtime_compare_snapshot(
+                     g_runtime.get(),
+                     frame,
+                     object_data,
