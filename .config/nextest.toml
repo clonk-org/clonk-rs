@@ -35,7 +35,7 @@ retries = 2
 # Host preparation uses a real background runtime and can exhaust its bounded
 # poll window when several worker gates saturate the machine simultaneously.
 [[profile.default.overrides]]
-filter = 'package(clonk-app) and test(selected_network_scenario_installs_prepared_host_before_admission)'
+filter = 'package(clonk-app) and test(/(prepared_host_transport_swap_retains_automatic_preload_state|selected_network_scenario_installs_prepared_host_before_admission)/)'
 retries = 2
 slow-timeout = { period = "60s", terminate-after = 1 }
 

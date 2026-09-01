@@ -2811,8 +2811,31 @@ impl GameApp {
                             return Ok(());
                         }
                     }
+                    let retained_preload = self
+                        .classic_host_lobby
+                        .as_ref()
+                        .filter(|_| {
+                            matches!(
+                                &mode,
+                                NetworkMode::Host(HostSettings {
+                                    prepared: Some(_),
+                                    ..
+                                })
+                            )
+                        })
+                        .map(|lobby| lobby.preload);
                     match self.build_classic_host_lobby(&mode, &manager) {
-                        Ok((lobby, options)) => {
+                        Ok((mut lobby, options)) => {
+                            // Final resource publication replaces only the preliminary
+                            // transport. Its lobby remains the same preload context, so
+                            // retain the latch together with its live task or artifact.
+                            if let Some(preload) = retained_preload {
+                                lobby.preload = preload;
+                                lobby.controller.set_preload_button_state(
+                                    preload.manual_button_present,
+                                    preload.eligible,
+                                );
+                            }
                             match &mode {
                                 NetworkMode::Host(HostSettings {
                                     prepared: Some(prepared),

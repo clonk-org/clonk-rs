@@ -6890,6 +6890,83 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
 }
 
 #[test]
+fn prepared_host_transport_swap_retains_automatic_preload_state() {
+    // clonk-org/clonk-rs#1419: resource publication replaces the preliminary
+    // transport without replacing the scenario whose preload is in flight.
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    persist_config_value(&paths, "Network", "PortUDP", "0").test_value();
+    persist_config_value(&paths, "Network", "PortDiscovery", "0").test_value();
+    persist_config_value(&paths, "Network", "EnableUPnP", "0").test_value();
+    persist_config_value(&paths, "Network", "MasterServerSignUp", "0").test_value();
+    persist_config_value(&paths, "General", "Preloading", "1").test_value();
+    let reference_port = std::net::TcpListener::bind("[::1]:0")
+        .expect("reserve selected-host reference port")
+        .local_addr()
+        .test_value()
+        .port();
+    persist_config_value(
+        &paths,
+        "Network",
+        "PortRefServer",
+        reference_port.to_string(),
+    )
+    .test_value();
+    let mut app = new_menu_app_with_paths(1280, 720, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    app.staged_network_host_scenario = Some(staged);
+
+    app.activate_prepared_network_host(scenario, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while app.network.is_none() {
+        app.poll_startup_network_connection().test_value();
+        main_assert!(
+            Instant::now() < deadline,
+            "preliminary host did not enter its lobby: {}",
+            app.status_text
+        );
+        thread::yield_now();
+    }
+    let preliminary_preload = app_classic_lobby(&app).preload;
+    main_assert!(preliminary_preload.spent);
+    main_assert!(!preliminary_preload.eligible);
+    main_assert!(app.lobby_preload_task.is_some() || app.lobby_preload_artifact.is_some());
+
+    while app.pending_network_host_preparation.is_some()
+        || app.startup_network_connection.is_some()
+        || !matches!(
+            app.network_mode.as_ref(),
+            Some(NetworkMode::Host(HostSettings {
+                prepared: Some(_),
+                ..
+            }))
+        )
+    {
+        app.test_update();
+        main_assert!(
+            Instant::now() < deadline,
+            "prepared host did not replace its preliminary transport: {}",
+            app.status_text
+        );
+        thread::yield_now();
+    }
+
+    let exact_lobby = app_classic_lobby(&app);
+    main_assert_eq!(exact_lobby.preload => preliminary_preload);
+    main_assert!(
+        !exact_lobby
+            .controller
+            .logs()
+            .iter()
+            .any(|line| line.text == "Preloading error."),
+        "the retained preload must not be relaunched after the transport swap"
+    );
+}
+
+#[test]
 fn selected_network_scenario_installs_prepared_host_before_admission() {
     // OpenScenario and InitHost finish before Players.Init authors the
     // empty Initial PlayerInfo; AllowJoin follows that direct local
