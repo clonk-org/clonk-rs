@@ -4,6 +4,12 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.6] - 2026-09-01
+
+### Bug fixes
+
+- Fail closed on mismatched player resources (#1433)
+
 ## [0.21.5] - 2026-08-31
 
 ### Bug fixes
