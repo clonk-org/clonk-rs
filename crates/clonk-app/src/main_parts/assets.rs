@@ -1563,10 +1563,11 @@ fn select_loader_with_safe_random(
     let _guard = CLASSIC_SAFE_RANDOM_LOCK
         .lock()
         .map_err(|_| anyhow!("classic SafeRandom lock was poisoned"))?;
-    select_loader_source(
+    select_loader_source_with_directory_order(
         groups,
         graphics,
         specification,
+        presentation_capture_or_discovery_requested(),
         classic_safe_random_unlocked,
     )
 }
@@ -1575,6 +1576,16 @@ pub(crate) fn select_loader_source(
     groups: &[Group],
     graphics: &Group,
     specification: &str,
+    next_mod: impl FnMut(usize) -> usize,
+) -> Result<SelectedLoaderSource> {
+    select_loader_source_with_directory_order(groups, graphics, specification, false, next_mod)
+}
+
+pub(crate) fn select_loader_source_with_directory_order(
+    groups: &[Group],
+    graphics: &Group,
+    specification: &str,
+    canonical_directory_order: bool,
     mut next_mod: impl FnMut(usize) -> usize,
 ) -> Result<SelectedLoaderSource> {
     let patterns = loader_patterns(specification)?;
@@ -1584,15 +1595,30 @@ pub(crate) fn select_loader_source(
     // C4LoaderScreen's GroupSet pass uses png, jpeg, jpg, doubles all of
     // those reservoir slots, then visits bmp.
     for group in groups {
-        seek_loader_candidates(group, &patterns.png, &mut count, &mut chosen, &mut next_mod)?;
         seek_loader_candidates(
             group,
-            &patterns.jpeg,
+            &patterns.png,
+            canonical_directory_order,
             &mut count,
             &mut chosen,
             &mut next_mod,
         )?;
-        seek_loader_candidates(group, &patterns.jpg, &mut count, &mut chosen, &mut next_mod)?;
+        seek_loader_candidates(
+            group,
+            &patterns.jpeg,
+            canonical_directory_order,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
+        seek_loader_candidates(
+            group,
+            &patterns.jpg,
+            canonical_directory_order,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
         count = count
             .checked_mul(2)
             .context("classic loader reservoir count overflow")?;
@@ -1600,7 +1626,14 @@ pub(crate) fn select_loader_source(
             count <= i32::MAX as usize,
             "classic loader reservoir exceeds C++ int range"
         );
-        seek_loader_candidates(group, &patterns.bmp, &mut count, &mut chosen, &mut next_mod)?;
+        seek_loader_candidates(
+            group,
+            &patterns.bmp,
+            canonical_directory_order,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
     }
     if count > 0 {
         return chosen.context("classic loader reservoir selected no local candidate");
@@ -1610,6 +1643,7 @@ pub(crate) fn select_loader_source(
     seek_loader_candidates(
         graphics,
         &patterns.png,
+        canonical_directory_order,
         &mut count,
         &mut chosen,
         &mut next_mod,
@@ -1617,6 +1651,7 @@ pub(crate) fn select_loader_source(
     seek_loader_candidates(
         graphics,
         &patterns.jpg,
+        canonical_directory_order,
         &mut count,
         &mut chosen,
         &mut next_mod,
@@ -1624,6 +1659,7 @@ pub(crate) fn select_loader_source(
     seek_loader_candidates(
         graphics,
         &patterns.jpeg,
+        canonical_directory_order,
         &mut count,
         &mut chosen,
         &mut next_mod,
@@ -1638,6 +1674,7 @@ pub(crate) fn select_loader_source(
     seek_loader_candidates(
         graphics,
         &patterns.bmp,
+        canonical_directory_order,
         &mut count,
         &mut chosen,
         &mut next_mod,
@@ -1646,7 +1683,14 @@ pub(crate) fn select_loader_source(
     if count == 0 {
         // The final fallback intentionally excludes bmp.
         for pattern in ["Loader*.png", "Loader*.jpg", "Loader*.jpeg"] {
-            seek_loader_candidates(graphics, pattern, &mut count, &mut chosen, &mut next_mod)?;
+            seek_loader_candidates(
+                graphics,
+                pattern,
+                canonical_directory_order,
+                &mut count,
+                &mut chosen,
+                &mut next_mod,
+            )?;
         }
     }
 
@@ -1709,12 +1753,17 @@ pub(crate) fn loader_patterns(specification: &str) -> Result<LoaderPatterns> {
 fn seek_loader_candidates(
     group: &Group,
     wildcard: &str,
+    canonical_directory_order: bool,
     count: &mut usize,
     chosen: &mut Option<SelectedLoaderSource>,
     next_mod: &mut impl FnMut(usize) -> usize,
 ) -> Result<()> {
     let wildcard = clonk_script::c4_string_bytes(wildcard);
-    for entry in group.entries()? {
+    let mut entries = group.entries()?;
+    if canonical_directory_order && group.is_directory() {
+        sort_directory_loader_entries_for_presentation_capture(&mut entries);
+    }
+    for entry in entries {
         if !classic_wildcard_match(&wildcard, &entry.name_bytes) {
             continue;
         }
@@ -1739,6 +1788,31 @@ fn seek_loader_candidates(
         }
     }
     Ok(())
+}
+
+fn sort_directory_loader_entries_for_presentation_capture(entries: &mut [GroupEntry]) {
+    // Acquisition writes the capture resource tree in Git tree order.
+    // Preserve the pinned Darwin oracle's observed folder scan when Linux
+    // readdir exposes the materialized files in a different order. Packed
+    // groups and ordinary product runs retain their C4Group entry order.
+    entries.sort_by(git_tree_entry_order);
+}
+
+fn git_tree_entry_order(left: &GroupEntry, right: &GroupEntry) -> std::cmp::Ordering {
+    let common_length = left.name_bytes.len().min(right.name_bytes.len());
+    let prefix_order = left.name_bytes[..common_length].cmp(&right.name_bytes[..common_length]);
+    if prefix_order != std::cmp::Ordering::Equal || left.name_bytes.len() == right.name_bytes.len()
+    {
+        return prefix_order;
+    }
+    let byte_at_end = |entry: &GroupEntry| {
+        entry
+            .name_bytes
+            .get(common_length)
+            .copied()
+            .unwrap_or(if entry.is_directory { b'/' } else { 0 })
+    };
+    byte_at_end(left).cmp(&byte_at_end(right))
 }
 
 pub(crate) fn classic_wildcard_match(wildcard: &[u8], value: &[u8]) -> bool {

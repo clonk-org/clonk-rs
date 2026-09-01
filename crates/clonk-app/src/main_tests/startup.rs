@@ -3540,6 +3540,91 @@ fn loader_selector_repeats_explicit_extension_passes_and_cpp_wildcards() {
 }
 
 #[test]
+fn presentation_capture_directory_loader_order_follows_the_git_tree() {
+    // C4Group's folder search consumes host directory order
+    // (src/C4Group.cpp:1177-1188,1980-2002; src/StdFile.cpp:824-836). The
+    // capture tree is materialized from Git order, so emulate the pinned
+    // oracle host after Linux readdir returns these entries out of order.
+    let directory = tempdir();
+    fs::write(directory.path().join("LoaderWatercave1.png"), b"watercave").test_value();
+    fs::write(directory.path().join("LoaderGoldmine1.png"), b"goldmine").test_value();
+    fs::write(directory.path().join("LoaderSky1.jpg"), b"sky").test_value();
+    let graphics = Group::open(directory.path()).test_value();
+    let mut ranges = Vec::new();
+    let mut draws = [0, 0, 2].into_iter();
+
+    let selected =
+        select_loader_source_with_directory_order(&[], &graphics, "Loader*", true, |range| {
+            ranges.push(range);
+            draws
+                .next()
+                .expect("one canonical draw per loader candidate")
+        })
+        .test_value();
+
+    main_assert_eq!(selected.filename_bytes() => b"LoaderWatercave1.png");
+    main_assert_eq!(ranges => [1, 2, 3]);
+}
+
+#[test]
+fn presentation_capture_git_tree_order_terminates_directory_names_with_a_slash() {
+    // Git's tree walk gives directory names a synthetic trailing slash. That
+    // is the canonical capture order fed to C4Group's native folder search
+    // (src/C4Group.cpp:1177-1188,1980-2002; src/StdFile.cpp:824-836).
+    let directory = tempdir();
+    fs::create_dir(directory.path().join("LoaderA.png")).test_value();
+    fs::write(directory.path().join("LoaderA.png.png"), b"file").test_value();
+    let graphics = Group::open(directory.path()).test_value();
+    let mut ranges = Vec::new();
+
+    let selected =
+        select_loader_source_with_directory_order(&[], &graphics, "Loader*", true, |range| {
+            ranges.push(range);
+            0
+        })
+        .test_value();
+
+    main_assert_eq!(selected.filename_bytes() => b"LoaderA.png");
+    main_assert_eq!(ranges => [1, 2]);
+}
+
+#[test]
+fn presentation_capture_loader_order_preserves_packed_group_entries() {
+    // C4Group's packed search walks the stored entry table, not host folder
+    // order (src/C4Group.cpp:1980-2002), so capture canonicalization must not
+    // reorder it.
+    let mut fixture = MutableGroup::new_bytes(b"Fixture.bin".to_vec());
+    fixture
+        .add_file("LoaderWatercave1.png", b"watercave".to_vec())
+        .test_value();
+    fixture
+        .add_file("LoaderGoldmine1.png", b"goldmine".to_vec())
+        .test_value();
+    fixture
+        .add_file("LoaderSky1.jpg", b"sky".to_vec())
+        .test_value();
+    let graphics = Group::from_raw_memory(
+        PathBuf::from("Fixture.bin"),
+        fixture.pack_raw().expect("pack loader order fixture"),
+    )
+    .test_value();
+    let mut ranges = Vec::new();
+    let mut draws = [0, 0, 2].into_iter();
+
+    let selected =
+        select_loader_source_with_directory_order(&[], &graphics, "Loader*", true, |range| {
+            ranges.push(range);
+            draws
+                .next()
+                .expect("one canonical draw per loader candidate")
+        })
+        .test_value();
+
+    main_assert_eq!(selected.filename_bytes() => b"LoaderGoldmine1.png");
+    main_assert_eq!(ranges => [1, 2, 3]);
+}
+
+#[test]
 fn loader_exhaustion_reports_the_native_four_pattern_diagnostic() {
     // C4LoaderScreen::Init logs its own reason before returning false, and the
     // pattern list it prints is png/bmp/jpg/jpeg -- deliberately not the order
