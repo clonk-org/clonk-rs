@@ -1352,6 +1352,177 @@ pub(crate) fn draw_transform_at(matrix: [f32; 9], off_x: f32, off_y: f32) -> Gra
 /// The five dialogs that own a text field each grew their own copy of this
 /// routine. They render the same glyph through the same atlas and the same
 /// clipped stretch, so they share one implementation here.
+pub(crate) struct CaretAtlas {
+    pub(crate) image: ImageData,
+    pub(crate) source_x: u32,
+    pub(crate) source_y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+type CaretAtlasCacheKey = (u32, u32, u32, u32, u32, u64);
+
+pub(crate) fn caret_atlas(font: &clonk_graphics::clonk_font::ClonkFont) -> Option<CaretAtlas> {
+    use clonk_graphics::clonk_font::GlyphCell;
+
+    if let Some(atlas) = font.prerendered_atlas() {
+        // CStdFont::Init(C4Surface *) retains bitmap facets on their supplied
+        // surface instead of routing them through AddRenderedChar's vector
+        // packing (`src/StdFont.cpp:459-530`).
+        let facet = atlas.facet('\u{a6}')?;
+        if facet.width == 0 || facet.height == 0 {
+            return None;
+        }
+        return Some(CaretAtlas {
+            image: ImageData::from_arc(atlas.width(), atlas.height(), atlas.rgba()),
+            source_x: facet.x,
+            source_y: facet.y,
+            width: facet.width,
+            height: facet.height,
+        });
+    }
+
+    let atlas_size = u32::try_from(font.texture_size()).ok()?;
+    let height = u32::try_from(font.cell_height).ok()?;
+    if atlas_size == 0 || height == 0 {
+        return None;
+    }
+
+    struct Placement<'a> {
+        byte: u8,
+        page: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        glyph: &'a GlyphCell,
+    }
+
+    let mut placements = Vec::new();
+    let (mut page, mut atlas_x, mut atlas_y) = (0_u32, 0_u32, 0_u32);
+    let mut caret = None;
+    for byte in 0x20_u8..=0xff {
+        let character = crate::clonk_fonts::cp1252_to_char(byte).unwrap_or(char::from(byte));
+        let Some(glyph) = font.rendered_glyph(character) else {
+            continue;
+        };
+        let width = u32::try_from(glyph.width).ok()?;
+        if width == 0 || glyph.pixels.len() != width as usize * height as usize {
+            continue;
+        }
+        if atlas_x.checked_add(width)? >= atlas_size && atlas_x != 0 {
+            atlas_x = 0;
+            atlas_y = atlas_y.checked_add(height)?;
+            if atlas_y.checked_add(height)? >= atlas_size {
+                page = page.checked_add(1)?;
+                atlas_y = 0;
+            }
+        }
+        if byte == 0xa6 {
+            caret = Some((page, atlas_x, atlas_y, width));
+        }
+        placements.push(Placement {
+            byte,
+            page,
+            x: atlas_x,
+            y: atlas_y,
+            width,
+            glyph,
+        });
+        atlas_x = atlas_x.checked_add(width)?;
+    }
+    let (caret_page, source_x, source_y, width) = caret?;
+
+    let mut atlas_hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut hash_byte = |byte: u8| {
+        atlas_hash = (atlas_hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for value in [atlas_size, height, caret_page, source_x, source_y, width] {
+        for byte in value.to_le_bytes() {
+            hash_byte(byte);
+        }
+    }
+    for placement in placements
+        .iter()
+        .filter(|placement| placement.page == caret_page)
+    {
+        hash_byte(placement.byte);
+        for value in [placement.x, placement.y, placement.width] {
+            for byte in value.to_le_bytes() {
+                hash_byte(byte);
+            }
+        }
+        for pixel in &placement.glyph.pixels {
+            for byte in [pixel.r, pixel.g, pixel.b, pixel.a] {
+                hash_byte(byte);
+            }
+        }
+    }
+
+    thread_local! {
+        /// CStdFont keeps immutable 128px atlas pages. Reusing the equivalent
+        /// ImageData identity prevents a blinking caret from allocating a new
+        /// retained GPU texture on every visible frame.
+        static CARET_ATLASES: std::cell::RefCell<
+            std::collections::HashMap<CaretAtlasCacheKey, ImageData>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let image = CARET_ATLASES.with(|atlases| {
+        let key = (atlas_size, height, source_x, source_y, width, atlas_hash);
+        if let Some(image) = atlases.borrow().get(&key).cloned() {
+            return image;
+        }
+        let pixel_count = usize::try_from(atlas_size)
+            .ok()
+            .and_then(|side| side.checked_mul(side))
+            .and_then(|count| count.checked_mul(4));
+        let Some(pixel_count) = pixel_count else {
+            return ImageData::new(0, 0, Vec::new());
+        };
+        let mut pixels = vec![255_u8; pixel_count];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        for placement in placements
+            .iter()
+            .filter(|placement| placement.page == caret_page)
+        {
+            for row in 0..height {
+                for column in 0..placement.width {
+                    let Some(pixel) = placement
+                        .glyph
+                        .pixels
+                        .get(row as usize * placement.width as usize + column as usize)
+                    else {
+                        continue;
+                    };
+                    let (Some(x), Some(y)) = (
+                        placement.x.checked_add(column),
+                        placement.y.checked_add(row),
+                    ) else {
+                        continue;
+                    };
+                    if x >= atlas_size || y >= atlas_size {
+                        continue;
+                    }
+                    let destination = ((y * atlas_size + x) * 4) as usize;
+                    pixels[destination..destination + 4]
+                        .copy_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+                }
+            }
+        }
+        let image = ImageData::new(atlas_size, atlas_size, pixels);
+        atlases.borrow_mut().insert(key, image.clone());
+        image
+    });
+    (image.width() != 0).then_some(CaretAtlas {
+        image,
+        source_x,
+        source_y,
+        width,
+        height,
+    })
+}
+
 pub(crate) fn draw_scaled_caret(
     surface: &mut Surface,
     font: &clonk_graphics::clonk_font::ClonkFont,
@@ -1361,68 +1532,14 @@ pub(crate) fn draw_scaled_caret(
     gamma: Option<&clonk_graphics::GammaRamp>,
 ) {
     const SCALE: f32 = 1.5;
-    let Some(glyph) = font.glyph('\u{a6}') else {
+    let Some(atlas) = caret_atlas(font) else {
         return;
     };
-    let Ok(width) = u32::try_from(glyph.width) else {
-        return;
-    };
-    let Ok(height) = u32::try_from(font.cell_height) else {
-        return;
-    };
-    if width == 0 || height == 0 || glyph.pixels.len() != width as usize * height as usize {
-        return;
-    }
-    // Keep the glyph inside one texture tile like the real font atlas. A
-    // narrow standalone image would otherwise be split into width-sized
-    // vertical tiles by the shared C4Surface blitter.
-    let atlas_width = width.max(height).next_power_of_two();
-    let mut glyph_hash = 0xcbf2_9ce4_8422_2325_u64;
-    for pixel in &glyph.pixels {
-        for byte in [pixel.r, pixel.g, pixel.b, pixel.a] {
-            glyph_hash = (glyph_hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    thread_local! {
-        /// The caret atlas is immutable for a given rasterized font. Reusing
-        /// its ImageData identity keeps the retained renderer from allocating
-        /// a fresh GPU texture cache entry on every blinking frame.
-        static CARET_ATLASES: std::cell::RefCell<
-            std::collections::HashMap<(u32, u32, u64), ImageData>,
-        > = std::cell::RefCell::new(std::collections::HashMap::new());
-    }
-    let image = CARET_ATLASES.with(|atlases| {
-        let key = (width, height, glyph_hash);
-        if let Some(image) = atlases.borrow().get(&key).cloned() {
-            return image;
-        }
-        let mut pixels = vec![255_u8; atlas_width as usize * height as usize * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = 0;
-        }
-        for row in 0..height as usize {
-            for column in 0..width as usize {
-                let pixel = glyph.pixels[row * width as usize + column];
-                let destination = (row * atlas_width as usize + column) * 4;
-                // C4Surface initializes unused font-atlas pixels to transparent
-                // white. Preserve that RGB for the GL_LINEAR 1.5x sample.
-                let (red, green, blue) = if pixel.a == 0 {
-                    (255, 255, 255)
-                } else {
-                    (pixel.r, pixel.g, pixel.b)
-                };
-                pixels[destination..destination + 4].copy_from_slice(&[red, green, blue, pixel.a]);
-            }
-        }
-        let image = ImageData::new(atlas_width, height, pixels);
-        atlases.borrow_mut().insert(key, image.clone());
-        image
-    });
     let destination = (
         x as f32,
         y as f32,
-        width as f32 * SCALE,
-        height as f32 * SCALE,
+        atlas.width as f32 * SCALE,
+        atlas.height as f32 * SCALE,
     );
     let left = destination.0.max(clip.x as f32);
     let top = destination.1.max(clip.y as f32);
@@ -1433,10 +1550,10 @@ pub(crate) fn draw_scaled_caret(
     }
     crate::classic_gui::draw_facet_stretch(
         surface,
-        &image,
+        &atlas.image,
         (
-            (left - destination.0) / SCALE,
-            (top - destination.1) / SCALE,
+            atlas.source_x as f32 + (left - destination.0) / SCALE,
+            atlas.source_y as f32 + (top - destination.1) / SCALE,
             (right - left) / SCALE,
             (bottom - top) / SCALE,
         ),

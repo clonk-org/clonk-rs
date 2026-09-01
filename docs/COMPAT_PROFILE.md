@@ -162,9 +162,11 @@ and every first-run configuration default equals the C++ default.
 
 Whole-screen equality is promised **as pixels only where every pixel is
 oracle-authored**. A screen that renders the port's own branding or its
-super-resolved startup art is promised the same *layout* — the same controls at
-the same rects with the same captions, wrapping and ordering — and not the same
-pixels. This is not a softening to make a failing comparison pass: running it
+super-resolved startup art is promised the same *layout* — the same ordered
+controls, semantic roles, visibility, rects and wrapping geometry — and not the
+same pixels. Captions and resolved line text remain exact except at the
+individually declared port-asset nodes whose product text is intentionally
+different. This is not a softening to make a failing comparison pass: running it
 showed the renderer is not what fails. On `startup-main`, excluding the port's
 logo, version string and footer and the cursor the C++ F9 capture bakes in, the
 remaining 823,144 pixels are 99.93% bit-identical and 100.00% within one channel
@@ -177,25 +179,26 @@ clonk-org/clonk-rs#587 forbids masking port-version text or product features, so
 no mask could rescue a pixel term either. Decided in
 clonk-org/clonk-rs#1298.
 
-Held: `docs/RENDERING_PARITY.md` and the F9 reference-capture pixel-parity
-suites in `crates/clonk-frontend`.
+Held: `docs/RENDERING_PARITY.md`, the F9 reference-capture pixel-parity suites
+in `crates/clonk-frontend`, and `.github/workflows/landing.yml (presentation
+captures)`. The landing test runs the release-profile C++/Rust comparison for
+all thirteen screens. `compat/presentation_captures.json` retains the exact
+first audited run-1 artifact pair for each screen, the single resolution and
+scale every capture is taken at, the tolerances a comparison may apply — nothing
+at all for the software renderer, the documented one byte for GPU readback —
+the term each screen is compared on, and the regions a comparison is allowed to
+ignore. A screen counts as captured only once it names a C++ and a Rust capture;
+a mask has to say which platform artifact it covers and what approved it; and a
+screen may sit on the weaker `layout` term only if it names a declared
+port-authored asset class, each of which states what it is and what approved it.
+So a comparison cannot be quietly weakened into one that passes, and "compare
+this screen more weakly" always has to finish the sentence. `crates/clonk-app`
+reads that file rather than a second copy of the list, and its tests fail if a
+screen is dropped, a mask hides pixels without a stated reason, or the software
+tolerance stops being exact.
 
-Pending: clonk-org/clonk-rs#587, C++/Rust presentation capture diffs taken with
-the profile active, and clonk-org/clonk-rs#1241, live platform qualification of
-complete retained-GPU device-loss recovery through the shipped event loop.
-`compat/presentation_captures.json` is the detail behind the first entry: the thirteen screens a comparison has to cover, the single
-resolution and scale every capture is taken at, the tolerances a comparison may
-apply — nothing at all for the software renderer, the documented one byte for
-GPU readback — the term each screen is compared on, and the regions a comparison
-is allowed to ignore. A screen counts as captured only once it names a C++ and a
-Rust capture; a mask has to say which platform artifact it covers and what
-approved it; and a screen may sit on the weaker `layout` term only if it names a
-declared port-authored asset class, each of which states what it is and what
-approved it. So a comparison cannot be quietly weakened into one that passes,
-and "compare this screen more weakly" always has to finish the sentence. `crates/clonk-app` reads that
-file rather than a second copy of the list, and its tests fail if a screen is
-dropped, a mask hides pixels without a stated reason, or the software tolerance
-stops being exact.
+Pending: clonk-org/clonk-rs#1241, live platform qualification of complete
+retained-GPU device-loss recovery through the shipped event loop.
 
 ### Save and replay
 
@@ -359,12 +362,12 @@ matching what a C++ peer computes, not passing its resource negotiation. The
 entry is kept in the manifest rather than removed, so the limitation is stated
 where the contract is read.
 
-The eleven pending evidence entries name ten issues:
+The ten pending evidence entries name nine issues:
 clonk-org/clonk-rs#1261, clonk-org/clonk-rs#1240, clonk-org/clonk-rs#516, and
 clonk-org/clonk-rs#1243 (simulation),
 clonk-org/clonk-rs#586 (control and transport, once each),
-clonk-org/clonk-rs#583 (transport), clonk-org/clonk-rs#587 and
-clonk-org/clonk-rs#1241 (presentation), and clonk-org/clonk-rs#524 and
+clonk-org/clonk-rs#583 (transport), clonk-org/clonk-rs#1241 (presentation), and
+clonk-org/clonk-rs#524 and
 clonk-org/clonk-rs#527 (save and replay).
 
 ## Changing this contract

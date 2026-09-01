@@ -107,6 +107,15 @@ impl NetworkHostPreparation {
     /// The two clock reads remain separate because C++ reads `time(nullptr)`
     /// once for game identity and later for the parameter seed.
     pub fn prepare(self) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
+        self.prepare_with_global_system_scripts(&[])
+    }
+
+    /// Materializes a host whose pre-lobby and post-lobby scenario links share
+    /// the exact compatibility-filtered process `System.c4g` host table.
+    pub fn prepare_with_global_system_scripts(
+        self,
+        global_system_scripts: &[(String, String)],
+    ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
         let start_unix_seconds = unix_seconds_now();
         let random_seed_unix_seconds = pinned_host_parameter_seed_seconds(unix_seconds_now());
         let mut team_assignment =
@@ -139,6 +148,7 @@ impl NetworkHostPreparation {
                 league: self.league.as_ref(),
             },
             self.staged_scenario,
+            global_system_scripts,
             &mut team_assignment,
         )
     }

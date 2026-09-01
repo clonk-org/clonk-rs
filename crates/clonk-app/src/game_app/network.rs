@@ -2898,6 +2898,7 @@ impl GameApp {
         let worker_path = combined_path.clone();
         let worker_definition_groups = definition_groups.clone();
         let worker_material_groups = material_groups.clone();
+        let global_system_scripts = self.global_scripts_for_session();
         let scenario_title = legacy_presentation_text(join_data.parameters.title.as_bytes());
         let spawn_failure_title = scenario_title.clone();
         let (sender, receiver) = mpsc::channel();
@@ -2916,7 +2917,7 @@ impl GameApp {
             .spawn(move || {
                 let mut reporter = ScenarioLoadingReporter::new(sender);
                 let result =
-                    Scenario::load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
+                    Scenario::load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress(
                         &worker_path,
                         &worker_definition_groups,
                         &worker_material_groups,
@@ -2925,6 +2926,7 @@ impl GameApp {
                         random_seed,
                         &language_packs,
                         startup_player_count,
+                        &global_system_scripts,
                         |progress, line| {
                             let visible = if preloaded_first_part {
                                 progress >= 88
@@ -5316,6 +5318,7 @@ impl GameApp {
         };
         let preparation = preparation.with_staged_scenario(staged_scenario);
         let preparing_config = preparation.preparing_host_config();
+        let global_system_scripts = self.global_scripts_for_session();
         self.staged_network_host_scenario = Some(staged);
         let selected_scenario = Some((scenario.identifier.clone(), scenario.title.clone()));
         self.startup_game_search = None;
@@ -5349,9 +5352,11 @@ impl GameApp {
                 if sender.send(Ok((mode, manager))).is_err() {
                     return;
                 }
-                let prepared = preparation.prepare().map_err(|error| {
-                    NetworkStartError::Other(format!("host preparation failed: {error}"))
-                });
+                let prepared = preparation
+                    .prepare_with_global_system_scripts(&global_system_scripts)
+                    .map_err(|error| {
+                        NetworkStartError::Other(format!("host preparation failed: {error}"))
+                    });
                 let _ = preparation_sender.send(prepared);
             });
         match spawn {
@@ -6765,16 +6770,18 @@ impl GameApp {
                 return Ok(false);
             }
         };
-        let mut prepared = match preparation.prepare() {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "cannot materialize the next round on the live session; re-hosting instead"
-                );
-                return Ok(false);
-            }
-        };
+        let global_system_scripts = self.global_scripts_for_session();
+        let mut prepared =
+            match preparation.prepare_with_global_system_scripts(&global_system_scripts) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "cannot materialize the next round on the live session; re-hosting instead"
+                    );
+                    return Ok(false);
+                }
+            };
 
         // Keep each connected client and its player-file identity, but reset
         // the fields that described the finished simulation. The host packet
@@ -9803,13 +9810,20 @@ impl GameApp {
         })?;
         let resolver = InstallDefinitionResolver::new(self.app_paths.clone().map(Arc::new));
         let languages = startup_language_sequence(self.app_paths.as_ref());
-        let scenario =
-            load_scenario_with_definition_load(path, &resolver, &languages, &definition_load)
-                .map_err(|error| {
-                    classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
-                        detail: format!("scenario validation failed: {error}"),
-                    })
-                })?;
+        let global_system_scripts = self.global_scripts_for_session();
+        let scenario = load_scenario_with_definition_load_and_progress(
+            path,
+            &resolver,
+            &languages,
+            &definition_load,
+            &global_system_scripts,
+            |_, _| {},
+        )
+        .map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: format!("scenario validation failed: {error}"),
+            })
+        })?;
         let metadata = scenario.lobby_metadata().ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
                 detail: "legacy Scenario.txt lobby metadata is unavailable".to_string(),

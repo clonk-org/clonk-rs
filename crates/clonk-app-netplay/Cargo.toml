@@ -15,6 +15,8 @@ publish.workspace = true
 # graph sees the same hook surface `#[cfg(test)]` provided before the split;
 # production builds never request it.
 test-hooks = []
+# Routes native presentation-only random draws into the audited capture stream.
+presentation-capture = ["clonk-engine/presentation-capture"]
 
 [dependencies]
 anyhow = "1.0"
@@ -35,7 +37,7 @@ tracing = "0.1"
 # Keep clonk-engine's property-test dependencies in this test graph so focused
 # netplay-crate runs share one clonk-engine fingerprint with the workspace gate.
 clonk-app-core = { path = "../clonk-app-core", features = ["test-support"] }
-clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
+clonk-engine = { path = "../clonk-engine", features = ["presentation-capture", "test-graph"] }
 flate2 = "1"
 # Match clonk-app's image feature request so both test graphs resolve one
 # image fingerprint.

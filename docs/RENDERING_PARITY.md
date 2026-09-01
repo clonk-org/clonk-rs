@@ -194,50 +194,50 @@ Keep all three evidence layers when changing this boundary:
 Canonical C++/Rust presentation captures use 1280x720 at 100% scale. Both sides
 of a comparison must use the same geometry; comparing different resolutions or
 scales is not visual-parity evidence. The required screen set, the measured
-blockers and approved masks are machine-readable in
+comparison terms, retained evidence paths and approved masks are machine-readable in
 `compat/presentation_captures.json`.
 
-### Capturing a startup pair
+### Audited capture workflow
 
-Both halves are byte-reproducible, so a difference between them is a real one.
-Verified 2026-08-26 for all six startup views (clonk-org/clonk-rs#587).
+The evidence gate does not accept manual F9 screenshots. The launcher archives
+the exact Rust revision and pinned instrumented oracle, applies
+`parity/oracle/presentation_capture.patch`, builds both producers, and runs two
+fresh processes per engine and screen. Each receipt binds the executable,
+source/content trees, native config, player, network fixture, locale, scenario,
+frame/trigger and synchronized and presentation RNG ledgers.
 
-**Rust half** — headless, one process per view:
+On macOS with `LEGACYCLONK_ORACLE_ROOT` pointing at the pinned checkout, create
+and accept a candidate from a clean committed revision with:
 
 ```sh
-LC_USER_DATA_DIR=<scratch> clonk-app --dump-menu-frame <out>.png \
-  --menu-view {main|scenarios|net|plrsel|options|about}
+python3 scripts/acquire_presentation_oracle.py acquire \
+  --oracle-root "$LEGACYCLONK_ORACLE_ROOT" \
+  --output-dir /absolute/fresh/presentation-candidate \
+  --accept
 ```
 
-The scratch config needs `[Graphics] DisableGamma=0` and `Shader=true`, or
-`startup_fragment_gamma` falls back to identity and every pure-black text pixel
-comes out 0 where the oracle's gamma LUT floors it to 1 — a capture-config
-artifact that reads as a large parity loss. It also needs a player: with none,
-the first-run new-player form opens over the menu and picks its colour from
-`SafeRandom`, so the capture is neither comparable nor reproducible.
-`two_menu_dumps_are_byte_identical_once_the_capture_procedure_has_a_player`
-pins that.
+The output path must be fresh, absolute and outside both repositories. A
+candidate is accepted only when duplicate captures are byte-identical and the
+trusted Rust comparator proves every C++/Rust pair on its declared pixel or
+layout term. `cargo xtask compat verify` revalidates the checked-in evidence and
+its squash-stable source inventory. The live landing gate separately rebuilds
+the current Rust producer, captures it twice and compares it to the accepted C++
+references; run the same check locally with a second fresh output directory:
 
-**C++ half** — the pinned oracle has no headless dump, so it needs a headed
-windowed run driven to each screen and F9 on each. Its own screenshot is
-already exactly 1280x720 and is byte-identical across repeats of one screen, so
-no OS screen capture is involved. Traps, each of which cost a run:
+```sh
+cargo xtask presentation verify-current --profile release \
+  --output-dir /absolute/fresh/presentation-current
+```
 
-- the app reads `~/Library/Preferences/legacyclonk.config`, not the port's
-  config; back it up, since the engine rewrites it on a clean exit;
-- set `DisplayMode=Window`, 1280x720, `Scale=100`, and
-  `[Network] EnableAutomaticUpdate=0` or a modal update dialog blocks startup;
-- the bundle's content symlinks must resolve, or it segfaults right after
-  `Loading graphics...`;
-- a build linked against an older homebrew `fmt` will not launch at all once the
-  `opt/fmt` symlink moves; repoint it with `install_name_tool -change` rather
-  than rebuilding;
-- park the mouse in a dead corner before F9. The engine draws its own cursor
-  into the frame, so wherever it sits becomes a masked region.
+Ambient pointer state is normalized as input, not hidden from the output. Both
+engines route a no-button, no-modifier logical pointer at `(32, 32)` through
+their production input path immediately before every captured render, and both
+render their native cursor glyph. No cursor mask is approved.
 
-**Comparison** — `C4Surface::SavePNG` reads the framebuffer one row low, so the
-C++ capture's rows 1..719 line up with the Rust dump's rows 0..718. Compare on
-that shift, not on row 0.
+The oracle patch also corrects the historical `C4Surface::SavePNG` framebuffer
+readback coordinate before writing evidence. Unpatched manual F9 captures read
+one row low — rows 1..719 line up with Rust rows 0..718 — so those screenshots
+remain useful for exploration but are not admissible evidence for this suite.
 
 New draw code must not read destination CPU pixels during active retained
 capture. It must emit a blend command, use an isolated scratch resource before

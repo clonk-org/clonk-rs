@@ -611,16 +611,28 @@ class CiLatencyTests(unittest.TestCase):
             self.assertNotIn(f"          - name: {old_name}\n", workflow)
         self.assertNotIn("components: clippy, rustfmt", linux)
 
-    def test_quality_fetches_only_the_pinned_oracle_history(self):
+    def test_oracle_verifiers_fetch_only_the_pinned_oracle_history(self):
         workflow = LANDING.read_text(encoding="utf-8")
-        quality = matrix_entry(workflow, "workspace quality")
+        linux = workflow[workflow.index("  linux:") : workflow.index("  windows-smoke:")]
         fetch = (
             "git fetch --no-tags --depth=1 origin "
             "7d43b47b7d789b533f32d005e64596e0a07019cd"
         )
 
-        self.assertIn(fetch, quality)
-        self.assertLess(quality.index(fetch), quality.index("python3 -m unittest"))
+        for name in (
+            "workspace quality",
+            "presentation captures",
+            "engine contracts",
+        ):
+            with self.subTest(name=name):
+                self.assertIn("oracle: true", matrix_entry(workflow, name))
+        self.assertEqual(linux.count("oracle: true"), 3)
+        self.assertIn("if: matrix.oracle == true", linux)
+        self.assertIn(fetch, linux)
+        self.assertLess(
+            linux.index("- name: Fetch pinned LegacyClonk oracle commit"),
+            linux.index("- name: Run ${{ matrix.name }}"),
+        )
 
     def test_linux_setup_is_pinned_fast_and_matrix_scoped(self):
         workflow = LANDING.read_text(encoding="utf-8")
@@ -648,6 +660,7 @@ class CiLatencyTests(unittest.TestCase):
             "engine and frontend unit and parity": "libasound2-dev libudev-dev",
             "remaining workspace 2/2": "libasound2-dev libxmp4 mesa-vulkan-drivers",
             "workspace quality": "libasound2-dev libudev-dev python3-pil",
+            "presentation captures": "libasound2-dev libudev-dev",
         }
         for name, packages in expected_apt.items():
             self.assertIn(f"apt: {packages}", matrix_entry(workflow, name))
@@ -665,9 +678,10 @@ class CiLatencyTests(unittest.TestCase):
 
         self.assertEqual(
             len(re.findall(r"(?m)^          - name: ", linux)),
-            17,
-            "17 Linux rows plus two Windows lanes and release context fit the runner pool",
+            18,
+            "at most 17 Linux rows plus two Windows lanes and release context fit the runner pool",
         )
+        self.assertIn("max-parallel: 17", linux)
 
         self.assertIn('if [[ -n "$APT_PACKAGES" ]]', linux)
         self.assertIn("scripts/install-apt-packages.sh", linux)
@@ -675,6 +689,46 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("rustc 1.98.0", linux)
         self.assertIn("id: preinstalled-rust", linux)
         self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", linux)
+
+    def test_presentation_captures_are_a_bounded_fail_closed_landing_row(self):
+        workflow = LANDING.read_text(encoding="utf-8")
+        linux = workflow[workflow.index("  linux:") : workflow.index("  windows-smoke:")]
+        capture = matrix_entry(workflow, "presentation captures")
+
+        self.assertIn("timeout-minutes: ${{ matrix.timeout || 15 }}", linux)
+        self.assertIn("timeout: 30", capture)
+        self.assertIn(
+            'cargo xtask presentation verify-current --profile release --output-dir "$RUNNER_TEMP/presentation-current"',
+            capture,
+        )
+        upload = linux[linux.index("- name: Upload presentation capture failure") :]
+        self.assertIn("if: failure() && matrix.name == 'presentation captures'", upload)
+        self.assertIn(
+            "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
+            upload,
+        )
+        for path in (
+            "${{ runner.temp }}/presentation-current/run-*/rust/artifacts",
+            "${{ runner.temp }}/presentation-current/run-*/rust/receipts",
+            "${{ runner.temp }}/presentation-current/verify-current.json",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, upload)
+        self.assertIn("if-no-files-found: warn", upload)
+        self.assertIn("retention-days: 14", upload)
+        self.assertNotIn("continue-on-error", upload)
+
+    def test_presentation_command_routes_through_the_engine_xtask(self):
+        engine_xtask = (REPOSITORY / "xtask" / "src" / "main.rs").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('Some("presentation") => {', engine_xtask)
+        self.assertIn("compat_profile::presentation_command(&tail)", engine_xtask)
+        self.assertIn(
+            "cargo xtask presentation verify-current --profile <p> --output-dir <dir>",
+            engine_xtask,
+        )
 
     def test_hosted_toolchains_and_cached_registry_are_reused_safely(self):
         workflow = LANDING.read_text(encoding="utf-8")

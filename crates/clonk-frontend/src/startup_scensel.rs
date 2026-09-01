@@ -2935,7 +2935,10 @@ mod tests {
         }
         assert_eq!(
             (changed, bounds, hash),
-            (104, (165, 468, 170, 485), 0x4ec9_97b4_06dd_f222)
+            // C4GuiEdit.cpp:613-620 draws byte A6 at 1.5x, and
+            // StdFont.cpp:902-925 samples its shared atlas facet. The first
+            // changed column is the adjacent CP1252 glyph sampled by GL_LINEAR.
+            (111, (164, 468, 170, 485), 0x160a_1975_b40b_95b5)
         );
         assert_ne!(
             render(None, text.len(), 20, false).snapshot(),

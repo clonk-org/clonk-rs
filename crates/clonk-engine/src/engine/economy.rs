@@ -3059,6 +3059,7 @@ impl Engine {
         let trace_index = self.rng.trace_index;
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace_index = trace_index;
+        #[cfg(any(test, feature = "presentation-capture"))]
         crate::particles::reset_presentation_safe_random_after_fix_random();
     }
 

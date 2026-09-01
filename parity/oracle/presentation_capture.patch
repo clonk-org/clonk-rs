@@ -1,4 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 880e9aaa8..0210ac497 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -494,7 +494,7 @@ target_link_libraries(clonk PRIVATE CURL::libcurl)
@@ -11,7 +12,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
  
  # Link Freetype
 diff --git a/src/C4Application.cpp b/src/C4Application.cpp
-index 89bbf76..05c3c12 100644
+index 89bbf7661..05c3c12f6 100644
 --- a/src/C4Application.cpp
 +++ b/src/C4Application.cpp
 @@ -38,7 +38,9 @@
@@ -82,7 +83,7 @@ index 89bbf76..05c3c12 100644
  			iLastGameTick = iThisGameTick;
  		}
 diff --git a/src/C4Application.h b/src/C4Application.h
-index d441a29..f9bfb49 100644
+index d441a2952..f9092b134 100644
 --- a/src/C4Application.h
 +++ b/src/C4Application.h
 @@ -32,6 +32,7 @@
@@ -93,16 +94,17 @@ index d441a29..f9bfb49 100644
  
  class C4ToastSystem;
  class CStdDDraw;
-@@ -117,6 +118,7 @@ public:
+@@ -117,6 +118,8 @@ public:
  	virtual int32_t &ScreenWidth() override { return Config.Graphics.ResX; }
  	virtual int32_t &ScreenHeight() override { return Config.Graphics.ResY; }
  	virtual float GetScale() override { return Config.Graphics.Scale / 100.0f; }
 +	std::string GetExecutablePath() const;
++	unsigned int GetGameTickDelay() const { return iGameTickDelay; }
  	void Clear() override;
  	void Execute() override;
  	// System.c4g helper funcs
 diff --git a/src/C4FileMonitor.h b/src/C4FileMonitor.h
-index a868229..1c047c3 100644
+index a8682290b..1c047c306 100644
 --- a/src/C4FileMonitor.h
 +++ b/src/C4FileMonitor.h
 @@ -32,6 +32,7 @@
@@ -113,8 +115,36 @@ index a868229..1c047c3 100644
  #elif defined(__linux__)
  #include "C4Coroutine.h"
  #endif
+diff --git a/src/C4FullScreen.h b/src/C4FullScreen.h
+index 566e4b466..9576589f4 100644
+--- a/src/C4FullScreen.h
++++ b/src/C4FullScreen.h
+@@ -23,6 +23,11 @@
+ 
+ #include "C4Game.h"
+ 
++namespace C4PresentationCapture
++{
++	bool OwnsRuntimeClock();
++}
++
+ class C4FullScreen : public CStdWindow
+ {
+ public:
+@@ -33,7 +38,10 @@ public:
+ 	~C4FullScreen();
+ 	void Execute();
+ 	bool ViewportCheck();
+-	void Sec1Timer() override { Game.Sec1Timer(); Application.DoSec1Timers(); }
++	void Sec1Timer() override
++	{
++		if (!C4PresentationCapture::OwnsRuntimeClock()) { Game.Sec1Timer(); Application.DoSec1Timers(); }
++	}
+ 	bool ShowAbortDlg(); // show game abort dialog (Escape pressed)
+ 	bool ActivateMenuMain();
+ 	void CloseMenu();
 diff --git a/src/C4Game.cpp b/src/C4Game.cpp
-index e322f43..7bcf9b1 100644
+index e322f43bb..7bcf9b19b 100644
 --- a/src/C4Game.cpp
 +++ b/src/C4Game.cpp
 @@ -1846,7 +1846,10 @@ void C4Game::Evaluate()
@@ -145,8 +175,63 @@ index e322f43..7bcf9b1 100644
  }
  
  void C4Game::OnResolutionChanged()
+diff --git a/src/C4GameMessage.h b/src/C4GameMessage.h
+index ac9916a98..2a5ae334e 100644
+--- a/src/C4GameMessage.h
++++ b/src/C4GameMessage.h
+@@ -51,9 +51,18 @@ const int32_t C4GM_NoBreak    = 1 << 0,
+ 
+ const int32_t C4GM_PositioningFlags = C4GM_Bottom | C4GM_Top | C4GM_Left | C4GM_Right | C4GM_HCenter | C4GM_VCenter;
+ 
++extern int32_t PortraitWidth;
++extern int32_t PortraitIndent;
++
++namespace C4PresentationCapture
++{
++	class RuntimeLayoutBuilder;
++}
++
+ class C4GameMessage
+ {
+ 	friend class C4GameMessageList;
++	friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ 
+ public:
+ 	void Draw(C4FacetEx &cgo, int32_t iPlayer);
+@@ -84,6 +93,7 @@ public:
+ 
+ class C4GameMessageList
+ {
++	friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ public:
+ 	C4GameMessageList();
+ 	~C4GameMessageList();
+diff --git a/src/C4GameOverDlg.h b/src/C4GameOverDlg.h
+index 816f92344..9bf79631c 100644
+--- a/src/C4GameOverDlg.h
++++ b/src/C4GameOverDlg.h
+@@ -23,6 +23,11 @@
+ #include <C4GuiDialogs.h>
+ #include <C4RoundResults.h>
+ 
++namespace C4PresentationCapture
++{
++	class RuntimeLayoutBuilder;
++}
++
+ // horizontal display of goal symbols; filfilled goals marked
+ // maybe to be reused for a game goal dialog?
+ class C4GoalDisplay : public C4GUI::Window
+@@ -52,6 +57,7 @@ public:
+ 
+ class C4GameOverDlg : public C4GUI::Dialog
+ {
++	friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ private:
+ 	static bool is_shown;
+ 	C4Sec1TimerCallback<C4GameOverDlg> *pSec1Timer; // engine timer hook for player list update
 diff --git a/src/C4GraphicsSystem.cpp b/src/C4GraphicsSystem.cpp
-index c49bfe0..e583659 100644
+index c49bfe065..e58365953 100644
 --- a/src/C4GraphicsSystem.cpp
 +++ b/src/C4GraphicsSystem.cpp
 @@ -30,6 +30,7 @@
@@ -190,7 +275,7 @@ index c49bfe0..e583659 100644
  }
  
 diff --git a/src/C4Gui.cpp b/src/C4Gui.cpp
-index 03dc816..6d6eb43 100644
+index 03dc81679..f04f9898c 100644
 --- a/src/C4Gui.cpp
 +++ b/src/C4Gui.cpp
 @@ -215,6 +215,14 @@ void Element::ClientPos2ScreenPos(int32_t &riX, int32_t &riY)
@@ -208,79 +293,8 @@ index 03dc816..6d6eb43 100644
  void Element::MouseInput(CMouse &rMouse, int32_t iButton, int32_t iX, int32_t iY, uint32_t dwKeyParam)
  {
  	// store self as mouse-over-component
-@@ -442,29 +450,32 @@ void CMouse::Input(int32_t iButton, int32_t iX, int32_t iY, uint32_t dwKeyParam)
- 	}
- }
- 
--void CMouse::Draw(C4FacetEx &cgo, bool fDrawToolTip)
-+void CMouse::Draw(C4FacetEx &cgo, bool fDrawToolTip, bool fDrawCursor)
- {
- 	// only if owned
- 	if (!fActive) return;
- 
--	int32_t iOffsetX, iOffsetY;
--	if (GfxR->fOldStyleCursor)
--	{
--		iOffsetX = iOffsetY = 0;
--	}
--	else
-+	if (fDrawCursor)
- 	{
--		iOffsetX = -GfxR->fctMouseCursor.Wdt / 2;
--		iOffsetY = -GfxR->fctMouseCursor.Hgt / 2;
--	}
-+		int32_t iOffsetX, iOffsetY;
-+		if (GfxR->fOldStyleCursor)
-+		{
-+			iOffsetX = iOffsetY = 0;
-+		}
-+		else
-+		{
-+			iOffsetX = -GfxR->fctMouseCursor.Wdt / 2;
-+			iOffsetY = -GfxR->fctMouseCursor.Hgt / 2;
-+		}
- 
--	const auto scale = Application.GetScale();
--	const auto inverseScale = 1 / scale;
--	C4DrawTransform transform;
--	transform.SetMoveScale(0.f, 0.f, inverseScale, inverseScale);
--	GfxR->fctMouseCursor.DrawT(cgo.Surface, static_cast<int>(x * scale + iOffsetX), static_cast<int>(y * scale + iOffsetY), 0, 0, &transform, true);
--	if (Game.MouseControl.IsHelp())
--		GfxR->fctMouseCursor.DrawT(cgo.Surface, static_cast<int>(x * scale + iOffsetX + 5), static_cast<int>(y * scale + iOffsetY - 5), 29, 0, &transform, true);
-+		const auto scale = Application.GetScale();
-+		const auto inverseScale = 1 / scale;
-+		C4DrawTransform transform;
-+		transform.SetMoveScale(0.f, 0.f, inverseScale, inverseScale);
-+		GfxR->fctMouseCursor.DrawT(cgo.Surface, static_cast<int>(x * scale + iOffsetX), static_cast<int>(y * scale + iOffsetY), 0, 0, &transform, true);
-+		if (Game.MouseControl.IsHelp())
-+			GfxR->fctMouseCursor.DrawT(cgo.Surface, static_cast<int>(x * scale + iOffsetX + 5), static_cast<int>(y * scale + iOffsetY - 5), 29, 0, &transform, true);
-+	}
- 	// ToolTip
- 	if (fDrawToolTip && pMouseOverElement)
- 	{
-@@ -522,7 +533,7 @@ void Screen::RemoveElement(Element *pChild)
- 	if (pContext) if (pContext == pChild) pContext = nullptr; else pContext->RemoveElement(pChild);
- }
- 
--Screen::Screen(int32_t tx, int32_t ty, int32_t twdt, int32_t thgt) : Window(), Mouse(tx + twdt / 2, ty + thgt / 2), pContext(nullptr), fExclusive(true), pGamePadOpener(nullptr)
-+Screen::Screen(int32_t tx, int32_t ty, int32_t twdt, int32_t thgt) : Window(), Mouse(tx + twdt / 2, ty + thgt / 2), pContext(nullptr), fExclusive(true), fRenderMouseCursor(true), pGamePadOpener(nullptr)
- {
- 	// no dialog active
- 	pActiveDlg = nullptr;
-@@ -662,8 +673,9 @@ void Screen::Render(bool fDoBG)
- 
- void Screen::RenderMouse(C4FacetEx &cgo)
- {
--	// draw mouse cursor
--	Mouse.Draw(cgo, (Mouse.IsMouseStill() && Mouse.IsActiveInput()) || Game.MouseControl.IsHelp());
-+	// Audited capture omits only the glyph. A tooltip made visible by real
-+	// input remains part of the composed frame.
-+	Mouse.Draw(cgo, (Mouse.IsMouseStill() && Mouse.IsActiveInput()) || Game.MouseControl.IsHelp(), fRenderMouseCursor);
- }
- 
- void Screen::Draw(C4FacetEx &cgo, bool fDoBG)
 diff --git a/src/C4Gui.h b/src/C4Gui.h
-index f683209..395459e 100644
+index f68320988..1af6fe860 100644
 --- a/src/C4Gui.h
 +++ b/src/C4Gui.h
 @@ -41,6 +41,9 @@
@@ -372,33 +386,8 @@ index f683209..395459e 100644
  
  	// get margins from bounds to client rect
  	virtual int32_t GetMarginTop() override    { return 8; }
-@@ -1675,7 +1690,7 @@ public:
- 	CMouse(int32_t iX, int32_t iY);
- 	~CMouse();
- 
--	void Draw(C4FacetEx &cgo, bool fDrawToolTip); // draw cursor
-+	void Draw(C4FacetEx &cgo, bool fDrawToolTip, bool fDrawCursor = true); // draw cursor and/or tooltip
- 
- 	void Input(int32_t iButton, int32_t iX, int32_t iY, uint32_t dwKeyParam); // process mouse input
- 	bool IsLDown() { return LDown; }
-@@ -1712,6 +1727,7 @@ protected:
- 	Dialog *pActiveDlg; // current, active dialog
- 	ContextMenu *pContext; // currently opened context menu (lowest submenu)
- 	bool fExclusive; // default true. if false, input is shared with the game
-+	bool fRenderMouseCursor; // false only for audited captures; tooltips remain rendered
- 	C4Rect PreferredDlgRect; // rectangle in which dialogs should be placed
- 	C4GamePadOpener *pGamePadOpener;
- 
-@@ -1740,6 +1756,7 @@ public:
- 
- 	void Render(bool fDoBG); // render to lpDDraw
- 	void RenderMouse(C4FacetEx &cgo); // draw mouse only
-+	void SetRenderMouseCursor(bool fToValue) { fRenderMouseCursor = fToValue; }
- 
- 	virtual Screen *GetScreen() override { return this; } // return contained screen
- 	static Screen *GetScreenS() { return pScreen; } // get global screen
 diff --git a/src/C4GuiButton.cpp b/src/C4GuiButton.cpp
-index 53fc2b9..baacb05 100644
+index 53fc2b940..baacb0537 100644
 --- a/src/C4GuiButton.cpp
 +++ b/src/C4GuiButton.cpp
 @@ -67,6 +67,24 @@ void Button::SetText(const char *szToText)
@@ -445,7 +434,7 @@ index 53fc2b9..baacb05 100644
  {
  	if (eUseIcon >= 0) fctIcon = Icon::GetIconFacet(eUseIcon); else fctIcon.Surface = nullptr;
 diff --git a/src/C4GuiCheckBox.cpp b/src/C4GuiCheckBox.cpp
-index 761e7ed..a5d8178 100644
+index 761e7ed3d..a5d8178ca 100644
 --- a/src/C4GuiCheckBox.cpp
 +++ b/src/C4GuiCheckBox.cpp
 @@ -136,6 +136,28 @@ void CheckBox::DrawElement(C4FacetEx &cgo)
@@ -478,7 +467,7 @@ index 761e7ed..a5d8178 100644
  {
  	if (pCBHandler) pCBHandler->DeRef();
 diff --git a/src/C4GuiComboBox.cpp b/src/C4GuiComboBox.cpp
-index 9e0a3a4..072aa08 100644
+index 9e0a3a43e..072aa0824 100644
 --- a/src/C4GuiComboBox.cpp
 +++ b/src/C4GuiComboBox.cpp
 @@ -184,6 +184,17 @@ void ComboBox::DrawElement(C4FacetEx &cgo)
@@ -500,7 +489,7 @@ index 9e0a3a4..072aa08 100644
  {
  	// left-click activates menu
 diff --git a/src/C4GuiComboBox.h b/src/C4GuiComboBox.h
-index de5e369..54839ae 100644
+index de5e36986..54839ae25 100644
 --- a/src/C4GuiComboBox.h
 +++ b/src/C4GuiComboBox.h
 @@ -77,6 +77,7 @@ public:
@@ -512,7 +501,7 @@ index de5e369..54839ae 100644
  
  	void SetColors(uint32_t dwFontClr, uint32_t dwBGClr, uint32_t dwBorderClr)
 diff --git a/src/C4GuiContainers.cpp b/src/C4GuiContainers.cpp
-index b68423c..5274a79 100644
+index b68423c74..5274a79a3 100644
 --- a/src/C4GuiContainers.cpp
 +++ b/src/C4GuiContainers.cpp
 @@ -630,6 +630,15 @@ CStdFont *GroupBox::GetTitleFont() const
@@ -531,8 +520,21 @@ index b68423c..5274a79 100644
  void GroupBox::DrawElement(C4FacetEx &cgo)
  {
  	// draw background
+diff --git a/src/C4GuiDialogs.h b/src/C4GuiDialogs.h
+index 9e83e51f0..c41cb3ba0 100644
+--- a/src/C4GuiDialogs.h
++++ b/src/C4GuiDialogs.h
+@@ -155,6 +155,8 @@ public:
+ 	}
+ 
+ 	FrameDecoration *GetFrameDecoration() const { return pFrameDeco; }
++	WoodenLabel *GetPresentationTitle() const { return pTitle; }
++	IconButton *GetPresentationCloseButton() const { return pCloseBtn; }
+ 	void SetClientSize(int32_t iToWdt, int32_t iToHgt); // resize dialog so its client area has the specified size
+ 
+ 	void OnUserClose(C4GUI::Control *btn) // user presses close btn: Usually close dlg with abort
 diff --git a/src/C4GuiEdit.cpp b/src/C4GuiEdit.cpp
-index 198dc65..d923fa4 100644
+index 198dc6549..d923fa4b1 100644
 --- a/src/C4GuiEdit.cpp
 +++ b/src/C4GuiEdit.cpp
 @@ -633,6 +633,20 @@ void Edit::DrawElement(C4FacetEx &cgo)
@@ -557,7 +559,7 @@ index 198dc65..d923fa4 100644
  {
  	// safety: no text?
 diff --git a/src/C4GuiEdit.h b/src/C4GuiEdit.h
-index 6ba3fc9..20fdc1a 100644
+index 6ba3fc9f5..20fdc1a4e 100644
 --- a/src/C4GuiEdit.h
 +++ b/src/C4GuiEdit.h
 @@ -106,6 +106,7 @@ protected:
@@ -569,7 +571,7 @@ index 6ba3fc9..20fdc1a 100644
  
  	static int32_t GetDefaultEditHeight();
 diff --git a/src/C4GuiLabels.cpp b/src/C4GuiLabels.cpp
-index c5a943a..ca5226b 100644
+index c5a943ae7..ca5226bb8 100644
 --- a/src/C4GuiLabels.cpp
 +++ b/src/C4GuiLabels.cpp
 @@ -49,6 +49,16 @@ void Label::DrawElement(C4FacetEx &cgo)
@@ -644,7 +646,7 @@ index c5a943a..ca5226b 100644
  {
  	// inherited
 diff --git a/src/C4GuiListBox.h b/src/C4GuiListBox.h
-index c569ec2..0a00acd 100644
+index c569ec2de..0a00acd1a 100644
 --- a/src/C4GuiListBox.h
 +++ b/src/C4GuiListBox.h
 @@ -115,6 +115,8 @@ public:
@@ -657,7 +659,7 @@ index c569ec2..0a00acd 100644
  	// get margins from bounds to client rect
  	virtual int32_t GetMarginTop() override    { return 3; }
 diff --git a/src/C4GuiTabular.cpp b/src/C4GuiTabular.cpp
-index 9de0568..2b8bf6d 100644
+index 9de0568e8..2b8bf6d22 100644
 --- a/src/C4GuiTabular.cpp
 +++ b/src/C4GuiTabular.cpp
 @@ -672,6 +672,57 @@ int32_t Tabular::GetTabButtonWidth() const
@@ -719,7 +721,7 @@ index 9de0568..2b8bf6d 100644
  {
  	Control::UpdateSize();
 diff --git a/src/C4GuiTabular.h b/src/C4GuiTabular.h
-index d8ad218..8ea3a31 100644
+index d8ad218ce..8ea3a3138 100644
 --- a/src/C4GuiTabular.h
 +++ b/src/C4GuiTabular.h
 @@ -46,7 +46,7 @@ public:
@@ -764,7 +766,7 @@ index d8ad218..8ea3a31 100644
  	void SetGfx(C4FacetEx *pafctBack, C4FacetEx *pafctClip, C4FacetEx *pafctIcons, CStdFont *paSheetCaptionFont, bool fResizeByAspect);
  	static int32_t GetLeftClipSize(C4FacetEx *pfctForClip) { return pfctForClip->Wdt * 95 / 120; } // left clip area size by gfx
 diff --git a/src/C4League.cpp b/src/C4League.cpp
-index f64b344..478d4a1 100644
+index f64b34442..478d4a16d 100644
 --- a/src/C4League.cpp
 +++ b/src/C4League.cpp
 @@ -23,6 +23,7 @@
@@ -784,8 +786,40 @@ index f64b344..478d4a1 100644
  	StdSha1 sha1;
  	for (uint32_t i = 0; i < (1 << 30); i++)
  	{
+diff --git a/src/C4Menu.h b/src/C4Menu.h
+index 7d31b908f..c9f2dc184 100644
+--- a/src/C4Menu.h
++++ b/src/C4Menu.h
+@@ -29,6 +29,11 @@
+ 
+ class C4Viewport;
+ 
++namespace C4PresentationCapture
++{
++	class RuntimeLayoutBuilder;
++}
++
+ enum
+ {
+ 	C4MN_SymbolSize = 16,
+@@ -76,6 +81,7 @@ void DrawMenuSymbol(int32_t iMenu, C4Facet &cgo, int32_t iOwner, C4Object *cObj)
+ class C4MenuItem : public C4GUI::Element
+ {
+ 	friend class C4Menu;
++	friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ 
+ public:
+ 	~C4MenuItem();
+@@ -133,6 +139,7 @@ public:
+ 
+ class C4Menu : public C4GUI::Dialog
+ {
++	friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ 	typedef C4GUI::Dialog BaseClass;
+ 
+ public:
 diff --git a/src/C4Movement.cpp b/src/C4Movement.cpp
-index 3f235c3..baa850b 100644
+index 3f235c32a..baa850b6c 100644
 --- a/src/C4Movement.cpp
 +++ b/src/C4Movement.cpp
 @@ -20,6 +20,7 @@
@@ -797,7 +831,7 @@ index 3f235c3..baa850b 100644
  #include <C4Wrappers.h>
  
 diff --git a/src/C4NetIO.cpp b/src/C4NetIO.cpp
-index 02bf4cb..d8cefb0 100644
+index 02bf4cb12..d8cefb057 100644
 --- a/src/C4NetIO.cpp
 +++ b/src/C4NetIO.cpp
 @@ -20,6 +20,7 @@
@@ -835,7 +869,7 @@ index 02bf4cb..d8cefb0 100644
  		return false;
  
 diff --git a/src/C4Network2Dialogs.h b/src/C4Network2Dialogs.h
-index db04f4b..47499bb 100644
+index db04f4b30..47499bb30 100644
 --- a/src/C4Network2Dialogs.h
 +++ b/src/C4Network2Dialogs.h
 @@ -249,6 +249,8 @@ protected:
@@ -847,8 +881,35 @@ index db04f4b..47499bb 100644
  };
  
  // graph display component
+diff --git a/src/C4PlayerInfoListBox.h b/src/C4PlayerInfoListBox.h
+index e1727fced..1fb0b7102 100644
+--- a/src/C4PlayerInfoListBox.h
++++ b/src/C4PlayerInfoListBox.h
+@@ -28,8 +28,14 @@
+ 
+ class C4Team;
+ 
++namespace C4PresentationCapture
++{
++	class RuntimeLayoutBuilder;
++}
++
+ class C4PlayerInfoListBox : public C4GUI::ListBox
+ {
++	friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ public:
+ 	enum Spacings
+ 	{
+@@ -99,6 +105,7 @@ private:
+ 	// lobby information and display of joined players
+ 	class PlayerListItem : public ListItem
+ 	{
++		friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ 	private:
+ 		// subcomponents
+ 		C4GUI::Icon *pIcon; // player icon
 diff --git a/src/C4Random.h b/src/C4Random.h
-index f6d50fe..91243d0 100644
+index f6d50fece..91243d00f 100644
 --- a/src/C4Random.h
 +++ b/src/C4Random.h
 @@ -23,11 +23,19 @@
@@ -930,19 +991,25 @@ index f6d50fe..91243d0 100644
  
  void Randomize3();
 diff --git a/src/C4Startup.cpp b/src/C4Startup.cpp
-index 9542728..2a981a0 100644
+index 9542728ef..353b03214 100644
 --- a/src/C4Startup.cpp
 +++ b/src/C4Startup.cpp
-@@ -26,9 +26,900 @@
+@@ -26,9 +26,1300 @@
  #include <C4StartupOptionsDlg.h>
  #include <C4StartupAboutDlg.h>
  #include <C4StartupPlrSelDlg.h>
 +#include <C4GameLobby.h>
 +#include <C4GameOverDlg.h>
++#include <C4GameMessage.h>
 +#include <C4GuiComboBox.h>
 +#include <C4GuiEdit.h>
++#include <C4Menu.h>
++#include <C4PlayerInfoListBox.h>
++#include <C4Viewport.h>
  #include <C4Game.h>
++#include <C4FullScreen.h>
 +#include <C4Object.h>
++#include <C4ObjectMenu.h>
 +#include <C4Player.h>
  #include <C4Application.h>
  #include <C4Log.h>
@@ -968,9 +1035,11 @@ index 9542728..2a981a0 100644
 +	constexpr int32_t CaptureWidth = 1280;
 +	constexpr int32_t CaptureHeight = 720;
 +	constexpr int32_t CaptureScale = 100;
++	constexpr int32_t CapturePointerX = 32;
++	constexpr int32_t CapturePointerY = 32;
 +	constexpr uint32_t CaptureSeed = 587;
 +	constexpr std::string_view OracleSourceTree = "3859b3715b7f58d0c461cf45dc226593a2b0d687";
-+	constexpr std::string_view FixtureContentTree = "df08a1ea6d4ad70313b20e0b95996a354f059d6b";
++	constexpr std::string_view FixtureContentTree = "092a7dd9a43f0d87e8d6dd9957325c44668776b9";
 +	constexpr std::string_view ConfigSha256 = "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb";
 +	constexpr std::string_view PlayerSha256 = "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0";
 +	constexpr std::string_view NetworkReferencesSha256 = "922c7ccf941069bafd38a18e3ed71a747eadaa0c2a037b4e34422ce7312c8bf4";
@@ -978,14 +1047,16 @@ index 9542728..2a981a0 100644
 +	constexpr std::string_view OracleGraphicsManifestSha256 = "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d";
 +	constexpr std::string_view OracleSystemTree = "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3";
 +	constexpr std::string_view OracleSystemManifestSha256 = "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b";
-+	constexpr std::string_view TutorialManifestSha256 = "b391f1c9a7039b441afe5f9b680090bc92f4be18b86b0051b91d12700e197386";
-+	constexpr std::string_view ObjectsManifestSha256 = "8d9af578fe57878320ccb0345d607c63af18a41c0f8f5d8f75a36b4f5fa4423b";
++	constexpr std::string_view TutorialManifestSha256 = "72a021e24acb3eb3c7fb296b71fbdb69a577626a335b90fff57c81ca9538000f";
++	constexpr std::string_view ObjectsManifestSha256 = "a0030a62c311e29d893dcd4ad178ee162ce8223d4686f6737b4c8f6ca8d23088";
 +	constexpr std::string_view MaterialManifestSha256 = "1fe714cea5c3f824633ba2b3cf98561866f76b1c577ac0ffe8dea741b35bdc90";
 +	constexpr std::string_view CaptureCapabilityMarker =
-+		"CLONK_PRESENTATION_CAPTURE_CAPABILITIES_V1=startup-main,startup-scenario-selection,startup-network-browser,startup-player-selection,startup-options,startup-about,network-lobby,loader,hud,ingame-menu,object-menu,gameplay,evaluation";
++		"CLONK_PRESENTATION_CAPTURE_CAPABILITIES_V1=startup-main,startup-scenario-selection,startup-network-browser,startup-player-selection,startup-options,startup-about,network-lobby,loader,hud,ingame-menu,object-menu,gameplay,evaluation;layout=hud,ingame-menu,object-menu,gameplay,evaluation";
 +	constexpr std::array<std::string_view, 6> StartupCaptureCapabilities{
 +		"startup-main", "startup-scenario-selection", "startup-network-browser",
 +		"startup-player-selection", "startup-options", "startup-about"};
++	constexpr std::array<std::string_view, 5> RuntimeLayoutCapabilities{
++		"hud", "ingame-menu", "object-menu", "gameplay", "evaluation"};
 +	constexpr std::array<std::string_view, 6> CaptureEnvironment{
 +		"CLONK_PRESENTATION_CAPTURE",
 +		"CLONK_PRESENTATION_RUN_ID",
@@ -1422,6 +1493,359 @@ index 9542728..2a981a0 100644
 +		return left.x < right.x + right.Wdt && right.x < left.x + left.Wdt &&
 +			left.y < right.y + right.Hgt && right.y < left.y + left.Hgt;
 +	}
++
++	class RuntimeLayoutBuilder
++	{
++		std::vector<LayoutElement> elements;
++
++		static LayoutElement NativeText(const char *path, const char *role, const C4Rect &rect,
++			const char *caption, const C4Rect &lineRect, const bool visible = true)
++		{
++			LayoutElement result{path, role, rect, visible, "", caption ? caption : "", {}};
++			if (!result.caption.empty()) result.lines.push_back({result.caption, lineRect});
++			return result;
++		}
++
++		void AddHud(C4Viewport &viewport)
++		{
++			C4Player *player = Game.Players.Get(viewport.Player);
++			if (!player) return;
++			const C4Rect output{viewport.DrawX, viewport.DrawY, viewport.ViewWdt, viewport.ViewHgt};
++			C4Object *const realCursor = player->Cursor;
++			C4Object *const cursor = player->ViewCursor ? player->ViewCursor : realCursor;
++			if (cursor)
++			{
++				if (Config.Graphics.ShowPlayerHUDAlways && cursor->Info)
++				{
++					const C4Rect info{output.x + C4SymbolBorder, output.y + C4SymbolBorder,
++						3 * C4SymbolSize, C4SymbolSize};
++					elements.push_back(Empty("game/viewport/0/hud/cursor-info", "group", info, true));
++					if (Config.Graphics.ShowPortraits && !(cursor->Def->HideHUDElements & C4DefCore::HH_Portrait) &&
++						cursor->Info->Portrait.GetGfx() && cursor->Info->Portrait.GetGfx()->Bitmap->Wdt)
++						elements.push_back(Empty("game/viewport/0/hud/cursor-info/portrait", "image",
++							C4Rect(info.x, info.y, 4 * info.Hgt / 3 + 10, info.Hgt + 10), true));
++				}
++				if (!(cursor->Def->HideHUDElements & C4DefCore::HH_Inventory))
++					elements.push_back(Empty("game/viewport/0/hud/inventory", "inventory",
++						C4Rect(output.x + C4SymbolBorder, output.y + output.Hgt - C4SymbolBorder - C4SymbolSize,
++							7 * C4SymbolSize, C4SymbolSize), true));
++				if ((cursor->ViewEnergy || Config.Graphics.ShowPlayerHUDAlways) &&
++					output.Hgt > 2 * C4SymbolSize + 2 * C4SymbolBorder)
++				{
++					const int32_t barWidth = Game.GraphicsResource.fctEnergyBars.Wdt;
++					const int32_t yOffset = Config.Graphics.ShowPortraits ? 10 : 0;
++					C4Rect bar{output.x + C4SymbolBorder,
++						output.y + C4SymbolSize + 2 * C4SymbolBorder + yOffset,
++						barWidth, output.Hgt - 3 * C4SymbolBorder - 2 * C4SymbolSize - yOffset};
++					if (!(cursor->Def->HideHUDBars & C4DefCore::HB_Energy))
++					{
++						elements.push_back(Empty("game/viewport/0/hud/energy", "meter", bar, true));
++						bar.x += barWidth + 1;
++					}
++					if (cursor->MagicEnergy && !(cursor->Def->HideHUDBars & C4DefCore::HB_MagicEnergy))
++					{
++						elements.push_back(Empty("game/viewport/0/hud/magic-energy", "meter", bar, true));
++						bar.x += barWidth + 1;
++					}
++					if (cursor->Breath && cursor->Breath < cursor->GetPhysical()->Breath &&
++						!(cursor->Def->HideHUDBars & C4DefCore::HB_Breath))
++						elements.push_back(Empty("game/viewport/0/hud/breath", "meter", bar, true));
++				}
++				// C4Object::DrawCommands returns before painting either command facet
++				// while the cursor owns an active object menu (src/C4Object.cpp:2952).
++				if (Config.Graphics.ShowCommands && realCursor &&
++					(!realCursor->Menu || !realCursor->Menu->IsActive()) && output.Hgt > C4SymbolSize)
++				{
++					const int32_t size = 2 * C4SymbolSize / 3;
++					elements.push_back(Empty("game/viewport/0/hud/commands/primary", "command-area",
++						C4Rect(output.x, output.y + output.Hgt - size, output.Wdt, size), true));
++					elements.push_back(Empty("game/viewport/0/hud/commands/secondary", "command-area",
++						C4Rect(output.x + output.Wdt - 2 * size, output.y, 2 * size, output.Hgt - size - 5), true));
++				}
++			}
++
++			if (player->ViewWealth || Config.Graphics.ShowPlayerHUDAlways)
++				elements.push_back(Empty("game/viewport/0/hud/player/wealth", "value",
++					C4Rect(output.x + output.Wdt - C4SymbolSize - C4SymbolBorder, output.y + C4SymbolBorder,
++						C4SymbolSize, C4SymbolSize / 2), true));
++			if ((Game.C4S.Game.ValueGain && player->ViewValue) || Config.Graphics.ShowPlayerHUDAlways)
++				elements.push_back(Empty("game/viewport/0/hud/player/value", "value",
++					C4Rect(output.x + output.Wdt - 2 * C4SymbolSize - 2 * C4SymbolBorder, output.y + C4SymbolBorder,
++						C4SymbolSize, C4SymbolSize / 2), true));
++			if (Config.Graphics.ShowPlayerHUDAlways)
++				elements.push_back(Empty("game/viewport/0/hud/player/crew", "value",
++					C4Rect(output.x + output.Wdt - 3 * C4SymbolSize - 3 * C4SymbolBorder, output.y + C4SymbolBorder,
++						C4SymbolSize, C4SymbolSize / 2), true));
++
++			if (player->ShowControl)
++			{
++				const int32_t size = std::min(output.Wdt / 3, 7 * output.Hgt / 24);
++				int32_t x = output.x + output.Wdt / 2 - size / 2;
++				int32_t y = output.y + 15;
++				switch (player->ShowControlPos)
++				{
++				case 1: x = output.x + output.Wdt * 3 / 4 - size / 2; y = output.y + output.Hgt / 2 - size / 2; break;
++				case 2: x = output.x + output.Wdt / 4 - size / 2; y = output.y + output.Hgt / 2 - size / 2; break;
++				case 3: x = output.x + output.Wdt / 4 - size / 2; break;
++				case 4: x = output.x + output.Wdt * 3 / 4 - size / 2; break;
++				}
++				const int32_t cellWidth = size / 3, cellHeight = size / 4;
++				for (int32_t control = 0; control < 10; ++control)
++					if (player->ShowControl & (1 << control))
++					{
++						const std::string path = std::format("game/viewport/0/hud/controls/{}", control);
++						elements.push_back(Empty(path.c_str(), "control", C4Rect(
++							x + cellWidth * (control % 3), y + cellHeight * (control / 3), cellWidth, cellHeight), true));
++					}
++			}
++
++			if (Config.Graphics.ShowCommands)
++			{
++				const int32_t symbolSize = C4SymbolSize * 2 / 3;
++				const int32_t x = output.x + output.Wdt - symbolSize;
++				const int32_t y = output.y + C4SymbolSize + 2 * C4SymbolBorder;
++				if (Game.MouseControl.IsViewport(&viewport))
++				{
++					elements.push_back(Empty("game/viewport/0/hud/mouse/help", "control",
++						C4Rect(x, y, symbolSize, symbolSize), true));
++					elements.push_back(Empty("game/viewport/0/hud/mouse/player-menu", "control",
++						C4Rect(x, y + symbolSize, symbolSize, symbolSize), true));
++				}
++				else
++					elements.push_back(Empty("game/viewport/0/hud/player-menu", "control",
++						C4Rect(x, y + symbolSize, symbolSize, symbolSize), true));
++			}
++		}
++
++		void AddMenu(C4Viewport &viewport, C4Menu &menu)
++		{
++			C4Rect menuBounds = menu.GetBounds();
++			menuBounds.x += viewport.DrawX;
++			menuBounds.y += viewport.DrawY;
++			elements.push_back(Empty("game/viewport/0/menu/background", "panel", menuBounds, menu.IsVisible()));
++			if (auto *title = menu.GetPresentationTitle())
++				elements.push_back(Label("game/viewport/0/menu/title", title));
++			// Trace the live child: C4MainMenu.cpp:45-49 assigns Player only after
++			// C4Menu.cpp:351-357 may have created it while HasMouse() saw NO_OWNER.
++			if (auto *close = menu.GetPresentationCloseButton())
++				elements.push_back(Button("game/viewport/0/menu/close", close));
++			if (menu.pClientWindow)
++			{
++				elements.push_back(Empty("game/viewport/0/menu/client", "panel", menu.pClientWindow));
++				const C4Rect client = menu.pClientWindow->GetScreenBounds();
++				for (int32_t index = 0; index < menu.ItemCount; ++index)
++				{
++					C4MenuItem *const item = menu.GetItem(index);
++					if (!item || !item->IsVisible() || !Intersects(item->GetScreenBounds(), client)) continue;
++					const C4Rect itemBounds = item->GetScreenBounds();
++					C4Rect textBounds = itemBounds;
++					const int32_t symbolWidth = item->GetSymbolWidth(textBounds.Hgt);
++					textBounds.x += symbolWidth;
++					textBounds.Wdt -= symbolWidth;
++					const std::string path = std::format("game/viewport/0/menu/items/{}", index);
++					elements.push_back(NativeText(path.c_str(), "menu-item", itemBounds,
++						item->Caption, textBounds, true));
++				}
++				if (auto *scrollbar = menu.pClientWindow->GetPresentationScrollBar())
++					elements.push_back(Empty("game/viewport/0/menu/scrollbar", "scrollbar", scrollbar));
++			}
++
++			if (menu.Extra || menu.DrawMenuControls)
++			{
++				const C4Rect extra{menuBounds.x + 1, menuBounds.y + menuBounds.Hgt - C4MN_SymbolSize - 1,
++					menuBounds.Wdt - 2, C4MN_SymbolSize};
++				elements.push_back(Empty("game/viewport/0/menu/extra-bar", "panel", extra, true));
++				if (menu.DrawMenuControls)
++				{
++					int32_t controlX = extra.x;
++					const auto addControl = [this, &controlX, &extra](const char *name)
++					{
++						const std::string path = std::format("game/viewport/0/menu/controls/{}", name);
++						elements.push_back(Empty(path.c_str(), "control", C4Rect(controlX, extra.y,
++							C4MN_SymbolSize, C4MN_SymbolSize), true));
++						controlX += C4MN_SymbolSize;
++					};
++					C4MenuItem *const selected = menu.GetSelectedItem();
++					if (menu.Style != C4MN_Style_Info)
++					{
++						addControl("enter-key");
++						addControl("confirm");
++						if (selected && selected->Command2[0])
++						{
++							addControl("enter-all-key");
++							addControl("confirm-all");
++						}
++					}
++					addControl("close-key");
++					addControl(SSearch(menu.CloseCommand.getData(), "\"Exit\"") ? "exit" : "cancel");
++				}
++			}
++		}
++
++		void AddMessages(C4Viewport &viewport)
++		{
++			int32_t outputIndex = 0;
++			for (const auto &ownedMessage : Game.Messages.Messages)
++			{
++				const C4GameMessage &message = *ownedMessage;
++				if (!message.Delay || (message.Type != C4GM_Global && message.Type != C4GM_GlobalPlayer) ||
++					(message.Type == C4GM_GlobalPlayer && viewport.Player != message.Player) || !message.PortraitDef)
++					continue;
++				int32_t x = message.dwFlags & C4GM_XRel ? message.X * viewport.ViewWdt / 100 : message.X;
++				int32_t y = message.dwFlags & C4GM_YRel ? message.Y * viewport.ViewHgt / 100 : message.Y;
++				int32_t width = message.dwFlags & C4GM_WidthRel ? message.Wdt * viewport.ViewWdt / 100 : message.Wdt;
++				int32_t textWidth, textHeight;
++				StdStrBuf brokenText;
++				if (~message.dwFlags & C4GM_NoBreak)
++				{
++					if (!width) width = BoundBy<int32_t>(viewport.ViewWdt / 2, 50, std::min<int32_t>(500, viewport.ViewWdt - 10));
++					const int32_t unbrokenWidth = Game.GraphicsResource.FontRegular.GetTextWidth(message.Text.getData(), true);
++					width = std::min(width, unbrokenWidth + 10);
++					textWidth = width;
++					textHeight = Game.GraphicsResource.FontRegular.BreakMessage(message.Text.getData(), textWidth, &brokenText, true);
++				}
++				else
++				{
++					Game.GraphicsResource.FontRegular.GetTextExtent(message.Text.getData(), textWidth, textHeight, true);
++					brokenText.Ref(message.Text);
++				}
++
++				int32_t drawX = viewport.DrawX + x;
++				int32_t drawY = viewport.DrawY + y;
++				if (message.dwFlags & C4GM_Bottom) drawY += viewport.ViewHgt;
++				else if (message.dwFlags & C4GM_VCenter) drawY += viewport.ViewHgt / 2;
++				if (message.dwFlags & C4GM_Right) drawX += viewport.ViewWdt;
++				else if (message.dwFlags & C4GM_HCenter) drawX += viewport.ViewWdt / 2;
++				const int32_t leftBorder = message.pFrameDeco ? message.pFrameDeco->iBorderLeft : 0;
++				const int32_t rightBorder = message.pFrameDeco ? message.pFrameDeco->iBorderRight : 0;
++				const int32_t topBorder = message.pFrameDeco ? message.pFrameDeco->iBorderTop : 0;
++				const int32_t bottomBorder = message.pFrameDeco ? message.pFrameDeco->iBorderBottom : 0;
++				C4Rect background{drawX, drawY,
++					textWidth + PortraitWidth + PortraitIndent + leftBorder + rightBorder,
++					std::max(textHeight, PortraitWidth) + topBorder + bottomBorder};
++				if (message.dwFlags & C4GM_Bottom) background.y -= background.Hgt;
++				else if (message.dwFlags & C4GM_VCenter) background.y -= background.Hgt / 2;
++				if (message.dwFlags & C4GM_Right) background.x -= background.Wdt;
++				else if (message.dwFlags & C4GM_HCenter) background.x -= background.Wdt / 2;
++				if (!message.pFrameDeco) background.y = drawY - textHeight;
++
++				const C4Rect portrait{background.x + leftBorder, background.y + topBorder, PortraitWidth, PortraitWidth};
++				const C4Rect text{portrait.x + PortraitWidth + PortraitIndent, portrait.y, textWidth, textHeight};
++				const std::string base = std::format("game/viewport/0/message/{}", outputIndex++);
++				elements.push_back(Empty((base + "/background").c_str(), "panel", background, true));
++				elements.push_back(Empty((base + "/portrait").c_str(), "image", portrait, true));
++				elements.push_back(NativeText((base + "/text").c_str(), "label", text,
++					brokenText.getData(), text, true));
++			}
++		}
++
++		void AddEvaluation()
++		{
++			auto *const dialog = Game.pGUI ? dynamic_cast<C4GameOverDlg *>(Game.pGUI->GetTopDialog()) : nullptr;
++			if (!dialog) CaptureFailure("evaluation layout has no live C4GameOverDlg");
++			elements.push_back(Empty("game/evaluation/dialog", "dialog", dialog));
++			if (auto *title = dialog->GetPresentationTitle())
++				elements.push_back(Label("game/evaluation/title", title));
++			if (auto *close = dialog->GetPresentationCloseButton())
++				elements.push_back(Button("game/evaluation/close", close));
++
++			C4GoalDisplay *goalDisplay = nullptr;
++			for (C4GUI::Element *element = dialog->GetFirst(); element; element = element->GetNext())
++				if ((goalDisplay = dynamic_cast<C4GoalDisplay *>(element))) break;
++			if (goalDisplay)
++			{
++				elements.push_back(Empty("game/evaluation/goals", "group", goalDisplay));
++				if (C4GUI::Element *picture = goalDisplay->GetFirst())
++					elements.push_back(Empty("game/evaluation/goals/0/picture", "image", picture));
++			}
++
++			if (dialog->iPlrListCount > 0 && dialog->ppPlayerLists && dialog->ppPlayerLists[0])
++			{
++				C4PlayerInfoListBox *const list = dialog->ppPlayerLists[0];
++				elements.push_back(Empty("game/evaluation/player-list", "list", list));
++				elements.push_back(Empty("game/evaluation/player-list/viewport", "viewport",
++					list->GetPresentationViewportBounds(), list->IsVisible()));
++				if (auto *player = dynamic_cast<C4PlayerInfoListBox::PlayerListItem *>(list->GetFirst()))
++				{
++					elements.push_back(Empty("game/evaluation/player-list/players/0", "list-item", player));
++					if (player->pIcon)
++						elements.push_back(Empty("game/evaluation/player-list/players/0/portrait", "image", player->pIcon));
++					if (player->pNameLabel)
++						elements.push_back(Label("game/evaluation/player-list/players/0/name", player->pNameLabel));
++					if (player->pTimeLabel)
++						elements.push_back(Label("game/evaluation/player-list/players/0/time", player->pTimeLabel));
++					if (player->pScoreLabel)
++						elements.push_back(Label("game/evaluation/player-list/players/0/score", player->pScoreLabel));
++				}
++				if (auto *scrollbar = list->GetPresentationScrollBar())
++					elements.push_back(Empty("game/evaluation/player-list/scrollbar", "scrollbar", scrollbar));
++			}
++
++			const std::array<C4GUI::Button *, 4> buttons{
++				dialog->pBtnExit, dialog->pBtnContinue, dialog->pBtnRestart, dialog->pBtnNextMission};
++			for (std::size_t index = 0; index < buttons.size(); ++index)
++				if (buttons[index])
++				{
++					const std::string path = std::format("game/evaluation/buttons/{}", index);
++					elements.push_back(Button(path.c_str(), buttons[index]));
++				}
++		}
++
++	public:
++		static std::string Build(const char *screen)
++		{
++			RuntimeLayoutBuilder builder;
++			builder.elements.push_back(Empty("game/surface", "surface",
++				C4Rect(0, 0, Config.Graphics.ResX, Config.Graphics.ResY), true));
++			C4UpperBoard &upperBoard = Game.GraphicsSystem.UpperBoard;
++			const C4Facet &upper = upperBoard.Output;
++			builder.elements.push_back(Empty("game/upper-board/background", "board",
++				C4Rect(upper.X, upper.Y, upper.Wdt, upper.Hgt), !!upper.Surface));
++
++			const C4Facet &nativeLogo = Game.GraphicsResource.fctLogo;
++			float logoZoom = static_cast<float>(nativeLogo.Wdt) / nativeLogo.Hgt != 3.f ? 0.25f : 0.21f;
++			logoZoom *= 960.f / nativeLogo.Wdt;
++			const C4Rect logo{upper.X + static_cast<int32_t>(upper.Wdt / 2 - (nativeLogo.Wdt / 2) * logoZoom), upper.Y,
++				static_cast<int32_t>(nativeLogo.Wdt * logoZoom), static_cast<int32_t>(nativeLogo.Hgt * logoZoom)};
++			builder.elements.push_back(Empty("game/upper-board/branding/logo", "image", logo, true, "branding"));
++
++			const int32_t lineHeight = Game.GraphicsResource.FontRegular.GetLineHeight();
++			const char *const scenarioTitle = Game.Parameters.ScenarioTitle.getData();
++			const C4Rect scenarioLine{upper.X + 10, upper.Y + upper.Hgt / 2 - lineHeight / 2,
++				Game.GraphicsResource.FontRegular.GetTextWidth(scenarioTitle), lineHeight};
++			builder.elements.push_back(NativeText("game/upper-board/scenario-title", "label",
++				scenarioLine, scenarioTitle, scenarioLine));
++			const C4Rect timeLine{upper.X + upper.Wdt - upperBoard.TextWidth - 10, upperBoard.TextYPosition,
++				upperBoard.TextWidth, lineHeight};
++			builder.elements.push_back(NativeText("game/upper-board/game-time", "label",
++				timeLine, upperBoard.cTimeString, timeLine));
++
++			const auto &viewports = Game.GraphicsSystem.GetViewports();
++			if (viewports.size() != 1) CaptureFailure(std::format("{} layout requires exactly one viewport", screen));
++			C4Viewport &viewport = *viewports.front();
++			builder.elements.push_back(Empty("game/viewport/0", "viewport", viewport.GetOutputRect(), true));
++			builder.elements.push_back(Empty("game/viewport/0/landscape", "landscape",
++				C4Rect(viewport.DrawX + viewport.BorderLeft, viewport.DrawY + viewport.BorderTop,
++					viewport.ViewWdt - viewport.BorderLeft - viewport.BorderRight,
++					viewport.ViewHgt - viewport.BorderTop - viewport.BorderBottom), true));
++			builder.AddHud(viewport);
++
++			if (C4Player *player = Game.Players.Get(viewport.Player))
++			{
++				if (player->Cursor && player->Cursor->Menu && player->Cursor->Menu->IsActive())
++					builder.AddMenu(viewport, *player->Cursor->Menu);
++				else if (player->Menu.IsActive())
++					builder.AddMenu(viewport, player->Menu);
++			}
++			builder.AddMessages(viewport);
++			if (std::string_view{screen} == "evaluation") builder.AddEvaluation();
++
++			const C4Facet &messageBoard = Game.GraphicsSystem.MessageBoard.Output;
++			builder.elements.push_back(Empty("game/message-board/output", "board",
++				C4Rect(messageBoard.X, messageBoard.Y, messageBoard.Wdt, messageBoard.Hgt), !!messageBoard.Surface));
++			return Serialize(screen, builder.elements);
++		}
++	};
 +}
 +
 +namespace C4PresentationCapture
@@ -1442,6 +1866,7 @@ index 9542728..2a981a0 100644
 +			int32_t stateFrame;
 +			uint32_t receiptFrame;
 +			uint32_t renderOrdinal;
++			int32_t expectedGameTime;
 +			bool networkLobby;
 +			int32_t simulationCalls;
 +			int32_t presentationCalls;
@@ -1449,13 +1874,13 @@ index 9542728..2a981a0 100644
 +		};
 +
 +		constexpr std::array RuntimeCases{
-+			RuntimeCaseSpec{RuntimeCase::NetworkLobby, "network-lobby", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "network-host-lobby-v1", "lobby-notice-acknowledged/render-ordinal-2", 0, 2, 2, true, 0, 3, "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"},
-+			RuntimeCaseSpec{RuntimeCase::Loader, "loader", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "scenario-loader-v1", "loader-progress-60-fixed-log/render-ordinal-2", 0, 2, 2, false, 0, 3, "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"},
-+			RuntimeCaseSpec{RuntimeCase::Hud, "hud", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "tutorial01-frame-v1", "state-frame-90/render-ordinal-1", 90, 90, 1, false, 585, 1, "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"},
-+			RuntimeCaseSpec{RuntimeCase::IngameMenu, "ingame-menu", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "tutorial01-activate-menu-main-v1", "state-frame-90/render-ordinal-2", 90, 90, 2, false, 585, 1, "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"},
-+			RuntimeCaseSpec{RuntimeCase::ObjectMenu, "object-menu", "Tutorial.c4f/Tutorial03.c4s", "555f0a23db98761b8b84839db2ddc9e9bfb9ad7080081d43581d55323d7c8cd2", "tutorial03-object-menu-input-v1", "state-frame-410/tooltip-render-ordinal-90", 410, 410, 90, false, 890, 7, "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6"},
-+			RuntimeCaseSpec{RuntimeCase::Gameplay, "gameplay", "Tutorial.c4f/Tutorial02.c4s", "9e82deb0e2b47ab4a9961390b6060690ee395346fad55cc543f5e7b8080d7f07", "tutorial02-frame-v1", "state-frame-180/render-ordinal-1", 180, 180, 1, false, 581, 1, "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"},
-+			RuntimeCaseSpec{RuntimeCase::Evaluation, "evaluation", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "tutorial01-game-over-v1", "state-frame-90/evaluation-open/render-ordinal-2", 90, 90, 2, false, 585, 1, "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}};
++			RuntimeCaseSpec{RuntimeCase::NetworkLobby, "network-lobby", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "network-host-lobby-v1", "lobby-notice-acknowledged/render-ordinal-2", 0, 2, 2, -1, true, 0, 3, "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"},
++			RuntimeCaseSpec{RuntimeCase::Loader, "loader", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "scenario-loader-v1", "loader-progress-60-fixed-log/render-ordinal-2", 0, 2, 2, -1, false, 0, 3, "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"},
++			RuntimeCaseSpec{RuntimeCase::Hud, "hud", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "tutorial01-frame-v1", "state-frame-90/render-ordinal-1", 90, 90, 1, 2, false, 585, 1, "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"},
++			RuntimeCaseSpec{RuntimeCase::IngameMenu, "ingame-menu", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "tutorial01-activate-menu-main-v1", "state-frame-90/render-ordinal-2", 90, 90, 2, 2, false, 585, 1, "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"},
++			RuntimeCaseSpec{RuntimeCase::ObjectMenu, "object-menu", "Tutorial.c4f/Tutorial03.c4s", "555f0a23db98761b8b84839db2ddc9e9bfb9ad7080081d43581d55323d7c8cd2", "tutorial03-object-menu-input-v1", "state-frame-410/tooltip-render-ordinal-90", 410, 410, 90, 11, false, 890, 7, "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6"},
++			RuntimeCaseSpec{RuntimeCase::Gameplay, "gameplay", "Tutorial.c4f/Tutorial02.c4s", "9e82deb0e2b47ab4a9961390b6060690ee395346fad55cc543f5e7b8080d7f07", "tutorial02-frame-v1", "state-frame-180/render-ordinal-1", 180, 180, 1, 5, false, 581, 1, "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"},
++			RuntimeCaseSpec{RuntimeCase::Evaluation, "evaluation", "Tutorial.c4f/Tutorial01.c4s", "051d42a206715601e2c087a8b99646dadda9c0ae30dc46f0aec9c0bdbd7a71af", "tutorial01-game-over-v1", "state-frame-90/evaluation-open/render-ordinal-2", 90, 90, 2, 2, false, 585, 1, "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}};
 +
 +		struct RuntimeCaptureState
 +		{
@@ -1463,8 +1888,8 @@ index 9542728..2a981a0 100644
 +			const RuntimeCaseSpec *spec{nullptr};
 +			bool checkpointReady{false};
 +			bool simulationFrozen{false};
-+			bool cursorSuppressed{false};
 +			uint32_t renderOrdinal{0};
++			uint64_t gameClockAccumulatorMs{0};
 +			std::string runID;
 +			std::string nonce;
 +			std::filesystem::path outputDirectory;
@@ -1618,8 +2043,22 @@ index 9542728..2a981a0 100644
 +				CaptureFailure(std::format("{} trusted RNG call contract is unavailable; run CLONK_PRESENTATION_DISCOVER first", spec.id));
 +			if (RandomCount != spec.simulationCalls || SafeRandomCount != spec.presentationCalls || safeRandomTraceSha256 != spec.presentationTraceSha256)
 +				CaptureFailure(std::format("{} RNG contract drift: simulation calls={}, presentation calls={}", spec.id, RandomCount, SafeRandomCount));
++			const bool hasLayout = std::ranges::find(RuntimeLayoutCapabilities, spec.id) != RuntimeLayoutCapabilities.end();
++			std::string layout;
++			if (hasLayout)
++			{
++				try
++				{
++					layout = RuntimeLayoutBuilder::Build(spec.id.data());
++				}
++				catch (const std::exception &error)
++				{
++					CaptureFailure(std::format("{} layout capture failed: {}", spec.id, error.what()));
++				}
++			}
 +
 +			const auto pngPath = RuntimeCapture.outputDirectory / (std::string{spec.id} + ".png");
++			const auto layoutPath = RuntimeCapture.outputDirectory / (std::string{spec.id} + ".layout.json");
 +			auto temporaryPng = pngPath;
 +			temporaryPng += std::format(".tmp.{}", RuntimeCapture.nonce);
 +			std::error_code outputError;
@@ -1628,26 +2067,38 @@ index 9542728..2a981a0 100644
 +			if (!Application.DDraw->lpBack->SavePNG(temporaryPng.string().c_str(), false, !Config.Graphics.Shader, false, Application.GetScale()))
 +				CaptureFailure("could not encode the composed pre-pageflip frame as PNG");
 +			PromoteAtomic(temporaryPng, pngPath);
++			if (hasLayout) WriteAtomic(layoutPath, layout, RuntimeCapture.nonce);
 +
 +			const std::string artifactPrefix = RuntimeCapture.runID + "/cpp/artifacts/";
 +			const FileRecord png = ReadFileRecord(pngPath, artifactPrefix + pngPath.filename().string());
++			const std::optional<FileRecord> layoutRecord = hasLayout
++				? std::optional<FileRecord>{ReadFileRecord(layoutPath, artifactPrefix + layoutPath.filename().string())}
++				: std::nullopt;
++			const std::string artifactRecords = layoutRecord
++				? std::format(R"("png":{},"layout":{})", FileRecordJson(png), FileRecordJson(*layoutRecord))
++				: std::format(R"("png":{})", FileRecordJson(png));
 +			const FileRecord binary = ReadFileRecord(RuntimeCapture.binaryPath, "");
 +			const FileRecord config = ReadFileRecord(RuntimeCapture.configPath, "");
 +			const FileRecord player = ReadFileRecord(RuntimeCapture.playerPath, "");
 +			const FileRecord networkReferences = ReadFileRecord(RuntimeCapture.networkReferencesPath, "");
 +			const auto language = TextEncodingConverter.ClonkToUtf8<char>(Config.General.Language);
 +			const std::string receipt = std::format(
-+				R"({{"schema":"clonk-rs/presentation-engine-receipt/v2","run_id":"{}","launcher_nonce":"{}","engine":"cpp","producer":"legacyclonk-capture-patch-v1","case_id":"{}","binary_sha256":"{}","source_tree":"{}","content_tree":"{}","profile":"oracle-native","config_sha256":"{}","player_sha256":"{}","network_references_sha256":"{}","runtime_resources":{{"graphics":{{"tree":"{}","manifest_sha256":"{}"}},"system":{{"tree":"{}","manifest_sha256":"{}"}}}},"locale":{{"language":"{}","charset":"Windows-1252","lang":"C","lc_all":"C","tz":"UTC"}},"seeds":{{"simulation":{{"seed":587,"calls":{}}},"presentation":{{"algorithm":"darwin-libc-rand-park-miller-v1","seed":587,"calls":{},"trace_sha256":"{}"}}}},"trigger":{{"id":"{}"}},"scenario":{{"path":"{}","content_tree":"{}"}},"frame":{{"checkpoint":"{}","number":{}}},"artifacts":{{"png":{}}}}})",
++				R"({{"schema":"clonk-rs/presentation-engine-receipt/v2","run_id":"{}","launcher_nonce":"{}","engine":"cpp","producer":"legacyclonk-capture-patch-v1","case_id":"{}","binary_sha256":"{}","source_tree":"{}","content_tree":"{}","profile":"oracle-native","config_sha256":"{}","player_sha256":"{}","network_references_sha256":"{}","runtime_resources":{{"graphics":{{"tree":"{}","manifest_sha256":"{}"}},"system":{{"tree":"{}","manifest_sha256":"{}"}}}},"locale":{{"language":"{}","charset":"Windows-1252","lang":"C","lc_all":"C","tz":"UTC"}},"seeds":{{"simulation":{{"seed":587,"calls":{}}},"presentation":{{"algorithm":"darwin-libc-rand-park-miller-v1","seed":587,"calls":{},"trace_sha256":"{}"}}}},"trigger":{{"id":"{}"}},"scenario":{{"path":"{}","content_tree":"{}"}},"frame":{{"checkpoint":"{}","number":{}}},"artifacts":{{{}}}}})",
 +				JsonEscape(RuntimeCapture.runID), RuntimeCapture.nonce, spec.id, binary.sha256, OracleSourceTree, FixtureContentTree,
 +				config.sha256, player.sha256, networkReferences.sha256,
 +				OracleGraphicsTree, OracleGraphicsManifestSha256, OracleSystemTree, OracleSystemManifestSha256, JsonEscape(language),
 +				spec.simulationCalls, spec.presentationCalls, safeRandomTraceSha256, spec.trigger, spec.scenario, FixtureContentTree,
-+				spec.checkpoint, spec.receiptFrame, FileRecordJson(png));
++				spec.checkpoint, spec.receiptFrame, artifactRecords);
 +			WriteAtomic(RuntimeCapture.receiptPath, receipt, RuntimeCapture.nonce);
 +			std::fprintf(stdout, "LegacyClonk presentation capture complete: %s render ordinal %u\n", spec.id.data(), spec.renderOrdinal);
 +			std::fflush(nullptr);
 +			std::_Exit(EXIT_SUCCESS);
 +		}
++	}
++
++	bool OwnsRuntimeClock()
++	{
++		return RuntimeCapture.mode != RuntimeMode::None && RuntimeCapture.spec && RuntimeCapture.spec->stateFrame > 0;
 +	}
 +
 +	void ConfigureRuntime()
@@ -1709,9 +2160,8 @@ index 9542728..2a981a0 100644
 +
 +	void BeforeRender()
 +	{
-+		if (RuntimeCapture.mode == RuntimeMode::None || RuntimeCapture.cursorSuppressed || !Game.pGUI) return;
-+		Game.pGUI->SetRenderMouseCursor(false);
-+		RuntimeCapture.cursorSuppressed = true;
++		if (RuntimeCapture.mode == RuntimeMode::None) return;
++		Game.GraphicsSystem.MouseMove(C4MC_Button_None, CapturePointerX, CapturePointerY, 0, nullptr);
 +	}
 +
 +	void OnInitProgress(const int32_t progress)
@@ -1762,9 +2212,20 @@ index 9542728..2a981a0 100644
 +	void AfterGameExecute()
 +	{
 +		if (RuntimeCapture.mode == RuntimeMode::None || !RuntimeCapture.spec || RuntimeCapture.spec->stateFrame <= 0 || RuntimeCapture.simulationFrozen) return;
++		RuntimeCapture.gameClockAccumulatorMs += Application.GetGameTickDelay();
++		if (RuntimeCapture.gameClockAccumulatorMs >= 2000)
++			RuntimeCapture.gameClockAccumulatorMs = 1000 + RuntimeCapture.gameClockAccumulatorMs % 1000;
++		if (RuntimeCapture.gameClockAccumulatorMs >= 1000)
++		{
++			Game.Sec1Timer();
++			Application.DoSec1Timers();
++			RuntimeCapture.gameClockAccumulatorMs -= 1000;
++		}
 +		if (Game.FrameCounter < RuntimeCapture.spec->stateFrame) return;
 +		if (Game.FrameCounter != RuntimeCapture.spec->stateFrame)
 +			CaptureFailure(std::format("{} did not stop at exact state frame {}", RuntimeCapture.spec->id, RuntimeCapture.spec->stateFrame));
++		if (Game.Time != RuntimeCapture.spec->expectedGameTime)
++			CaptureFailure(std::format("{} game clock is {}, expected {}", RuntimeCapture.spec->id, Game.Time, RuntimeCapture.spec->expectedGameTime));
 +		C4Player *player = Game.Players.GetLocalByIndex(0);
 +		switch (RuntimeCapture.spec->type)
 +		{
@@ -1834,7 +2295,7 @@ index 9542728..2a981a0 100644
  
  bool C4StartupGraphics::LoadFile(C4FacetExID &rToFct, const char *szFilename)
  {
-@@ -149,6 +1040,242 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
+@@ -149,6 +1437,241 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
  	pInstance = this;
  }
  
@@ -1969,7 +2430,6 @@ index 9542728..2a981a0 100644
 +		!SEqual(C4Config::GetCharsetCodeName(Config.General.LanguageCharset), "CP1252"))
 +		CaptureFailure("capture config locale must resolve to US / CP1252");
 +
-+	Game.pGUI->SetRenderMouseCursor(false);
 +	presentationCaptureStableRenderOrdinal = 0;
 +	fPresentationCaptureEnabled = true;
 +}
@@ -2077,7 +2537,7 @@ index 9542728..2a981a0 100644
  C4Startup::~C4Startup()
  {
  	pInstance = nullptr;
-@@ -269,6 +1396,8 @@ bool C4Startup::DoStartup()
+@@ -269,6 +1792,8 @@ bool C4Startup::DoStartup()
  	delete pLastDlg; pLastDlg = nullptr;
  	delete pCurrDlg; pCurrDlg = nullptr;
  
@@ -2086,7 +2546,7 @@ index 9542728..2a981a0 100644
  	// start with the last dlg that was shown - at first startup main dialog
  	if (!SwitchDialog(eLastDlgID)) return false;
  
-@@ -370,6 +1499,14 @@ void C4Startup::Unload()
+@@ -370,9 +1895,19 @@ void C4Startup::Unload()
  
  bool C4Startup::Execute()
  {
@@ -2101,8 +2561,13 @@ index 9542728..2a981a0 100644
  	// ensure gfx are loaded
  	C4Startup *pStartup = EnsureLoaded();
  	if (!pStartup) return false;
++	if (IsCaptureEnvironmentPresent())
++		Game.GraphicsSystem.MouseMove(C4MC_Button_None, CapturePointerX, CapturePointerY, 0, nullptr);
+ 	// exec it
+ 	bool fResult = pStartup->DoStartup();
+ 	return fResult;
 diff --git a/src/C4Startup.h b/src/C4Startup.h
-index 65d3304..ec30b8d 100644
+index 65d33045c..ef6ec3026 100644
 --- a/src/C4Startup.h
 +++ b/src/C4Startup.h
 @@ -22,6 +22,9 @@
@@ -2115,7 +2580,7 @@ index 65d3304..ec30b8d 100644
  #define C4CFN_StartupBackgroundMain "LoaderGoldmine1"
  
  // special colors for startup designs
-@@ -90,6 +93,48 @@ public:
+@@ -90,6 +93,49 @@ public:
  	C4StartupDlg(const char *szTitle) : C4GUI::FullscreenDialog(szTitle, nullptr) {}
  };
  
@@ -2152,6 +2617,7 @@ index 65d3304..ec30b8d 100644
 +
 +	// Audited capture controller for the seven direct-scenario presentation
 +	// checkpoints. Discovery uses the same typed trigger and never writes files.
++	bool OwnsRuntimeClock();
 +	void ConfigureRuntime();
 +	void OnInitProgress(int32_t progress);
 +	bool BeforeGameExecute();
@@ -2164,7 +2630,7 @@ index 65d3304..ec30b8d 100644
  class C4Startup
  {
  public:
-@@ -103,8 +148,20 @@ public:
+@@ -103,8 +149,20 @@ public:
  
  private:
  	bool fInStartup, fAborted, fLastDlgWasBack;
@@ -2185,7 +2651,7 @@ index 65d3304..ec30b8d 100644
  
  	C4StartupDlg *pLastDlg, *pCurrDlg; // startup dlg that is currently shown, and dialog that was last shown
  
-@@ -115,6 +172,8 @@ protected:
+@@ -115,6 +173,8 @@ protected:
  
  	bool DoStartup(); // run main dlg
  	class C4StartupDlg *SwitchDialog(DialogID eToDlg, bool fFade = true); // do transition to another dialog
@@ -2194,7 +2660,7 @@ index 65d3304..ec30b8d 100644
  
  	friend class C4StartupMainDlg;
  	friend class C4StartupNetDlg;
-@@ -128,6 +187,7 @@ public:
+@@ -128,6 +188,7 @@ public:
  	static void Unload(); // make sure startup data is destroyed
  	static bool Execute(); // run startup - return false if game is to be closed
  	static bool SetStartScreen(const char *szScreen); // set screen that is shown first by case insensitive identifier
@@ -2203,7 +2669,7 @@ index 65d3304..ec30b8d 100644
  	static C4Startup *Get() { assert(pInstance); return pInstance; }
  };
 diff --git a/src/C4StartupAboutDlg.cpp b/src/C4StartupAboutDlg.cpp
-index 6206887..2e51ac8 100644
+index 620688787..2e51ac83f 100644
 --- a/src/C4StartupAboutDlg.cpp
 +++ b/src/C4StartupAboutDlg.cpp
 @@ -27,7 +27,9 @@
@@ -2278,7 +2744,7 @@ index 6206887..2e51ac8 100644
  {
  	licenses.push_back({std::move(title), std::move(licenseTitle), std::move(licenseText)});
 diff --git a/src/C4StartupAboutDlg.h b/src/C4StartupAboutDlg.h
-index bba8ec7..6b8acaf 100644
+index bba8ec716..6b8acaffa 100644
 --- a/src/C4StartupAboutDlg.h
 +++ b/src/C4StartupAboutDlg.h
 @@ -42,6 +42,9 @@ protected:
@@ -2299,7 +2765,7 @@ index bba8ec7..6b8acaf 100644
  	virtual bool HasBackground() override { return true; }
  };
 diff --git a/src/C4StartupMainDlg.cpp b/src/C4StartupMainDlg.cpp
-index 45c9ebe..27b949d 100644
+index 45c9ebe0f..27b949d23 100644
 --- a/src/C4StartupMainDlg.cpp
 +++ b/src/C4StartupMainDlg.cpp
 @@ -33,6 +33,7 @@
@@ -2397,7 +2863,7 @@ index 45c9ebe..27b949d 100644
  {
  	// inherited
 diff --git a/src/C4StartupMainDlg.h b/src/C4StartupMainDlg.h
-index fe39d7c..289badd 100644
+index fe39d7c56..289badde4 100644
 --- a/src/C4StartupMainDlg.h
 +++ b/src/C4StartupMainDlg.h
 @@ -21,13 +21,18 @@
@@ -2426,7 +2892,7 @@ index fe39d7c..289badd 100644
 +	std::string BuildPresentationLayoutTrace();
  };
 diff --git a/src/C4StartupNetDlg.cpp b/src/C4StartupNetDlg.cpp
-index c18ae48..1296adf 100644
+index c18ae4881..1296adfc8 100644
 --- a/src/C4StartupNetDlg.cpp
 +++ b/src/C4StartupNetDlg.cpp
 @@ -33,6 +33,7 @@
@@ -2589,7 +3055,7 @@ index c18ae48..1296adf 100644
  {
  	// dlg abort: return to main screen
 diff --git a/src/C4StartupNetDlg.h b/src/C4StartupNetDlg.h
-index 62a7fa6..e492e8b 100644
+index 62a7fa643..e492e8beb 100644
 --- a/src/C4StartupNetDlg.h
 +++ b/src/C4StartupNetDlg.h
 @@ -137,6 +137,8 @@ private:
@@ -2628,7 +3094,7 @@ index 62a7fa6..e492e8b 100644
  	bool DoBack(); // abort dialog
  	void DoRefresh(); // restart network search
 diff --git a/src/C4StartupOptionsDlg.cpp b/src/C4StartupOptionsDlg.cpp
-index cebd24f..fc68a50 100644
+index cebd24ff4..fc68a50d9 100644
 --- a/src/C4StartupOptionsDlg.cpp
 +++ b/src/C4StartupOptionsDlg.cpp
 @@ -35,6 +35,9 @@
@@ -2756,7 +3222,7 @@ index cebd24f..fc68a50 100644
  {
  	// callback when dlg got closed - save config
 diff --git a/src/C4StartupOptionsDlg.h b/src/C4StartupOptionsDlg.h
-index d8dc701..f01c1ed 100644
+index d8dc7013a..f01c1ed1c 100644
 --- a/src/C4StartupOptionsDlg.h
 +++ b/src/C4StartupOptionsDlg.h
 @@ -35,6 +35,7 @@ private:
@@ -2784,7 +3250,7 @@ index d8dc701..f01c1ed 100644
  	};
  
 diff --git a/src/C4StartupPlrSelDlg.cpp b/src/C4StartupPlrSelDlg.cpp
-index f9b00f8..beac67d 100644
+index f9b00f822..beac67d20 100644
 --- a/src/C4StartupPlrSelDlg.cpp
 +++ b/src/C4StartupPlrSelDlg.cpp
 @@ -622,6 +622,41 @@ C4StartupPlrSelDlg::~C4StartupPlrSelDlg()
@@ -2830,7 +3296,7 @@ index f9b00f8..beac67d 100644
  {
  	if (pRenameEdit) pRenameEdit->Abort();
 diff --git a/src/C4StartupPlrSelDlg.h b/src/C4StartupPlrSelDlg.h
-index 5638741..7180e18 100644
+index 5638741b7..7180e1847 100644
 --- a/src/C4StartupPlrSelDlg.h
 +++ b/src/C4StartupPlrSelDlg.h
 @@ -82,6 +82,9 @@ private:
@@ -2852,7 +3318,7 @@ index 5638741..7180e18 100644
  private:
  	class C4KeyBinding *pKeyBack, *pKeyProperties, *pKeyCrew, *pKeyDelete, *pKeyRename, *pKeyNew;
 diff --git a/src/C4StartupScenSelDlg.cpp b/src/C4StartupScenSelDlg.cpp
-index 9a27c74..749abcb 100644
+index 9a27c7449..749abcb17 100644
 --- a/src/C4StartupScenSelDlg.cpp
 +++ b/src/C4StartupScenSelDlg.cpp
 @@ -1338,9 +1338,9 @@ C4StartupScenSelDlg::C4StartupScenSelDlg(bool fNetwork) : C4StartupDlg(LoadResSt
@@ -2918,7 +3384,7 @@ index 9a27c74..749abcb 100644
  {
  	// draw background
 diff --git a/src/C4StartupScenSelDlg.h b/src/C4StartupScenSelDlg.h
-index 47b2e28..4d7ae9b 100644
+index 47b2e28b5..4d7ae9be9 100644
 --- a/src/C4StartupScenSelDlg.h
 +++ b/src/C4StartupScenSelDlg.h
 @@ -362,6 +362,8 @@ public:
@@ -2950,7 +3416,7 @@ index 47b2e28..4d7ae9b 100644
  protected:
  	virtual int32_t GetMarginTop() override { return (rcBounds.Hgt / 7); }
 diff --git a/src/C4Surface.cpp b/src/C4Surface.cpp
-index 5b642a2..e5c1483 100644
+index 5b642a223..e5c1483ee 100644
 --- a/src/C4Surface.cpp
 +++ b/src/C4Surface.cpp
 @@ -431,7 +431,7 @@ bool C4Surface::SavePNG(const char *szFilename, bool fSaveAlpha, bool fApplyGamm
@@ -2963,7 +3429,7 @@ index 5b642a2..e5c1483 100644
  	else
  #endif
 diff --git a/src/C4Texture.cpp b/src/C4Texture.cpp
-index 3c7150f..97a8ab3 100644
+index 3c7150fa3..97a8ab3fa 100644
 --- a/src/C4Texture.cpp
 +++ b/src/C4Texture.cpp
 @@ -26,6 +26,7 @@
@@ -2986,8 +3452,52 @@ index 3c7150f..97a8ab3 100644
 +			if (AuditedRawRandom("C4Texture.cpp:451") < RAND_MAX / 2) bypPalette[3 * i + 2] += 3; else bypPalette[3 * i + 2] -= 3;
  		}
  }
+diff --git a/src/C4UpperBoard.h b/src/C4UpperBoard.h
+index 05a7901b2..f4f75f781 100644
+--- a/src/C4UpperBoard.h
++++ b/src/C4UpperBoard.h
+@@ -18,9 +18,15 @@
+ 
+ #include <C4Facet.h>
+ 
++namespace C4PresentationCapture
++{
++	class RuntimeLayoutBuilder;
++}
++
+ class C4UpperBoard
+ {
+ 	friend class C4GraphicsSystem;
++	friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ 
+ public:
+ 	enum DisplayMode : int32_t
+diff --git a/src/C4Viewport.h b/src/C4Viewport.h
+index 4c67e9615..115e7e863 100644
+--- a/src/C4Viewport.h
++++ b/src/C4Viewport.h
+@@ -34,6 +34,11 @@ typedef CStdWindow C4ViewportBase;
+ 
+ class C4Viewport;
+ 
++namespace C4PresentationCapture
++{
++	class RuntimeLayoutBuilder;
++}
++
+ class C4ViewportWindow : public C4ViewportBase
+ {
+ #ifdef _WIN32
+@@ -84,6 +89,7 @@ class C4Viewport
+ {
+ 	friend class C4GraphicsSystem;
+ 	friend class C4MouseControl;
++	friend class C4PresentationCapture::RuntimeLayoutBuilder;
+ 
+ public:
+ 	C4Viewport();
 diff --git a/src/C4WinMain.cpp b/src/C4WinMain.cpp
-index c601558..6243f27 100644
+index c60155869..6243f277c 100644
 --- a/src/C4WinMain.cpp
 +++ b/src/C4WinMain.cpp
 @@ -23,6 +23,8 @@
@@ -3012,7 +3522,7 @@ index c601558..6243f27 100644
  	if (std::getenv("APPIMAGE"))
  	{
 diff --git a/src/StdAppUnix.cpp b/src/StdAppUnix.cpp
-index 38e2863..bf2abf7 100644
+index 38e2863e5..bf2abf718 100644
 --- a/src/StdAppUnix.cpp
 +++ b/src/StdAppUnix.cpp
 @@ -24,6 +24,7 @@

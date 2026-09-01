@@ -625,7 +625,7 @@ pub fn draw_facet_nearest(
 }
 
 fn cpp_texture_size(width: u32, height: u32) -> u32 {
-    let required = width.min(height).max(1);
+    let required = width.min(height).max(2);
     let mut size = 1u32;
     while size < required {
         size <<= 1;
@@ -1088,6 +1088,14 @@ mod tests {
         let sample = bilinear_sample_tile(&image, 0, 0, 4, 0.0, 3.0);
 
         assert_eq!(sample, [255.0, 255.0, 255.0, 0.0]);
+    }
+
+    #[test]
+    fn one_pixel_surface_still_uses_native_two_pixel_texture_tiles() {
+        // CreateTextures begins its power-of-two search at 2 even when the
+        // surface's shorter dimension is one pixel (C4Surface.cpp:182-188).
+        assert_eq!(cpp_texture_size(270, 1), 2);
+        assert_eq!(cpp_texture_size(1, 1), 2);
     }
 
     // `DynBarFacet::SetHorizontal` + exact `Element::DrawBar`: begin, tiled

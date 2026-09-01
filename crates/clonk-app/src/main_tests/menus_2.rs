@@ -1255,33 +1255,14 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
 }
 
 #[test]
-fn player_menu_title_close_visibility_follows_mouse_owner_and_disable_mouse() {
+fn player_menu_title_close_survives_disable_mouse_player_assignment() {
+    // C4MainMenu::Init calls DoInit before assigning Player
+    // (src/C4MainMenu.cpp:45-49). InitMenu therefore calls SetTitle while
+    // HasMouse sees NO_OWNER and returns true (src/C4Menu.cpp:351-356,
+    // 1270-1276), creating the close button. A later SetTitle(false) does not
+    // remove that existing button (src/C4GuiDialogs.cpp:400-422).
     let mut app = new_classic_running_sandbox_app();
     let owner = app.players.local_owner;
-    app.open_ingame_menu().test_value();
-    let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.test_render(&mut frame);
-    main_assert!(app.ingame_menu_gfx.as_ref().is_some_and(|gfx| gfx.show_close_button));
-
-    app.ingame_menu.clear();
-    app.ingame_menu.replace(
-        owner + 1,
-        IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
-    );
-    app.test_render(&mut frame);
-    main_assert!(!app.ingame_menu_gfx.as_ref().is_some_and(|gfx| gfx.show_close_button), "a non-controlling player's C4Menu::HasMouse is false");
-    app.local_controls = LocalControlRegistry::default();
-    app.local_controls
-        .initialize(test_local_control_init(owner + 1, 1, true, false));
-    app.mouse_control = true;
-    app.test_render(&mut frame);
-    main_assert!(app.ingame_menu_gfx.as_ref().is_some_and(|gfx| gfx.show_close_button), "close visibility follows the assigned mouse owner, not local_owner");
-
-    app.ingame_menu.clear();
-    app.ingame_menu.replace(
-        owner,
-        IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
-    );
     app.local_controls = LocalControlRegistry::default();
     let assignment = app
         .local_controls
@@ -1289,21 +1270,29 @@ fn player_menu_title_close_visibility_follows_mouse_owner_and_disable_mouse() {
     main_assert!(!assignment.mouse);
     app.mouse_control_allowed = false;
     app.mouse_control = false;
+    app.open_ingame_menu().test_value();
+
+    let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    main_assert!(!app.ingame_menu_gfx.as_ref().is_some_and(|gfx| gfx.show_close_button), "DisableMouse=1 suppresses the title close button");
+    main_assert!(app
+        .ingame_menu_gfx
+        .as_ref()
+        .is_some_and(|gfx| gfx.show_close_button));
 
     let area = app.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
-    let close = app.ingame_menu.get(owner).test_value().close_button_rect(
+    let presentation = app.ingame_menu.get(owner).test_value().presentation_layout(
         area,
         &font,
-        &menus2_fixture!(ingame_graphics: app.display_flags.show_commands),
+        app.ingame_menu_gfx.as_ref().test_value(),
     );
+    let close = presentation.close_button.test_value();
+    main_assert_eq!((close.width, close.height) => (16, 16));
     let point = GuiPoint::new(
         (close.x + close.width as i32 / 2) as f32,
         (close.y + close.height as i32 / 2) as f32,
     );
-    main_assert_eq!(app.ingame_menu_pointer_target(point) => None, "DisableMouse leaves no invisible close hit target");
+    main_assert_eq!(app.ingame_menu_pointer_target(point) => None, "DisableMouse still prevents pointer routing; it does not retroactively delete the title control");
 }
 
 #[test]
@@ -1883,6 +1872,62 @@ fn context_style_script_menu_reaches_command2_by_right_click_and_special2() {
             "Command2 must run (keyboard: {use_keyboard})"
         );
     }
+}
+
+#[test]
+fn script_menu_close_survives_disable_mouse_object_assignment() {
+    // C4ObjectMenu::Init runs DoInit before LocalInit assigns Object
+    // (src/C4ObjectMenu.cpp:47-52,78-90). InitMenu therefore calls SetTitle
+    // while GetControllingPlayer returns NO_OWNER, so HasMouse is true
+    // (src/C4Menu.cpp:337-356,1270-1276;
+    // src/C4ObjectMenu.cpp:499-503), creating the close control
+    // (src/C4GuiDialogs.cpp:412-419). Later title refreshes can pass false
+    // (src/C4Menu.cpp:579-585,1219-1226), but identical titles return before
+    // the flag is read and the false branch removes nothing
+    // (src/C4GuiDialogs.cpp:400-427).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.players.local_owner;
+    app.local_controls = LocalControlRegistry::default();
+    let assignment = app
+        .local_controls
+        .initialize(test_local_control_init(owner, 0, true, true));
+    main_assert!(!assignment.mouse);
+    app.mouse_control_allowed = false;
+    app.mouse_control = false;
+
+    let cursor = app.engine.test_crew_cursor(owner);
+    let menu = two_item_script_menu(cursor);
+    install_test_cursor_menu(&mut app, cursor, menu.clone());
+    let close_color = Color::opaque(17, 238, 51);
+    let mut gui_icons = vec![0_u8; 240 * 240 * 4];
+    for y in 200..240 {
+        for x in 160..200 {
+            let offset = (y * 240 + x) * 4;
+            gui_icons[offset..offset + 4].copy_from_slice(&[17, 238, 51, 255]);
+        }
+    }
+    app.ensure_ingame_menu_gfx().gui_icons = Some(ImageData::new(240, 240, gui_icons));
+
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+    let area = app.graphics.viewport_rect(owner).test_value();
+    menus2_fixture!(hud_font: app, fallback, font);
+    let layout =
+        object_menu::engine_script_menu_layout(area, &font, &menu, app.display_flags.show_commands);
+    let close = layout.close_button_rect();
+    let point = GuiPoint::new(
+        (close.x + close.width as i32 / 2) as f32,
+        (close.y + close.height as i32 / 2) as f32,
+    );
+    main_assert_eq!(app.script_menu_pointer_target(point).test_value() => None, "DisableMouse still blocks object-menu pointer routing");
+    main_assert_eq!(
+        app.graphics
+            .surface()
+            .get_pixel(point.x as u32, point.y as u32) =>
+        Some(close_color),
+        "the retained native close control remains rendered"
+    );
 }
 
 #[test]

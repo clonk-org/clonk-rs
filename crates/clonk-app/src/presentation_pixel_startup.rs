@@ -35,15 +35,21 @@ pub(crate) fn stage_network_lobby_checkpoint(
         .context("staging the real network host for presentation capture")?;
 
     let deadline = Instant::now() + CHECKPOINT_TIMEOUT;
-    while app.startup_network_connection.is_some() {
+    while app.startup_network_connection.is_some() || app.pending_network_host_preparation.is_some()
+    {
         app.poll_startup_network_connection()
             .map_err(anyhow::Error::from)
             .context("polling the presentation capture's network host")?;
+        app.poll_pending_network_host_preparation()
+            .map_err(anyhow::Error::from)
+            .context("publishing the presentation capture's network host resources")?;
         anyhow::ensure!(
             Instant::now() < deadline,
             "network host did not reach its live lobby capture checkpoint"
         );
-        if app.startup_network_connection.is_some() {
+        if app.startup_network_connection.is_some()
+            || app.pending_network_host_preparation.is_some()
+        {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
@@ -173,10 +179,24 @@ pub(crate) fn stage_loader_checkpoint(
         .loading_state
         .as_ref()
         .context("the scenario loader disappeared at its capture checkpoint")?;
+    let expected_log_tail = [
+        "C4AulScriptEngine linked - 24442 lines, 0 warnings, 0 errors",
+        "Texture table holds 48 entries.",
+        "21 textures loaded.",
+        "21 materials loaded.",
+    ];
     anyhow::ensure!(
         loading.last_progress == 60
-            && loading.log.last().map(String::as_str) == Some("21 materials loaded."),
-        "scenario loader's 60% frame did not carry the fixed material-library log"
+            && loading.log.len() >= expected_log_tail.len()
+            && loading.log[loading.log.len() - expected_log_tail.len()..] == expected_log_tail,
+        "scenario loader's 60% frame did not carry the native link/material log tail: {:?}",
+        loading
+            .log
+            .iter()
+            .rev()
+            .take(expected_log_tail.len())
+            .rev()
+            .collect::<Vec<_>>()
     );
     let simulation_seed = loading
         .offline_random_seed
@@ -326,9 +346,10 @@ mod tests {
 
     #[test]
     fn loader_checkpoint_stops_on_the_real_sixty_percent_frame() -> Result<()> {
-        // Pinned C++ oracle: src/C4Game.cpp:981 logs the loaded-material count,
+        // Pinned C++ oracle: src/C4AulLink.cpp:299-303 emits the link summary,
+        // src/C4Game.cpp:945,980-981 emits the three material/texture totals,
         // and src/C4Game.cpp:4094-4106 publishes the exact InitProgress value
-        // rendered by C4LoaderScreen.cpp:281-324.
+        // rendered by src/C4LoaderScreen.cpp:281-324.
         let (_environment, _user_data, mut app, scenario) = capture_app()?;
 
         let checkpoint = stage_loader_checkpoint(&mut app, scenario)?;
@@ -343,8 +364,13 @@ mod tests {
             .expect("the sixty-percent worker remains live");
         assert_eq!(loading.last_progress, 60);
         assert_eq!(
-            loading.log.last().map(String::as_str),
-            Some("21 materials loaded.")
+            loading.log[loading.log.len() - 4..],
+            [
+                "C4AulScriptEngine linked - 24442 lines, 0 warnings, 0 errors",
+                "Texture table holds 48 entries.",
+                "21 textures loaded.",
+                "21 materials loaded.",
+            ]
         );
         let loader = app
             .loader_screen

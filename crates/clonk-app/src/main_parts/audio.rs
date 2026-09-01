@@ -2647,6 +2647,7 @@ pub(crate) struct AudioContext {
     /// C4SoundSystem selects RXSound only while Game.IsRunning; startup and
     /// scenario initialization use the independent FESamples toggle.
     synchronous_game_running: bool,
+    #[cfg(any(test, feature = "presentation-capture"))]
     /// Presentation acquisition fast-forwards simulation without a window
     /// scheduler. Pin its logical sound-instance clock so muted one-shots age
     /// by native game ticks instead of host wall time.
@@ -2718,13 +2719,19 @@ pub(crate) fn reconnect_audio_context(engine: &mut Engine, audio: Option<&Shared
 
 impl AudioContext {
     fn sound_instance_now(&self) -> Instant {
-        self.presentation_capture_now.unwrap_or_else(Instant::now)
+        #[cfg(any(test, feature = "presentation-capture"))]
+        if let Some(now) = self.presentation_capture_now {
+            return now;
+        }
+        Instant::now()
     }
 
+    #[cfg(any(test, feature = "presentation-capture"))]
     pub(crate) fn install_presentation_capture_clock(&mut self) {
         self.presentation_capture_now = Some(Instant::now());
     }
 
+    #[cfg(any(test, feature = "presentation-capture"))]
     pub(crate) fn advance_presentation_capture_clock(&mut self, elapsed: Duration) {
         let now = self
             .presentation_capture_now
@@ -2803,6 +2810,7 @@ impl AudioContext {
             rendered_object_audibility: HashMap::new(),
             synchronous_sound_viewports: Vec::new(),
             synchronous_game_running: false,
+            #[cfg(any(test, feature = "presentation-capture"))]
             presentation_capture_now: None,
             emitter_positions: HashMap::new(),
             resolver,

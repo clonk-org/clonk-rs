@@ -3374,6 +3374,31 @@ fn real_mars_upper_board_keeps_the_product_logo() {
 }
 
 #[test]
+fn legacy_compat_runtime_keeps_the_product_logo() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let mut app = new_menu_app_with_paths(320, 200, &paths);
+    let scenario =
+        resolve_next_mission_scenario(&app.scensel.catalog, "Tutorial.c4f/Tutorial01.c4s")
+            .test_value();
+    let product = app.assets.hud_graphics().logo.clone().test_value();
+
+    // Compatibility changes engine behavior, not Clonk Rust product branding.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    let runtime = app
+        .loaded_game_graphics_resources(&scenario, None)
+        .expect("resolve LegacyClonk Tutorial01 game graphics")
+        .hud_graphics
+        .logo
+        .clone()
+        .test_value();
+
+    main_assert_eq!((runtime.width(), runtime.height()) => (product.width(), product.height()));
+    main_assert_eq!(runtime.pixels() => product.pixels());
+}
+
+#[test]
 fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
     let check = |mut app: GameApp, label: &str| {
         app.dialogs.scoreboard_initial_reconcile_pending = true;

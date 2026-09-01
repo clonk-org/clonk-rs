@@ -4715,6 +4715,7 @@ impl GameApp {
             fallback: self.startup_game_graphics_resources(),
             liquid_animation_enabled: self.assets.liquid_animation_enabled(),
         };
+        let global_system_scripts = self.global_scripts_for_session();
         if let Some(staged) = self.staged_network_host_scenario.as_ref() {
             let frontend = staged.frontend.clone();
             let scenario_path = frontend
@@ -4728,6 +4729,7 @@ impl GameApp {
                 .collect::<Vec<_>>();
             return Ok(LobbyPreloadJob {
                 graphics,
+                global_system_scripts,
                 source: LobbyPreloadJobSource::Host {
                     frontend,
                     scenario_path,
@@ -4742,6 +4744,7 @@ impl GameApp {
                 .ok_or_else(|| "selected host scenario has no preload key".to_string())?;
             return Ok(LobbyPreloadJob {
                 graphics,
+                global_system_scripts,
                 source: LobbyPreloadJobSource::CatalogHost { frontend, key },
             });
         }
@@ -4786,6 +4789,7 @@ impl GameApp {
         .map_err(|error| error.to_string())?;
         Ok(LobbyPreloadJob {
             graphics,
+            global_system_scripts,
             source: LobbyPreloadJobSource::Client {
                 join_data,
                 scenario_resources,
@@ -4801,7 +4805,11 @@ impl GameApp {
     pub(crate) fn run_lobby_preload_job(
         job: LobbyPreloadJob,
     ) -> std::result::Result<LobbyPreloadArtifact, String> {
-        let LobbyPreloadJob { graphics, source } = job;
+        let LobbyPreloadJob {
+            graphics,
+            global_system_scripts,
+            source,
+        } = job;
         match source {
             LobbyPreloadJobSource::Host {
                 frontend,
@@ -4841,11 +4849,13 @@ impl GameApp {
             LobbyPreloadJobSource::CatalogHost { frontend, key } => {
                 let resolver =
                     InstallDefinitionResolver::new(graphics.app_paths.clone().map(Arc::new));
-                let scenario = load_scenario_with_definition_load(
+                let scenario = load_scenario_with_definition_load_and_progress(
                     &key.scenario_path,
                     &resolver,
                     &key.languages,
                     &key.definition_load,
+                    &global_system_scripts,
+                    |_, _| {},
                 )
                 .map_err(|error| format!("failed to preload host scenario: {error}"))?;
                 let definition_paths = scenario
@@ -4968,7 +4978,7 @@ impl GameApp {
                         .unwrap_or_default();
                     let random_seed = u64::from(join_data.parameters.random_seed as u32);
                     let scenario =
-                        Scenario::load_network_from_path_with_languages_and_seed_and_packs(
+                        Scenario::load_network_from_path_with_languages_and_seed_and_packs_and_global_scripts(
                             &working_path,
                             &definition_groups,
                             &material_groups,
@@ -4976,6 +4986,7 @@ impl GameApp {
                             &languages,
                             random_seed,
                             &language_packs,
+                            &global_system_scripts,
                         )
                         .map_err(|error| error.to_string())?;
                     validate_client_network_scenario(&scenario)?;

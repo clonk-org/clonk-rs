@@ -20,6 +20,9 @@ test = false
 default = []
 bench = ["dep:criterion"]
 test-graph = ["dep:proptest"]
+# Process-global presentation RNG tracing used only by the audited capture
+# executable. Ordinary engine and shipped app builds keep this surface absent.
+presentation-capture = []
 # The C ABI the pinned oracle's USE_RUST_ENGINE_VALIDATION bridge links against
 # (clonk-org/clonk-rs#585). Off by default: it is a diagnostic surface, not part
 # of the shipped engine.

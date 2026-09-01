@@ -64,10 +64,15 @@ mod object_list_window_host;
 mod offline_savegame;
 mod offline_startup;
 mod output_folders;
+#[cfg(any(test, feature = "presentation-capture"))]
 mod presentation_captures;
+#[cfg(any(test, feature = "presentation-capture"))]
 mod presentation_layout;
+#[cfg(any(test, feature = "presentation-capture"))]
 mod presentation_layout_producers;
+#[cfg(any(test, feature = "presentation-capture"))]
 mod presentation_pixel_capture;
+#[cfg(any(test, feature = "presentation-capture"))]
 mod presentation_pixel_startup;
 mod ready_check_backend;
 mod ready_check_notification;
@@ -554,6 +559,15 @@ fn update_recovery_message(outcome: &clonk_update::ResumeOutcome) -> String {
     }
 }
 
+fn presentation_capture_or_discovery_requested() -> bool {
+    #[cfg(any(test, feature = "presentation-capture"))]
+    {
+        presentation_pixel_capture::capture_or_discovery_requested()
+    }
+    #[cfg(not(any(test, feature = "presentation-capture")))]
+    false
+}
+
 fn run() -> Result<()> {
     // C++ recovers a translocated bundle path and chdirs to the directory
     // holding the .app before anything else (C4WinMain.cpp:233-238;
@@ -594,6 +608,7 @@ fn run() -> Result<()> {
     }
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
+    #[cfg(any(test, feature = "presentation-capture"))]
     if presentation_pixel_capture::run_presentation_utility_from_environment()? {
         return Ok(());
     }
@@ -738,6 +753,7 @@ fn run() -> Result<()> {
         record_enabled: load_recording_flag(app_paths.as_deref()),
     };
 
+    #[cfg(any(test, feature = "presentation-capture"))]
     if presentation_pixel_capture::run_capture_or_discovery_from_environment(
         &classic,
         app_paths.as_ref(),
@@ -2401,9 +2417,7 @@ impl GameApp {
                 .require_classic_global_gui_bootstrap_resources(&HashMap::new())
                 .map_err(report_classic_parity_boundary)?;
         }
-        if let Some(paths) =
-            paths.filter(|_| !presentation_pixel_capture::capture_or_discovery_requested())
-        {
+        if let Some(paths) = paths.filter(|_| !presentation_capture_or_discovery_requested()) {
             if let Err(error) = validate_startup_participant_config(paths) {
                 // C++ configuration strings are legacy byte buffers. Until
                 // the general Config model is byte-preserving, never rewrite
@@ -6057,6 +6071,7 @@ impl GameApp {
         let context = AppCommandContext {
             engine: &self.engine,
             bindings: &self.bindings,
+            gamepad_bindings: &self.gamepad_bindings,
             snapshot: &self.snapshot,
             resources: &self.startup_tooltip_resources,
         };
@@ -8733,11 +8748,22 @@ impl GameApp {
             let resolver_paths = cached_app_paths().ok();
             let languages = startup_language_sequence(resolver_paths.as_deref());
             let resolver = InstallDefinitionResolver::new(resolver_paths);
+            let global_system_scripts = self.global_scripts_for_session();
             let scenario_data = match saved_definition_load.as_ref() {
-                Some(definition_load) => {
-                    load_scenario_with_definition_load(path, &resolver, &languages, definition_load)
-                }
-                None => Scenario::load_from_path_with_languages(path, &resolver, &languages),
+                Some(definition_load) => load_scenario_with_definition_load_and_progress(
+                    path,
+                    &resolver,
+                    &languages,
+                    definition_load,
+                    &global_system_scripts,
+                    |_, _| {},
+                ),
+                None => Scenario::load_from_path_with_languages_and_global_scripts(
+                    path,
+                    &resolver,
+                    &languages,
+                    &global_system_scripts,
+                ),
             }
             .with_context(|| {
                 format!(

@@ -468,6 +468,26 @@ struct ClassicGameOverLayout {
     buttons: Vec<IntRect>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassicGameOverPresentationButtonLayout {
+    pub index: usize,
+    pub rect: IntRect,
+    pub caption: String,
+}
+
+/// Read-only projection of the classic evaluation dialog's rendered chrome
+/// and content geometry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassicGameOverPresentationLayout {
+    pub dialog: IntRect,
+    pub caption: IntRect,
+    pub close_button: IntRect,
+    pub player_area: IntRect,
+    pub goal_area: Option<IntRect>,
+    pub buttons: Vec<ClassicGameOverPresentationButtonLayout>,
+    pub evaluation: ClassicEvaluationLayout,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClassicEvaluationGoalLayout {
     pub picture: IntRect,
@@ -502,6 +522,17 @@ pub struct ClassicEvaluationTextLayout {
     pub scrollbar: Option<IntRect>,
 }
 
+/// The always-present `C4GUI::ListBox` scroll window used for one evaluation
+/// player column. Unlike the custom evaluation text window, its scrollbar is
+/// not auto-hidden when the rows fit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassicEvaluationPlayerListLayout {
+    pub area: IntRect,
+    pub viewport: IntRect,
+    pub scrollbar: IntRect,
+    pub content_height: i32,
+}
+
 /// One `TeamListItem` row at the top of a team-filtered evaluation list box
 /// (src/C4PlayerInfoListBox.cpp:1536-1541).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -519,6 +550,7 @@ pub struct ClassicEvaluationLayout {
     pub network_result: Option<IntRect>,
     pub custom_evaluation: Option<ClassicEvaluationTextLayout>,
     pub player_lists: Vec<IntRect>,
+    pub player_list_windows: Vec<ClassicEvaluationPlayerListLayout>,
     pub team_headers: Vec<ClassicEvaluationTeamHeaderLayout>,
     pub players: Vec<ClassicEvaluationPlayerLayout>,
 }
@@ -1402,6 +1434,41 @@ impl GameOverState {
         )
     }
 
+    /// Returns the exact geometry consumed by the classic game-over renderer,
+    /// including only bottom buttons that pass its visibility latch.
+    pub fn classic_presentation_layout(
+        &self,
+        surface_width: u32,
+        surface_height: u32,
+        fonts: &ClonkFontSet,
+    ) -> ClassicGameOverPresentationLayout {
+        let chrome = self.classic_layout(surface_width, surface_height, fonts);
+        let evaluation = self.classic_evaluation_layout(surface_width, surface_height, fonts);
+        let buttons = self
+            .buttons
+            .iter()
+            .zip(&chrome.buttons)
+            .enumerate()
+            .filter(|(index, _)| self.button_is_visible(*index))
+            .map(
+                |(index, (button, rect))| ClassicGameOverPresentationButtonLayout {
+                    index,
+                    rect: *rect,
+                    caption: expand_hotkey_markup(&button.label).0,
+                },
+            )
+            .collect();
+        ClassicGameOverPresentationLayout {
+            dialog: chrome.dialog,
+            caption: chrome.caption,
+            close_button: chrome.close_button,
+            player_area: chrome.player_area,
+            goal_area: evaluation.goal_display,
+            buttons,
+            evaluation,
+        }
+    }
+
     fn classic_evaluation_layout_with_metrics(
         &self,
         surface_width: u32,
@@ -1669,12 +1736,54 @@ impl GameOverState {
             }
         }
 
+        // ListBox gives its client a 3px margin on every side. ScrollWindow
+        // then reserves its always-visible 16px ScrollBar at the right edge
+        // (src/C4GuiListBox.h:119-123; src/C4GuiContainers.cpp:477-490,
+        // 584-602 in the pinned oracle commit).
+        let player_list_windows = player_lists
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(player_list_index, area)| {
+                let viewport = IntRect::new(
+                    area.x + CLASSIC_PLAYER_ROW_TOP_INSET,
+                    area.y + CLASSIC_PLAYER_ROW_TOP_INSET,
+                    (area.w - 2 * CLASSIC_PLAYER_ROW_TOP_INSET - CLASSIC_SCROLLBAR_EXTENT).max(0),
+                    (area.h - 2 * CLASSIC_PLAYER_ROW_TOP_INSET).max(0),
+                );
+                let content_bottom = team_headers
+                    .iter()
+                    .filter(|header| header.player_list_index == player_list_index)
+                    .map(|header| header.icon.y + header.icon.h)
+                    .chain(
+                        players
+                            .iter()
+                            .filter(|player| player.player_list_index == player_list_index)
+                            .map(|player| player.row.y + player.row.h),
+                    )
+                    .max()
+                    .unwrap_or(viewport.y);
+                ClassicEvaluationPlayerListLayout {
+                    area,
+                    viewport,
+                    scrollbar: IntRect::new(
+                        viewport.x + viewport.w,
+                        viewport.y,
+                        CLASSIC_SCROLLBAR_EXTENT,
+                        viewport.h,
+                    ),
+                    content_height: (content_bottom - viewport.y).max(0),
+                }
+            })
+            .collect();
+
         ClassicEvaluationLayout {
             goal_display,
             goals,
             network_result,
             custom_evaluation,
             player_lists,
+            player_list_windows,
             team_headers,
             players,
         }
@@ -2279,6 +2388,25 @@ impl GameOverState {
                     &player.custom_evaluation_strings,
                     Color::opaque(0xff, 0xff, 0xff),
                     TextAlign::Right,
+                    gamma,
+                );
+            }
+        }
+
+        // C4GUI::ListBox creates a non-auto-hidden ScrollBar beside every
+        // player-list ScrollWindow. DrawElement paints its arrows and shaft
+        // even when `fScrolling` is false; only the pin is omitted
+        // (src/C4GuiListBox.cpp:32-40; src/C4GuiContainers.cpp:343-368,
+        // 446-490 in the pinned oracle commit).
+        if let Some(scroll_facet) = resources.scroll {
+            for window in &layout.player_list_windows {
+                let maximum_scroll = (window.content_height - window.viewport.h).max(0);
+                draw_classic_scrollbar(
+                    surface,
+                    window.scrollbar,
+                    scroll_facet,
+                    scrollbar_pin_offset(window.scrollbar, 0, maximum_scroll),
+                    maximum_scroll,
                     gamma,
                 );
             }
@@ -3775,6 +3903,45 @@ mod tests {
         );
     }
 
+    // C4GameOverDlg composes its caption, close control, evaluation areas and
+    // only the currently visible bottom buttons from one ComponentAligner
+    // layout (C4GameOverDlg.cpp:115-258).
+    #[test]
+    fn classic_presentation_layout_projects_the_geometry_rendered_by_evaluation() {
+        let fonts = endeavour_fonts();
+        let mut state = GameOverState::new("A Clonk".into(), Vec::new(), true);
+        state.set_evaluation(EvaluationViewModel::new(
+            vec![EvaluationGoal {
+                definition_id: "GOAL".into(),
+                fulfilled: true,
+                tooltip: "Goal fulfilled".into(),
+                picture: None,
+            }],
+            vec![evaluation_player(1, "Clonk")],
+        ));
+        state.quit_buttons_visible = false;
+
+        let presentation = state.classic_presentation_layout(1024, 600, &fonts);
+        let chrome = state.classic_layout(1024, 600, &fonts);
+
+        assert_eq!(presentation.dialog, chrome.dialog);
+        assert_eq!(presentation.caption, chrome.caption);
+        assert_eq!(presentation.close_button, chrome.close_button);
+        assert_eq!(presentation.player_area, chrome.player_area);
+        assert_eq!(presentation.goal_area, presentation.evaluation.goal_display);
+        assert_eq!(presentation.evaluation.goals.len(), 1);
+        assert_eq!(presentation.evaluation.players.len(), 1);
+        assert_eq!(
+            presentation.buttons,
+            [ClassicGameOverPresentationButtonLayout {
+                index: 2,
+                rect: chrome.buttons[2],
+                caption: "<c ffffff7f>R</c>estart".into(),
+            }],
+            "hidden End/Continue controls retain their cells but are not drawn",
+        );
+    }
+
     fn evaluation_player(player_info_id: i32, name: &str) -> EvaluationPlayer {
         EvaluationPlayer {
             player_info_id,
@@ -4236,6 +4403,63 @@ mod tests {
         assert_eq!(content.goals[0].picture, IntRect::new(928, 213, 64, 64));
         assert_eq!(content.player_lists[0], IntRect::new(330, 293, 1260, 533));
         assert_eq!(content.players[0].row, IntRect::new(336, 296, 1235, 54));
+    }
+
+    #[test]
+    fn classic_evaluation_player_list_keeps_the_visible_native_scrollbar() {
+        // A ListBox always creates its ScrollWindow and ScrollBar, and the bar
+        // only auto-hides when explicitly decorated that way. Evaluation does
+        // not request auto-hide (src/C4GuiListBox.cpp:32-40,108-110;
+        // src/C4GuiContainers.cpp:311-368,477-490 in pinned commit
+        // 7d43b47b7d789b533f32d005e64596e0a07019cd).
+        let fonts = endeavour_fonts();
+        let mut state = evaluation_state(1280);
+        state.set_evaluation(EvaluationViewModel::new(
+            vec![EvaluationGoal {
+                definition_id: "SCRG".into(),
+                fulfilled: true,
+                tooltip: "Goal fulfilled".into(),
+                picture: None,
+            }],
+            vec![evaluation_player(41, "Presentation Host")],
+        ));
+
+        let layout = state.classic_evaluation_layout(1280, 720, &fonts);
+        assert_eq!(
+            layout.player_list_windows,
+            [ClassicEvaluationPlayerListLayout {
+                area: IntRect::new(85, 188, 1110, 383),
+                viewport: IntRect::new(88, 191, 1088, 377),
+                scrollbar: IntRect::new(1176, 191, 16, 377),
+                content_height: 54,
+            }]
+        );
+
+        let caption = solid_image(192, 23, [0, 0, 0, 0]);
+        let button = solid_image(128, 32, [0, 0, 0, 0]);
+        let button_down = solid_image(128, 32, [0, 0, 0, 0]);
+        let scroll = solid_image(32, 48, [17, 93, 201, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, None);
+        let mut surface = Surface::new(1280, 720, clonk_graphics::PixelFormat::Rgba8888);
+        state.render(
+            &mut surface,
+            &clonk_graphics::BitmapFont::new(),
+            Some(GameOverClassicResources::new(
+                skin,
+                &fonts,
+                None,
+                None,
+                None,
+                None,
+                Some(&scroll),
+                None,
+            )),
+        );
+        assert_eq!(
+            surface.get_pixel(1180, 200),
+            Some(Color::opaque(17, 93, 201)),
+            "the unscrollable one-player list still draws both arrows and its shaft",
+        );
     }
 
     #[test]

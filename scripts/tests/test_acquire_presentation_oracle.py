@@ -37,7 +37,9 @@ EXPECTED_CASE_IDS = (
     "gameplay",
     "evaluation",
 )
-EXPECTED_LAYOUT_IDS = frozenset(EXPECTED_CASE_IDS[:6])
+EXPECTED_LAYOUT_IDS = frozenset(
+    (*EXPECTED_CASE_IDS[:6], "hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
+)
 EXPECTED_PORT_ASSET_EXEMPTIONS = {
     "startup-main": {
         "startup/main/branding/logo": "branding",
@@ -58,6 +60,10 @@ EXPECTED_PORT_ASSET_EXEMPTIONS = {
     },
     "startup-about": {
         "startup/about/branding/fan-project": "branding",
+    },
+    **{
+        case_id: {"game/upper-board/branding/logo": "branding"}
+        for case_id in ("hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
     },
 }
 
@@ -225,9 +231,23 @@ import sys
 case_id = os.environ["CLONK_PRESENTATION_CASE"]
 reference = Path(os.environ["CLONK_PRESENTATION_REFERENCE"])
 actual = Path(os.environ["CLONK_PRESENTATION_ACTUAL"])
+layout_cases = {
+    "startup-main",
+    "startup-scenario-selection",
+    "startup-network-browser",
+    "startup-player-selection",
+    "startup-options",
+    "startup-about",
+    "hud",
+    "ingame-menu",
+    "object-menu",
+    "gameplay",
+    "evaluation",
+}
+comparison = "layout" if case_id in layout_cases else "pixel"
 if reference.read_bytes() != actual.read_bytes():
+    print(f"{comparison} mismatch: synthetic comparator canary", file=sys.stderr)
     sys.exit(1)
-comparison = "layout" if case_id.startswith("startup-") else "pixel"
 print(json.dumps({"schema":"clonk-rs/presentation-comparison/v1","case_id":case_id,"comparison":comparison,"status":"match"}, separators=(",", ":")))
 """,
         encoding="utf-8",
@@ -442,7 +462,9 @@ def write_v2_candidate(root):
                 artifact_directory = root / run_id / engine / "artifacts"
                 artifact_directory.mkdir(parents=True, exist_ok=True)
                 png_relative = f"{run_id}/{engine}/artifacts/{case_id}.png"
-                (root / png_relative).write_bytes(png_bytes())
+                (root / png_relative).write_bytes(
+                    png_bytes(sample_byte=255 if case_id == "loader" else 0)
+                )
                 artifacts = {"png": artifact_metadata(root, png_relative)}
                 if case_id in EXPECTED_LAYOUT_IDS:
                     layout_relative = (
@@ -699,11 +721,7 @@ def write_v2_candidate(root):
                 "sha256": case_specs_sha256,
             },
             "geometry": {"width": 1280, "height": 720, "scale": 100},
-            "normalization": {
-                "cpp_savepng_readback": "real-height-minus-one-minus-y",
-                "cpp_cursor": "omit-rendered-cursor-glyph-preserve-tooltip",
-                "color": "rgb-or-rgba8-srgb",
-            },
+            "normalization": dict(MODULE.EXPECTED_NORMALIZATION),
             "launcher": {
                 "source_path": "scripts/acquire_presentation_oracle.py",
                 "retained_path": "launcher/acquire_presentation_oracle.py",
@@ -818,16 +836,32 @@ def provenance_index(artifact_root):
         **fields,
         "capture_patch_sha256": "8" * 64,
         "geometry": {"width": 1280, "height": 720, "scale": 100},
-        "normalization": {
-            "cpp_savepng_readback": "real-height-minus-one-minus-y",
-            "cpp_cursor": "omit-rendered-cursor-glyph-preserve-tooltip",
-            "color": "rgb-or-rgba8-srgb",
-        },
+        "normalization": dict(MODULE.EXPECTED_NORMALIZATION),
         "captures": captures,
     }
 
 
 class PinAndGitTests(unittest.TestCase):
+    def test_run_bounds_a_command_and_reports_its_partial_output(self):
+        timeout = subprocess.TimeoutExpired(
+            ["headed-capture"],
+            7,
+            output="capture started\n",
+            stderr="window never closed\n",
+        )
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=timeout) as run:
+            with self.assertRaisesRegex(
+                MODULE.AcquisitionFailure,
+                "timed out after 7 seconds.*window never closed",
+            ):
+                MODULE._run(
+                    ["headed-capture"],
+                    text=True,
+                    timeout_seconds=7,
+                )
+
+        self.assertEqual(run.call_args.kwargs["timeout"], 7)
+
     def test_presentation_rng_contract_pins_darwin_vector_and_empty_trace(self):
         self.assertEqual(
             MODULE.darwin_park_miller_values(587, 5),
@@ -1036,7 +1070,7 @@ class PinAndGitTests(unittest.TestCase):
         )
         self.assertEqual(
             MODULE.FIXTURE_CONTENT_COMMIT,
-            "b9214cafb46ac1fd82293d1fe9f2f78a48831a47",
+            "ab9094f96838ae9c8cb77555560a8b887231640a",
         )
         self.assertEqual(MODULE.CASE_IDS, EXPECTED_CASE_IDS)
         self.assertEqual(MODULE.LAYOUT_CASE_IDS, EXPECTED_LAYOUT_IDS)
@@ -1261,7 +1295,7 @@ class PinAndGitTests(unittest.TestCase):
         self.assertTrue(oracle["entries"])
         self.assertEqual(
             MODULE.tree_oid(REPOSITORY / "content", MODULE.FIXTURE_CONTENT_COMMIT),
-            "df08a1ea6d4ad70313b20e0b95996a354f059d6b",
+            "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
         )
 
     def test_provenance_can_revalidate_the_recorded_pre_evidence_rust_commit(self):
@@ -1286,7 +1320,24 @@ class PinAndGitTests(unittest.TestCase):
 
 
 class InventoryAndPngTests(unittest.TestCase):
-    def test_case_inventory_requires_all_thirteen_and_only_six_layout_cases(self):
+    def test_repository_contract_stays_pending_until_capture_evidence_exists(self):
+        manifest = MODULE.load_json(REPOSITORY / MODULE.CAPTURE_MANIFEST_SOURCE_PATH)
+        self.assertTrue(all(screen["status"] == "pending" for screen in manifest["screens"]))
+        self.assertTrue(all("evidence" not in screen for screen in manifest["screens"]))
+
+        profile = MODULE.load_json(REPOSITORY / "compat/profile.json")
+        lifecycle = [
+            (entry["kind"], entry["value"], entry["status"])
+            for entry in profile["promise"]["presentation"]["evidence"]
+            if entry["value"]
+            in {"clonk-org/clonk-rs#587", MODULE.FINAL_PRESENTATION_GATE_EVIDENCE}
+        ]
+        self.assertEqual(
+            lifecycle,
+            [("issue", "clonk-org/clonk-rs#587", "pending")],
+        )
+
+    def test_case_inventory_requires_all_thirteen_and_exactly_eleven_layout_cases(self):
         MODULE.validate_case_inventory(EXPECTED_CASE_IDS, EXPECTED_LAYOUT_IDS)
         for capture_ids, layout_ids in (
             (EXPECTED_CASE_IDS[:-1], EXPECTED_LAYOUT_IDS),
@@ -1374,7 +1425,7 @@ class InventoryAndPngTests(unittest.TestCase):
             write_capture_set(second)
 
             artifacts = MODULE.validate_duplicate_runs(first, second)
-            self.assertEqual(len(artifacts), 19)
+            self.assertEqual(len(artifacts), 24)
 
             (second / "gameplay.png").write_bytes(png_bytes(sample_byte=1))
             with self.assertRaisesRegex(MODULE.AcquisitionFailure, "gameplay.png"):
@@ -1691,6 +1742,41 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                     )
             run.assert_not_called()
 
+    def test_each_headed_capture_uses_the_short_capture_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate"
+            command = [str(candidate / "clonk-app")]
+            with (
+                mock.patch.object(
+                    MODULE,
+                    "_capture_command",
+                    return_value=(command, candidate),
+                ),
+                mock.patch.object(MODULE, "_prepare_capture_user_data_directory"),
+                mock.patch.object(
+                    MODULE,
+                    "_run",
+                    side_effect=MODULE.AcquisitionFailure("stop after launch"),
+                ) as run,
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.AcquisitionFailure, "stop after launch"
+                ):
+                    MODULE._run_capture_case(
+                        candidate,
+                        {"rust": candidate / "clonk-app"},
+                        run_id="run-1",
+                        nonce="a" * 64,
+                        engine="rust",
+                        case_id="gameplay",
+                        runtime_resources=synthetic_runtime_resources(),
+                    )
+
+            self.assertEqual(
+                run.call_args.kwargs["timeout_seconds"],
+                MODULE.CAPTURE_COMMAND_TIMEOUT_SECONDS,
+            )
+
     def test_capture_runtime_environment_strips_hostile_project_and_locale_state(self):
         hostile = {
             "PATH": "/audited/bin",
@@ -1724,6 +1810,30 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 **overrides,
             },
         )
+
+    def test_capture_audio_driver_is_pinned_to_dummy_for_both_engines(self):
+        hostile = {
+            "PATH": "/audited/bin",
+            "SDL_AUDIODRIVER": "coreaudio",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate"
+            candidate.mkdir()
+            for engine in MODULE.ENGINE_IDS:
+                with self.subTest(engine=engine):
+                    with mock.patch.dict(MODULE.os.environ, hostile, clear=True):
+                        controlled = MODULE._capture_environment(
+                            candidate,
+                            run_id="run-1",
+                            nonce="a" * 64,
+                            engine=engine,
+                            case_id="object-menu",
+                        )
+                        environment = MODULE._capture_runtime_environment(controlled)
+
+                    self.assertEqual(controlled["SDL_AUDIODRIVER"], "dummy")
+                    self.assertEqual(environment["SDL_AUDIODRIVER"], "dummy")
+                    self.assertNotIn("coreaudio", environment.values())
 
     def test_capture_user_data_is_candidate_local_and_must_be_fresh(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1805,6 +1915,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 **MODULE.BUILD_ENVIRONMENT,
             },
         )
+        self.assertEqual(environment["CARGO_INCREMENTAL"], "0")
 
     def test_cpp_startup_launch_requires_exact_runtime_resource_trees(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1969,13 +2080,34 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
         )
         self.assertEqual(
             rust["commands"][0]["argv"],
-            ["cargo", "build", "--locked", "--release", "-p", "clonk-app"],
+            [
+                "cargo",
+                "build",
+                "--locked",
+                "--release",
+                "-p",
+                "clonk-app",
+                "--features",
+                "presentation-capture",
+            ],
         )
         for recipe in (cpp, rust):
             self.assertEqual(
                 recipe["sha256"],
                 canonical_sha256({"commands": recipe["commands"]}),
             )
+
+    def test_audited_build_streams_its_output(self):
+        repository = Path("/checkout")
+        recipe = MODULE.rust_current_build_recipe(repository, "test")
+        with mock.patch.object(MODULE, "_run") as run:
+            MODULE._execute_current_rust_build(
+                recipe,
+                repository,
+                build_profile="test",
+            )
+
+        self.assertFalse(run.call_args.kwargs["capture_output"])
 
     def test_cpp_capture_patch_links_the_pinned_fmt_headers_without_a_runtime_dylib(self):
         patch = (REPOSITORY / MODULE.CAPTURE_PATCH_SOURCE_PATH).read_text(
@@ -2116,7 +2248,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 path.write_bytes(b"regular")
             success = {
                 "schema": "clonk-rs/presentation-comparison/v1",
-                "case_id": "gameplay",
+                "case_id": "loader",
                 "comparison": "pixel",
                 "status": "match",
             }
@@ -2130,7 +2262,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 self.assertEqual(
                     MODULE._compare_current_artifact(
                         binary,
-                        case_id="gameplay",
+                        case_id="loader",
                         reference=reference,
                         actual=actual,
                     ),
@@ -2146,7 +2278,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                     controlled,
                     {
                         "CLONK_PRESENTATION_COMPARE": "1",
-                        "CLONK_PRESENTATION_CASE": "gameplay",
+                        "CLONK_PRESENTATION_CASE": "loader",
                         "CLONK_PRESENTATION_REFERENCE": str(reference.resolve()),
                         "CLONK_PRESENTATION_ACTUAL": str(actual.resolve()),
                     },
@@ -2161,7 +2293,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.AcquisitionFailure, "schema drift"):
                     MODULE._compare_current_artifact(
                         binary,
-                        case_id="gameplay",
+                        case_id="loader",
                         reference=reference,
                         actual=actual,
                     )
@@ -2282,6 +2414,20 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
 
             def comparison_result(_command, **kwargs):
                 case_id = kwargs["environment"]["CLONK_PRESENTATION_CASE"]
+                actual = Path(
+                    kwargs["environment"]["CLONK_PRESENTATION_ACTUAL"]
+                )
+                is_negative_canary = (
+                    case_id == "network-lobby" and actual.name == "loader.png"
+                ) or (
+                    case_id == "startup-main"
+                    and "clonk-presentation-layout-canary-" in str(actual)
+                )
+                if is_negative_canary:
+                    term = "layout" if case_id in MODULE.LAYOUT_CASE_IDS else "pixel"
+                    raise MODULE.AcquisitionFailure(
+                        f"command failed (1): {term} mismatch: intentional canary"
+                    )
                 result = {
                     "schema": MODULE.COMPARISON_RECEIPT_SCHEMA,
                     "case_id": case_id,
@@ -2307,10 +2453,222 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                     trusted_comparator=binary,
                 )
 
-            self.assertEqual(run.call_count, len(MODULE.RUN_IDS) * len(MODULE.CASE_IDS))
+            self.assertEqual(
+                run.call_count,
+                len(MODULE.RUN_IDS) * len(MODULE.CASE_IDS) + 2,
+            )
+
+    def test_negative_canaries_reject_an_always_match_comparator(self):
+        root = Path("/accepted")
+        comparator = Path("/trusted/clonk-app")
+        success = (
+            {
+                "schema": MODULE.COMPARISON_RECEIPT_SCHEMA,
+                "case_id": "network-lobby",
+                "comparison": "pixel",
+                "status": "match",
+            },
+            "match\n",
+        )
+        with (
+            mock.patch.object(MODULE, "_regular_file"),
+            mock.patch.object(
+                MODULE,
+                "_run_presentation_comparator",
+                return_value=success,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.AcquisitionFailure,
+                "accepted a pixel negative canary",
+            ):
+                MODULE._require_comparator_negative_canaries(comparator, root)
+
+    def test_layout_negative_canary_changes_structure_without_changing_screen(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "run-1/cpp/artifacts"
+            artifacts.mkdir(parents=True)
+            for name in ("network-lobby.png", "loader.png"):
+                (artifacts / name).write_bytes(b"png")
+            for case_id in ("startup-main", "startup-about"):
+                (artifacts / f"{case_id}.layout.json").write_text(
+                    json.dumps(
+                        {
+                            "screen": case_id,
+                            "elements": [
+                                {
+                                    "path": "startup/main/root",
+                                    "rect": {"x": 0, "y": 0, "width": 10, "height": 10},
+                                    "visible": True,
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            def comparison(_binary, *, case_id, reference, actual):
+                if case_id == "network-lobby":
+                    self.assertEqual(reference.name, "network-lobby.png")
+                    self.assertEqual(actual.name, "loader.png")
+                    raise MODULE.AcquisitionFailure(
+                        "command failed (1): pixel mismatch: intentional canary"
+                    )
+                reference_value = json.loads(reference.read_text(encoding="utf-8"))
+                actual_value = json.loads(actual.read_text(encoding="utf-8"))
+                self.assertEqual(reference_value["screen"], "startup-main")
+                self.assertEqual(actual_value["screen"], "startup-main")
+                return ({"status": "match"}, "match\n")
+
+            with mock.patch.object(
+                MODULE,
+                "_run_presentation_comparator",
+                side_effect=comparison,
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.AcquisitionFailure,
+                    "accepted a layout negative canary",
+                ):
+                    MODULE._require_comparator_negative_canaries(
+                        Path("/trusted/clonk-app"),
+                        root,
+                    )
+
+    def test_comparator_crash_does_not_satisfy_a_negative_canary(self):
+        with (
+            mock.patch.object(MODULE, "_regular_file"),
+            mock.patch.object(
+                MODULE,
+                "_run_presentation_comparator",
+                side_effect=MODULE.AcquisitionFailure("command timed out"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.AcquisitionFailure,
+                "did not report a pixel mismatch",
+            ):
+                MODULE._require_comparator_negative_canaries(
+                    Path("/trusted/clonk-app"),
+                    Path("/accepted"),
+                )
+
+
+def finalized_contract_values():
+    manifest = json.loads(
+        (REPOSITORY / MODULE.CAPTURE_MANIFEST_SOURCE_PATH).read_text(
+            encoding="utf-8"
+        )
+    )
+    for screen in manifest["screens"]:
+        screen["status"] = "captured"
+        screen.pop("blocker", None)
+        suffix = "layout.json" if screen["comparison"] == "layout" else "png"
+        screen["evidence"] = {
+            engine: (
+                "compat/presentation/oracle/v1/run-1/"
+                f"{engine}/artifacts/{screen['id']}.{suffix}"
+            )
+            for engine in MODULE.ENGINE_IDS
+        }
+    profile = json.loads(
+        (REPOSITORY / "compat/profile.json").read_text(encoding="utf-8")
+    )
+    lifecycle = next(
+        entry
+        for entry in profile["promise"]["presentation"]["evidence"]
+        if entry["value"]
+        in {"clonk-org/clonk-rs#587", MODULE.FINAL_PRESENTATION_GATE_EVIDENCE}
+    )
+    lifecycle.update(
+        {
+            "kind": "test",
+            "value": MODULE.FINAL_PRESENTATION_GATE_EVIDENCE,
+            "status": "held",
+            "note": "Required current capture landing row.",
+        }
+    )
+    return manifest, profile
 
 
 class ProvenanceAndAcceptanceTests(unittest.TestCase):
+    def test_final_lifecycle_rejects_evidence_detached_from_its_screen(self):
+        manifest, profile = finalized_contract_values()
+        MODULE._validate_final_presentation_lifecycle(manifest, profile)
+
+        detached = copy.deepcopy(manifest)
+        detached["screens"][0]["evidence"]["cpp"] = detached["screens"][1][
+            "evidence"
+        ]["cpp"]
+        with self.assertRaisesRegex(
+            MODULE.AcquisitionFailure,
+            "startup-main.*evidence",
+        ):
+            MODULE._validate_final_presentation_lifecycle(detached, profile)
+
+        pending = copy.deepcopy(manifest)
+        pending["screens"][0]["status"] = "pending"
+        with self.assertRaisesRegex(
+            MODULE.AcquisitionFailure,
+            "startup-main.*not captured",
+        ):
+            MODULE._validate_final_presentation_lifecycle(pending, profile)
+
+        duplicate = copy.deepcopy(manifest)
+        duplicate["screens"].append(copy.deepcopy(duplicate["screens"][0]))
+        with self.assertRaisesRegex(
+            MODULE.AcquisitionFailure,
+            "screen identity or order drift",
+        ):
+            MODULE._validate_final_presentation_lifecycle(duplicate, profile)
+
+        pending_profile = copy.deepcopy(profile)
+        lifecycle = next(
+            entry
+            for entry in pending_profile["promise"]["presentation"]["evidence"]
+            if entry["value"] == MODULE.FINAL_PRESENTATION_GATE_EVIDENCE
+        )
+        lifecycle.update(
+            {
+                "kind": "issue",
+                "value": "clonk-org/clonk-rs#587",
+                "status": "pending",
+            }
+        )
+        with self.assertRaisesRegex(
+            MODULE.AcquisitionFailure,
+            "lifecycle is not held by the live gate",
+        ):
+            MODULE._validate_final_presentation_lifecycle(manifest, pending_profile)
+
+    def test_accepted_verifier_reuses_a_prebuilt_current_comparator(self):
+        repository = Path("/checkout")
+        comparator = repository / "target/debug/clonk-app"
+        context = (comparator, "a" * 40, "b" * 40, {"schema": "inventory"})
+        with (
+            mock.patch.object(MODULE, "_regular_file"),
+            mock.patch.object(MODULE, "_build_trusted_current_comparator") as build,
+        ):
+            selected = MODULE._select_trusted_current_comparator(
+                repository,
+                context,
+            )
+
+        self.assertEqual(selected, context)
+        build.assert_not_called()
+
+    def test_verify_accepted_index_selects_nonexecuting_provenance_validation(self):
+        repository = Path("/checkout")
+        validated = [repository / "compat/presentation/oracle/v1/index.json"]
+        with mock.patch.object(
+            MODULE,
+            "verify_accepted_output",
+            return_value=validated,
+        ) as verify:
+            self.assertEqual(MODULE.verify_accepted_index(repository), validated)
+
+        verify.assert_called_once_with(repository, rerun_comparisons=False)
+
     def test_capture_contract_digest_excludes_lifecycle_but_binds_terms(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest_path = Path(temporary) / "presentation_captures.json"
@@ -2323,7 +2681,10 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
             original = MODULE.capture_manifest_contract_sha256(manifest_path)
 
             manifest["screens"][0]["status"] = "captured"
-            manifest["screens"][0]["evidence"] = ["oracle/run-1/cpp/startup-main.png"]
+            manifest["screens"][0]["evidence"] = {
+                "cpp": "oracle/run-1/cpp/startup-main.layout.json",
+                "rust": "oracle/run-1/rust/startup-main.layout.json",
+            }
             manifest["screens"][0].pop("blocker", None)
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             self.assertEqual(
@@ -2335,6 +2696,14 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
             self.assertNotEqual(
                 MODULE.capture_manifest_contract_sha256(manifest_path), original
             )
+
+            manifest["tolerance"]["cpu_max_channel_delta"] = 0
+            manifest["capture"]["pointer"]["position"] = [33, 32]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(
+                MODULE.AcquisitionFailure, "capture pointer input drift"
+            ):
+                MODULE.capture_manifest_contract_sha256(manifest_path)
 
     def test_profile_contract_normalizes_pending_issue_and_held_verifier_lifecycle(self):
         profile = json.loads(
@@ -2349,23 +2718,25 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
         )
         pending = copy.deepcopy(evidence[index])
         evidence[index] = {
-            "kind": "command",
-            "value": "cargo xtask compat verify",
+            "kind": "test",
+            "value": MODULE.FINAL_PRESENTATION_GATE_EVIDENCE,
             "status": "held",
-            "note": "all presentation evidence is accepted and verified live",
+            "note": "Required current capture landing row.",
         }
         self.assertEqual(MODULE.compat_profile_contract_value_sha256(profile), original)
         evidence.append(pending)
         with self.assertRaisesRegex(MODULE.AcquisitionFailure, "exactly one.*lifecycle"):
             MODULE.compat_profile_contract_value_sha256(profile)
         evidence.pop()
-        invalid = copy.deepcopy(profile)
+        invalid = json.loads(
+            (REPOSITORY / "compat/profile.json").read_text(encoding="utf-8")
+        )
         invalid_entry = next(
             entry
             for entry in invalid["promise"]["presentation"]["evidence"]
-            if entry["value"] == "cargo xtask compat verify"
+            if entry["value"] == "clonk-org/clonk-rs#587"
         )
-        invalid_entry["status"] = "pending"
+        invalid_entry["status"] = "held"
         with self.assertRaisesRegex(
             MODULE.AcquisitionFailure, "identity/status drift"
         ):
@@ -2384,7 +2755,12 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
             MODULE.EXPECTED_NORMALIZATION,
             {
                 "cpp_savepng_readback": "real-height-minus-one-minus-y",
-                "cpp_cursor": "omit-rendered-cursor-glyph-preserve-tooltip",
+                "pointer_input": {
+                    "position": [32, 32],
+                    "button": "none",
+                    "modifiers": [],
+                    "help": False,
+                },
                 "color": "rgb-or-rgba8-srgb",
             },
         )
@@ -2622,7 +2998,7 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
                 {
                     "schema": MODULE.COMPARISON_RECEIPT_SCHEMA,
                     "case_id": "gameplay",
-                    "comparison": "pixel",
+                    "comparison": "layout",
                     "status": "mismatch",
                 },
                 separators=(",", ":"),
@@ -2933,7 +3309,7 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
             index = fixture["index"]
 
             for run_id in MODULE.RUN_IDS:
-                relative = f"{run_id}/rust/artifacts/gameplay.png"
+                relative = f"{run_id}/rust/artifacts/network-lobby.png"
                 (candidate / relative).write_bytes(png_bytes(sample_byte=1))
                 new_artifact = artifact_metadata(candidate, relative)
                 rewrite_engine_receipt(
@@ -2941,7 +3317,7 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
                     index,
                     run_id,
                     "rust",
-                    "gameplay",
+                    "network-lobby",
                     lambda receipt, record=new_artifact: receipt["artifacts"].update(
                         png=record
                     ),
@@ -2952,7 +3328,7 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
                 comparison = next(
                     entry
                     for entry in comparison_run["cases"]
-                    if entry["id"] == "gameplay"
+                    if entry["id"] == "network-lobby"
                 )
                 comparison["actual"] = copy.deepcopy(new_artifact)
                 attestation_path = candidate / comparison["receipt"]["path"]
@@ -3094,8 +3470,7 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
             self.assertNotEqual(
                 sha256(current_comparator), sha256(fixture["trusted_comparator"])
             )
-            manifest = MODULE.load_json(REPOSITORY / MODULE.CAPTURE_MANIFEST_SOURCE_PATH)
-            profile = MODULE.load_json(REPOSITORY / "compat/profile.json")
+            manifest, profile = finalized_contract_values()
             source_hashes = {
                 MODULE.CPP_CONFIG_SOURCE_PATH: fixture["index"]["inputs"]["configs"][
                     "cpp"
@@ -3198,6 +3573,10 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
             ["verify-accepted", "--repo-root", "/tmp/repository"]
         )
         self.assertEqual(accepted.repo_root, Path("/tmp/repository"))
+        accepted_index = parser.parse_args(
+            ["verify-accepted-index", "--repo-root", "/tmp/repository"]
+        )
+        self.assertEqual(accepted_index.repo_root, Path("/tmp/repository"))
         current = parser.parse_args(
             [
                 "verify-current",
@@ -3205,9 +3584,28 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
                 "/tmp/repository",
                 "--output-dir",
                 "/tmp/current",
+                "--profile",
+                "test",
             ]
         )
         self.assertEqual(current.output_dir, Path("/tmp/current"))
+        self.assertEqual(current.profile, "test")
+        self.assertEqual(
+            MODULE.rust_current_build_recipe(Path("/tmp/repository"), "test")[
+                "commands"
+            ][0]["argv"],
+            [
+                "cargo",
+                "build",
+                "--locked",
+                "--profile",
+                "test",
+                "-p",
+                "clonk-app",
+                "--features",
+                "presentation-capture",
+            ],
+        )
 
 
 if __name__ == "__main__":

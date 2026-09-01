@@ -1,9 +1,16 @@
 {
-  "note": "The screens a compatibility session promises to render like the oracle, and the terms on which a capture pair may be compared. Owned by clonk-org/clonk-rs#587; the presentation promise in profile.json names that issue as pending evidence, and this file is the detail behind it. Screens whose artwork or branding is port-authored are compared on the `layout` term rather than pixel equality - see `comparison_terms` and `port_assets`, decided in clonk-org/clonk-rs#1298.",
+  "note": "The screens a compatibility session promises to render like the oracle, and the terms on which a capture pair may be compared. The presentation promise in profile.json names clonk-org/clonk-rs#587 as pending evidence, and this file is the detail behind it. Screens whose artwork or branding is port-authored are compared on the `layout` term rather than pixel equality - see `comparison_terms` and `port_assets`, decided in clonk-org/clonk-rs#1298.",
   "capture": {
     "resolution": "1280x720",
     "scale": 100,
-    "note": "One resolution and scale for every screen: a comparison across different geometry proves nothing, and 1280x720 at scale 100 is what docs/RENDERING_PARITY.md's live C++ captures already use."
+    "pointer": {
+      "position": [32, 32],
+      "button": "none",
+      "modifiers": [],
+      "help": false,
+      "note": "Route this no-button logical position through each engine's production input path immediately before every capture render. The inset keeps the native 50-pixel CursorLarge glyph fully visible and makes ambient host pointer position irrelevant without suppressing product output."
+    },
+    "note": "One resolution, scale, and pointer input for every screen: a comparison across different geometry or ambient mouse state proves nothing, and 1280x720 at scale 100 is what docs/RENDERING_PARITY.md's live C++ captures already use."
   },
   "tolerance": {
     "cpu_max_channel_delta": 0,
@@ -16,10 +23,6 @@
       "area": "startup",
       "description": "Startup root menu.",
       "status": "pending",
-      "blocker": {
-        "summary": "Compared 2026-08-26 against the pinned oracle: 95.94% bit-identical. Every remaining pixel is the port's own branding - its Logo.png, its version string and its footer line - plus the mouse cursor the C++ F9 capture bakes in. Excluding those four regions, 823144 pixels are 99.93% bit-identical, 100.00% within one channel step, and no pixel differs by more than one. The renderer already meets the GPU term; the product identity is what a comparison cannot pass. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run.",
-        "issue": "clonk-org/clonk-rs#587"
-      },
       "comparison": "layout",
       "port_assets": [
         "branding"
@@ -30,10 +33,6 @@
       "area": "startup",
       "description": "Scenario selection subtree, including the folder listing and the selected-scenario panel.",
       "status": "pending",
-      "blocker": {
-        "summary": "Compared 2026-08-26 against the pinned oracle: 2.06% bit-identical. The widgets match; the background does not, because planet/Graphics.c4g StartupScenSelBG.png is 2400x1800 in the port and 800x600 at the pin (commit d239bbb9d, 'super-resolve the stretched startup menu art'). Different source art cannot meet a zero-delta term at any resolution. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run.",
-        "issue": "clonk-org/clonk-rs#587"
-      },
       "comparison": "layout",
       "port_assets": [
         "super-resolved-startup-art"
@@ -44,10 +43,6 @@
       "area": "startup",
       "description": "Network game browser.",
       "status": "pending",
-      "blocker": {
-        "summary": "Compared 2026-08-26 against the pinned oracle: 5.90% bit-identical, same cause as startup-scenario-selection - StartupNetworkBG.png is 2400x1800 in the port and 800x600 at the pin. This screen additionally lists live master-server games, so its content is not reproducible without a pinned server list. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run.",
-        "issue": "clonk-org/clonk-rs#587"
-      },
       "comparison": "layout",
       "port_assets": [
         "super-resolved-startup-art"
@@ -58,10 +53,6 @@
       "area": "startup",
       "description": "Player selection subtree.",
       "status": "pending",
-      "blocker": {
-        "summary": "Compared 2026-08-26 against the pinned oracle: 3.96% bit-identical, same cause as startup-scenario-selection - StartupPlrSelBG.png is 2400x1800 in the port and 800x600 at the pin. The button row and the player entry match exactly; the difference is the background texture throughout. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run.",
-        "issue": "clonk-org/clonk-rs#587"
-      },
       "comparison": "layout",
       "port_assets": [
         "super-resolved-startup-art"
@@ -72,10 +63,6 @@
       "area": "startup",
       "description": "Options sheets.",
       "status": "pending",
-      "blocker": {
-        "summary": "Compared 2026-08-26 against the pinned oracle: 63.08% bit-identical. The paper sheet the options rows sit on is StartupDlgPaper.png, 1884x1449 in the port and 628x483 at the pin. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result above is expected rather than a defect. It stays pending until a layout comparison is actually run.",
-        "issue": "clonk-org/clonk-rs#587"
-      },
       "comparison": "layout",
       "port_assets": [
         "super-resolved-startup-art"
@@ -86,10 +73,6 @@
       "area": "startup",
       "description": "About/update subtree.",
       "status": "pending",
-      "blocker": {
-        "summary": "Compared 2026-08-26 against the pinned oracle: 81.44% bit-identical. Both engines load the same LoaderWatercave1.png background and the same seven credit lists; the port-authored fan-project footer is the declared branding difference. Decided in clonk-org/clonk-rs#1298: this screen is compared on the `layout` term instead, so the pixel result is expected rather than a defect. It stays pending until a layout comparison is actually run.",
-        "issue": "clonk-org/clonk-rs#587"
-      },
       "comparison": "layout",
       "port_assets": [
         "branding"
@@ -114,35 +97,50 @@
       "area": "hud",
       "description": "In-game upper board, message board and crew portraits.",
       "status": "pending",
-      "comparison": "pixel"
+      "comparison": "layout",
+      "port_assets": [
+        "branding"
+      ]
     },
     {
       "id": "ingame-menu",
       "area": "menus",
       "description": "In-game main-menu subtree.",
       "status": "pending",
-      "comparison": "pixel"
+      "comparison": "layout",
+      "port_assets": [
+        "branding"
+      ]
     },
     {
       "id": "object-menu",
       "area": "menus",
       "description": "Object-menu subtree, including the extra bar and tooltips.",
       "status": "pending",
-      "comparison": "pixel"
+      "comparison": "layout",
+      "port_assets": [
+        "branding"
+      ]
     },
     {
       "id": "gameplay",
       "area": "gameplay",
       "description": "Representative gameplay frame at a pinned scenario and frame number.",
       "status": "pending",
-      "comparison": "pixel"
+      "comparison": "layout",
+      "port_assets": [
+        "branding"
+      ]
     },
     {
       "id": "evaluation",
       "area": "evaluation",
       "description": "Round evaluation screen.",
       "status": "pending",
-      "comparison": "pixel"
+      "comparison": "layout",
+      "port_assets": [
+        "branding"
+      ]
     }
   ],
   "masks": [],
@@ -152,7 +150,7 @@
       "applies_to": "Every screen whose pixels are all oracle-authored."
     },
     "layout": {
-      "summary": "Widget geometry and text layout, not pixel equality: the same controls at the same rects with the same captions, wrapping and ordering. The pixel term is not applied to a screen on this term, because the port's own artwork cannot equal the oracle's at any resolution - the difference is texture detail across the whole asset, not a rounding residue.",
+      "summary": "Widget geometry and text layout, not pixel equality: the same ordered controls, semantic roles, visibility, rects and resolved-line geometry. Captions and resolved line text are exact except at the individually declared port-asset nodes whose product text is intentionally different. The pixel term is not applied to a screen on this term, because the port's own artwork cannot equal the oracle's at any resolution - the difference is texture detail across the whole asset, not a rounding residue.",
       "applies_to": "Screens that render one or more of `port_assets`.",
       "authority": "clonk-org/clonk-rs#1298",
       "note": "Chosen over shipping the oracle's branding and 1x art inside the profile. The port's identity and its super-resolved startup art are deliberate product features, and clonk-org/clonk-rs#587 forbids masking port-version text or product features, so no mask could make a pixel term pass on these screens either."

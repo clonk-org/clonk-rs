@@ -726,26 +726,36 @@ pub fn compose_classic_lobby_player_fallback_icon(
         "active Player raster must not be empty"
     );
     let player = blacken_transparent_pixels(player);
-    let colored = crate::hud::colorize_by_owner(&player, owner_color);
+    let colored = crate::hud::colorize_by_owner_software(&player, owner_color);
     let extent = i32::try_from(CLASSIC_ROSTER_ICON_EXTENT).expect("40 fits i32");
     let bounds = IntRect::new(0, 0, extent, extent);
     let fitted = aspect_fit_roster_raster(colored.width(), colored.height(), bounds);
+    let source = Surface::from_bytes(
+        colored.width(),
+        colored.height(),
+        PixelFormat::Rgba8888,
+        colored.pixels().to_vec(),
+    )?;
     let mut surface = Surface::new(
         CLASSIC_ROSTER_ICON_EXTENT,
         CLASSIC_ROSTER_ICON_EXTENT,
         PixelFormat::Rgba8888,
     );
-    draw_facet_stretch(
-        &mut surface,
-        &colored,
-        (0.0, 0.0, colored.width() as f32, colored.height() as f32),
-        (
-            fitted.x as f32,
-            fitted.y as f32,
-            fitted.w as f32,
-            fitted.h as f32,
-        ),
-        None,
+    surface.fill(Color::new(255, 255, 255, 0));
+    ensure!(
+        clonk_graphics::compositing::copy_stretched(
+            &source,
+            clonk_graphics::Rect::new(0, 0, colored.width(), colored.height()),
+            &mut surface,
+            clonk_graphics::Rect::new(
+                fitted.x,
+                fitted.y,
+                fitted.w.max(0) as u32,
+                fitted.h.max(0) as u32,
+            ),
+        )
+        .is_some(),
+        "active Player raster must fit the fallback surface"
     );
     Ok(ImageData::new(
         CLASSIC_ROSTER_ICON_EXTENT,
@@ -6563,6 +6573,9 @@ mod tests {
 
     #[test]
     fn classic_player_fallback_composes_to_40px_before_join_overlay() {
+        // C4Surface::Create initializes the texture backing store to 0xff
+        // (C4Surface.cpp:1110-1113), so aspect-fit bars remain transparent
+        // white around the pixels Blit8 writes.
         let player = ImageData::new(2, 1, vec![0, 0, 255, 255, 200, 20, 10, 255]);
         let icon = compose_classic_lobby_player_fallback_icon(&player, Color::opaque(12, 34, 56))
             .expect("non-empty active Player raster");
@@ -6571,10 +6584,11 @@ mod tests {
             let start = ((y * icon.width() + x) * 4) as usize;
             &icon.pixels()[start..start + 4]
         };
-        assert_eq!(pixel(5, 9), [0, 0, 0, 0]);
-        assert_eq!(pixel(5, 20), [12, 34, 56, 255]);
+        assert_eq!(pixel(5, 9), [255, 255, 255, 0]);
+        // The offscreen Blit8 path applies StdColors.h:159-169 modulation.
+        assert_eq!(pixel(5, 20), [11, 33, 55, 255]);
         assert_eq!(pixel(30, 20), [200, 20, 10, 255]);
-        assert_eq!(pixel(5, 30), [0, 0, 0, 0]);
+        assert_eq!(pixel(5, 30), [255, 255, 255, 0]);
 
         let crew = ImageData::new(1, 1, vec![0, 0, 255, 255]);
         let bounds = IntRect::new(0, 0, 40, 40);
@@ -6592,8 +6606,63 @@ mod tests {
     }
 
     #[test]
+    fn classic_player_fallback_uses_offscreen_blit8_nearest_sampling() {
+        // C4PlayerInfoListBox.cpp:293-294 creates a non-render-target 40x40
+        // surface, so StdDDraw2.cpp:644-645,846-872 selects Blit8's integer
+        // nearest-neighbour source coordinate for the fallback player icon.
+        let player = ImageData::new(
+            3,
+            1,
+            vec![10, 10, 10, 255, 100, 100, 100, 255, 200, 200, 200, 255],
+        );
+        let icon = compose_classic_lobby_player_fallback_icon(&player, Color::opaque(1, 2, 3))
+            .expect("non-empty active Player raster");
+        let pixel = |x: u32, y: u32| {
+            let start = ((y * icon.width() + x) * 4) as usize;
+            &icon.pixels()[start..start + 4]
+        };
+
+        assert_eq!(pixel(13, 20), [10, 10, 10, 255]);
+        assert_eq!(pixel(14, 20), [100, 100, 100, 255]);
+        assert_eq!(pixel(26, 20), [100, 100, 100, 255]);
+        assert_eq!(pixel(27, 20), [200, 200, 200, 255]);
+    }
+
+    #[test]
+    fn classic_player_fallback_uses_blit8_owner_modulation() {
+        // Blit8 asks C4Surface::GetPixDw(..., true) for each source pixel
+        // (C4Surface.cpp:742-755); its ClrByOwner path uses ModulateClr's
+        // divide-by-256 RGB products (C4Surface.cpp:672-700;
+        // StdColors.h:159-169), including 255*255 -> 254.
+        let player = ImageData::new(1, 1, vec![0, 0, 255, 255]);
+        let icon =
+            compose_classic_lobby_player_fallback_icon(&player, Color::opaque(255, 255, 255))
+                .expect("non-empty active Player raster");
+        let center = ((20 * icon.width() + 20) * 4) as usize;
+
+        assert_eq!(&icon.pixels()[center..center + 4], [254, 254, 254, 255]);
+    }
+
+    #[test]
+    fn classic_player_fallback_preserves_partial_alpha_rgb_in_empty_cache() {
+        // Blit8 reaches C4Surface::BltPix (C4Surface.cpp:742-755). The empty
+        // destination has inverted alpha 0xff, so BltAlpha assigns the source
+        // pixel verbatim instead of premultiplying its RGB
+        // (StdColors.h:120-126).
+        let player = ImageData::new(1, 1, vec![40, 40, 40, 128]);
+        let icon = compose_classic_lobby_player_fallback_icon(&player, Color::opaque(12, 34, 56))
+            .expect("partial-alpha Player raster creates the fallback surface");
+        let center = ((20 * icon.width() + 20) * 4) as usize;
+
+        assert_eq!(&icon.pixels()[center..center + 4], [40, 40, 40, 128]);
+    }
+
+    #[test]
     fn joined_player_overlay_matches_cpp_lower_half_shadow_aspect_and_clip() {
-        let crew = ImageData::new(2, 1, vec![0, 0, 255, 255, 0, 0, 255, 255]);
+        // Keep the 2:1 aspect ratio while filling C4Surface's minimum 2px
+        // texture height, so this layout/clip test does not also exercise the
+        // transparent padding row (C4Surface.cpp:182-205,955-991).
+        let crew = ImageData::new(4, 2, [0, 0, 255, 255].repeat(8));
         let icon = LobbyRosterIcon::Standard(7);
         let bounds = IntRect::new(4, 3, 40, 40);
         let clip = IntRect::new(4, 3, 22, 34);

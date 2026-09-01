@@ -14,9 +14,8 @@
 //! all verification failures, never warnings.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -626,78 +625,80 @@ pub fn readiness(json: &str) -> Result<(usize, usize)> {
     Ok((pending, blocked))
 }
 
-fn presentation_verification_commands(
-    repo_root: &Path,
-    output_directory: &Path,
-) -> [Vec<OsString>; 2] {
-    let script = repo_root.join("scripts/acquire_presentation_oracle.py");
-    [
-        vec![
-            script.clone().into_os_string(),
-            "verify-accepted".into(),
-            "--repo-root".into(),
-            repo_root.as_os_str().to_owned(),
-        ],
-        vec![
-            script.into_os_string(),
-            "verify-current".into(),
-            "--repo-root".into(),
-            repo_root.as_os_str().to_owned(),
-            "--output-dir".into(),
-            output_directory.as_os_str().to_owned(),
-        ],
+fn accepted_presentation_verification_command(repo_root: &Path) -> Vec<OsString> {
+    vec![
+        repo_root
+            .join("scripts/acquire_presentation_oracle.py")
+            .into_os_string(),
+        "verify-accepted-index".into(),
+        "--repo-root".into(),
+        repo_root.as_os_str().to_owned(),
     ]
 }
 
-fn presentation_verification_output_directory() -> Result<PathBuf> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("reading the clock for a presentation-verification path")?
-        .as_nanos();
-    let output = std::env::temp_dir().join(format!(
-        "clonk-rs-presentation-current-{}-{nonce}",
-        std::process::id()
-    ));
-    if output.exists() {
-        bail!(
-            "presentation-verification output path already exists: {}",
-            output.display()
-        );
-    }
-    Ok(output)
+fn current_presentation_verification_command(
+    repo_root: &Path,
+    arguments: &[String],
+) -> Vec<OsString> {
+    let mut command = vec![
+        repo_root
+            .join("scripts/acquire_presentation_oracle.py")
+            .into_os_string(),
+        "verify-current".into(),
+        "--repo-root".into(),
+        repo_root.as_os_str().to_owned(),
+    ];
+    command.extend(arguments.iter().map(OsString::from));
+    command
 }
 
-fn verify_presentation_evidence(repo_root: &Path) -> Result<()> {
-    let output_directory = presentation_verification_output_directory()?;
-    for command in presentation_verification_commands(repo_root, &output_directory) {
-        let (script, arguments) = command
-            .split_first()
-            .context("presentation-verification command has no script")?;
-        let status = Command::new("python3")
-            .arg(script)
-            .args(arguments)
-            .current_dir(repo_root)
-            .status()
-            .with_context(|| {
-                format!(
-                    "running presentation evidence verifier {}",
-                    script.to_string_lossy()
-                )
-            })?;
-        if !status.success() {
-            bail!(
-                "presentation evidence verification failed with {status}; live output, if any, is retained at {}",
-                output_directory.display()
-            );
-        }
+fn run_presentation_verification(repo_root: &Path, command: &[OsString]) -> Result<()> {
+    let (script, arguments) = command
+        .split_first()
+        .context("presentation-verification command has no script")?;
+    let status = Command::new("python3")
+        .arg(script)
+        .args(arguments)
+        .current_dir(repo_root)
+        .status()
+        .with_context(|| {
+            format!(
+                "running presentation evidence verifier {}",
+                script.to_string_lossy()
+            )
+        })?;
+    if !status.success() {
+        bail!("presentation evidence verification failed with {status}");
     }
-    std::fs::remove_dir_all(&output_directory).with_context(|| {
-        format!(
-            "removing successful presentation-verification output {}",
-            output_directory.display()
-        )
-    })?;
     Ok(())
+}
+
+fn verify_accepted_presentation_evidence(repo_root: &Path) -> Result<()> {
+    run_presentation_verification(
+        repo_root,
+        &accepted_presentation_verification_command(repo_root),
+    )
+}
+
+pub fn presentation_command(args: &[String]) -> Result<()> {
+    if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
+        println!(
+            "Usage:\n  cargo xtask presentation verify-current --profile <p> --output-dir <dir>   Capture current Rust twice and compare every case to accepted C++ evidence."
+        );
+        return Ok(());
+    }
+    if args[0] != "verify-current" {
+        bail!(
+            "unknown `presentation` subcommand `{}` (try `cargo xtask presentation --help`)",
+            args[0]
+        );
+    }
+
+    let repo_root = workspace_dir()?;
+    run_presentation_verification(
+        &repo_root,
+        &current_presentation_verification_command(&repo_root, &args[1..]),
+    )
 }
 
 pub fn command(args: &[String]) -> Result<()> {
@@ -732,7 +733,7 @@ pub fn command(args: &[String]) -> Result<()> {
         );
     }
 
-    verify_presentation_evidence(&workspace_dir)?;
+    verify_accepted_presentation_evidence(&workspace_dir)?;
 
     let manifest: Manifest = serde_json::from_str(&json)?;
     let (pending, blocked) = readiness(&json)?;
@@ -787,33 +788,49 @@ mod tests {
     }
 
     #[test]
-    fn presentation_evidence_gate_verifies_accepted_then_current_captures() {
+    fn compat_presentation_evidence_gate_verifies_only_accepted_captures() {
         let repository = Path::new("/checkout");
-        let output = Path::new("/tmp/current-presentation");
 
-        let commands = presentation_verification_commands(repository, output);
+        let command = accepted_presentation_verification_command(repository);
 
         assert_eq!(
-            commands,
-            [
-                vec![
-                    repository
-                        .join("scripts/acquire_presentation_oracle.py")
-                        .into_os_string(),
-                    "verify-accepted".into(),
-                    "--repo-root".into(),
-                    repository.as_os_str().to_owned(),
-                ],
-                vec![
-                    repository
-                        .join("scripts/acquire_presentation_oracle.py")
-                        .into_os_string(),
-                    "verify-current".into(),
-                    "--repo-root".into(),
-                    repository.as_os_str().to_owned(),
-                    "--output-dir".into(),
-                    output.as_os_str().to_owned(),
-                ],
+            command,
+            vec![
+                repository
+                    .join("scripts/acquire_presentation_oracle.py")
+                    .into_os_string(),
+                "verify-accepted-index".into(),
+                "--repo-root".into(),
+                repository.as_os_str().to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn current_presentation_capture_forwards_profile_and_output_directory() {
+        let repository = Path::new("/checkout");
+        let arguments = [
+            "--profile".to_owned(),
+            "test".to_owned(),
+            "--output-dir".to_owned(),
+            "/tmp/current-presentation".to_owned(),
+        ];
+
+        let command = current_presentation_verification_command(repository, &arguments);
+
+        assert_eq!(
+            command,
+            vec![
+                repository
+                    .join("scripts/acquire_presentation_oracle.py")
+                    .into_os_string(),
+                "verify-current".into(),
+                "--repo-root".into(),
+                repository.as_os_str().to_owned(),
+                "--profile".into(),
+                "test".into(),
+                "--output-dir".into(),
+                "/tmp/current-presentation".into(),
             ]
         );
     }

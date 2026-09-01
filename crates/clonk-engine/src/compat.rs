@@ -109,6 +109,7 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+#[cfg(any(test, feature = "presentation-capture"))]
 pub(crate) fn seed_script_safe_random(seed: u32) {
     SCRIPT_SAFE_RNG.with(|rng| *rng.borrow_mut() = crate::particles::SafeRng::new(seed));
 }

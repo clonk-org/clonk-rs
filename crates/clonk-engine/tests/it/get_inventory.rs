@@ -68,6 +68,7 @@ fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
         style: 0,
         equal_item_height: false,
         permanent: true,
+        close_command: clonk_engine::ObjectMenuCloseCommand::None,
         location: None,
         runtime_id: 0,
         extra: ObjectMenuExtra::None,

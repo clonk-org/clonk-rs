@@ -2858,6 +2858,77 @@ fn collect_player_overlay_marks_focus_and_energy() {
 }
 
 #[test]
+fn command_key_label_uses_the_owning_players_keyboard_set() {
+    let owner = 17;
+    let mut snapshot = SimulationSnapshot::default();
+    snapshot.players.push(PlayerState {
+        id: owner,
+        control_set: 2,
+        ..PlayerState::default()
+    });
+    let mut bindings = KeyboardBindings::load(None);
+    assert!(bindings.rebind_for_set(
+        2,
+        ControlBindingId::PlayerMenu,
+        VirtualKeyCode::F8,
+    ));
+    let gamepad_bindings = GamepadBindings::default();
+    let engine = Engine::new();
+    let resources = HashMap::new();
+    let context = AppCommandContext {
+        engine: &engine,
+        bindings: &bindings,
+        gamepad_bindings: &gamepad_bindings,
+        snapshot: &snapshot,
+        resources: &resources,
+    };
+
+    // C4Object::DrawCommand passes iPlayer into PlrControlKeyName, which reads
+    // that player's selected keyboard set (src/C4Object.cpp:4084-4087;
+    // src/C4Viewport.cpp:1363-1373).
+    runtime_assert_eq!(
+        clonk_app_render::draw_commands::CommandContext::key_label(&context, owner, 9)
+            => format_key_label(VirtualKeyCode::F8),
+        "command labels follow the owner rather than the global Keyboard1 set"
+    );
+}
+
+#[test]
+fn command_key_label_uses_the_owning_players_gamepad_set() {
+    let owner = 17;
+    let mut snapshot = SimulationSnapshot::default();
+    snapshot.players.push(PlayerState {
+        id: owner,
+        control_set: 6,
+        ..PlayerState::default()
+    });
+    let bindings = KeyboardBindings::load(None);
+    let mut gamepad_bindings = GamepadBindings::default();
+    gamepad_bindings.rebind_raw(
+        2,
+        ControlBindingId::PlayerMenu,
+        input::legacy_gamepad_button_key(2, 1).test_value(),
+    );
+    let engine = Engine::new();
+    let resources = HashMap::new();
+    let context = AppCommandContext {
+        engine: &engine,
+        bindings: &bindings,
+        gamepad_bindings: &gamepad_bindings,
+        snapshot: &snapshot,
+        resources: &resources,
+    };
+
+    // PlrControlKeyName subtracts C4P_Control_GamePad1 before looking up the
+    // owner's configured button (src/C4Viewport.cpp:1363-1373).
+    runtime_assert_eq!(
+        clonk_app_render::draw_commands::CommandContext::key_label(&context, owner, 9)
+            => gamepad_bindings.key_label_for_set(2, ControlBindingId::PlayerMenu),
+        "command labels follow the owner's selected gamepad set"
+    );
+}
+
+#[test]
 fn participant_module_count_matches_cpp_smodulecount() {
     assert_eq!(c4_module_count(""), 0);
     assert_eq!(c4_module_count("   ;  ;; "), 0);

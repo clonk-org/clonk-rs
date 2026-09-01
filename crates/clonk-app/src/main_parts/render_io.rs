@@ -897,23 +897,6 @@ pub(crate) fn startup_main_logo_geometry(
     (logo_x, logo_y, logo_w, logo_h)
 }
 
-pub(crate) fn startup_main_classic_logo_geometry(
-    surface_width: i32,
-    surface_height: i32,
-) -> (i32, i32, i32, i32) {
-    // Native Logo.png is 960x320 and C4StartupMainDlg draws it at 0.4 zoom
-    // (C4StartupMainDlg.cpp:115-121). The LegacyClonk profile preserves that
-    // semantic allocation even when the port supplies different artwork.
-    const WIDTH: i32 = 384;
-    const HEIGHT: i32 = 128;
-    (
-        surface_width * 30 / 31 - WIDTH,
-        surface_height / 21 - 5,
-        WIDTH,
-        HEIGHT,
-    )
-}
-
 pub(crate) fn scenario_list_scrollbar_visible(
     scenario_menu: &MenuState,
     layout: &clonk_frontend::startup_scensel::ScenSelLayout,
@@ -955,7 +938,6 @@ pub(crate) fn render_startup_frame(
     network_lobby: Option<&mut NetworkLobbyState>,
     flags: StartupViewFlags,
     backdrop: &mut StartupBackdropCache,
-    classic_main_logo: bool,
     defer_native_main_text: bool,
     gamma: &clonk_graphics::GammaRamp,
     frame: &mut [u8],
@@ -1272,11 +1254,8 @@ pub(crate) fn render_startup_frame(
                 if let Some(logo) = assets.logo() {
                     let width = surface.width() as i32;
                     let height = surface.height() as i32;
-                    let (logo_x, logo_y, logo_w, logo_h) = if classic_main_logo {
-                        startup_main_classic_logo_geometry(width, height)
-                    } else {
-                        startup_main_logo_geometry(width, height, logo.width(), logo.height())
-                    };
+                    let (logo_x, logo_y, logo_w, logo_h) =
+                        startup_main_logo_geometry(width, height, logo.width(), logo.height());
                     let logo_rect = clonk_gui::Rect::new(
                         logo_x as f32,
                         logo_y as f32,
@@ -1799,10 +1778,11 @@ pub(crate) fn collect_viewport_inputs_from_physical_state<'a>(
 }
 
 /// [`draw_commands::CommandContext`] over the live engine, the local
-/// keyboard bindings and the current snapshot.
+/// keyboard/gamepad bindings and the current snapshot.
 pub(crate) struct AppCommandContext<'a> {
     pub(crate) engine: &'a Engine,
     pub(crate) bindings: &'a KeyboardBindings,
+    pub(crate) gamepad_bindings: &'a GamepadBindings,
     pub(crate) snapshot: &'a SimulationSnapshot,
     pub(crate) resources: &'a HashMap<String, String>,
 }
@@ -1900,15 +1880,35 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
         self.engine.definition_shape_rect(definition_id)
     }
 
-    fn key_label(&self, _owner: i32, control: i32) -> String {
-        // PlrControlKeyName (src/C4Viewport.cpp:1363-1374): the local
-        // keyboard set's key for the CON_* index, short name. The
-        // ControlBindingId order IS the CON_* order (src/C4Constants.h:158).
-        usize::try_from(control)
+    fn key_label(&self, owner: i32, control: i32) -> String {
+        // PlrControlKeyName (src/C4Viewport.cpp:1363-1374): the owning
+        // player's selected keyboard set's key for the CON_* index, short
+        // name. The ControlBindingId order IS the CON_* order
+        // (src/C4Constants.h:158).
+        let binding = usize::try_from(control)
             .ok()
-            .and_then(|index| ControlBindingId::ALL.get(index).copied())
-            .and_then(|binding| self.bindings.key_for(binding))
-            .map(format_key_label)
+            .and_then(|index| ControlBindingId::ALL.get(index).copied());
+        let control_set = self
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .map(|player| player.control_set);
+        binding
+            .zip(control_set)
+            .map(|(binding, control_set)| {
+                if (0..4).contains(&control_set) {
+                    self.bindings
+                        .key_for_set(control_set as usize, binding)
+                        .map(format_key_label)
+                        .unwrap_or_default()
+                } else if (4..8).contains(&control_set) {
+                    self.gamepad_bindings
+                        .key_label_for_set((control_set - 4) as usize, binding)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default()
     }
 

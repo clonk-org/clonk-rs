@@ -6994,6 +6994,26 @@ protected func CalcDefValue(object base, int player)
     }
 
     #[test]
+    fn automatic_context_menu_records_its_exit_close_command() {
+        // AutoContextMenu installs its Exit CloseCommand only after opening
+        // the permanent contained C4MN_Context menu (src/C4Object.cpp:2044-2062).
+        let mut engine = clonk_engine("#strict\n");
+        register_auto_context_structure(&mut engine, "HUT3", "Hut", "#strict\n");
+        engine.register_test_player(PlayerConfig::new(1, "Test"));
+        engine.player_mut(1).test_value().control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine.spawn_test_object(SpawnConfig::new("HUT3"));
+        contain_object(&mut engine, crew, hut);
+
+        engine.execute_player_controls().test_value();
+
+        assert_eq!(
+            test_menu(&engine, crew).close_command,
+            crate::ObjectMenuCloseCommand::Exit
+        );
+    }
+
+    #[test]
     fn contained_context_runs_script_declared_context_function() {
         // C4MN_Context inserts target `Context*` functions between the base
         // rows and Info/Exit. Their leading description block supplies the
@@ -7881,6 +7901,45 @@ global func FxWorldContextLateLast(target, number, menu, image) { [Global late l
 
         let menu = open_native_context(&mut engine, crew, target);
         assert_eq!(menu_captions(&menu), ["Put", "Contents", "Exit"]);
+    }
+
+    #[test]
+    fn manual_contained_context_exit_row_keeps_an_empty_close_command() {
+        // C4Command::Context opens C4MN_Context without a CloseCommand, even
+        // though its refill adds an Exit row for the current container
+        // (src/C4Command.cpp:1076-1087; src/C4ObjectMenu.cpp:426-433).
+        let mut engine = clonk_engine("#strict\n");
+        let mut container = structure_definition("CONT", "Container", "#strict\n");
+        container.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine.register_test_definition(container);
+        let crew = register_player_crew(&mut engine);
+        let target = engine.spawn_test_object(SpawnConfig::new("CONT"));
+        contain_object(&mut engine, crew, target);
+
+        let menu = open_native_context(&mut engine, crew, target);
+
+        assert!(menu.items.iter().any(|item| item.caption == "Exit"));
+        assert_eq!(menu.close_command, crate::ObjectMenuCloseCommand::None);
+    }
+
+    #[test]
+    fn legacy_serialized_object_menu_defaults_to_an_empty_close_command() {
+        // Fresh native menus clear CloseCommand in C4Menu::Default; Rust
+        // snapshots written before this field existed must restore that state
+        // (src/C4Menu.cpp:282-305,337-341).
+        let mut engine = clonk_engine("#strict\n");
+        let crew = register_player_crew(&mut engine);
+        let menu = open_native_context(&mut engine, crew, crew);
+        let mut legacy = serde_json::to_value(menu).expect("menu serializes");
+        legacy
+            .as_object_mut()
+            .expect("menu serializes as an object")
+            .remove("close_command");
+
+        let restored: crate::ObjectMenuState =
+            serde_json::from_value(legacy).expect("legacy menu restores");
+
+        assert_eq!(restored.close_command, crate::ObjectMenuCloseCommand::None);
     }
 
     #[test]
@@ -9704,6 +9763,31 @@ protected func CalcValue(object base, int player)
             None,
             "the evaluated context close command exits on the next tick"
         );
+    }
+
+    #[test]
+    fn control_close_executes_only_the_recorded_object_menu_close_command() {
+        // TryClose invokes MenuCommand only when the live CloseCommand is set;
+        // menu identity, permanence, and rows are not substitutes for that
+        // state (src/C4Menu.cpp:317-331).
+        let mut engine = clonk_engine("#strict\n");
+        register_auto_context_structure(&mut engine, "HUT3", "Hut", "#strict\n");
+        engine.register_test_player(PlayerConfig::new(1, "Test"));
+        engine.player_mut(1).test_value().control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine.spawn_test_object(SpawnConfig::new("HUT3"));
+        contain_object(&mut engine, crew, hut);
+        engine.execute_player_controls().test_value();
+        test_object_mut(&mut engine, crew)
+            .state
+            .menu
+            .as_mut()
+            .test_value()
+            .close_command = crate::ObjectMenuCloseCommand::None;
+
+        engine.player_in_com(1, COM_DIG, 0).test_value();
+
+        assert!(test_snapshot(&engine, crew).command_stack.is_empty());
     }
 
     #[test]

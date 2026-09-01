@@ -2477,12 +2477,16 @@ fn store_map_palette(
             for channel in &mut palette[slot] {
                 // StoreMapPalette intentionally consumes the process-global
                 // C rand() stream; the chosen color is presentation-only.
+                #[cfg(any(test, feature = "presentation-capture"))]
                 let increase = palette_random_increases(
                     crate::particles::presentation_safe_random_capture_raw_value(),
                     // SAFETY: libc guarantees a non-negative `rand` result;
                     // ordinary execution keeps the native unsynced stream.
                     || unsafe { rand() },
                 );
+                #[cfg(not(any(test, feature = "presentation-capture")))]
+                // SAFETY: libc guarantees a non-negative `rand` result.
+                let increase = unsafe { rand() } < C_RAND_MAX / 2;
                 *channel = if increase {
                     channel.wrapping_add(3)
                 } else {
@@ -2494,6 +2498,7 @@ fn store_map_palette(
     palette
 }
 
+#[cfg(any(test, feature = "presentation-capture"))]
 fn palette_random_increases(
     capture_value: Option<u32>,
     native_random: impl FnOnce() -> i32,

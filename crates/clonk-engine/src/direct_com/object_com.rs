@@ -145,9 +145,8 @@ impl Engine {
                 }
             }
             COM_MENU_CLOSE => {
-                let auto_context_exit =
-                    !menu.user_menu && menu.permanent && menu.identification == Value::Int(14);
-                if self.close_object_menu(object_id, false)? && auto_context_exit {
+                let close_with_exit = menu.close_command == crate::ObjectMenuCloseCommand::Exit;
+                if self.close_object_menu(object_id, false)? && close_with_exit {
                     // C4Object::AutoContextMenu's CloseCommand is invoked
                     // only for a control close (C4Menu.cpp:327-331), not
                     // when another menu force-replaces the context menu.

@@ -34,6 +34,8 @@ const CANONICAL_NETWORK_REFERENCES_SHA256: &str =
     "922c7ccf941069bafd38a18e3ed71a747eadaa0c2a037b4e34422ce7312c8bf4";
 const PRESENTATION_RNG_ALGORITHM: &str = "darwin-libc-rand-park-miller-v1";
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const CANONICAL_POINTER_X: f64 = 32.0;
+const CANONICAL_POINTER_Y: f64 = 32.0;
 
 pub(crate) fn capture_or_discovery_requested() -> bool {
     std::env::var_os(CAPTURE_ENABLED_ENV).is_some()
@@ -124,6 +126,13 @@ impl PresentationCaptureCase {
         match self {
             Self::Layout(case) => case.id(),
             Self::Pixel(case) => case.id(),
+        }
+    }
+
+    const fn uses_layout_comparison(self) -> bool {
+        match self {
+            Self::Layout(_) => true,
+            Self::Pixel(case) => case.uses_layout_comparison(),
         }
     }
 }
@@ -276,6 +285,10 @@ impl PixelCaptureCase {
             Self::Hud | Self::Gameplay => 1,
             Self::ObjectMenu => 90,
         }
+    }
+
+    const fn uses_layout_comparison(self) -> bool {
+        !matches!(self, Self::NetworkLobby | Self::Loader)
     }
 }
 
@@ -469,9 +482,10 @@ fn build_engine_receipt(
     );
     anyhow::ensure!(
         artifacts.keys().map(String::as_str).collect::<Vec<_>>()
-            == match case {
-                PresentationCaptureCase::Layout(_) => vec!["layout", "png"],
-                PresentationCaptureCase::Pixel(_) => vec!["png"],
+            == if case.uses_layout_comparison() {
+                vec!["layout", "png"]
+            } else {
+                vec!["png"]
             },
         "capture artifact set does not match the typed case"
     );
@@ -650,11 +664,6 @@ fn trusted_case_spec_from_bytes(
         }
         PresentationCaptureCase::Pixel(case) => {
             anyhow::ensure!(
-                spec.comparison == "pixel" && spec.port_asset_exemptions.is_empty(),
-                "{} must use the strict pixel term without port assets",
-                case.id()
-            );
-            anyhow::ensure!(
                 spec.trigger.id == case.trigger(),
                 "{} trigger is {:?}, expected {:?}",
                 case.id(),
@@ -747,6 +756,13 @@ fn stage_tutorial_checkpoint(
         .ok_or_else(|| anyhow::anyhow!("{} capture requires logical audio", case.id()))?
         .borrow_mut()
         .install_presentation_capture_clock();
+    let (presentation_width, presentation_height) = {
+        let surface = app.graphics.surface();
+        (surface.width(), surface.height())
+    };
+    let mut discarded_presentation =
+        vec![0; presentation_width as usize * presentation_height as usize * 4];
+    let mut game_clock_accumulator = std::time::Duration::ZERO;
 
     while app.engine.frame() < case.frame() {
         if case == PixelCaptureCase::ObjectMenu {
@@ -776,11 +792,29 @@ fn stage_tutorial_checkpoint(
         app.update().map_err(|error| {
             anyhow::anyhow!("advance {} from frame {before}: {error}", case.id())
         })?;
+        crate::advance_game_clock_from_elapsed(app, &mut game_clock_accumulator, tick_delay)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "advance {} game clock after frame {}: {error}",
+                    case.id(),
+                    app.engine.frame()
+                )
+            })?;
         anyhow::ensure!(
             app.mode == crate::AppMode::Running && app.engine.frame() == before + 1,
             "{} did not advance exactly one real simulation frame from {before}",
             case.id()
         );
+        if app.engine.frame() < case.frame() {
+            route_canonical_capture_pointer(app)?;
+            app.render(&mut discarded_presentation).map_err(|error| {
+                anyhow::anyhow!(
+                    "render {} intermediate frame {}: {error}",
+                    case.id(),
+                    app.engine.frame()
+                )
+            })?;
+        }
     }
     anyhow::ensure!(
         app.engine.frame() == case.frame(),
@@ -815,6 +849,10 @@ fn stage_tutorial_checkpoint(
                 app.engine.request_game_over_from_control()?,
                 "Tutorial01 did not enter the real game-over path"
             );
+            // The native checkpoint calls C4Game::Evaluate immediately after
+            // DoGameOver without advancing frame 90
+            // (parity/oracle/presentation_capture.patch:2242-2244).
+            app.engine.evaluate_game_over_from_control()?;
             app.snapshot = app.engine.snapshot();
             app.handle_game_over()
                 .map_err(|error| anyhow::anyhow!("open real evaluation dialog: {error}"))?;
@@ -836,6 +874,17 @@ fn stage_tutorial_checkpoint(
     })
 }
 
+fn route_canonical_capture_pointer(app: &mut crate::GameApp) -> Result<()> {
+    app.handle_modifiers_changed(winit::keyboard::ModifiersState::empty())
+        .map_err(|error| anyhow::anyhow!("clear presentation pointer modifiers: {error}"))?;
+    app.handle_cursor_moved(winit::dpi::PhysicalPosition::new(
+        CANONICAL_POINTER_X,
+        CANONICAL_POINTER_Y,
+    ))
+    .map_err(|error| anyhow::anyhow!("route canonical presentation pointer: {error}"))?;
+    Ok(())
+}
+
 fn render_checkpoint_png(app: &mut crate::GameApp, render_ordinal: u32) -> Result<Vec<u8>> {
     anyhow::ensure!(render_ordinal > 0, "render ordinal must be positive");
     let (width, height) = {
@@ -848,11 +897,227 @@ fn render_checkpoint_png(app: &mut crate::GameApp, render_ordinal: u32) -> Resul
     );
     let mut frame = vec![0; width as usize * height as usize * 4];
     for ordinal in 1..=render_ordinal {
+        route_canonical_capture_pointer(app)?;
         app.render(&mut frame)
             .map_err(|error| anyhow::anyhow!("render presentation ordinal {ordinal}: {error}"))?;
     }
     crate::encode_screenshot_png(width, height, &frame)
         .map_err(|error| anyhow::anyhow!("encode presentation PNG: {error}"))
+}
+
+struct RuntimeLayoutFrame {
+    png: Vec<u8>,
+    commands: Vec<clonk_graphics::clonk_font::CapturedClonkText>,
+}
+
+struct RuntimeLayoutCapture {
+    png: Vec<u8>,
+    layout: Vec<u8>,
+    commands: Vec<clonk_graphics::clonk_font::CapturedClonkText>,
+}
+
+fn render_runtime_layout_frame(
+    app: &mut crate::GameApp,
+    case: PixelCaptureCase,
+    render_ordinal: u32,
+) -> Result<RuntimeLayoutFrame> {
+    anyhow::ensure!(
+        case.uses_layout_comparison(),
+        "{} does not use semantic layout comparison",
+        case.id()
+    );
+    anyhow::ensure!(render_ordinal > 0, "render ordinal must be positive");
+    let (width, height) = {
+        let surface = app.graphics.surface();
+        (surface.width(), surface.height())
+    };
+    anyhow::ensure!(
+        (width, height) == (1280, 720),
+        "presentation render surface is {width}x{height}, expected 1280x720"
+    );
+    let mut frame = vec![0; width as usize * height as usize * 4];
+    let mut presenter = clonk_scaling::FramePresenter::new(1.0, width, height);
+    let mut commands = Vec::new();
+    for ordinal in 1..=render_ordinal {
+        route_canonical_capture_pointer(app)?;
+        let refreshed = presenter
+            .present(&mut frame, |logical| {
+                app.render_ordered_native_base(logical)
+            })
+            .map_err(|error| anyhow::anyhow!("render {} ordinal {ordinal}: {error}", case.id()))?;
+        anyhow::ensure!(refreshed, "{} ordinal {ordinal} did not refresh", case.id());
+        if ordinal == render_ordinal {
+            commands = app
+                .pending_native_presentation
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{} semantic render produced no native plan", case.id())
+                })?
+                .batches
+                .iter()
+                .flat_map(|batch| batch.text.iter().cloned())
+                .collect();
+        }
+        let mut composer = presenter.ordered_composer(&mut frame);
+        app.replay_pending_native_presentation(&mut composer)
+            .map_err(|error| anyhow::anyhow!("replay {} ordinal {ordinal}: {error}", case.id()))?;
+    }
+    let png = crate::encode_screenshot_png(width, height, &frame)
+        .map_err(|error| anyhow::anyhow!("encode {} PNG: {error}", case.id()))?;
+    Ok(RuntimeLayoutFrame { png, commands })
+}
+
+fn render_runtime_layout_capture(
+    app: &mut crate::GameApp,
+    case: PixelCaptureCase,
+    render_ordinal: u32,
+) -> Result<RuntimeLayoutCapture> {
+    let rendered = render_runtime_layout_frame(app, case, render_ordinal)?;
+    let fonts = app
+        .assets
+        .clonk_fonts
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("{} has no live GUI fonts", case.id()))?;
+    let snapshot = app.graphics.runtime_presentation_snapshot();
+    let case_elements = match case {
+        PixelCaptureCase::IngameMenu => {
+            let viewport = snapshot.active_viewports.first().ok_or_else(|| {
+                anyhow::anyhow!("ingame-menu semantic capture has no active viewport")
+            })?;
+            let menu = app.ingame_menu.get(viewport.owner).ok_or_else(|| {
+                anyhow::anyhow!("ingame-menu semantic capture has no live player menu")
+            })?;
+            let gfx = app.ingame_menu_gfx.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("ingame-menu semantic capture has no live menu graphics")
+            })?;
+            let fallback = app.assets.font_arc();
+            let font = clonk_frontend::hud::HudFont::from_set(Some(fonts), fallback.as_ref());
+            let layout = menu.presentation_layout(viewport.rect, &font, gfx);
+            crate::presentation_layout_producers::runtime_ingame_menu_elements(
+                menu,
+                &layout,
+                &rendered.commands,
+                fonts,
+            )?
+        }
+        PixelCaptureCase::Evaluation => {
+            let hud = app.current_hud_graphics();
+            let league_score_icon = app
+                .assets
+                .startup_dialog_images
+                .get("GUIIcons2.png")
+                .and_then(clonk_app_menus::game_over::resolve_league_evaluation_icon);
+            let dialog = app.game_over_dialog.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("evaluation semantic capture has no live game-over dialog")
+            })?;
+            let layout = dialog.classic_presentation_layout(
+                snapshot.surface_rect.width,
+                snapshot.surface_rect.height,
+                fonts,
+            );
+            crate::presentation_layout_producers::runtime_evaluation_elements(
+                dialog,
+                &layout,
+                hud.score.as_ref(),
+                league_score_icon.as_ref(),
+                &rendered.commands,
+                fonts,
+            )?
+        }
+        PixelCaptureCase::ObjectMenu => {
+            let viewport = snapshot.active_viewports.first().ok_or_else(|| {
+                anyhow::anyhow!("object-menu semantic capture has no active viewport")
+            })?;
+            let owner = viewport.owner;
+            let (_, menu) = app.engine.cursor_object_menu(owner).ok_or_else(|| {
+                anyhow::anyhow!("object-menu semantic capture has no live cursor menu")
+            })?;
+            let gfx = app.ingame_menu_gfx.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("object-menu semantic capture has no live menu graphics")
+            })?;
+            let fallback = app.assets.font_arc();
+            let font = clonk_frontend::hud::HudFont::from_set(Some(fonts), fallback.as_ref());
+            let explicit_lines = app
+                .script_menu_presentations
+                .get(&owner)
+                .and_then(|state| state.explicit_lines);
+            let layout = clonk_app_menus::object_menu::engine_script_menu_layout_with_presentation(
+                viewport.rect,
+                &font,
+                menu,
+                gfx.show_commands,
+                &gfx.font_images,
+                gfx.menu_location,
+                gfx.menu_scroll_y,
+                false,
+                explicit_lines,
+            );
+            let mut elements = crate::presentation_layout_producers::runtime_object_menu_elements(
+                menu,
+                layout,
+                &rendered.commands,
+                fonts,
+            )?;
+            for (index, message) in app
+                .snapshot
+                .hud
+                .messages
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message.kind,
+                        clonk_engine::MessageKind::Global | clonk_engine::MessageKind::GlobalPlayer
+                    ) && message
+                        .portrait
+                        .as_deref()
+                        .is_some_and(|portrait| !portrait.is_empty())
+                        && (message.kind != clonk_engine::MessageKind::GlobalPlayer
+                            || message.player == Some(owner))
+                })
+                .enumerate()
+            {
+                let mut message = message.clone();
+                for line in &mut message.lines {
+                    *line = crate::c4_presentation_text(line);
+                }
+                let font_images = crate::resolve_message_font_images(
+                    &app.engine,
+                    &message,
+                    app.script_text_spec_resources(),
+                );
+                let message_layout = crate::game_message::global_message_presentation_layout(
+                    &fonts.text,
+                    viewport.rect,
+                    &message,
+                    message.frame_decoration.as_ref(),
+                    &font_images,
+                )
+                .map_err(|detail| anyhow::anyhow!("object-menu message layout failed: {detail}"))?;
+                elements.extend(
+                    crate::presentation_layout_producers::runtime_global_message_elements(
+                        index,
+                        &message_layout,
+                    ),
+                );
+            }
+            elements
+        }
+        PixelCaptureCase::Hud | PixelCaptureCase::Gameplay => Vec::new(),
+        PixelCaptureCase::NetworkLobby | PixelCaptureCase::Loader => unreachable!(),
+    };
+    let trace = crate::presentation_layout_producers::runtime_base_trace(
+        case.id(),
+        &snapshot,
+        &rendered.commands,
+        fonts,
+        case_elements,
+    )?;
+    let layout = crate::presentation_layout_producers::serialize_layout_trace(&trace)?.into_bytes();
+    Ok(RuntimeLayoutCapture {
+        png: rendered.png,
+        layout,
+        commands: rendered.commands,
+    })
 }
 
 fn stage_pixel_checkpoint(
@@ -1106,9 +1371,11 @@ fn render_layout_capture(
         "presentation render surface is {width}x{height}, expected 1280x720"
     );
     let mut frame = vec![0; width as usize * height as usize * 4];
+    route_canonical_capture_pointer(app)?;
     app.render(&mut frame)
         .map_err(|error| anyhow::anyhow!("render {} ordinal 1: {error}", case.id()))?;
     let mut presenter = clonk_scaling::FramePresenter::new(1.0, width, height);
+    route_canonical_capture_pointer(app)?;
     let refreshed = presenter
         .present(&mut frame, |logical| {
             app.render_ordered_native_base(logical)
@@ -1585,10 +1852,11 @@ fn validate_capture_inputs(
     let layout_path = request
         .output_dir
         .join(format!("{}.layout.json", request.case_id));
+    let requires_layout = capture_case_requires_layout_target(&request.case_id)?;
     anyhow::ensure!(
         !artifact_path.exists()
             && !request.receipt_path.exists()
-            && (LayoutCaptureCase::from_id(&request.case_id).is_none() || !layout_path.exists()),
+            && (!requires_layout || !layout_path.exists()),
         "presentation artifact and receipt targets must be fresh"
     );
 
@@ -1652,6 +1920,12 @@ fn validate_capture_inputs(
         network_references: network,
         runtime_resources,
     })
+}
+
+fn capture_case_requires_layout_target(case_id: &str) -> Result<bool> {
+    PresentationCaptureCase::from_id(case_id)
+        .map(PresentationCaptureCase::uses_layout_comparison)
+        .ok_or_else(|| anyhow::anyhow!("unknown presentation capture case {case_id:?}"))
 }
 
 struct PresentationRandomGuard;
@@ -1743,8 +2017,14 @@ fn run_capture_request(
         }
         PresentationCaptureCase::Pixel(case) => {
             let checkpoint = stage_pixel_checkpoint(&mut app, case)?;
-            let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
-            (checkpoint, png, None)
+            if case.uses_layout_comparison() {
+                let output =
+                    render_runtime_layout_capture(&mut app, case, checkpoint.render_ordinal)?;
+                (checkpoint, output.png, Some(output.layout))
+            } else {
+                let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
+                (checkpoint, png, None)
+            }
         }
     };
     let presentation_report = clonk_engine::particles::presentation_safe_random_capture_report();
@@ -2171,7 +2451,11 @@ fn write_pixel_capabilities(mut output: impl Write) -> Result<()> {
                         .into_iter()
                         .map(|case| PresentationCapabilityCase {
                             id: case.id(),
-                            artifacts: vec!["png"],
+                            artifacts: if case.uses_layout_comparison() {
+                                vec!["png", "layout"]
+                            } else {
+                                vec!["png"]
+                            },
                         }),
                 )
                 .collect(),
@@ -2526,6 +2810,30 @@ mod tests {
     }
 
     #[test]
+    fn capture_reroutes_ambient_pointer_input_to_the_canonical_position() -> Result<()> {
+        // C4GraphicsSystem::MouseMove routes one physical pointer position
+        // through C4GUI before C4MouseControl draws it (src/C4GraphicsSystem.cpp:445-473).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        stage_layout_checkpoint(&mut app, LayoutCaptureCase::Main, b"")?;
+
+        app.handle_cursor_moved(winit::dpi::PhysicalPosition::new(900.0, 650.0))?;
+        let (first, _) = render_layout_capture(&mut app, LayoutCaptureCase::Main)?;
+        app.handle_cursor_moved(winit::dpi::PhysicalPosition::new(700.0, 500.0))?;
+        let (second, _) = render_layout_capture(&mut app, LayoutCaptureCase::Main)?;
+
+        assert_eq!(
+            sha256_bytes(&first)?,
+            sha256_bytes(&second)?,
+            "host pointer position leaked into evidence"
+        );
+        assert_eq!(
+            app.live_input.window_pointer,
+            Some(clonk_frontend::GuiPoint::new(32.0, 32.0))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn live_startup_dialog_captures_emit_png_and_semantic_layout() -> Result<()> {
         // These are the real initial controller states mirrored from
         // C4StartupScenSelDlg.cpp:1302-1382, C4StartupNetDlg.cpp:631-728,
@@ -2608,29 +2916,9 @@ mod tests {
                 serde_json::json!({
                     "id": screen.id,
                     "comparison": comparison,
-                    "port_asset_exemptions": match screen.id.as_str() {
-                        "startup-main" => serde_json::json!({
-                            "startup/main/branding/logo": "branding",
-                            "startup/main/branding/version": "branding",
-                            "startup/main/branding/fan-project": "branding"
-                        }),
-                        "startup-scenario-selection" => serde_json::json!({
-                            "startup/scenario-selection/background": "super-resolved-startup-art"
-                        }),
-                        "startup-network-browser" => serde_json::json!({
-                            "startup/network-browser/background": "super-resolved-startup-art"
-                        }),
-                        "startup-player-selection" => serde_json::json!({
-                            "startup/player-selection/background": "super-resolved-startup-art"
-                        }),
-                        "startup-options" => serde_json::json!({
-                            "startup/options/tabs/paper": "super-resolved-startup-art"
-                        }),
-                        "startup-about" => serde_json::json!({
-                            "startup/about/branding/fan-project": "branding"
-                        }),
-                        _ => serde_json::json!({}),
-                    },
+                    "port_asset_exemptions":
+                        crate::presentation_layout::expected_port_asset_exemptions(&screen.id)
+                            .expect("every synthetic screen has a port-asset contract"),
                     "config_sha256": {
                         "cpp": CANONICAL_CONFIG_SHA256,
                         "rust": CANONICAL_CONFIG_SHA256
@@ -2713,6 +3001,24 @@ mod tests {
                     "branding".to_owned(),
                 ),
             ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tracked_hud_contract_declares_the_upper_board_branding_layout() -> Result<()> {
+        let spec = trusted_case_spec_from_bytes(
+            include_bytes!("../../../compat/presentation/case_specs.json"),
+            PixelCaptureCase::Hud,
+        )?;
+
+        assert_eq!(spec.comparison, "layout");
+        assert_eq!(
+            spec.port_asset_exemptions,
+            BTreeMap::from([(
+                "game/upper-board/branding/logo".to_owned(),
+                "branding".to_owned(),
+            )])
         );
         Ok(())
     }
@@ -2928,6 +3234,310 @@ mod tests {
     }
 
     #[test]
+    fn hud_checkpoint_ages_message_board_during_native_intermediate_renders() -> Result<()> {
+        // Pinned C++ oracle: src/C4Application.cpp:455-478 executes graphics
+        // after each game pass, where src/C4GraphicsSystem.cpp:130 advances
+        // C4MessageBoard before composing the running frame.
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let scenario = crate::resolve_next_mission_scenario(
+            &app.scensel.catalog,
+            PixelCaptureCase::Hud.scenario(),
+        )
+        .expect("tracked Tutorial01 scenario");
+
+        stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Hud)?;
+
+        assert_eq!(
+            app.message_board.current_line(),
+            None,
+            "the player-join line must age through the pre-checkpoint graphics passes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence() -> Result<()> {
+        // Pinned C++ oracle: C4Game::Ticks arms TimeGo after every simulation
+        // frame and C4Game::Sec1Timer consumes it once per scheduler second
+        // (src/C4Game.cpp:1755-1759,1902-1917).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let scenario = crate::resolve_next_mission_scenario(
+            &app.scensel.catalog,
+            PixelCaptureCase::Hud.scenario(),
+        )
+        .expect("tracked Tutorial01 scenario");
+
+        stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Hud)?;
+
+        assert_eq!(app.engine.game_time(), 2);
+        assert_eq!(app.snapshot.game_time, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn hud_layout_capture_retains_the_text_commands_from_its_presented_frame() -> Result<()> {
+        // C4GraphicsSystem::Execute paints the viewport overlays and both
+        // fullscreen boards into the captured back buffer in one ordered pass
+        // (src/C4GraphicsSystem.cpp:130-199,352-365).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let scenario = crate::resolve_next_mission_scenario(
+            &app.scensel.catalog,
+            PixelCaptureCase::Hud.scenario(),
+        )
+        .expect("tracked Tutorial01 scenario");
+        let checkpoint = stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Hud)?;
+
+        let rendered = render_runtime_layout_capture(
+            &mut app,
+            PixelCaptureCase::Hud,
+            checkpoint.render_ordinal,
+        )?;
+        let (width, height, _) = decode_capture_png("hud", &rendered.png)?;
+        let layout: crate::presentation_layout::LayoutTrace =
+            serde_json::from_slice(&rendered.layout)?;
+
+        assert_eq!((width, height), (1280, 720));
+        assert!(rendered
+            .commands
+            .iter()
+            .any(|command| command.text == "00:00:02"));
+        assert_eq!(layout.screen, "hud");
+        assert_eq!(layout.elements[2].path, "game/upper-board/branding/logo");
+        assert_eq!(layout.elements[2].port_asset.as_deref(), Some("branding"));
+        let paths = layout
+            .elements
+            .iter()
+            .map(|element| element.path.as_str())
+            .collect::<Vec<_>>();
+        for path in [
+            "game/viewport/0/hud/cursor-info",
+            "game/viewport/0/hud/cursor-info/portrait",
+            "game/viewport/0/hud/inventory",
+            "game/viewport/0/hud/energy",
+            "game/viewport/0/hud/commands/primary",
+            "game/viewport/0/hud/commands/secondary",
+            "game/viewport/0/hud/player/wealth",
+            "game/viewport/0/hud/player/value",
+            "game/viewport/0/hud/player/crew",
+            "game/viewport/0/hud/player-menu",
+        ] {
+            assert!(paths.contains(&path), "missing {path}");
+        }
+        assert_eq!(
+            layout
+                .elements
+                .iter()
+                .find(|element| element.path == "game/upper-board/game-time")
+                .expect("game-time element")
+                .rect,
+            crate::presentation_layout::LayoutRect {
+                x: 1207,
+                y: 14,
+                width: 63,
+                height: 22,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ingame_menu_layout_capture_contains_every_visible_menu_cell() -> Result<()> {
+        // C4Menu::InitLocation lays out the title, ScrollWindow client, visible
+        // item rows and optional command strip consumed by C4Menu::Draw
+        // (src/C4Menu.cpp:642-783,796-880).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let scenario = crate::resolve_next_mission_scenario(
+            &app.scensel.catalog,
+            PixelCaptureCase::IngameMenu.scenario(),
+        )
+        .expect("tracked Tutorial01 scenario");
+        let checkpoint =
+            stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::IngameMenu)?;
+
+        let rendered = render_runtime_layout_capture(
+            &mut app,
+            PixelCaptureCase::IngameMenu,
+            checkpoint.render_ordinal,
+        )?;
+        let layout: crate::presentation_layout::LayoutTrace =
+            serde_json::from_slice(&rendered.layout)?;
+        let paths = layout
+            .elements
+            .iter()
+            .map(|element| element.path.as_str())
+            .collect::<Vec<_>>();
+
+        for path in [
+            "game/viewport/0/menu/background",
+            "game/viewport/0/menu/title",
+            "game/viewport/0/menu/close",
+            "game/viewport/0/menu/client",
+            "game/viewport/0/menu/items/0",
+            "game/viewport/0/menu/items/1",
+            "game/viewport/0/menu/items/2",
+            "game/viewport/0/menu/items/3",
+            "game/viewport/0/menu/items/4",
+            "game/viewport/0/menu/items/5",
+            "game/viewport/0/menu/extra-bar",
+            "game/viewport/0/menu/controls/enter-key",
+            "game/viewport/0/menu/controls/confirm",
+            "game/viewport/0/menu/controls/close-key",
+            "game/viewport/0/menu/controls/cancel",
+        ] {
+            assert!(paths.contains(&path), "missing {path}");
+        }
+        let index_of = |path: &str| {
+            paths
+                .iter()
+                .position(|candidate| *candidate == path)
+                .unwrap_or_else(|| panic!("missing {path}"))
+        };
+        assert!(
+            index_of("game/viewport/0/menu/scrollbar") < index_of("game/viewport/0/menu/extra-bar")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn object_menu_layout_capture_contains_menu_and_game_message_topology() -> Result<()> {
+        // C4Menu::DrawElement projects the active cursor menu and
+        // C4GameMessage::Draw appends its portrait-backed tutorial message
+        // (src/C4Menu.cpp:796-880; src/C4GameMessage.cpp:159-292).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let scenario = crate::resolve_next_mission_scenario(
+            &app.scensel.catalog,
+            PixelCaptureCase::ObjectMenu.scenario(),
+        )
+        .expect("tracked Tutorial03 scenario");
+        let checkpoint =
+            stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::ObjectMenu)?;
+
+        let rendered = render_runtime_layout_capture(
+            &mut app,
+            PixelCaptureCase::ObjectMenu,
+            checkpoint.render_ordinal,
+        )?;
+        let layout: crate::presentation_layout::LayoutTrace =
+            serde_json::from_slice(&rendered.layout)?;
+        let paths = layout
+            .elements
+            .iter()
+            .map(|element| element.path.as_str())
+            .collect::<Vec<_>>();
+
+        for path in [
+            "game/viewport/0/menu/background",
+            "game/viewport/0/menu/title",
+            "game/viewport/0/menu/close",
+            "game/viewport/0/menu/client",
+            "game/viewport/0/menu/items/0",
+            "game/viewport/0/menu/items/1",
+            "game/viewport/0/menu/items/2",
+            "game/viewport/0/menu/items/3",
+            "game/viewport/0/menu/items/4",
+            "game/viewport/0/menu/scrollbar",
+            "game/viewport/0/menu/extra-bar",
+            "game/viewport/0/menu/controls/enter-key",
+            "game/viewport/0/menu/controls/confirm",
+            "game/viewport/0/menu/controls/close-key",
+            "game/viewport/0/menu/controls/exit",
+            "game/viewport/0/message/0/background",
+            "game/viewport/0/message/0/portrait",
+            "game/viewport/0/message/0/text",
+        ] {
+            assert!(paths.contains(&path), "missing {path}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn evaluation_layout_capture_contains_the_live_dialog_topology() -> Result<()> {
+        // C4GameOverDlg constructs the caption, goal display, player list,
+        // player row and visible action buttons as live GUI children
+        // (src/C4GameOverDlg.cpp:115-258;
+        // src/C4PlayerInfoListBox.cpp:79-154,184-231).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let scenario = crate::resolve_next_mission_scenario(
+            &app.scensel.catalog,
+            PixelCaptureCase::Evaluation.scenario(),
+        )
+        .expect("tracked Tutorial01 scenario");
+        let checkpoint =
+            stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Evaluation)?;
+
+        let rendered = render_runtime_layout_capture(
+            &mut app,
+            PixelCaptureCase::Evaluation,
+            checkpoint.render_ordinal,
+        )?;
+        let layout: crate::presentation_layout::LayoutTrace =
+            serde_json::from_slice(&rendered.layout)?;
+        let paths = layout
+            .elements
+            .iter()
+            .map(|element| element.path.as_str())
+            .collect::<Vec<_>>();
+
+        for path in [
+            "game/evaluation/dialog",
+            "game/evaluation/title",
+            "game/evaluation/close",
+            "game/evaluation/goals",
+            "game/evaluation/goals/0/picture",
+            "game/evaluation/player-list",
+            "game/evaluation/player-list/viewport",
+            "game/evaluation/player-list/players/0",
+            "game/evaluation/player-list/players/0/portrait",
+            "game/evaluation/player-list/players/0/name",
+            "game/evaluation/player-list/players/0/time",
+            "game/evaluation/player-list/players/0/score",
+            "game/evaluation/player-list/scrollbar",
+            "game/evaluation/buttons/0",
+            "game/evaluation/buttons/1",
+            "game/evaluation/buttons/2",
+            "game/evaluation/buttons/3",
+        ] {
+            assert!(paths.contains(&path), "missing {path}");
+        }
+        let element = |path: &str| {
+            layout
+                .elements
+                .iter()
+                .find(|element| element.path == path)
+                .unwrap_or_else(|| panic!("missing {path}"))
+        };
+        assert_eq!(
+            element("game/evaluation/player-list/players/0/name").rect,
+            crate::presentation_layout::LayoutRect {
+                x: 147,
+                y: 193,
+                width: 149,
+                height: 22,
+            }
+        );
+        assert_eq!(
+            element("game/evaluation/player-list/players/0/time").rect,
+            crate::presentation_layout::LayoutRect {
+                x: 151,
+                y: 217,
+                width: 1023,
+                height: 26,
+            }
+        );
+        let score = element("game/evaluation/player-list/players/0/score");
+        assert_eq!(score.rect.x, 1006);
+        assert_eq!(
+            score.caption,
+            "{{Ico:Settlement}}<c afafaf>42 (+100)</c> 142 Score"
+        );
+        assert!(element("game/evaluation/player-list/scrollbar").visible);
+        let repeat = element("game/evaluation/buttons/3");
+        assert_eq!(repeat.caption, "<c ffffff7f>R</c>epeat this round");
+        assert_eq!(repeat.lines.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn gameplay_checkpoint_renders_through_the_production_cpu_surface() -> Result<()> {
         // Pinned C++ oracle: src/C4Game.cpp:776-858 fixes the state consumed
         // by C4Viewport::Draw; the capture takes that real presented frame.
@@ -3070,12 +3680,20 @@ mod tests {
             tree: "2".repeat(40),
             content_tree: "4".repeat(40),
         };
-        let artifact = CaptureArtifactRecord {
+        let png_artifact = CaptureArtifactRecord {
             path: "run-1/rust/artifacts/gameplay.png".to_owned(),
             sha256: "5".repeat(64),
             size_bytes: 123,
         };
-        let artifacts = BTreeMap::from([("png".to_owned(), artifact)]);
+        let layout_artifact = CaptureArtifactRecord {
+            path: "run-1/rust/artifacts/gameplay.layout.json".to_owned(),
+            sha256: "7".repeat(64),
+            size_bytes: 456,
+        };
+        let artifacts = BTreeMap::from([
+            ("layout".to_owned(), layout_artifact),
+            ("png".to_owned(), png_artifact),
+        ]);
         let checkpoint = crate::presentation_pixel_startup::StartupPixelCheckpoint {
             simulation_seed: 587,
             random_count: 0,
@@ -3388,14 +4006,23 @@ mod tests {
                     {"id": "startup-about", "artifacts": ["png", "layout"]},
                     {"id": "network-lobby", "artifacts": ["png"]},
                     {"id": "loader", "artifacts": ["png"]},
-                    {"id": "hud", "artifacts": ["png"]},
-                    {"id": "ingame-menu", "artifacts": ["png"]},
-                    {"id": "object-menu", "artifacts": ["png"]},
-                    {"id": "gameplay", "artifacts": ["png"]},
-                    {"id": "evaluation", "artifacts": ["png"]}
+                    {"id": "hud", "artifacts": ["png", "layout"]},
+                    {"id": "ingame-menu", "artifacts": ["png", "layout"]},
+                    {"id": "object-menu", "artifacts": ["png", "layout"]},
+                    {"id": "gameplay", "artifacts": ["png", "layout"]},
+                    {"id": "evaluation", "artifacts": ["png", "layout"]}
                 ]
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_layout_cases_reserve_a_fresh_layout_target() -> Result<()> {
+        assert!(capture_case_requires_layout_target("hud")?);
+        assert!(capture_case_requires_layout_target("evaluation")?);
+        assert!(!capture_case_requires_layout_target("network-lobby")?);
+        assert!(!capture_case_requires_layout_target("loader")?);
         Ok(())
     }
 
@@ -3484,8 +4111,8 @@ mod tests {
             clonk_graphics::Surface::new(1280, 720, clonk_graphics::PixelFormat::Rgba8888);
         let png = crate::encode_surface_to_png(&surface).expect("encode test capture");
 
-        let comparison =
-            compare_artifact_bytes("gameplay", &png, &png).expect("identical CPU captures match");
+        let comparison = compare_artifact_bytes("network-lobby", &png, &png)
+            .expect("identical CPU captures match");
 
         assert_eq!(comparison, "pixel");
     }
@@ -3504,7 +4131,7 @@ mod tests {
         let reference = crate::encode_surface_to_png(&reference).expect("encode reference");
         let actual = crate::encode_surface_to_png(&actual).expect("encode actual");
 
-        let comparison = compare_artifact_bytes("gameplay", &reference, &actual)
+        let comparison = compare_artifact_bytes("network-lobby", &reference, &actual)
             .expect("one-channel delta is accepted for the native OpenGL reference");
 
         assert_eq!(comparison, "pixel");

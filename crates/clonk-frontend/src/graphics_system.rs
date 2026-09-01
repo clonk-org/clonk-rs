@@ -677,6 +677,232 @@ pub(crate) struct MouseTargetLookupResult {
     pub(crate) ocf: u32,
 }
 
+/// Renderer-owned runtime presentation state for semantic capture traces.
+///
+/// All geometry is the output of the same production layout paths that the
+/// current frame uses. Consumers should record these values rather than
+/// reconstructing upper-board, message-board, or viewport formulas.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimePresentationSnapshot {
+    pub surface_rect: SurfaceRect,
+    /// Active viewports in their rendered layout order.
+    pub active_viewports: Vec<ActiveViewportProjection>,
+    pub upper_board_output_rect: Option<SurfaceRect>,
+    /// Compatibility slot that owns the active Clonk Rust logo destination.
+    pub upper_board_logo_slot: Option<SurfaceRect>,
+    /// `C4UpperBoard::TextWidth`, latched when the board is initialized and
+    /// reused as the allocation width even when the current clock string is
+    /// one pixel narrower.
+    pub upper_board_text_width: i32,
+    pub message_board_output_rect: Option<SurfaceRect>,
+    pub scenario_title: String,
+    pub formatted_game_time: String,
+    pub message_board: MessageBoardOverlay,
+    pub players: Vec<PlayerOverlay>,
+    pub viewport_overlays_visible: bool,
+    pub show_player_hud_always: bool,
+    /// Logical cell width of the loaded EnergyBars.png, or `None` when the
+    /// renderer cannot draw that sheet.
+    pub level_bar_cell_width: Option<u32>,
+    /// Inputs retained from the final viewport-control draw pass. `None`
+    /// means that pass has not drawn for the current frame.
+    pub viewport_control_overlays: Option<RuntimeViewportControlOverlayState>,
+    pub show_commands: bool,
+    pub show_command_keys: bool,
+    pub show_portraits: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeHudPresentationNodeKind {
+    CursorInfo,
+    Portrait,
+    Inventory,
+    EnergyBar,
+    MagicBar,
+    BreathBar,
+    PrimaryCommands,
+    SecondaryCommands,
+    Wealth,
+    Value,
+    Crew,
+    ShowControl(u8),
+    ViewportHelp,
+    ViewportPlayerMenu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeHudPresentationNode {
+    pub kind: RuntimeHudPresentationNodeKind,
+    pub rect: SurfaceRect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeHudPresentationLayout {
+    pub viewport_index: usize,
+    pub owner: i32,
+    pub viewport: SurfaceRect,
+    pub nodes: Vec<RuntimeHudPresentationNode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeViewportControlOverlayState {
+    pub mouse_viewport_index: Option<usize>,
+    pub chat_active: bool,
+}
+
+impl RuntimePresentationSnapshot {
+    /// Project one active viewport/player through the exact gates and shared
+    /// geometry helpers used by the live HUD renderer.
+    pub fn hud_layout_for_viewport(
+        &self,
+        viewport_index: usize,
+    ) -> Option<RuntimeHudPresentationLayout> {
+        let viewport = self
+            .active_viewports
+            .iter()
+            .find(|viewport| viewport.index == viewport_index)?;
+        let player = self
+            .players
+            .iter()
+            .find(|player| player.owner == viewport.owner)?;
+        let mut nodes = Vec::new();
+        let mut push = |kind, rect| nodes.push(RuntimeHudPresentationNode { kind, rect });
+        if self.viewport_overlays_visible {
+            let cursor_crew = player
+                .cursor
+                .and_then(|id| player.crew.iter().find(|crew| crew.object_id == id));
+            if let Some(crew) = cursor_crew {
+                if crew.info_name.is_some() {
+                    push(
+                        RuntimeHudPresentationNodeKind::CursorInfo,
+                        hud::cursor_info_rect(viewport.rect),
+                    );
+                    if crew.hide_hud_elements & clonk_engine::HIDE_HUD_ELEMENT_PORTRAIT == 0
+                        && crew.portrait.is_some()
+                    {
+                        push(
+                            RuntimeHudPresentationNodeKind::Portrait,
+                            hud::cursor_portrait_rect(viewport.rect),
+                        );
+                    }
+                }
+                if crew.hide_hud_elements & clonk_engine::HIDE_HUD_ELEMENT_INVENTORY == 0 {
+                    push(
+                        RuntimeHudPresentationNodeKind::Inventory,
+                        hud::inventory_allocation_rect(viewport.rect),
+                    );
+                }
+                if let Some(cell_width) = self.level_bar_cell_width {
+                    let draw_bars = crew.view_energy != 0 || self.show_player_hud_always;
+                    let mut slot = 0;
+                    if draw_bars && crew.hide_hud_bars & clonk_engine::HIDE_HUD_BAR_ENERGY == 0 {
+                        if let Some(rect) = hud::level_bar_rect_with_cell_width(
+                            viewport.rect,
+                            slot,
+                            self.show_portraits,
+                            cell_width,
+                        ) {
+                            push(RuntimeHudPresentationNodeKind::EnergyBar, rect);
+                        }
+                        slot += 1;
+                    }
+                    if draw_bars
+                        && crew.magic_energy != 0
+                        && crew.hide_hud_bars & clonk_engine::HIDE_HUD_BAR_MAGIC_ENERGY == 0
+                    {
+                        if let Some(rect) = hud::level_bar_rect_with_cell_width(
+                            viewport.rect,
+                            slot,
+                            self.show_portraits,
+                            cell_width,
+                        ) {
+                            push(RuntimeHudPresentationNodeKind::MagicBar, rect);
+                        }
+                        slot += 1;
+                    }
+                    if draw_bars
+                        && crew.breath != 0
+                        && crew.breath < crew.breath_capacity
+                        && crew.hide_hud_bars & clonk_engine::HIDE_HUD_BAR_BREATH == 0
+                    {
+                        if let Some(rect) = hud::level_bar_rect_with_cell_width(
+                            viewport.rect,
+                            slot,
+                            self.show_portraits,
+                            cell_width,
+                        ) {
+                            push(RuntimeHudPresentationNodeKind::BreathBar, rect);
+                        }
+                    }
+                }
+            }
+
+            if self.show_commands && !player.commands.is_empty() {
+                if let Some(commands) = hud::command_layout(viewport.rect, &player.commands) {
+                    push(
+                        RuntimeHudPresentationNodeKind::PrimaryCommands,
+                        commands.primary,
+                    );
+                    push(
+                        RuntimeHudPresentationNodeKind::SecondaryCommands,
+                        commands.secondary,
+                    );
+                }
+            }
+
+            let fixed = hud::player_fixed_item_layout(viewport.rect);
+            let (show_wealth, show_value, show_crew) = player_fixed_item_visibility(
+                self.show_player_hud_always,
+                player.view_wealth,
+                player.view_value,
+            );
+            if show_wealth {
+                push(RuntimeHudPresentationNodeKind::Wealth, fixed.wealth);
+            }
+            if show_value {
+                push(RuntimeHudPresentationNodeKind::Value, fixed.value);
+            }
+            if show_crew {
+                push(RuntimeHudPresentationNodeKind::Crew, fixed.crew);
+            }
+
+            for cell in hud::show_control_cells(
+                viewport.rect,
+                player.show_control,
+                player.show_control_position,
+            ) {
+                push(
+                    RuntimeHudPresentationNodeKind::ShowControl(cell.control),
+                    cell.rect,
+                );
+            }
+            if let Some(controls) = self.viewport_control_overlays {
+                for cell in hud::viewport_button_cells(
+                    viewport.rect,
+                    self.show_commands,
+                    controls.mouse_viewport_index == Some(viewport_index),
+                    controls.chat_active,
+                ) {
+                    let kind = match cell.button {
+                        hud::ViewportButton::Help => RuntimeHudPresentationNodeKind::ViewportHelp,
+                        hud::ViewportButton::PlayerMenu => {
+                            RuntimeHudPresentationNodeKind::ViewportPlayerMenu
+                        }
+                        hud::ViewportButton::Chat => continue,
+                    };
+                    push(kind, cell.rect);
+                }
+            }
+        }
+        Some(RuntimeHudPresentationLayout {
+            viewport_index,
+            owner: player.owner,
+            viewport: viewport.rect,
+            nodes,
+        })
+    }
+}
+
 pub struct GraphicsSystem {
     pub(crate) surface: Surface,
     tiled_underlay_cache: TiledUnderlayCache,
@@ -722,6 +948,7 @@ pub struct GraphicsSystem {
     pub(crate) show_portraits: bool,
     show_commands: bool,
     show_command_keys: bool,
+    viewport_control_overlays: Option<RuntimeViewportControlOverlayState>,
     /// Debug FRAME/STATUS lines; `None` hides them (default HUD).
     debug_hud_text: Option<(String, String)>,
     debug_draw_flags: DebugDrawFlags,
@@ -902,6 +1129,7 @@ impl GraphicsSystem {
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
+            viewport_control_overlays: None,
             debug_hud_text: None,
             debug_draw_flags: DebugDrawFlags::default(),
             definition_debug_geometry: HashMap::new(),
@@ -1836,6 +2064,34 @@ impl GraphicsSystem {
                 zoom: viewport.zoom,
             })
             .collect()
+    }
+
+    /// Snapshot the exact runtime topology and HUD inputs used by the current
+    /// renderer state. This is read-only and does not advance or redraw a
+    /// frame.
+    pub fn runtime_presentation_snapshot(&self) -> RuntimePresentationSnapshot {
+        RuntimePresentationSnapshot {
+            surface_rect: SurfaceRect::new(0, 0, self.surface_width, self.surface_height),
+            active_viewports: self.active_viewport_projections(),
+            upper_board_output_rect: self.upper_board_output_rect(),
+            upper_board_logo_slot: self.hud_graphics.logo.as_ref().and_then(|logo| {
+                hud::upper_board_logo_layout(self.surface_width as i32, self.upper_board_mode, logo)
+                    .map(|layout| layout.slot)
+            }),
+            upper_board_text_width: self.initialized_upper_board_text_width(),
+            message_board_output_rect: self.message_board_output_rect(),
+            scenario_title: self.scenario_label_text.clone(),
+            formatted_game_time: hud::format_game_time(self.game_time_seconds),
+            message_board: self.message_board.clone(),
+            players: self.hud_players.clone(),
+            viewport_overlays_visible: self.viewport_overlays_visible,
+            show_player_hud_always: self.show_player_hud_always,
+            level_bar_cell_width: hud::level_bar_cell_width(&self.hud_graphics),
+            viewport_control_overlays: self.viewport_control_overlays,
+            show_commands: self.show_commands,
+            show_command_keys: self.show_command_keys,
+            show_portraits: self.show_portraits,
+        }
     }
 
     /// The projection for one physical viewport identity.
@@ -3543,6 +3799,7 @@ impl GraphicsSystem {
         viewports: &[ViewportInput<'_>],
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
+        self.viewport_control_overlays = None;
         self.object_render_plan_generation = self.object_render_plan_generation.wrapping_add(1);
         self.active_viewports.clear();
         self.rendered_object_audibility_calls.clear();
@@ -8775,26 +9032,73 @@ impl GraphicsSystem {
             facet.width,
             facet.height,
         );
-        // Full con: the facet at cox+FacetX/coy+FacetY; growing: the
-        // con-scaled shape rect at cox/coy (src/C4Object.cpp:2450-2467).
-        let dest = if con == FULL_CON {
-            (
-                cox + facet.target_x as f32,
-                coy + facet.target_y as f32,
-                facet.width as f32,
-                facet.height as f32,
-            )
-        } else {
-            (cox, coy, inst_shape.width as f32, inst_shape.height as f32)
-        };
+        // The rotated GrowthType branch is deliberately not the generic
+        // growing-action placement below. Its destination scales Def->Shape
+        // and the action facet directly by Con; the live rotated Shape only
+        // supplies the integer rotation pivot (src/C4Object.cpp:2446-2467).
+        // In particular, an odd Con-scaled facet may have a half-pixel centre
+        // while C4Shape::Rotate has replaced the live rect with an even
+        // radius square centred exactly on the object.
+        let rotated_native_action = object.rotation != 0
+            && self.object_is_rotateable(object, definition_sprite)
+            && (definition_sprite.stretch_growth || con == FULL_CON);
+        let (dest, shape_center) =
+            if rotated_native_action {
+                let scale_by_con = |value: i32| {
+                    (i64::from(value) * i64::from(con) / i64::from(FULL_CON))
+                        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+                };
+                let live_shape = self.live_object_shape(definition_sprite, object);
+                (
+                    (
+                        object.position.x.saturating_add(scale_by_con(
+                            def_shape.x.saturating_add(facet.target_x),
+                        )) as f32,
+                        object.position.y.saturating_add(scale_by_con(
+                            def_shape.y.saturating_add(facet.target_y),
+                        )) as f32,
+                        scale_by_con(facet.width) as f32,
+                        scale_by_con(facet.height) as f32,
+                    ),
+                    (
+                        object
+                            .position
+                            .x
+                            .saturating_add(live_shape.x)
+                            .saturating_add(live_shape.width / 2) as f32,
+                        object
+                            .position
+                            .y
+                            .saturating_add(live_shape.y)
+                            .saturating_add(live_shape.height / 2) as f32,
+                    ),
+                )
+            } else {
+                // Full con: the facet at cox+FacetX/coy+FacetY; growing: the
+                // con-scaled shape rect at cox/coy (src/C4Object.cpp:2477-2490).
+                let dest = if con == FULL_CON {
+                    (
+                        cox + facet.target_x as f32,
+                        coy + facet.target_y as f32,
+                        facet.width as f32,
+                        facet.height as f32,
+                    )
+                } else {
+                    (cox, coy, inst_shape.width as f32, inst_shape.height as f32)
+                };
+                (
+                    dest,
+                    (
+                        cox + inst_shape.width as f32 / 2.0,
+                        coy + inst_shape.height as f32 / 2.0,
+                    ),
+                )
+            };
         self.blit_face_with_transformed(
             bitmap_sprite,
             source,
             dest,
-            (
-                cox + inst_shape.width as f32 / 2.0,
-                coy + inst_shape.height as f32 / 2.0,
-            ),
+            shape_center,
             owner_color,
             zoom,
             rotation_degrees,
@@ -10598,9 +10902,14 @@ impl GraphicsSystem {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
         let _renderer_config = activate_advanced_renderer_config(self.advanced_renderer_config);
+        self.viewport_control_overlays = None;
         if !self.viewport_overlays_visible {
             return;
         }
+        self.viewport_control_overlays = Some(RuntimeViewportControlOverlayState {
+            mouse_viewport_index,
+            chat_active,
+        });
         let viewports = self.active_viewports.clone();
         for (viewport_index, viewport) in viewports.iter().enumerate() {
             let player = self

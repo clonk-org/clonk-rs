@@ -18,6 +18,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// CStdGL device switches that affect the textured blits submitted by
 /// `CStdFont::DrawText`. AllowedBlitModes is retained for an exact device
@@ -111,12 +112,13 @@ pub fn markup_blit_color(tag_rgb: [u8; 3]) -> [u8; 3] {
 /// `cell_w`×`cell_h` cell (the caller computes `max(bitmap_left, 0)` and
 /// `ascent - bitmap_top`, `src/StdFont.cpp:221-222`).
 ///
-/// Returns `cell_w * cell_h` pixels in NORMAL alpha over a transparent
-/// background. (The C++ font texture background is transparent *white* —
-/// `memset 0xff`, `src/C4Surface.cpp:1113` — but with alpha 0 the RGB never
-/// contributes; we use transparent black.) Writes that fall outside the cell
-/// and short/oversized `cov` slices are handled gracefully (missing coverage
-/// reads as 0).
+/// Returns `cell_w * cell_h` pixels in NORMAL alpha over the transparent-white
+/// background created by C++'s `memset 0xff` (`src/C4Surface.cpp:1113`).
+/// Untouched padding stays white because its RGB contributes under linear
+/// filtering; visited fully-transparent texels are black because `SetPixDw`
+/// canonicalizes those writes (`src/C4Surface.cpp:732-733`). Writes outside the
+/// cell and short/oversized `cov` slices are handled gracefully (missing
+/// coverage reads as 0).
 const PAD: Color = Color::new(255, 255, 255, 0);
 
 pub fn compose_glyph_cell(
@@ -210,8 +212,11 @@ pub fn compose_glyph_cell(
             // (src/StdFont.cpp:256); writes outside the cell are skipped.
             if let (Some(tx), Some(ty)) = (at_x.checked_add(x), at_y.checked_add(y)) {
                 if tx < cell_w && ty < cell_h {
-                    cell[ty * cell_w + tx] =
-                        Color::new(r as u8, gr as u8, b as u8, (255 - a_inv) as u8);
+                    cell[ty * cell_w + tx] = if a_inv == 255 {
+                        Color::new(0, 0, 0, 0)
+                    } else {
+                        Color::new(r as u8, gr as u8, b as u8, (255 - a_inv) as u8)
+                    };
                 }
             }
         }
@@ -338,17 +343,96 @@ pub struct CapturedFontImage {
     pub rgba: Vec<u8>,
 }
 
-/// A bitmap font equivalent to an initialized shadowed `CStdFont`
-/// (`CStdFont::Init`, `src/StdFont.cpp:319-358`, `fDoShadow = true`).
+/// One character facet retained at its original position on a prerendered
+/// CStdFont surface (`src/StdFont.cpp:486-528`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontAtlasFacet {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The source surface owned by a bitmap CStdFont after its delimiter pixels
+/// have been removed (`src/StdFont.cpp:459-530`).
+#[derive(Debug, Clone)]
+pub struct PrerenderedFontAtlas {
+    width: u32,
+    height: u32,
+    rgba: Arc<[u8]>,
+    facets: HashMap<char, FontAtlasFacet>,
+}
+
+impl PrerenderedFontAtlas {
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixels: Vec<Color>,
+        facets: impl IntoIterator<Item = (char, FontAtlasFacet)>,
+    ) -> Option<Self> {
+        let expected = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        let facets =
+            facets
+                .into_iter()
+                .try_fold(HashMap::new(), |mut facets, (character, facet)| {
+                    let in_bounds = facet
+                        .x
+                        .checked_add(facet.width)
+                        .is_some_and(|right| right <= width)
+                        && facet
+                            .y
+                            .checked_add(facet.height)
+                            .is_some_and(|bottom| bottom <= height);
+                    (in_bounds && facets.insert(character, facet).is_none()).then_some(facets)
+                })?;
+        (pixels.len() == expected).then(|| {
+            let rgba = pixels
+                .into_iter()
+                .flat_map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
+                .collect::<Vec<_>>();
+            Self {
+                width,
+                height,
+                rgba: Arc::from(rgba.into_boxed_slice()),
+                facets,
+            }
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn rgba(&self) -> Arc<[u8]> {
+        Arc::clone(&self.rgba)
+    }
+
+    pub fn facet(&self, character: char) -> Option<FontAtlasFacet> {
+        self.facets.get(&character).copied()
+    }
+}
+
+/// A bitmap font equivalent to an initialized `CStdFont`, either vector
+/// (`src/StdFont.cpp:319-358`) or prerendered (`src/StdFont.cpp:459-536`).
 #[derive(Debug, Clone)]
 pub struct ClonkFont {
-    /// `iLineHgt` (`src/StdFont.cpp:351`): vertical advance per text line.
+    /// `iLineHgt`: vector fonts derive the line advance from FreeType
+    /// (`src/StdFont.cpp:351`); prerendered fonts use
+    /// `iGfxLineHgt - iIndent` (`src/StdFont.cpp:475-487`).
     pub line_height: i32,
-    /// `iGfxLineHgt = iLineHgt + 1` (`src/StdFont.cpp:352`): glyph cell height
-    /// including the one-pixel vertical shadow.
+    /// `iGfxLineHgt`: vector fonts add one shadow row to `iLineHgt`
+    /// (`src/StdFont.cpp:352`); prerendered fonts scan this height from their
+    /// first delimiter row (`src/StdFont.cpp:475-480`).
     pub cell_height: i32,
-    /// `iHSpace = -1` (`src/StdFont.cpp:327`): horizontal indent between
-    /// characters (negative so adjacent shadows overlap).
+    /// `iHSpace`: vector fonts use `-1` so adjacent shadows overlap
+    /// (`src/StdFont.cpp:327`); prerendered fonts use `-iIndent`
+    /// (`src/StdFont.cpp:485-487`).
     pub h_space: i32,
     cells: HashMap<char, GlyphCell>,
     /// FreeType glyph index zero (`.notdef`), used by UTF-8 vector fonts when
@@ -359,6 +443,9 @@ pub struct ClonkFont {
     /// matrix. Vector fonts use 128px atlases through height 40 and 512px
     /// atlases above it (StdFont.cpp:331-337).
     texture_size: i32,
+    /// Original surface and facets for `CStdFont::Init(C4Surface *)`. Vector
+    /// fonts leave this absent because AddRenderedChar packs their atlas.
+    prerendered_atlas: Option<PrerenderedFontAtlas>,
     /// Replay identity for engine-wide scale-native text capture. Untagged
     /// fonts retain the historical immediate-raster behavior.
     role: Option<ClonkFontRole>,
@@ -375,6 +462,7 @@ impl ClonkFont {
             cells: HashMap::new(),
             missing_glyph: None,
             texture_size: 128,
+            prerendered_atlas: None,
             role: None,
         }
     }
@@ -388,6 +476,16 @@ impl ClonkFont {
     /// Physical C4Surface tile size backing this font's glyph facets.
     pub fn texture_size(&self) -> i32 {
         self.texture_size
+    }
+
+    /// Retain the source surface used by a prerendered bitmap font.
+    pub fn set_prerendered_atlas(&mut self, atlas: PrerenderedFontAtlas) {
+        self.prerendered_atlas = Some(atlas);
+    }
+
+    /// Original bitmap-font surface and delimiter-parsed facets, if any.
+    pub fn prerendered_atlas(&self) -> Option<&PrerenderedFontAtlas> {
+        self.prerendered_atlas.as_ref()
     }
 
     /// The semantic replay role, if this font participates in capture.
@@ -1907,6 +2005,44 @@ mod tests {
     use super::*;
     use crate::PixelFormat;
 
+    #[test]
+    fn prerendered_font_atlas_rejects_duplicate_character_facets() {
+        let facet = FontAtlasFacet {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        let atlas = PrerenderedFontAtlas::new(
+            1,
+            1,
+            vec![Color::transparent()],
+            [('A', facet), ('A', facet)],
+        );
+
+        assert!(atlas.is_none());
+    }
+
+    #[test]
+    fn prerendered_font_atlas_rejects_out_of_bounds_facets() {
+        let atlas = PrerenderedFontAtlas::new(
+            1,
+            1,
+            vec![Color::transparent()],
+            [(
+                'A',
+                FontAtlasFacet {
+                    x: 1,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+            )],
+        );
+
+        assert!(atlas.is_none());
+    }
+
     // ---- metrics (CStdFont::Init, src/StdFont.cpp:351) ----
 
     #[test]
@@ -1941,10 +2077,11 @@ mod tests {
         let cell = compose_glyph_cell(&[255], 1, 1, 2, 2, 0, 0);
         // (0,0): bAlpha 0, base transparent → result = opaque white source.
         assert_eq!(cell[0], Color::new(255, 255, 255, 255));
-        // (1,0)/(0,1): no shadow (needs x>=1 && y>=1), bAlpha 255 →
-        // transparent white.
-        assert_eq!(cell[1], Color::new(255, 255, 255, 0));
-        assert_eq!(cell[2], Color::new(255, 255, 255, 0));
+        // (1,0)/(0,1): no shadow (needs x>=1 && y>=1), bAlpha 255.
+        // SetPixDw canonicalizes these written transparent pixels to black
+        // (C4Surface.cpp:732-733).
+        assert_eq!(cell[1], Color::new(0, 0, 0, 0));
+        assert_eq!(cell[2], Color::new(0, 0, 0, 0));
         // (1,1): iShadow = 8*255 = 2040 → /16 = 127 → inverted shadow alpha
         // 128; BltAlpha with fully transparent source keeps the black shadow:
         // normal alpha 127.
@@ -1957,8 +2094,8 @@ mod tests {
         let cell = compose_glyph_cell(&[128], 1, 1, 2, 2, 0, 0);
         // (0,0): bAlpha 127, base transparent → white with normal alpha 128.
         assert_eq!(cell[0], Color::new(255, 255, 255, 128));
-        assert_eq!(cell[1], Color::new(255, 255, 255, 0));
-        assert_eq!(cell[2], Color::new(255, 255, 255, 0));
+        assert_eq!(cell[1], Color::new(0, 0, 0, 0));
+        assert_eq!(cell[2], Color::new(0, 0, 0, 0));
         // (1,1): iShadow = 8*128 = 1024 → /16 = 64 → inverted alpha 191 →
         // black shadow with normal alpha 64.
         assert_eq!(cell[3], Color::new(0, 0, 0, 64));
@@ -1991,6 +2128,22 @@ mod tests {
         assert_eq!(cell[1], Color::new(255, 255, 255, 0));
         assert_eq!(cell[2], Color::new(255, 255, 255, 0));
         assert_eq!(cell[3], Color::new(255, 255, 255, 255));
+    }
+
+    #[test]
+    fn compose_blackens_written_fully_transparent_texels() {
+        // AddRenderedChar writes the complete bitmap-plus-shadow rectangle
+        // through SetPixDw (StdFont.cpp:224-258). SetPixDw canonicalizes every
+        // fully transparent write to black (C4Surface.cpp:732-733), while the
+        // untouched atlas keeps C4TexRef's transparent-white memset.
+        let cell = compose_glyph_cell(&[0], 1, 1, 3, 3, 0, 0);
+
+        assert_eq!(cell[0], Color::new(0, 0, 0, 0));
+        assert_eq!(cell[1], Color::new(0, 0, 0, 0));
+        assert_eq!(cell[3], Color::new(0, 0, 0, 0));
+        assert_eq!(cell[4], Color::new(0, 0, 0, 0));
+        assert_eq!(cell[2], Color::new(255, 255, 255, 0));
+        assert_eq!(cell[8], Color::new(255, 255, 255, 0));
     }
 
     /// The cell area no glyph pixel reaches is **transparent white**, not

@@ -1687,6 +1687,72 @@ fn unconfigured_normal_host_prepares_the_large_definition_transfer_limit() {
 }
 
 #[test]
+fn network_host_preparation_carries_the_session_global_scripts() {
+    // C4Game installs the process System.c4g hosts before the post-lobby
+    // LoadScenarioScripts link (src/C4Game.cpp:2767-2794,2593-2608).
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let frontend = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = new_menu_app_with_paths(320, 200, &paths);
+    app.system_scripts = vec![(
+        "System.c4g/NetworkLinkProbe.c".to_string(),
+        (0..128)
+            .map(|index| {
+                format!("global func NetworkLinkProbe{index}() {{ return {index}; }}\n")
+            })
+            .collect(),
+    )];
+    let global_system_scripts = app.global_scripts_for_session();
+    let mut staged = prepare_minimal_host_lobby(&app, frontend);
+
+    let preparation = build_network_host_preparation(
+        &app,
+        &staged.frontend,
+        &staged.definition_load,
+        &staged.effective_definition_modules,
+        &staged.definition_resources,
+        Some((&staged.definition_executable_path, &staged.definition_path)),
+        Some((&staged.lobby.local_name, &staged.lobby.nick)),
+    )
+    .test_value()
+    .with_staged_scenario(staged.scenario.take().test_value());
+    let prepared = preparation
+        .prepare_with_global_system_scripts(&global_system_scripts)
+        .test_value();
+    let parameters = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .test_value()
+        .parameters;
+    let random_seed = u64::from(parameters.random_seed as u32);
+    let startup_player_count = parameters.startup_player_count;
+    let mut link_summaries = Vec::new();
+    prepared
+        .claim_scenario_load()
+        .test_value()
+        .load_with_progress(random_seed, startup_player_count, |_, line| {
+            if line.starts_with("C4AulScriptEngine linked - ") {
+                link_summaries.push(line.to_string());
+            }
+        })
+        .test_value();
+    let linked_source_lines = link_summaries
+        .iter()
+        .find_map(|summary| {
+            summary
+                .strip_prefix("C4AulScriptEngine linked - ")
+                .and_then(|tail| tail.split_whitespace().next())
+                .and_then(|lines| lines.parse::<usize>().ok())
+        })
+        .test_value();
+
+    main_assert!(linked_source_lines >= 128, "missing global script lines: {link_summaries:?}");
+}
+
+#[test]
 fn network_host_preparation_keeps_cpp_configured_participant_order() {
     // C4Game freezes Config.General.Participants into PlayerFilenames and
     // C4ClientPlayerInfos walks those modules in order. The separately
@@ -1912,6 +1978,7 @@ fn command_line_definition_selection_is_published_to_network_clients() {
             fallback: app.startup_game_graphics_resources(),
             liquid_animation_enabled: app.assets.liquid_animation_enabled(),
         },
+        global_system_scripts: app.global_scripts_for_session(),
         source: LobbyPreloadJobSource::Client {
             join_data,
             scenario_resources: Some(scenario_resources),

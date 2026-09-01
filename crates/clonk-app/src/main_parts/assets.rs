@@ -1407,6 +1407,7 @@ pub(crate) struct LobbyPreloadGraphicsContext {
 
 pub(crate) struct LobbyPreloadJob {
     pub(crate) graphics: LobbyPreloadGraphicsContext,
+    pub(crate) global_system_scripts: Vec<(String, String)>,
     pub(crate) source: LobbyPreloadJobSource,
 }
 
@@ -1469,9 +1470,11 @@ pub(crate) enum LobbyPreloadTaskState {
 
 extern "C" {
     pub(crate) fn rand() -> std::os::raw::c_int;
+    #[cfg(any(test, feature = "presentation-capture"))]
     fn srand(seed: std::os::raw::c_uint);
 }
 
+#[cfg(any(test, feature = "presentation-capture"))]
 pub(crate) fn seed_classic_safe_random(seed: u32) {
     let _guard = lock_unpoisoned(&CLASSIC_SAFE_RANDOM_LOCK);
     // SAFETY: C guarantees `srand` accepts every unsigned seed. The same
@@ -1480,6 +1483,7 @@ pub(crate) fn seed_classic_safe_random(seed: u32) {
 }
 
 pub(crate) fn classic_safe_random_unlocked(range: usize) -> usize {
+    #[cfg(any(test, feature = "presentation-capture"))]
     if let Some(value) = clonk_engine::particles::presentation_safe_random_capture_range(range) {
         return value;
     }

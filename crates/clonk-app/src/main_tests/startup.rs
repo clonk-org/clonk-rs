@@ -50,7 +50,24 @@ fn two_line_product_logo_keeps_classic_startup_footprint() {
     main_assert_eq!((logo_width, logo_height) => (282, 128), "the two-line logo keeps the classic 960x320 logo's 0.4x height",);
 
     let first_button = clonk_frontend::main_menu_layout(800, 600).buttons[0];
-    main_assert!(logo_y + logo_height < first_button.y, "the startup logo must end above the first main-menu button",);
+    main_assert!(
+        logo_y + logo_height < first_button.y,
+        "the startup logo must end above the first main-menu button",
+    );
+}
+
+#[test]
+fn legacy_compat_startup_keeps_the_product_logo_geometry() {
+    let mut normal = new_real_classic_menu_app(800, 600);
+    let mut compatibility = new_real_classic_menu_app(800, 600);
+    compatibility.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    let mut normal_frame = vec![0; 800 * 600 * 4];
+    let mut compatibility_frame = vec![0; 800 * 600 * 4];
+
+    normal.test_render(&mut normal_frame);
+    compatibility.test_render(&mut compatibility_frame);
+
+    main_assert_eq!(compatibility_frame => normal_frame, "compatibility changes engine behavior, not Clonk Rust product presentation");
 }
 
 #[test]
@@ -190,7 +207,10 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     )
     .test_value();
 
-    main_assert!(audio.music_resolver.global.resolve("New Base").is_none(), "external edits remain invisible until the next PreInit");
+    main_assert!(
+        audio.music_resolver.global.resolve("New Base").is_none(),
+        "external edits remain invisible until the next PreInit"
+    );
     audio.reset_music_system_generation(Some(&paths));
 
     let mut reloaded = audio.music_resolver.active_filenames();
@@ -207,7 +227,10 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         b"new wildcard"
     );
     for removed in ["Old Base", "Removed", "Old Match", "Local Theme"] {
-        main_assert!(audio.music_resolver.resolve(removed).is_none(), "{removed} must not leak into the reconstructed catalog");
+        main_assert!(
+            audio.music_resolver.resolve(removed).is_none(),
+            "{removed} must not leak into the reconstructed catalog"
+        );
     }
     main_assert!(!audio.music_resolver.scenario_has_local_sources);
     main_assert!(audio.music_resolver.scenario_root.is_none());
@@ -266,7 +289,10 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         main_assert_eq!(controlled.requests.len() => 1);
         let request = controlled.requests.front().test_value();
         main_assert!(!request.looped);
-        main_assert!(request.identity.as_ref().is_some_and(|identity| Arc::ptr_eq(identity, &expected_frontend)));
+        main_assert!(request
+            .identity
+            .as_ref()
+            .is_some_and(|identity| Arc::ptr_eq(identity, &expected_frontend)));
         let generation = lock_unpoisoned(&audio.music_control).generation;
         generation
     };
@@ -320,7 +346,10 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     main_assert!(!app.failed_open_game_returns_to_startup());
     app.classic_command_line.record_stream = Some(PathBuf::new());
     app.classic_command_line.direct_join = Some(String::new());
-    main_assert!(app.failed_open_game_returns_to_startup(), "native suppresses startup only for nonempty command-line buffers");
+    main_assert!(
+        app.failed_open_game_returns_to_startup(),
+        "native suppresses startup only for nonempty command-line buffers"
+    );
 
     // User-aborting the pre-game lobby also makes OpenGame return false.
     // Its ordinary startup lineage must run the same QuitGame -> PreInit
@@ -702,7 +731,9 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
     main_assert_eq!(warning.state.buttons() => MessageDialogButtons::OK_CANCEL);
     main_assert_eq!(warning.state.icon() => MessageDialogIcon::NOTIFY);
     main_assert_eq!(warning.state.focused_button() => Some(MessageDialogButton::Ok));
-    main_assert!(matches!(&warning.continuation, MessageDialogContinuation::StartupIrcConnectWarning { login } if login == &cancelled));
+    main_assert!(
+        matches!(&warning.continuation, MessageDialogContinuation::StartupIrcConnectWarning { login } if login == &cancelled)
+    );
     main_assert_eq!(warning.state.handle_hotkey('d') => None);
     app.persist_top_message_dialog_checkbox_changes();
     app.finish_message_dialog(MessageDialogResult::Cancel)
@@ -731,7 +762,10 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
     let client = app.chat.client.test_ref();
-    main_assert!(matches!(client.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
+    main_assert!(matches!(
+        client.recv_event_timeout(Duration::from_secs(2)),
+        Ok(clonk_network::IrcClientEvent::Connected)
+    ));
     drop(app);
     server.test_join();
     reset_cached_app_paths();
@@ -757,7 +791,10 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
         Duration::from_secs(2),
     )
     .test_value();
-    main_assert!(matches!(handle.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
+    main_assert!(matches!(
+        handle.recv_event_timeout(Duration::from_secs(2)),
+        Ok(clonk_network::IrcClientEvent::Connected)
+    ));
 
     let mut app = new_real_classic_menu_app(640, 480);
     app.chat.server = address.to_string();
@@ -954,7 +991,10 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     main_assert_eq!(prompt.state.caption() => "Check for Updates");
     main_assert_eq!(prompt.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO);
     main_assert_eq!(prompt.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Extended(14));
-    main_assert!(matches!(prompt.continuation, MessageDialogContinuation::UpdatePrompt { .. }));
+    main_assert!(matches!(
+        prompt.continuation,
+        MessageDialogContinuation::UpdatePrompt { .. }
+    ));
 
     // Declining is silent, exactly as C++'s ShowMessageModal returning
     // false is (`C4UpdateDlg.cpp:385-394`).
@@ -1142,7 +1182,11 @@ fn a_failed_check_reports_the_transport_error_after_the_localized_prefix() {
         .test_value();
 
     let failure = update_result_dialog(&app);
-    main_assert!(failure.state.message().starts_with("Update failed.: "), "{}", failure.state.message());
+    main_assert!(
+        failure.state.message().starts_with("Update failed.: "),
+        "{}",
+        failure.state.message()
+    );
     main_assert!(failure.state.message().contains("503"));
     // Never "Error" in a title bar: the caption names the command, and the
     // failure itself is the body.
@@ -1189,7 +1233,10 @@ fn an_incoming_update_package_is_refused_instead_of_executed() {
     let refusal = update_result_dialog(&app);
     main_assert_eq!(refusal.state.caption() => "Update");
     main_assert_eq!(refusal.state.message() => "Update failed.");
-    main_assert!(app.update_check.is_none(), "nothing is fetched for a package");
+    main_assert!(
+        app.update_check.is_none(),
+        "nothing is fetched for a package"
+    );
 }
 
 #[test]
@@ -1278,7 +1325,10 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert!(app.update_check.is_none(), "closing the wait dialog abandons the check");
+    main_assert!(
+        app.update_check.is_none(),
+        "closing the wait dialog abandons the check"
+    );
     main_assert_eq!(app.startup.view => StartupView::About);
 
     for key in [VirtualKeyCode::Enter, VirtualKeyCode::Space] {
@@ -1360,7 +1410,8 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     app.sound.ui_log.clear();
 
     let actions = app
-        .startup.player_dialog
+        .startup
+        .player_dialog
         .as_mut()
         .test_value()
         .handle_key_down(KeyCode::Down);
@@ -1370,7 +1421,8 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     let back = clonk_frontend::startup_plrsel::plrsel_layout(640, 480).buttons[0];
     let back = GuiPoint::new((back.x + back.w / 2) as f32, (back.y + back.h / 2) as f32);
     let actions = app
-        .startup.player_dialog
+        .startup
+        .player_dialog
         .as_mut()
         .test_value()
         .handle_pointer_down(back);
@@ -1378,7 +1430,8 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     main_assert_eq!(app.sound.ui_log => ["Command", "ArrowHit"]);
 
     let actions = app
-        .startup.player_dialog
+        .startup
+        .player_dialog
         .as_mut()
         .test_value()
         .handle_pointer_up(back);
@@ -1474,13 +1527,16 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     main_assert_eq!(persisted.death_message => "Farewell");
 
     let layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
-    app.startup.player_dialog
+    app.startup
+        .player_dialog
         .test_mut()
         .set_pointer_position(Some(GuiPoint::new(
             (layout.list_client.x + layout.item_height * 2) as f32,
             (layout.list_client.y + layout.item_height / 2) as f32,
         )));
-    main_assert!(app.open_startup_player_context_menu(false).expect("open crew context menu"));
+    main_assert!(app
+        .open_startup_player_context_menu(false)
+        .expect("open crew context menu"));
     main_assert_eq!(app.context_menu.as_ref().expect("crew context menu").layout().panels[0].rows.len() => 3);
     app.close_context_menu_silently();
 
@@ -1625,12 +1681,20 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     wait_for_menu_preserving_first_player_dialog(&mut app);
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(matches!(
-        app.startup.player_properties_dialog
+        app.startup
+            .player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New)
     ));
-    main_assert!(app.startup.player_properties_dialog.as_ref().is_some_and(|pending| matches!(&pending.origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer)));
+    main_assert!(app
+        .startup
+        .player_properties_dialog
+        .as_ref()
+        .is_some_and(|pending| matches!(
+            &pending.origin,
+            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+        )));
 
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
@@ -1650,10 +1714,20 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     let broken = player_root.join("Broken.C4P");
     fs::write(&broken, b"not a player group").test_value();
     app.show_main_menu();
-    main_assert!(app.startup.player_properties_dialog.is_none(), "the native scan matches names without opening player groups");
+    main_assert!(
+        app.startup.player_properties_dialog.is_none(),
+        "the native scan matches names without opening player groups"
+    );
     fs::remove_file(&broken).test_value();
     app.show_main_menu();
-    main_assert!(app.startup.player_properties_dialog.as_ref().is_some_and(|pending| matches!(&pending.origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer)));
+    main_assert!(app
+        .startup
+        .player_properties_dialog
+        .as_ref()
+        .is_some_and(|pending| matches!(
+            &pending.origin,
+            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+        )));
 
     let raced = player_root.join("Racer.c4p");
     fs::create_dir_all(&raced).test_value();
@@ -1666,7 +1740,8 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     raced_config.set_in(Some("General"), "Participants", raced.to_string_lossy());
     raced_config.save(paths.config_file()).test_value();
 
-    app.startup.player_properties_dialog
+    app.startup
+        .player_properties_dialog
         .test_mut()
         .controller
         .set_name("First");
@@ -1709,7 +1784,10 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     );
 
     app.show_main_menu();
-    main_assert!(app.startup.player_properties_dialog.is_none(), "a visible player prevents another forced dialog");
+    main_assert!(
+        app.startup.player_properties_dialog.is_none(),
+        "a visible player prevents another forced dialog"
+    );
     app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
         .test_value();
     fs::remove_dir_all(&raced).test_value();
@@ -1717,7 +1795,10 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
         .test_value();
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
-    main_assert!(app.startup.player_properties_dialog.is_some(), "every main-menu show rechecks the physical player directory");
+    main_assert!(
+        app.startup.player_properties_dialog.is_some(),
+        "every main-menu show rechecks the physical player directory"
+    );
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
     ]);
@@ -1761,7 +1842,10 @@ fn assert_player_properties_validation_modal(
     main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
     main_assert_eq!(modal.state.icon() => MessageDialogIcon::ERROR);
     main_assert_eq!(modal.state.size() => MessageDialogSize::Regular);
-    main_assert!(matches!(modal.continuation, MessageDialogContinuation::None));
+    main_assert!(matches!(
+        modal.continuation,
+        MessageDialogContinuation::None
+    ));
     let form = app.startup.player_properties_dialog.test_ref();
     main_assert_eq!(form.controller.player() => expected_player);
     main_assert_eq!(form.controller.comment() => expected_comment);
@@ -1843,7 +1927,8 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
     main_assert_eq!(app.startup.player_files.len() => 1);
 
     app.open_existing_startup_player_properties(0);
-    app.startup.player_properties_dialog
+    app.startup
+        .player_properties_dialog
         .test_mut()
         .controller
         .set_name("Renamed");
@@ -1857,7 +1942,10 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
 
     main_assert!(!old.exists());
     main_assert!(!player_root.join("Renamed.c4p").exists());
-    main_assert!(app.startup.player_properties_dialog.is_none(), "the properties form closes before the screen-owned error dialog");
+    main_assert!(
+        app.startup.player_properties_dialog.is_none(),
+        "the properties form closes before the screen-owned error dialog"
+    );
     main_assert!(app.startup.player_files.is_empty());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(Config::load(paths.config_file()).expect("reload reconciled config").get_in(Some("General"), "Participants") => Some(""));
@@ -1868,7 +1956,10 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
     main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
     main_assert_eq!(modal.state.icon() => MessageDialogIcon::ERROR);
     main_assert_eq!(modal.state.size() => MessageDialogSize::Regular);
-    main_assert!(matches!(modal.continuation, MessageDialogContinuation::None));
+    main_assert!(matches!(
+        modal.continuation,
+        MessageDialogContinuation::None
+    ));
 
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
@@ -1885,7 +1976,8 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
     let user_data = tempdir();
     let (_guard, _paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
-    app.startup.player_properties_dialog
+    app.startup
+        .player_properties_dialog
         .test_mut()
         .controller
         .set_name("Fresh");
@@ -1898,7 +1990,10 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
 
-    main_assert!(app.startup.player_properties_dialog.is_none(), "the creation form closes before the screen-owned error dialog");
+    main_assert!(
+        app.startup.player_properties_dialog.is_none(),
+        "the creation form closes before the screen-owned error dialog"
+    );
     main_assert!(app.startup.player_files.is_empty());
     main_assert!(app.status_text.is_empty());
 
@@ -1908,7 +2003,10 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
     main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
     main_assert_eq!(modal.state.icon() => MessageDialogIcon::ERROR);
     main_assert_eq!(modal.state.size() => MessageDialogSize::Regular);
-    main_assert!(matches!(modal.continuation, MessageDialogContinuation::None));
+    main_assert!(matches!(
+        modal.continuation,
+        MessageDialogContinuation::None
+    ));
 
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
@@ -1937,7 +2035,11 @@ fn about_routes_wheel_to_credits_and_license_textwindows() {
         f64::from(text.y + 10),
     ));
     licenses.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert!(licenses.startup.about_dialog.as_ref().is_some_and(|dialog| dialog.license_scroll_offset() > 0));
+    main_assert!(licenses
+        .startup
+        .about_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.license_scroll_offset() > 0));
 }
 
 #[test]
@@ -1991,7 +2093,8 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
     app.live_input.modifiers = ModifiersState::SUPER;
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     main_assert!(matches!(
-        app.startup.player_properties_dialog
+        app.startup
+            .player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
@@ -2139,7 +2242,10 @@ fn startup_status_boundary_precedes_supported_view_pixels() {
             other => panic!("unexpected startup status boundary: {other:?}"),
         }
         main_assert_eq!(app.status_text => status, "diagnostic state is retained");
-        main_assert!(frame.iter().all(|byte| *byte == 0x5a), "{view:?} must fail before copying newly rendered pixels");
+        main_assert!(
+            frame.iter().all(|byte| *byte == 0x5a),
+            "{view:?} must fail before copying newly rendered pixels"
+        );
     }
 }
 
@@ -2178,7 +2284,10 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
         .test_value();
     let initial = app.ingame_menu.get(owner).test_value();
     main_assert_eq!(initial.close_action() => Some(&MenuAction::ActivateMain));
-    main_assert!(initial.items().iter().all(|item| matches!(&item.action, MenuAction::SelectTeam(_))));
+    main_assert!(initial
+        .items()
+        .iter()
+        .all(|item| matches!(&item.action, MenuAction::SelectTeam(_))));
     app.ingame_menu.clear();
     app.engine
         .set_player_status(owner, PlayerStatus::Active)
@@ -2211,7 +2320,10 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
     let main =
         IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
             .test_value();
-    main_assert!(!main.items().iter().any(|item| item.action == MenuAction::Abort));
+    main_assert!(!main
+        .items()
+        .iter()
+        .any(|item| item.action == MenuAction::Abort));
     let display =
         IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default());
     main_assert_eq!(
@@ -2233,7 +2345,10 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
     let main =
         IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
             .test_value();
-    main_assert!(main.items().iter().any(|item| item.action == MenuAction::Abort));
+    main_assert!(main
+        .items()
+        .iter()
+        .any(|item| item.action == MenuAction::Abort));
     main_assert_eq!(IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default()).items().len() => 9);
 }
 
@@ -2792,7 +2907,9 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
             (3, second.as_path()),
         ]
     );
-    main_assert!(registrations.iter().all(|registration| registration.group.root() != unused.as_path()));
+    main_assert!(registrations
+        .iter()
+        .all(|registration| registration.group.root() != unused.as_path()));
 
     let loader_tier = highest_loader_tier(&registrations).test_value();
     main_assert_eq!(
@@ -3015,8 +3132,8 @@ fn an_unopenable_graphics_group_reports_the_native_two_argument_diagnostic() {
     // the same state when Config.AtExePath(C4CFN_Graphics) will not open.
     fs::create_dir_all(install_root.path().join("planet/System.c4g")).test_value();
     let (_guard, paths) = guarded_test_app_paths(Some(install_root.path()), user_data.path());
-    let error = main_graphics_group(&paths)
-        .expect_err("an install without Graphics.c4g cannot open it");
+    let error =
+        main_graphics_group(&paths).expect_err("an install without Graphics.c4g cannot open it");
     let reported = format!("{error:#}");
     main_assert!(
         reported.starts_with("Error at graphics file Graphics.c4g: "),
@@ -3161,8 +3278,14 @@ fn startup_main_uses_classic_loader_wildcard_when_goldmine_is_absent() {
     paths.ensure_user_dirs().test_value();
     let app = new_menu_app_with_paths(640, 480, &paths);
 
-    main_assert!(app.assets.menu_background.is_some(), "the wildcard fallback must supply the startup background");
-    main_assert!(app.assets.require_classic_startup_main_resources().is_ok(), "preflight must not demand the named loader once a wildcard match exists");
+    main_assert!(
+        app.assets.menu_background.is_some(),
+        "the wildcard fallback must supply the startup background"
+    );
+    main_assert!(
+        app.assets.require_classic_startup_main_resources().is_ok(),
+        "preflight must not demand the named loader once a wildcard match exists"
+    );
     main_assert_eq!(app.loader_screen.as_ref().map(|loader| loader.selection().selected_filename().to_string()) => Some("LoaderWatercave1.png".to_string()));
 
     // A pack with no eligible loader at all still fails the preflight, so
@@ -3284,7 +3407,8 @@ fn missing_explicit_definition_during_scenario_start_returns_to_startup() {
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert!(
-        app.dialogs.messages
+        app.dialogs
+            .messages
             .iter()
             .any(|dialog| dialog.state.message().contains("Missing.c4d")),
         "the missing definition is presented through startup diagnostics"
@@ -3330,7 +3454,8 @@ fn missing_explicit_definition_under_definition_path_returns_to_startup() {
     main_assert!(!app.take_exit_request());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(
-        app.dialogs.messages
+        app.dialogs
+            .messages
             .iter()
             .any(|dialog| dialog.state.message().contains("Missing.c4d")),
         "the missing rooted definition is presented through startup diagnostics"
@@ -3353,7 +3478,10 @@ fn a_command_line_scenario_that_fails_to_load_ends_the_process() {
     app.finish_scenario_loading_failure("controlled command-line load failure".to_string(), false)
         .test_value();
 
-    main_assert!(app.take_exit_request(), "there is no startup generation to return to");
+    main_assert!(
+        app.take_exit_request(),
+        "there is no startup generation to return to"
+    );
 
     // A console `/open` failure is the other branch: `/open` sets
     // `UseStartupDialog` back (C4Application.cpp:598-612), so the engine
@@ -3369,7 +3497,10 @@ fn a_command_line_scenario_that_fails_to_load_ends_the_process() {
         .test_value();
 
     main_assert_eq!(opened.mode => AppMode::Menu);
-    main_assert!(!opened.take_exit_request(), "a console-opened failure waits for the next command instead");
+    main_assert!(
+        !opened.take_exit_request(),
+        "a console-opened failure waits for the next command instead"
+    );
 }
 
 #[test]
@@ -3485,7 +3616,8 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
             fs::write(raw_directory.join("Player.png"), &image_bytes).test_value();
             let directory_group = Group::open(&raw_directory).test_value();
 
-            main_assert!(loader_group_has_content(&directory_group).expect("opaque sibling does not abort loader classification"));
+            main_assert!(loader_group_has_content(&directory_group)
+                .expect("opaque sibling does not abort loader classification"));
             let selected = select_loader_source(
                 std::slice::from_ref(&directory_group),
                 &directory_group,
@@ -3586,7 +3718,10 @@ fn loader_decoder_uses_selected_filename_extension_instead_of_magic() {
         select_loader_source(std::slice::from_ref(&group), &group, "LoaderRenamed", |_| 0)
             .test_value();
     main_assert_eq!(selected.entry.relative_path => PathBuf::from("LoaderRenamed.jpg"));
-    main_assert!(decode_selected_loader(&selected).is_err(), "C4Surface dispatches to JPEG for a .jpg entry and rejects PNG bytes");
+    main_assert!(
+        decode_selected_loader(&selected).is_err(),
+        "C4Surface dispatches to JPEG for a .jpg entry and rejects PNG bytes"
+    );
 }
 
 #[test]
@@ -3636,7 +3771,10 @@ fn startup_loader_render_uses_configured_user_gamma() {
         });
     let mut disabled = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut disabled);
-    main_assert!(disabled.chunks_exact(4).zip(standard.chunks_exact(4)).any(|(raw, corrected)| raw[..3].contains(&0) && raw != corrected));
+    main_assert!(disabled
+        .chunks_exact(4)
+        .zip(standard.chunks_exact(4))
+        .any(|(raw, corrected)| raw[..3].contains(&0) && raw != corrected));
 }
 
 #[test]
@@ -3687,7 +3825,12 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     let scenario =
         resolve_next_mission_scenario(&app.scensel.catalog, "Tutorial.c4f/Tutorial01.c4s")
             .test_value();
-    main_assert!(scenario.path.as_ref().expect("scenario path").join("Scenario.txt").is_file());
+    main_assert!(scenario
+        .path
+        .as_ref()
+        .expect("scenario path")
+        .join("Scenario.txt")
+        .is_file());
 
     app.start_scenario(scenario).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
@@ -3700,11 +3843,18 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     let clonk_frontend::loader_screen::LoaderLog::Visible(lines) = state.log() else {
         panic!("worker phase status must make the live loader log visible");
     };
+    // Pinned C++ oracle: src/C4AulLink.cpp:299-303 logs the dynamic link
+    // tally between definition loading and C4Game.cpp:945's texmap tally.
+    let link_summary = lines
+        .iter()
+        .find(|line| line.starts_with("C4AulScriptEngine linked - "))
+        .unwrap_or_else(|| panic!("missing script link summary: {lines:?}"));
     let mut previous = None;
     for expected in [
         "Scenario manifest and components decoded",
         "Definition metadata and sources collected",
-        "Scenario script sources loaded",
+        link_summary,
+        "Texture table holds 48 entries.",
         "Landscape data generated or decoded",
         "Object records decoded",
         "Players initialized",
@@ -3722,7 +3872,10 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
 
     let mut frame = vec![0; app.graphics.surface().pixels().len()];
     app.render(&mut frame).test_value();
-    main_assert!(app.terminal_loader_frame_pending, "preparing a frame is not a successful window presentation");
+    main_assert!(
+        app.terminal_loader_frame_pending,
+        "preparing a frame is not a successful window presentation"
+    );
     main_assert!(app.finish_terminal_loader_frame_presentation());
     main_assert!(!app.loader_presentation_active());
     app.terminal_loader_frame_pending = true;
@@ -3796,7 +3949,10 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
     );
     app.test_cursor(first_row_name);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.plrsel_last_click.is_none(), "scrollbar release must not seed row double-click bookkeeping");
+    main_assert!(
+        app.plrsel_last_click.is_none(),
+        "scrollbar release must not seed row double-click bookkeeping"
+    );
 
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
@@ -4394,7 +4550,10 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
     app.ingame_menu.clear();
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
-    main_assert!(app.ingame_menu.is_none(), "a full game keeps the submenu closed");
+    main_assert!(
+        app.ingame_menu.is_none(),
+        "a full game keeps the submenu closed"
+    );
 }
 
 #[test]
@@ -4492,7 +4651,8 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         main_assert!(!matches!(app.mode, AppMode::Running), "{label}");
         let options_was_active = app.startup_options_dialog_is_active();
         let before_visual_music = app
-            .startup.options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .map(|dialog| dialog.sound().frontend_music);
         let before_music = app.test_audio_ref().options.menu_music_enabled;
@@ -4522,7 +4682,8 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
 
         let before_sound = app.test_audio_ref().options.menu_sound_enabled;
         let before_visual_sound = app
-            .startup.options_dialog
+            .startup
+            .options_dialog
             .as_ref()
             .map(|dialog| dialog.sound().frontend_sound_effects);
         app.handle_modifiers_changed(ModifiersState::CONTROL)
@@ -4905,7 +5066,14 @@ fn load_frontend_scenarios_preserves_legacy_ordering() {
         "merged children should follow legacy ordering rules"
     );
     main_assert_eq!(folder.children[2].title => "Alpha Override", "user override title should be retained");
-    main_assert!(folder.children[2].path.as_ref().map(|path| path.starts_with(&user_dir)).unwrap_or(false), "user override should keep user path");
+    main_assert!(
+        folder.children[2]
+            .path
+            .as_ref()
+            .map(|path| path.starts_with(&user_dir))
+            .unwrap_or(false),
+        "user override should keep user path"
+    );
 
     reset_cached_app_paths();
 }
@@ -5060,14 +5228,23 @@ fn a_dedicated_server_keeps_the_fullscreen_startup_lineage_rule() {
     for headless in [false, true] {
         let mut app = new_state_only_menu_app(320, 200);
         app.headless = headless;
-        main_assert!(app.failed_open_game_returns_to_startup(), "an empty command line keeps a startup generation to return to");
+        main_assert!(
+            app.failed_open_game_returns_to_startup(),
+            "an empty command line keeps a startup generation to return to"
+        );
 
         app.classic_command_line.scenario = Some(PathBuf::from("Broken.c4s"));
-        main_assert!(!app.failed_open_game_returns_to_startup(), "an explicit command-line scenario suppresses the startup dialog");
+        main_assert!(
+            !app.failed_open_game_returns_to_startup(),
+            "an explicit command-line scenario suppresses the startup dialog"
+        );
 
         app.classic_command_line.scenario = None;
         app.classic_command_line.record_stream = Some(PathBuf::from("Broken.c4r"));
-        main_assert!(!app.failed_open_game_returns_to_startup(), "a command-line record stream suppresses the startup dialog");
+        main_assert!(
+            !app.failed_open_game_returns_to_startup(),
+            "a command-line record stream suppresses the startup dialog"
+        );
     }
 }
 
@@ -5090,7 +5267,10 @@ fn a_dedicated_server_quits_when_its_command_line_record_stream_fails() {
         .test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
-    main_assert!(app.take_exit_request(), "a dedicated server with no startup generation to return to quits");
+    main_assert!(
+        app.take_exit_request(),
+        "a dedicated server with no startup generation to return to quits"
+    );
 }
 
 #[test]
@@ -5115,10 +5295,14 @@ fn a_ticked_dont_show_again_box_suppresses_its_warning_before_any_save() {
     app.app_paths = Some(paths.clone());
     main_assert!(!app.startup_message_hidden("HideMsgStartDedicated"));
 
-    app.config.deferred
+    app.config
+        .deferred
         .set("Startup", "HideMsgStartDedicated", "1");
 
-    main_assert!(app.startup_message_hidden("HideMsgStartDedicated"), "the tick suppresses the warning without waiting for a save");
+    main_assert!(
+        app.startup_message_hidden("HideMsgStartDedicated"),
+        "the tick suppresses the warning without waiting for a save"
+    );
     main_assert_eq!(
         Config::load(paths.config_file())
             .test_value()

@@ -1276,6 +1276,7 @@ impl GameApp {
         let preloaded_scenario = (!retry_generated_landscape)
             .then_some(preloaded_scenario)
             .flatten();
+        let global_system_scripts = self.global_scripts_for_session();
 
         thread::spawn(move || {
             let mut reporter = ScenarioLoadingReporter::new(sender);
@@ -1295,6 +1296,7 @@ impl GameApp {
                                 &definition_load,
                                 u64::from(replay.random_seed as u32),
                                 replay.startup_player_count,
+                                &global_system_scripts,
                                 |progress, line| reporter.report(progress, line),
                             )
                             .map(|scenario| (scenario, None))
@@ -1309,6 +1311,7 @@ impl GameApp {
                                 offline_random_seed
                                     .expect("fresh offline loading freezes a random seed"),
                                 startup_player_count,
+                                &global_system_scripts,
                                 |progress, line| reporter.report(progress, line),
                             )
                             .map(|(scenario, random_seed)| (scenario, Some(random_seed)))
@@ -1321,6 +1324,7 @@ impl GameApp {
                                 &definition_load,
                                 offline_random_seed.unwrap_or(0),
                                 startup_player_count,
+                                &global_system_scripts,
                                 |progress, line| reporter.report(progress, line),
                             )
                             .map(|scenario| (scenario, None))
@@ -1331,6 +1335,7 @@ impl GameApp {
                             &resolver,
                             &languages,
                             &definition_load,
+                            &global_system_scripts,
                             |progress, line| reporter.report(progress, line),
                         )
                         .map(|scenario| (scenario, None))

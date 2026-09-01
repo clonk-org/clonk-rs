@@ -20,6 +20,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -28,7 +29,7 @@ from typing import Any, Iterable, Mapping, Sequence
 WORKSPACE = Path(__file__).resolve().parents[1]
 ORACLE_SOURCE_COMMIT = "7d43b47b7d789b533f32d005e64596e0a07019cd"
 ORACLE_SOURCE_CONTENT_GITLINK = "67a54d0e662bda3aa0202134efc065d7bc420872"
-FIXTURE_CONTENT_COMMIT = "b9214cafb46ac1fd82293d1fe9f2f78a48831a47"
+FIXTURE_CONTENT_COMMIT = "ab9094f96838ae9c8cb77555560a8b887231640a"
 
 CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
@@ -142,7 +143,9 @@ CASE_IDS = (
     "gameplay",
     "evaluation",
 )
-LAYOUT_CASE_IDS = frozenset(CASE_IDS[:6])
+LAYOUT_CASE_IDS = frozenset(
+    (*CASE_IDS[:6], "hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
+)
 LAYOUT_PORT_ASSET_EXEMPTIONS = {
     "startup-main": {
         "startup/main/branding/logo": "branding",
@@ -163,6 +166,10 @@ LAYOUT_PORT_ASSET_EXEMPTIONS = {
     },
     "startup-about": {
         "startup/about/branding/fan-project": "branding",
+    },
+    **{
+        case_id: {"game/upper-board/branding/logo": "branding"}
+        for case_id in ("hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
     },
 }
 LAYOUT_PORT_ASSETS = {
@@ -193,9 +200,15 @@ EXPECTED_GEOMETRY = {
     "height": CAPTURE_HEIGHT,
     "scale": CAPTURE_SCALE,
 }
+EXPECTED_POINTER_INPUT = {
+    "position": [32, 32],
+    "button": "none",
+    "modifiers": [],
+    "help": False,
+}
 EXPECTED_NORMALIZATION = {
     "cpp_savepng_readback": "real-height-minus-one-minus-y",
-    "cpp_cursor": "omit-rendered-cursor-glyph-preserve-tooltip",
+    "pointer_input": EXPECTED_POINTER_INPUT,
     "color": "rgb-or-rgba8-srgb",
 }
 EXPECTED_LOCALE = {
@@ -206,6 +219,7 @@ EXPECTED_LOCALE = {
     "tz": "UTC",
 }
 ACCEPTED_DESTINATION = WORKSPACE / "compat/presentation/oracle/v1"
+FINAL_PRESENTATION_GATE_EVIDENCE = ".github/workflows/landing.yml (presentation captures)"
 RUN_IDS = ("run-1", "run-2")
 ENGINE_IDS = ("cpp", "rust")
 ENGINE_PRODUCERS = {
@@ -235,7 +249,14 @@ CPP_RUNTIME_SCENARIO_PATHS = (
     "Tutorial.c4f/Tutorial02.c4s",
     "Tutorial.c4f/Tutorial03.c4s",
 )
-BUILD_ENVIRONMENT = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+BUILD_ENVIRONMENT = {
+    "CARGO_INCREMENTAL": "0",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+}
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 1_800
+CAPTURE_COMMAND_TIMEOUT_SECONDS = 180
 BUILD_HOST_ENV_ALLOWLIST = frozenset(
     {
         "PATH",
@@ -421,17 +442,41 @@ def _run(
     input_stream: Any = None,
     text: bool = False,
     environment: Mapping[str, str] | None = None,
+    timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    capture_output: bool | None = None,
 ) -> subprocess.CompletedProcess[Any]:
+    should_capture_output = input_stream is None if capture_output is None else capture_output
     try:
         result = subprocess.run(
             list(command),
             cwd=cwd,
             stdin=input_stream,
             check=False,
-            capture_output=input_stream is None,
+            capture_output=should_capture_output,
             text=text,
             env=dict(environment) if environment is not None else None,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout if error.stdout is not None else ""
+        stderr = error.stderr if error.stderr is not None else ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        details = " ".join(
+            part
+            for part in (
+                f"stdout: {stdout.strip()}" if stdout.strip() else "",
+                f"stderr: {stderr.strip()}" if stderr.strip() else "",
+            )
+            if part
+        )
+        suffix = f": {details}" if details else ""
+        raise AcquisitionFailure(
+            f"command timed out after {timeout_seconds} seconds: "
+            f"{_command_text(command)}{suffix}"
+        ) from error
     except OSError as error:
         raise AcquisitionFailure(
             f"could not run {_command_text(command)}: {error}"
@@ -715,7 +760,23 @@ def capture_manifest_contract_value_sha256(manifest: Any) -> str:
 
     _require(isinstance(manifest, dict), "capture manifest must be an object")
     capture = _require_exact_keys(
-        manifest.get("capture"), {"resolution", "scale", "note"}, "capture geometry"
+        manifest.get("capture"),
+        {"resolution", "scale", "pointer", "note"},
+        "capture geometry",
+    )
+    pointer = _require_exact_keys(
+        capture["pointer"],
+        {"position", "button", "modifiers", "help", "note"},
+        "capture pointer input",
+    )
+    _require(
+        {key: pointer[key] for key in EXPECTED_POINTER_INPUT}
+        == EXPECTED_POINTER_INPUT,
+        "capture pointer input drift",
+    )
+    _require(
+        isinstance(pointer["note"], str) and pointer["note"].strip(),
+        "capture pointer input note must be non-empty",
     )
     tolerance = _require_exact_keys(
         manifest.get("tolerance"),
@@ -752,6 +813,7 @@ def capture_manifest_contract_value_sha256(manifest: Any) -> str:
         "capture": {
             "resolution": capture["resolution"],
             "scale": capture["scale"],
+            "pointer": dict(EXPECTED_POINTER_INPUT),
         },
         "tolerance": {
             "cpu_max_channel_delta": tolerance["cpu_max_channel_delta"],
@@ -782,6 +844,87 @@ def capture_manifest_contract_sha256_at_revision(
     )
 
 
+def _validate_final_presentation_lifecycle(manifest: Any, profile: Any) -> None:
+    _require(isinstance(manifest, dict), "final capture manifest must be an object")
+    screens = manifest.get("screens")
+    _require(isinstance(screens, list), "final capture screens must be an array")
+    _require(
+        [screen.get("id") for screen in screens if isinstance(screen, dict)]
+        == list(CASE_IDS),
+        "final capture screen identity or order drift",
+    )
+    for screen in screens:
+        case_id = screen["id"]
+        _require(
+            screen.get("status") == "captured",
+            f"final {case_id} lifecycle is not captured",
+        )
+        _require(
+            screen.get("blocker") is None,
+            f"final {case_id} still carries a blocker",
+        )
+        suffix = "layout.json" if case_id in LAYOUT_CASE_IDS else "png"
+        expected_evidence = {
+            engine: (
+                "compat/presentation/oracle/v1/run-1/"
+                f"{engine}/artifacts/{case_id}.{suffix}"
+            )
+            for engine in ENGINE_IDS
+        }
+        evidence = _require_exact_keys(
+            screen.get("evidence"),
+            ENGINE_IDS,
+            f"final {case_id} evidence",
+        )
+        _require(
+            evidence == expected_evidence,
+            f"final {case_id} evidence is detached from its indexed comparison pair",
+        )
+
+    _require(isinstance(profile, dict), "final compatibility profile must be an object")
+    try:
+        presentation_evidence = profile["promise"]["presentation"]["evidence"]
+    except (KeyError, TypeError) as error:
+        raise AcquisitionFailure("final profile presentation evidence is missing") from error
+    _require(
+        isinstance(presentation_evidence, list),
+        "final profile presentation evidence must be an array",
+    )
+    lifecycle = [
+        entry
+        for entry in presentation_evidence
+        if isinstance(entry, dict)
+        and entry.get("value")
+        in {"clonk-org/clonk-rs#587", FINAL_PRESENTATION_GATE_EVIDENCE}
+    ]
+    _require(
+        len(lifecycle) == 1,
+        "final profile must contain exactly one presentation capture lifecycle slot",
+    )
+    entry = _require_exact_keys(
+        lifecycle[0],
+        {"kind", "value", "status", "note"},
+        "final profile presentation capture lifecycle",
+    )
+    _require(
+        {
+            "kind": entry["kind"],
+            "value": entry["value"],
+            "status": entry["status"],
+        }
+        == {
+            "kind": "test",
+            "value": FINAL_PRESENTATION_GATE_EVIDENCE,
+            "status": "held",
+        },
+        "final profile presentation capture lifecycle is not held by the live gate",
+    )
+    _require(
+        isinstance(entry["note"], str) and entry["note"].strip(),
+        "final profile presentation capture lifecycle note must be non-empty",
+    )
+
+
 def compat_profile_contract_value_sha256(profile: Any) -> str:
     """Bind the profile while normalizing its one presentation-evidence lifecycle slot."""
 
@@ -798,7 +941,7 @@ def compat_profile_contract_value_sha256(profile: Any) -> str:
         value = entry.get("value")
         if value not in {
             "clonk-org/clonk-rs#587",
-            "cargo xtask compat verify",
+            FINAL_PRESENTATION_GATE_EVIDENCE,
         }:
             continue
         matched += 1
@@ -813,7 +956,7 @@ def compat_profile_contract_value_sha256(profile: Any) -> str:
         expected_identity = (
             {"kind": "issue", "status": "pending"}
             if value == "clonk-org/clonk-rs#587"
-            else {"kind": "command", "status": "held"}
+            else {"kind": "test", "status": "held"}
         )
         _require(
             all(entry[field] == expected for field, expected in expected_identity.items()),
@@ -3208,6 +3351,8 @@ def verify_accepted_output(
     repository_root: Path,
     *,
     output_directory: Path | None = None,
+    rerun_comparisons: bool = True,
+    trusted_comparator_context: tuple[Path, str, str, dict[str, Any]] | None = None,
 ) -> list[Path]:
     """Revalidate checked-in evidence against squash-stable current source inputs."""
 
@@ -3218,12 +3363,29 @@ def verify_accepted_output(
         if output_directory is not None
         else repository_root / "compat/presentation/oracle/v1"
     )
-    (
-        trusted_comparator,
-        comparator_commit,
-        comparator_tree,
-        comparator_inventory,
-    ) = _build_trusted_current_comparator(repository_root)
+    if rerun_comparisons:
+        (
+            trusted_comparator,
+            comparator_commit,
+            comparator_tree,
+            comparator_inventory,
+        ) = _select_trusted_current_comparator(
+            repository_root,
+            trusted_comparator_context,
+        )
+    else:
+        _require(
+            trusted_comparator_context is None,
+            "index-only verification cannot accept a comparator",
+        )
+        trusted_comparator = None
+        comparator_commit, comparator_tree = require_clean_source_revision(
+            repository_root
+        )
+        comparator_inventory = rust_source_input_inventory(
+            repository_root,
+            comparator_commit,
+        )
     index = load_json(output / "index.json")
     _require(isinstance(index, dict), "accepted provenance index must be an object")
     sources = index.get("sources")
@@ -3256,6 +3418,7 @@ def verify_accepted_output(
         "HEAD",
         "compat/profile.json",
     )
+    _validate_final_presentation_lifecycle(trusted_manifest, trusted_profile)
     trusted_case_specs = load_json_at_revision(
         repository_root,
         "HEAD",
@@ -3291,26 +3454,37 @@ def verify_accepted_output(
         "HEAD",
         LAUNCHER_SOURCE_PATH,
     )
-    validated = validate_candidate_output(
-        output,
-        expected_fields=expected_fields,
-        expected_case_specs=trusted_case_specs,
-        trusted_patch=None,
-        trusted_launcher=None,
-        trusted_manifest=trusted_manifest,
-        trusted_manifest_contract_sha256=capture_manifest_contract_value_sha256(
+    validation_arguments = {
+        "expected_fields": expected_fields,
+        "expected_case_specs": trusted_case_specs,
+        "trusted_patch": None,
+        "trusted_launcher": None,
+        "trusted_manifest": trusted_manifest,
+        "trusted_manifest_contract_sha256": capture_manifest_contract_value_sha256(
             trusted_manifest
         ),
-        trusted_profile=trusted_profile,
-        trusted_profile_contract_sha256=compat_profile_contract_value_sha256(
+        "trusted_profile": trusted_profile,
+        "trusted_profile_contract_sha256": compat_profile_contract_value_sha256(
             trusted_profile
         ),
-        expected_source_inventory=None,
-        trusted_patch_sha256=patch_sha256,
-        trusted_launcher_sha256=launcher_sha256,
-        accepted_inventory=True,
-        trusted_comparator=trusted_comparator,
-    )
+        "expected_source_inventory": None,
+        "trusted_patch_sha256": patch_sha256,
+        "trusted_launcher_sha256": launcher_sha256,
+        "accepted_inventory": True,
+    }
+    if trusted_comparator is not None:
+        validated = validate_candidate_output(
+            output,
+            **validation_arguments,
+            trusted_comparator=trusted_comparator,
+        )
+    else:
+        indexed = validate_provenance_index(
+            index,
+            output,
+            **validation_arguments,
+        )
+        validated = [output / "index.json", *indexed]
     verify_clean_source_checkpoint(
         repository_root,
         expected_commit=comparator_commit,
@@ -3319,6 +3493,12 @@ def verify_accepted_output(
         label="after accepted comparison",
     )
     return validated
+
+
+def verify_accepted_index(repository_root: Path) -> list[Path]:
+    """Validate accepted evidence structure and provenance without execution."""
+
+    return verify_accepted_output(repository_root, rerun_comparisons=False)
 
 
 def _validate_current_rust_case(
@@ -3472,12 +3652,13 @@ def _compare_current_artifact(
 def verify_current_rust(
     repository_root: Path,
     output_directory: Path,
+    *,
+    build_profile: str = "release",
 ) -> dict[str, Any]:
     """Capture the current Rust producer and compare it to accepted C++ evidence."""
 
     repository_root = repository_root.resolve()
     accepted_root = repository_root / "compat/presentation/oracle/v1"
-    verify_accepted_output(repository_root, output_directory=accepted_root)
     rust_commit, rust_tree = require_clean_source_revision(repository_root)
     source_inventory = rust_source_input_inventory(repository_root, rust_commit)
     verify_clean_source_checkpoint(
@@ -3557,8 +3738,12 @@ def verify_current_rust(
         },
     )
 
-    recipe = rust_current_build_recipe(repository_root)
-    _execute_current_rust_build(recipe, repository_root)
+    recipe = rust_current_build_recipe(repository_root, build_profile)
+    _execute_current_rust_build(
+        recipe,
+        repository_root,
+        build_profile=build_profile,
+    )
     verify_clean_source_checkpoint(
         repository_root,
         expected_commit=rust_commit,
@@ -3566,10 +3751,21 @@ def verify_current_rust(
         expected_inventory=source_inventory,
         label="after build",
     )
-    built_binary = repository_root / "target/release" / (
+    target_profile = "release" if build_profile == "release" else "debug"
+    built_binary = repository_root / f"target/{target_profile}" / (
         "clonk-app.exe" if os.name == "nt" else "clonk-app"
     )
     _regular_file(built_binary, "current Rust executable")
+    verify_accepted_output(
+        repository_root,
+        output_directory=accepted_root,
+        trusted_comparator_context=(
+            built_binary,
+            rust_commit,
+            rust_tree,
+            source_inventory,
+        ),
+    )
     runtime_binary = output_directory / "builds/rust/binary"
     _copy_regular_file(
         built_binary,
@@ -3910,7 +4106,16 @@ def rust_build_recipe() -> dict[str, Any]:
     return _recipe(
         [
             {
-                "argv": ["cargo", "build", "--locked", "--release", "-p", "clonk-app"],
+                "argv": [
+                    "cargo",
+                    "build",
+                    "--locked",
+                    "--release",
+                    "-p",
+                    "clonk-app",
+                    "--features",
+                    "presentation-capture",
+                ],
                 "cwd": "work/rust-source",
                 "environment": BUILD_ENVIRONMENT,
             }
@@ -3918,11 +4123,32 @@ def rust_build_recipe() -> dict[str, Any]:
     )
 
 
-def rust_current_build_recipe(repository_root: Path) -> dict[str, Any]:
+def rust_current_build_recipe(
+    repository_root: Path,
+    build_profile: str = "release",
+) -> dict[str, Any]:
+    _require(
+        build_profile in {"release", "test"},
+        f"unsupported current Rust build profile: {build_profile}",
+    )
+    profile_arguments = (
+        ["--release"]
+        if build_profile == "release"
+        else ["--profile", "test"]
+    )
     return _recipe(
         [
             {
-                "argv": ["cargo", "build", "--locked", "--release", "-p", "clonk-app"],
+                "argv": [
+                    "cargo",
+                    "build",
+                    "--locked",
+                    *profile_arguments,
+                    "-p",
+                    "clonk-app",
+                    "--features",
+                    "presentation-capture",
+                ],
                 "cwd": str(repository_root),
                 "environment": BUILD_ENVIRONMENT,
             }
@@ -3930,23 +4156,25 @@ def rust_current_build_recipe(repository_root: Path) -> dict[str, Any]:
     )
 
 
-def _execute_current_rust_build(recipe: Mapping[str, Any], repository_root: Path) -> None:
+def _execute_current_rust_build(
+    recipe: Mapping[str, Any],
+    repository_root: Path,
+    *,
+    build_profile: str = "release",
+) -> None:
     commands = recipe.get("commands")
     _require(isinstance(commands, list) and len(commands) == 1, "current build recipe drift")
     command = commands[0]
+    expected = rust_current_build_recipe(repository_root, build_profile)["commands"][0]
     _require(
-        command
-        == {
-            "argv": ["cargo", "build", "--locked", "--release", "-p", "clonk-app"],
-            "cwd": str(repository_root),
-            "environment": BUILD_ENVIRONMENT,
-        },
+        command == expected,
         "current build recipe is not the audited clean-tree command",
     )
     _run(
         command["argv"],
         cwd=repository_root,
         environment=_build_process_environment(command["environment"]),
+        capture_output=False,
     )
 
 
@@ -3965,6 +4193,7 @@ def _build_trusted_current_comparator(
     _execute_current_rust_build(
         rust_current_build_recipe(repository_root),
         repository_root,
+        build_profile="release",
     )
     verify_clean_source_checkpoint(
         repository_root,
@@ -3977,6 +4206,20 @@ def _build_trusted_current_comparator(
         "clonk-app.exe" if os.name == "nt" else "clonk-app"
     )
     _regular_file(binary, "current trusted Rust presentation comparator")
+    return binary, commit, tree, inventory
+
+
+def _select_trusted_current_comparator(
+    repository_root: Path,
+    prebuilt: tuple[Path, str, str, dict[str, Any]] | None = None,
+) -> tuple[Path, str, str, dict[str, Any]]:
+    if prebuilt is None:
+        return _build_trusted_current_comparator(repository_root)
+    binary, commit, tree, inventory = prebuilt
+    _regular_file(binary, "prebuilt current Rust presentation comparator")
+    _require(_is_lower_hex(commit, 40), "prebuilt comparator commit is invalid")
+    _require(_is_lower_hex(tree, 40), "prebuilt comparator tree is invalid")
+    _require(isinstance(inventory, dict), "prebuilt comparator inventory is invalid")
     return binary, commit, tree, inventory
 
 
@@ -4013,6 +4256,7 @@ def _execute_recipe(recipe: Mapping[str, Any], candidate_root: Path) -> None:
             command["argv"],
             cwd=cwd,
             environment=_build_process_environment(command["environment"]),
+            capture_output=False,
         )
 
 
@@ -4252,6 +4496,8 @@ def _capture_environment(
         ),
         "LC_CONTENT_DIR": str(candidate_root / "inputs"),
         "LC_LANGUAGE": "US",
+        # Stabilize C++ sound-variant SafeRandom; Rust ignores SDL audio.
+        "SDL_AUDIODRIVER": "dummy",
         **BUILD_ENVIRONMENT,
     }
     if engine == "rust":
@@ -4511,6 +4757,7 @@ def _run_capture_case(
             command,
             cwd=cwd,
             environment=_capture_runtime_environment(controlled_environment),
+            timeout_seconds=CAPTURE_COMMAND_TIMEOUT_SECONDS,
         )
     finally:
         if cpp_network_lobby:
@@ -4705,6 +4952,79 @@ def _run_acquisition_comparisons(
     return comparisons
 
 
+def _require_comparator_negative_canaries(
+    trusted_comparator: Path,
+    artifact_root: Path,
+) -> None:
+    def require_rejected(
+        term: str,
+        case_id: str,
+        reference: Path,
+        actual: Path,
+    ) -> None:
+        _regular_file(reference, f"{term} negative-canary reference")
+        _regular_file(actual, f"{term} negative-canary mismatch")
+        try:
+            _run_presentation_comparator(
+                trusted_comparator,
+                case_id=case_id,
+                reference=reference,
+                actual=actual,
+            )
+        except AcquisitionFailure as error:
+            _require(
+                f"{term} mismatch:" in str(error),
+                f"trusted comparator did not report a {term} mismatch for its "
+                f"negative canary: {error}",
+            )
+            return
+        raise AcquisitionFailure(
+            f"trusted comparator accepted a {term} negative canary"
+        )
+
+    artifacts = artifact_root / "run-1/cpp/artifacts"
+    require_rejected(
+        "pixel",
+        "network-lobby",
+        artifacts / "network-lobby.png",
+        artifacts / "loader.png",
+    )
+
+    layout_reference = artifacts / "startup-main.layout.json"
+    _regular_file(layout_reference, "layout negative-canary reference")
+    mutated_layout = load_json(layout_reference)
+    elements = mutated_layout.get("elements") if isinstance(mutated_layout, dict) else None
+    _require(
+        isinstance(elements, list),
+        "layout negative-canary reference has no element array",
+    )
+    element = next(
+        (
+            value
+            for value in elements
+            if isinstance(value, dict)
+            and "port_asset" not in value
+            and isinstance(value.get("rect"), dict)
+            and type(value["rect"].get("x")) is int
+        ),
+        None,
+    )
+    _require(
+        element is not None,
+        "layout negative-canary reference has no untagged rect",
+    )
+    element["rect"]["x"] += 1
+    with tempfile.TemporaryDirectory(prefix="clonk-presentation-layout-canary-") as temporary:
+        layout_actual = Path(temporary) / "startup-main.layout.json"
+        _write_json_new(layout_actual, mutated_layout)
+        require_rejected(
+            "layout",
+            "startup-main",
+            layout_reference,
+            layout_actual,
+        )
+
+
 def _rerun_indexed_comparisons(
     artifact_root: Path,
     index: Mapping[str, Any],
@@ -4765,6 +5085,7 @@ def _rerun_indexed_comparisons(
                 actual=actual,
             )
             results.append({"run_id": run_id, **result})
+    _require_comparator_negative_canaries(trusted_comparator, artifact_root)
     return results
 
 
@@ -5179,6 +5500,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="verify checked-in evidence against squash-stable current source inputs",
     )
     verify_accepted.add_argument("--repo-root", required=True, type=Path)
+    verify_accepted_index = subparsers.add_parser(
+        "verify-accepted-index",
+        help="verify checked-in evidence structure and provenance without building",
+    )
+    verify_accepted_index.add_argument("--repo-root", required=True, type=Path)
 
     verify_current = subparsers.add_parser(
         "verify-current",
@@ -5186,6 +5512,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_current.add_argument("--repo-root", required=True, type=Path)
     verify_current.add_argument("--output-dir", required=True, type=Path)
+    verify_current.add_argument(
+        "--profile",
+        choices=("release", "test"),
+        default="release",
+        help="Cargo build profile for the current Rust capture (default: release)",
+    )
     return parser
 
 
@@ -5227,8 +5559,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
             print(f"verified {len(validated)} checked-in presentation evidence files")
             return 0
 
+        if options.command == "verify-accepted-index":
+            validated = verify_accepted_index(options.repo_root)
+            print(
+                f"verified {len(validated)} checked-in presentation evidence files "
+                "without executing comparisons"
+            )
+            return 0
+
         if options.command == "verify-current":
-            result = verify_current_rust(options.repo_root, options.output_dir)
+            result = verify_current_rust(
+                options.repo_root,
+                options.output_dir,
+                build_profile=options.profile,
+            )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
 

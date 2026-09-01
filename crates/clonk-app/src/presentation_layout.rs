@@ -29,8 +29,10 @@ pub(crate) fn expected_port_asset_exemptions(screen: &str) -> Option<BTreeMap<St
         )],
         "startup-options" => &[("startup/options/tabs/paper", "super-resolved-startup-art")],
         "startup-about" => &[("startup/about/branding/fan-project", "branding")],
-        "network-lobby" | "loader" | "hud" | "ingame-menu" | "object-menu" | "gameplay"
-        | "evaluation" => &[],
+        "network-lobby" | "loader" => &[],
+        "hud" | "ingame-menu" | "object-menu" | "gameplay" | "evaluation" => {
+            &[("game/upper-board/branding/logo", "branding")]
+        }
         _ => return None,
     };
     Some(
@@ -523,6 +525,27 @@ mod tests {
     }
 
     #[test]
+    fn in_game_layouts_exempt_only_the_upper_board_product_logo() {
+        let expected = BTreeMap::from([(
+            "game/upper-board/branding/logo".to_owned(),
+            "branding".to_owned(),
+        )]);
+        for screen in [
+            "hud",
+            "ingame-menu",
+            "object-menu",
+            "gameplay",
+            "evaluation",
+        ] {
+            assert_eq!(
+                expected_port_asset_exemptions(screen),
+                Some(expected.clone()),
+                "{screen}"
+            );
+        }
+    }
+
+    #[test]
     fn a_trace_with_a_different_schema_is_rejected() {
         let reference = trace(&element("startup/main/local-game"));
         let actual = reference.replacen(LAYOUT_TRACE_SCHEMA, "other/schema/v9", 1);
@@ -638,9 +661,9 @@ mod tests {
         let trace = trace(&element("gameplay/world"));
 
         assert_eq!(
-            compare_layout_traces("gameplay", &trace, &trace),
+            compare_layout_traces("network-lobby", &trace, &trace),
             Err(LayoutMismatch::ComparisonTerm {
-                screen: "gameplay".to_owned(),
+                screen: "network-lobby".to_owned(),
                 expected: ComparisonTerm::Pixel,
                 actual: ComparisonTerm::Layout,
             })

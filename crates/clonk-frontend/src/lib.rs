@@ -321,6 +321,231 @@ mod tests {
     }
 
     #[test]
+    fn scaled_caret_preserves_written_transparent_black() {
+        // AddRenderedChar writes transparent texels through SetPixDw, which
+        // canonicalizes their RGB to black (StdFont.cpp:224-258;
+        // C4Surface.cpp:732-733). GL_LINEAR must sample that stored RGB rather
+        // than replacing it with the atlas's untouched transparent white.
+        let mut font = clonk_graphics::clonk_font::ClonkFont::new(1);
+        font.cell_height = 2;
+        font.set_texture_size(8);
+        let opaque = Color::new(255, 255, 255, 255);
+        let written_transparent = Color::new(0, 0, 0, 0);
+        font.add_glyph(
+            '\u{a6}',
+            clonk_graphics::clonk_font::GlyphCell {
+                width: 2,
+                pixels: vec![opaque, written_transparent, written_transparent, opaque],
+            },
+        );
+        font.add_glyph(
+            '\u{a5}',
+            clonk_graphics::clonk_font::GlyphCell {
+                width: 1,
+                pixels: vec![opaque, written_transparent],
+            },
+        );
+        font.add_glyph(
+            '\u{a7}',
+            clonk_graphics::clonk_font::GlyphCell {
+                width: 1,
+                pixels: vec![written_transparent, opaque],
+            },
+        );
+
+        let background = Color::new(31, 47, 63, 255);
+        let mut actual = Surface::new(8, 8, PixelFormat::Rgba8888);
+        actual.fill(background);
+        draw_scaled_caret(
+            &mut actual,
+            &font,
+            2,
+            2,
+            crate::classic_gui::IntRect::new(0, 0, 8, 8),
+            None,
+        );
+
+        let mut atlas = vec![255_u8; 8 * 8 * 4];
+        for pixel in atlas.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        for (x, rgba) in [
+            (0, [255, 255, 255, 255]),
+            (1, [255, 255, 255, 255]),
+            (2, [0, 0, 0, 0]),
+            (3, [0, 0, 0, 0]),
+        ] {
+            atlas[x * 4..x * 4 + 4].copy_from_slice(&rgba);
+        }
+        for (x, rgba) in [
+            (0, [0, 0, 0, 0]),
+            (1, [0, 0, 0, 0]),
+            (2, [255, 255, 255, 255]),
+            (3, [255, 255, 255, 255]),
+        ] {
+            let start = (8 + x) * 4;
+            atlas[start..start + 4].copy_from_slice(&rgba);
+        }
+        let atlas = ImageData::new(8, 8, atlas);
+        let mut expected = Surface::new(8, 8, PixelFormat::Rgba8888);
+        expected.fill(background);
+        crate::classic_gui::draw_facet_stretch(
+            &mut expected,
+            &atlas,
+            (1.0, 0.0, 2.0, 2.0),
+            (2.0, 2.0, 3.0, 3.0),
+            None,
+        );
+
+        front_assert_eq! {actual.pixels() => expected.pixels()};
+    }
+
+    #[test]
+    fn scaled_caret_samples_adjacent_cp1252_glyph_columns() {
+        // AddRenderedChar packs CP1252 facets without gutters
+        // (StdFont.cpp:182-266,386-430). DrawText then linearly samples that
+        // shared atlas (StdFont.cpp:902-925; StdDDraw2.cpp:637-786;
+        // StdGL.cpp:527-531), so the caret's edge fragments include the final
+        // Yen and first Section columns rather than clamping to the caret cell.
+        let mut font = clonk_graphics::clonk_font::ClonkFont::new(1);
+        font.cell_height = 2;
+        font.set_texture_size(8);
+        let transparent_white = Color::new(255, 255, 255, 0);
+        let opaque_white = Color::new(255, 255, 255, 255);
+        font.add_glyph(
+            '\u{a5}',
+            clonk_graphics::clonk_font::GlyphCell {
+                width: 1,
+                pixels: vec![opaque_white; 2],
+            },
+        );
+        font.add_glyph(
+            '\u{a6}',
+            clonk_graphics::clonk_font::GlyphCell {
+                width: 2,
+                pixels: vec![transparent_white; 4],
+            },
+        );
+        font.add_glyph(
+            '\u{a7}',
+            clonk_graphics::clonk_font::GlyphCell {
+                width: 1,
+                pixels: vec![opaque_white; 2],
+            },
+        );
+
+        let background = Color::new(31, 47, 63, 255);
+        let mut actual = Surface::new(8, 8, PixelFormat::Rgba8888);
+        actual.fill(background);
+        draw_scaled_caret(
+            &mut actual,
+            &font,
+            2,
+            2,
+            crate::classic_gui::IntRect::new(0, 0, 8, 8),
+            None,
+        );
+
+        let mut atlas = vec![255_u8; 8 * 8 * 4];
+        for pixel in atlas.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        for row in 0..=1 {
+            atlas[(row * 8 * 4)..(row * 8 * 4 + 4)].copy_from_slice(&[255; 4]);
+            atlas[(row * 8 * 4 + 3 * 4)..(row * 8 * 4 + 4 * 4)].copy_from_slice(&[255; 4]);
+        }
+        let atlas = ImageData::new(8, 8, atlas);
+        let mut expected = Surface::new(8, 8, PixelFormat::Rgba8888);
+        expected.fill(background);
+        crate::classic_gui::draw_facet_stretch(
+            &mut expected,
+            &atlas,
+            (1.0, 0.0, 2.0, 2.0),
+            (2.0, 2.0, 3.0, 3.0),
+            None,
+        );
+
+        front_assert_eq! {actual.pixels() => expected.pixels()};
+    }
+
+    #[test]
+    fn scaled_caret_reconstructs_endeavour_cp1252_facet() {
+        // CStdFont renders bytes 0x20..=0xff in order and advances each facet
+        // directly after CheckRenderedCharSpace (StdFont.cpp:165-180,386-430).
+        // The instrumented pinned oracle places A6 at this exact atlas rect.
+        let fonts = crate::test_support::endeavour_font_set();
+        let atlas = caret_atlas(&fonts.text).test_value();
+
+        front_assert_eq! {
+            (atlas.source_x, atlas.source_y, atlas.width, atlas.height)
+                => (23, 92, 5, 23)
+        };
+        front_assert_eq! {(atlas.image.width(), atlas.image.height()) => (128, 128)};
+    }
+
+    #[test]
+    fn scaled_caret_uses_prerendered_fonts_original_surface_facet() {
+        // Bitmap CStdFont keeps delimiter-parsed facets on the supplied
+        // surface and blackens the consumed delimiter rows and columns
+        // (StdFont.cpp:459-530; C4Surface.cpp:732-733). It does not repack the
+        // cells through vector AddRenderedChar atlas rules. Decoding also
+        // canonicalizes every alpha-zero texel to transparent black before
+        // font initialization (C4Surface.cpp:964-983).
+        const FIRST_BYTE: usize = 0x20;
+        const CARET_BYTE: usize = 0xa6;
+        const GLYPH_COUNT: usize = CARET_BYTE - FIRST_BYTE + 1;
+        let width = GLYPH_COUNT * 2;
+        let height = 3;
+        let mut rgba = vec![0_u8; width * height * 4];
+        let mut put = |x: usize, y: usize, color: [u8; 4]| {
+            let offset = (y * width + x) * 4;
+            rgba[offset..offset + 4].copy_from_slice(&color);
+        };
+        for index in 0..GLYPH_COUNT {
+            put(index * 2, 0, [255, 255, 255, 255]);
+            put(index * 2 + 1, 0, [255, 0, 0, 255]);
+        }
+        for index in 0..GLYPH_COUNT {
+            put(index * 2, 1, [255, 255, 255, 255]);
+            put(index * 2 + 1, 1, [255, 0, 0, 255]);
+        }
+        for x in 0..width {
+            put(x, 2, [255, 0, 0, 255]);
+        }
+        let caret_x = (CARET_BYTE - FIRST_BYTE) * 2;
+        put(caret_x, 0, [17, 34, 51, 255]);
+        put(caret_x, 1, [17, 34, 51, 0]);
+
+        let font =
+            crate::clonk_fonts::build_prerendered_font(width as u32, height as u32, &rgba, 0)
+                .test_value();
+        let atlas = caret_atlas(&font).test_value();
+
+        front_assert_eq! {
+            (atlas.source_x, atlas.source_y, atlas.width, atlas.height)
+                => (caret_x as u32, 0, 1, 2)
+        };
+        front_assert_eq! {
+            (atlas.image.width(), atlas.image.height()) => (width as u32, height as u32)
+        };
+        let caret_offset = caret_x * 4;
+        front_assert_eq! {
+            &atlas.image.pixels()[caret_offset..caret_offset + 4] => &[17, 34, 51, 255]
+        };
+        front_assert_eq! {
+            &atlas.image.pixels()[caret_offset + width * 4..caret_offset + width * 4 + 4]
+                => &[0, 0, 0, 0]
+        };
+        for row in 0..2 {
+            let delimiter_offset = (row * width + caret_x + 1) * 4;
+            front_assert_eq! {
+                &atlas.image.pixels()[delimiter_offset..delimiter_offset + 4]
+                    => &[0, 0, 0, 0]
+            };
+        }
+    }
+
+    #[test]
     fn player_startup_name_decodes_native_bytes_only_for_presentation() {
         let raw = clonk_script::c4_string_from_bytes(b"Andr\xe9");
         front_assert_eq! {c4_presentation_text(&raw) => "Andr\u{e9}"};
@@ -1664,6 +1889,80 @@ mod tests {
         front_assert_ne! {first => Some(red)};
         front_assert_ne! {first => Some(blue)};
         front_assert_ne! {first => Some(background)};
+    }
+
+    #[test]
+    fn rotated_partial_growth_action_uses_the_live_shape_pivot() {
+        // The rotated GrowthType action branch does not rotate around the
+        // unrotated Con-scaled facet. It first derives `cox` from the live
+        // rotated Shape, then uses `Shape.Wdt / 2` as the pivot while the
+        // `-Shape.x` destination term cancels that live offset
+        // (src/C4Object.cpp:2446-2467). Tutorial01 GRAS #54 exercises the
+        // half-pixel distinction: Con=53000 and DefCore Shape
+        // (-20,-15,40,30) yield a 21x15 facet, but its rotated live Shape is
+        // (-14,-14,28,28), whose center is exactly the object position.
+        let mut pixels = Vec::with_capacity(120 * 30 * 4);
+        for y in 0..30 {
+            for x in 0..120 {
+                pixels.extend_from_slice(&[((x % 40) * 6) as u8, (y * 8) as u8, 180, 255]);
+            }
+        }
+        let grass_action = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(0, 0, 40, 30, 0, 0));
+            action.directions = 1;
+            action.length = Some(3);
+        });
+        let grass = DefinitionSprite {
+            actions: HashMap::from([("Grass".to_string(), grass_action)]),
+            shape: Some(DefinitionRect::new(-20, -15, 40, 30)),
+            rotateable: 1,
+            stretch_growth: true,
+            ..test_sprite(ImageData::new(120, 30, pixels))
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(24, 24);
+        object.construction = 53_000;
+        object.rotation = 352;
+        object.action = clonk_engine::ActionState::new("Grass");
+        object.action.phase = 1;
+        object.crew_member = false;
+
+        let background = Color::opaque(0, 0, 0);
+        let sprites = test_sprites([("TestObject", grass.clone())]);
+        let mut actual =
+            test_graphics_with_sprites((48, 48, 48), "rotated partial GrowthType", sprites);
+        actual.surface_mut().fill(background);
+        actual.paint_object(
+            &object,
+            std::slice::from_ref(&object),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            0,
+            None,
+        );
+
+        let mut expected = test_graphics((48, 48, 48), "C++ rotated GrowthType branch");
+        expected.surface_mut().fill(background);
+        expected.blit_face(
+            &grass,
+            SourceRect::new(40, 0, 40, 30),
+            (14.0, 17.0, 21.0, 15.0),
+            (24.0, 24.0),
+            None,
+            1.0,
+            352.0,
+            None,
+            SpriteBlitState::for_object(&object),
+            None,
+        );
+
+        assert_surface_pixels_eq(
+            actual.surface(),
+            expected.surface(),
+            "rotated partial GrowthType action must pivot around live Shape",
+        );
     }
 
     #[test]
@@ -10137,6 +10436,284 @@ mod tests {
         // Rendering with overlay state must not panic; without an
         // UpperBoard texture the chrome stays off (C4UpperBoard::Init,
         // src/C4UpperBoard.cpp:114-118) and the viewport spans the surface.
+    }
+
+    #[test]
+    fn runtime_presentation_snapshot_reports_the_drawn_hud_topology() {
+        // The snapshot pins the presentation-visible state consumed by
+        // C4GraphicsSystem::Execute, C4Viewport::DrawOverlay,
+        // C4UpperBoard::Execute and C4MessageBoard::Draw
+        // (src/C4GraphicsSystem.cpp:352-365; src/C4Viewport.cpp:835-961;
+        // src/C4UpperBoard.cpp:37-99; src/C4MessageBoard.cpp:243-306).
+        let snapshot = make_snapshot();
+        let focus = &snapshot.objects[0];
+        let board = ImageData::new(4, 55, vec![120; 4 * 55 * 4]);
+        let hud_graphics = test_hud_graphics(|hud| hud.upper_board = Some(board));
+        let mut graphics =
+            test_graphics_with_hud((320, 240, 150), "Runtime Scenario", hud_graphics);
+        let message_board = MessageBoardOverlay {
+            log_lines: vec!["Player join: Test".to_string()],
+            back_scroll: 0,
+            ..MessageBoardOverlay::default()
+        };
+        let player = PlayerOverlay {
+            owner: focus.owner,
+            name: "Player".to_string(),
+            wealth: 15,
+            score: 2,
+            view_wealth: true,
+            view_value: false,
+            cursor: None,
+            captain: None,
+            eliminated: false,
+            owner_color: Color::opaque(0, 100, 200),
+            select_count: 0,
+            show_startup: false,
+            control_set: -1,
+            mouse_control: false,
+            show_control: 0,
+            show_control_position: 0,
+            last_com: 0,
+            control_key_labels: Vec::new(),
+            crew_count: 0,
+            crew: Vec::new(),
+            commands: Vec::new(),
+            flash_command: 0,
+        };
+        graphics.update_overlay(&GraphicsOverlay {
+            players: vec![player.clone()],
+            game_time_seconds: 3_723,
+            message_board: message_board.clone(),
+            show_portraits: false,
+            show_commands: false,
+            show_command_keys: true,
+            ..graphics_overlay_fixture()
+        });
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+
+        let presentation = graphics.runtime_presentation_snapshot();
+
+        front_assert_eq! {presentation.surface_rect => SurfaceRect::new(0, 0, 320, 240)};
+        front_assert_eq! {presentation.active_viewports => graphics.active_viewport_projections()};
+        front_assert_eq! {presentation.upper_board_output_rect => graphics.upper_board_output_rect()};
+        front_assert_eq! {presentation.message_board_output_rect => graphics.message_board_output_rect()};
+        front_assert_eq! {presentation.scenario_title => "Runtime Scenario"};
+        front_assert_eq! {presentation.formatted_game_time => "01:02:03"};
+        front_assert_eq! {presentation.message_board => message_board};
+        front_assert_eq! {presentation.players => vec![player]};
+        front_assert! {!presentation.show_portraits};
+        front_assert! {!presentation.show_commands};
+        front_assert! {presentation.show_command_keys};
+    }
+
+    // The semantic projection follows C4Viewport's live draw order and the
+    // same facet allocations as cursor info, object commands, fixed player
+    // values, ShowControl, and mouse buttons (src/C4Viewport.cpp:891-961,
+    // 1281-1441,1511-1533; src/C4Object.cpp:4033-4092).
+    #[test]
+    fn runtime_hud_presentation_layout_uses_the_drawn_gates_and_geometry() {
+        let snapshot = make_snapshot();
+        let focus = &snapshot.objects[0];
+        let hud_graphics = test_hud_graphics(|hud| {
+            hud.energy_bars = Some(ImageData::new(48, 36, vec![255; 48 * 36 * 4]));
+        });
+        let mut graphics = test_graphics_with_hud((320, 180, 150), "HUD Layout", hud_graphics);
+        let player = PlayerOverlay {
+            owner: focus.owner,
+            name: "Player".into(),
+            wealth: 15,
+            score: 2,
+            view_wealth: true,
+            view_value: true,
+            cursor: Some(focus.id),
+            captain: None,
+            eliminated: false,
+            owner_color: Color::opaque(0, 100, 200),
+            select_count: 1,
+            show_startup: false,
+            control_set: 0,
+            mouse_control: true,
+            show_control: (1 << 0) | (1 << 5),
+            show_control_position: 0,
+            last_com: 0,
+            control_key_labels: vec![String::new(); 10],
+            crew_count: 1,
+            crew: vec![CrewOverlay {
+                object_id: focus.id,
+                label: "Clonk".into(),
+                energy: 50,
+                energy_capacity: 100,
+                view_energy: 1,
+                magic_energy: 1_000,
+                magic_capacity: 2_000,
+                breath: 50,
+                breath_capacity: 100,
+                is_focus: true,
+                hide_hud_elements: 0,
+                hide_hud_bars: 0,
+                portrait: Some(ImageData::new(1, 1, vec![255; 4])),
+                portrait_owner_overlay: None,
+                portrait_owner_color: u32::MAX,
+                rank: 0,
+                rank_symbols: None,
+                rank_symbol_count: None,
+                info_name: Some("Clonk".into()),
+                rank_name: None,
+                inventory: vec![InventoryOverlay {
+                    object_id: ObjectId::new(20),
+                    definition_id: "ITEM".into(),
+                    picture: None,
+                    additive: false,
+                    picture_overlays: Vec::new(),
+                    count: 1,
+                }],
+            }],
+            commands: vec![
+                CommandIcon {
+                    com: 5,
+                    key_label: String::new(),
+                    side: false,
+                    caption: "Primary".into(),
+                    image: CommandImage::Exit,
+                },
+                CommandIcon {
+                    com: 8,
+                    key_label: String::new(),
+                    side: true,
+                    caption: "Secondary".into(),
+                    image: CommandImage::Exit,
+                },
+            ],
+            flash_command: 0,
+        };
+        graphics.update_overlay(&GraphicsOverlay {
+            players: vec![player],
+            show_portraits: true,
+            show_commands: true,
+            show_command_keys: true,
+            ..graphics_overlay_fixture()
+        });
+        graphics.set_renderer_config(true, true);
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+        graphics.draw_viewport_control_overlays(Some(0), false, None, None);
+
+        let layout = graphics
+            .runtime_presentation_snapshot()
+            .hud_layout_for_viewport(0)
+            .expect("active viewport has its live player HUD");
+
+        front_assert_eq! {
+            layout.nodes.iter().map(|node| node.kind).collect::<Vec<_>>() => vec![
+                RuntimeHudPresentationNodeKind::CursorInfo,
+                RuntimeHudPresentationNodeKind::Portrait,
+                RuntimeHudPresentationNodeKind::Inventory,
+                RuntimeHudPresentationNodeKind::EnergyBar,
+                RuntimeHudPresentationNodeKind::MagicBar,
+                RuntimeHudPresentationNodeKind::BreathBar,
+                RuntimeHudPresentationNodeKind::PrimaryCommands,
+                RuntimeHudPresentationNodeKind::SecondaryCommands,
+                RuntimeHudPresentationNodeKind::Wealth,
+                RuntimeHudPresentationNodeKind::Value,
+                RuntimeHudPresentationNodeKind::Crew,
+                RuntimeHudPresentationNodeKind::ShowControl(0),
+                RuntimeHudPresentationNodeKind::ShowControl(5),
+                RuntimeHudPresentationNodeKind::ViewportHelp,
+                RuntimeHudPresentationNodeKind::ViewportPlayerMenu,
+            ]
+        };
+        front_assert_eq! {
+            layout.nodes.iter().map(|node| node.rect).collect::<Vec<_>>() => vec![
+                SurfaceRect::new(5, 5, 105, 35),
+                SurfaceRect::new(5, 5, 56, 45),
+                SurfaceRect::new(5, 140, 245, 35),
+                SurfaceRect::new(5, 55, 8, 85),
+                SurfaceRect::new(14, 55, 8, 85),
+                SurfaceRect::new(23, 55, 8, 85),
+                SurfaceRect::new(0, 157, 320, 23),
+                SurfaceRect::new(274, 0, 46, 152),
+                SurfaceRect::new(280, 5, 35, 17),
+                SurfaceRect::new(240, 5, 35, 17),
+                SurfaceRect::new(200, 5, 35, 17),
+                SurfaceRect::new(134, 15, 17, 13),
+                SurfaceRect::new(168, 28, 17, 13),
+                SurfaceRect::new(297, 45, 23, 23),
+                SurfaceRect::new(297, 68, 23, 23),
+            ]
+        };
+    }
+
+    // DrawEnergyLevelEx is reached only through the loaded fctEnergyBars
+    // facet; a null Graphics.c4g resource allocates no visible bar topology
+    // (src/C4Viewport.cpp:921-945; src/C4GraphicsResource.cpp:236-241).
+    #[test]
+    fn runtime_hud_presentation_omits_bars_without_the_live_sheet() {
+        let (snapshot, mut graphics) = cursor_label_fixture(None);
+        let crew = &mut graphics.hud_players[0].crew[0];
+        crew.view_energy = 1;
+        crew.energy = 50;
+        crew.energy_capacity = 100;
+        crew.magic_energy = 1_000;
+        crew.magic_capacity = 2_000;
+        crew.breath = 50;
+        crew.breath_capacity = 100;
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::from_focus(&snapshot.objects[0])],
+        );
+
+        let layout = graphics
+            .runtime_presentation_snapshot()
+            .hud_layout_for_viewport(0)
+            .expect("active viewport has its live player HUD");
+
+        front_assert! {
+            layout.nodes.iter().all(|node| !matches!(
+                node.kind,
+                RuntimeHudPresentationNodeKind::EnergyBar
+                    | RuntimeHudPresentationNodeKind::MagicBar
+                    | RuntimeHudPresentationNodeKind::BreathBar
+            ))
+        };
+    }
+
+    // DrawMouseButtons belongs to the final viewport-control pass, and the
+    // Help cell exists only for the viewport selected by C4MouseControl
+    // (src/C4Viewport.cpp:863-880,1511-1533).
+    #[test]
+    fn runtime_hud_presentation_reports_only_drawn_viewport_controls() {
+        let (snapshot, mut graphics) = cursor_label_fixture(None);
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::from_focus(&snapshot.objects[0])],
+        );
+
+        let before_controls = graphics
+            .runtime_presentation_snapshot()
+            .hud_layout_for_viewport(0)
+            .expect("active viewport has its live player HUD");
+        front_assert! {
+            before_controls.nodes.iter().all(|node| !matches!(
+                node.kind,
+                RuntimeHudPresentationNodeKind::ViewportHelp
+                    | RuntimeHudPresentationNodeKind::ViewportPlayerMenu
+            ))
+        };
+
+        graphics.draw_viewport_control_overlays(Some(0), false, None, None);
+        let after_controls = graphics
+            .runtime_presentation_snapshot()
+            .hud_layout_for_viewport(0)
+            .expect("active viewport has its live player HUD");
+        front_assert_eq! {
+            after_controls.nodes.iter().filter_map(|node| match node.kind {
+                RuntimeHudPresentationNodeKind::ViewportHelp
+                | RuntimeHudPresentationNodeKind::ViewportPlayerMenu => Some(node.kind),
+                _ => None,
+            }).collect::<Vec<_>>() => vec![
+                RuntimeHudPresentationNodeKind::ViewportHelp,
+                RuntimeHudPresentationNodeKind::ViewportPlayerMenu,
+            ]
+        };
     }
 
     #[test]

@@ -49,6 +49,67 @@ pub enum UpperBoardMode {
     Mini,
 }
 
+/// The compatibility allocation of the upper-board brand and the exact
+/// destination of the active product artwork inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpperBoardLogoLayout {
+    pub slot: SurfaceRect,
+    pub image: SurfaceRect,
+}
+
+/// Returns the slot inherited from the classic 960x320 logo together with
+/// the destination of the active product logo. The Clonk Rust artwork remains
+/// the only image drawn; the slot makes its intentional branding difference
+/// explicit without substituting legacy pixels.
+pub fn upper_board_logo_layout(
+    surface_width: i32,
+    mode: UpperBoardMode,
+    logo: &ImageData,
+) -> Option<UpperBoardLogoLayout> {
+    if matches!(mode, UpperBoardMode::Hide | UpperBoardMode::Mini)
+        || logo.width() == 0
+        || logo.height() == 0
+    {
+        return None;
+    }
+    let mode_scale = if mode == UpperBoardMode::Small {
+        8.0 / 15.0
+    } else {
+        1.0
+    };
+    let slot_zoom = 0.21 * mode_scale;
+    let slot_width = (960.0 * slot_zoom) as i32;
+    let slot_height = (320.0 * slot_zoom) as i32;
+    let slot_x = (surface_width as f32 / 2.0 - 480.0 * slot_zoom) as i32;
+
+    let (logo_width, logo_height) = (logo.width() as f32, logo.height() as f32);
+    let mut image_zoom = if logo_width / logo_height != 3.0 {
+        0.25
+    } else {
+        0.21
+    };
+    image_zoom *= 960.0 / logo_width;
+    image_zoom = image_zoom.min(UPPER_BOARD_LOGO_MAX_HEIGHT / logo_height) * mode_scale;
+    let image_width = (logo_width * image_zoom) as i32;
+    let image_height = (logo_height * image_zoom) as i32;
+    let image_x = (surface_width as f32 / 2.0 - (logo_width / 2.0) * image_zoom) as i32;
+
+    Some(UpperBoardLogoLayout {
+        slot: SurfaceRect::new(
+            slot_x,
+            0,
+            slot_width.max(0) as u32,
+            slot_height.max(0) as u32,
+        ),
+        image: SurfaceRect::new(
+            image_x,
+            0,
+            image_width.max(0) as u32,
+            image_height.max(0) as u32,
+        ),
+    })
+}
+
 /// The strip removed from the viewport area by `C4UpperBoard::Height`.
 pub const fn upper_board_reserved_height(mode: UpperBoardMode) -> i32 {
     match mode {
@@ -914,25 +975,20 @@ pub(crate) fn draw_upper_board_with_initialized_text_width(
         );
 
         // Logo (src/C4UpperBoard.cpp:54-71).
-        if let Some(logo) = hud.logo.as_ref() {
-            let (logo_w, logo_h) = (logo.width() as f32, logo.height() as f32);
-            if logo_w > 0.0 && logo_h > 0.0 {
-                let mut zoom = if logo_w / logo_h != 3.0 { 0.25 } else { 0.21 };
-                zoom *= 960.0 / logo_w;
-                zoom = zoom.min(UPPER_BOARD_LOGO_MAX_HEIGHT / logo_h);
-                if mode == UpperBoardMode::Small {
-                    zoom *= 8.0 / 15.0;
-                }
-                let dst_w = (logo_w * zoom) as i32;
-                let dst_h = (logo_h * zoom) as i32;
-                let dst_x = (width as f32 / 2.0 - (logo_w / 2.0) * zoom) as i32;
-                draw_hud_image_bilinear(
-                    surface,
-                    &clonk_gui::Rect::new(dst_x as f32, 0.0, dst_w as f32, dst_h as f32),
-                    logo,
-                    gamma,
-                );
-            }
+        if let Some((logo, layout)) = hud.logo.as_ref().and_then(|logo| {
+            upper_board_logo_layout(width, mode, logo).map(|layout| (logo, layout))
+        }) {
+            draw_hud_image_bilinear(
+                surface,
+                &clonk_gui::Rect::new(
+                    layout.image.x as f32,
+                    layout.image.y as f32,
+                    layout.image.width as f32,
+                    layout.image.height as f32,
+                ),
+                logo,
+                gamma,
+            );
         }
     }
 
@@ -1023,6 +1079,41 @@ fn draw_value(
 /// The wealth / score / crew fixed items of `C4Viewport::DrawPlayerInfo`
 /// (src/C4Viewport.cpp:1281-1322), `Config.Graphics.ShowPlayerHUDAlways`
 /// defaults on (src/C4Config.cpp:445).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerFixedItemLayout {
+    pub wealth: SurfaceRect,
+    pub value: SurfaceRect,
+    pub crew: SurfaceRect,
+}
+
+/// The three fixed right-aligned player-info allocations used by both the
+/// live renderer and semantic presentation capture.
+pub fn player_fixed_item_layout(viewport: SurfaceRect) -> PlayerFixedItemLayout {
+    let (width, height) = (SYMBOL_SIZE, SYMBOL_SIZE / 2);
+    let right = viewport.x + viewport.width as i32;
+    let top = viewport.y + SYMBOL_BORDER;
+    PlayerFixedItemLayout {
+        wealth: SurfaceRect::new(
+            right - width - SYMBOL_BORDER,
+            top,
+            width as u32,
+            height as u32,
+        ),
+        value: SurfaceRect::new(
+            right - 2 * width - 2 * SYMBOL_BORDER,
+            top,
+            width as u32,
+            height as u32,
+        ),
+        crew: SurfaceRect::new(
+            right - 3 * width - 3 * SYMBOL_BORDER,
+            top,
+            width as u32,
+            height as u32,
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw_player_fixed_items(
     surface: &mut Surface,
@@ -1108,37 +1199,28 @@ pub(crate) fn draw_player_fixed_items_with_colored_crew_gamma(
     show_crew: bool,
     gamma: Option<&GammaRamp>,
 ) {
-    let (wdt, hgt) = (SYMBOL_SIZE, SYMBOL_SIZE / 2);
-    let right = viewport.x + viewport.width as i32;
-    let top = viewport.y + SYMBOL_BORDER;
+    let layout = player_fixed_item_layout(viewport);
 
     if show_wealth {
         // Wealth (src/C4Viewport.cpp:1287-1296).
-        let cgo = SurfaceRect::new(right - wdt - SYMBOL_BORDER, top, wdt as u32, hgt as u32);
         draw_value(
             surface,
             font,
             hud.wealth.as_ref(),
             &wealth.to_string(),
-            cgo,
+            layout.wealth,
             gamma,
         );
     }
 
     if show_score {
         // Value gain / score (src/C4Viewport.cpp:1299-1309).
-        let cgo = SurfaceRect::new(
-            right - 2 * wdt - 2 * SYMBOL_BORDER,
-            top,
-            wdt as u32,
-            hgt as u32,
-        );
         draw_value(
             surface,
             font,
             hud.score.as_ref(),
             &score.to_string(),
-            cgo,
+            layout.value,
             gamma,
         );
     }
@@ -1146,21 +1228,38 @@ pub(crate) fn draw_player_fixed_items_with_colored_crew_gamma(
     if show_crew {
         // Crew (src/C4Viewport.cpp:1312-1321): fctCrewClr colored by the
         // player color, "SelectCount/ActiveCrewCount".
-        let cgo = SurfaceRect::new(
-            right - 3 * wdt - 3 * SYMBOL_BORDER,
-            top,
-            wdt as u32,
-            hgt as u32,
-        );
         draw_value(
             surface,
             font,
             crew_icon,
             &format!("{select_count}/{crew_count}"),
-            cgo,
+            layout.crew,
             gamma,
         );
     }
+}
+
+/// `DrawCursorInfo`'s fixed top-left object-info allocation
+/// (src/C4Viewport.cpp:904).
+pub fn cursor_info_rect(viewport: SurfaceRect) -> SurfaceRect {
+    SurfaceRect::new(
+        viewport.x + SYMBOL_BORDER,
+        viewport.y + SYMBOL_BORDER,
+        (3 * SYMBOL_SIZE) as u32,
+        SYMBOL_SIZE as u32,
+    )
+}
+
+/// Optional portrait allocation within [`cursor_info_rect`]
+/// (src/C4ObjectInfo.cpp:308-320).
+pub fn cursor_portrait_rect(viewport: SurfaceRect) -> SurfaceRect {
+    let info = cursor_info_rect(viewport);
+    SurfaceRect::new(
+        info.x,
+        info.y,
+        (4 * SYMBOL_SIZE / 3 + 10) as u32,
+        (SYMBOL_SIZE + 10) as u32,
+    )
 }
 
 /// `C4ObjectInfo::Draw` (src/C4ObjectInfo.cpp:302-371) inside the
@@ -1215,23 +1314,13 @@ pub(crate) fn draw_cursor_info_with_gamma(
 ) {
     // ccgo = (border, border, 3*C4SymbolSize, C4SymbolSize)
     // (src/C4Viewport.cpp:904).
-    let cgo = SurfaceRect::new(
-        viewport.x + SYMBOL_BORDER,
-        viewport.y + SYMBOL_BORDER,
-        (3 * SYMBOL_SIZE) as u32,
-        SYMBOL_SIZE as u32,
-    );
+    let cgo = cursor_info_rect(viewport);
     let mut ix = 0;
 
     // Portrait: 4*Hgt/3+10 x Hgt+10 (src/C4ObjectInfo.cpp:308-320).
     if hide_hud_elements & clonk_engine::HIDE_HUD_ELEMENT_PORTRAIT == 0 {
         if let Some(portrait) = portrait {
-            let rect = SurfaceRect::new(
-                cgo.x + ix,
-                cgo.y,
-                (4 * SYMBOL_SIZE / 3 + 10) as u32,
-                (SYMBOL_SIZE + 10) as u32,
-            );
+            let rect = cursor_portrait_rect(viewport);
             draw_image_aspect(surface, portrait, rect, gamma);
             if let Some(owner_overlay) = portrait_owner_overlay {
                 draw_image_aspect_owner(surface, owner_overlay, rect, portrait_owner_color, gamma);
@@ -1384,6 +1473,25 @@ pub(crate) fn draw_cursor_info_with_gamma(
 /// (src/C4Viewport.cpp:911-917). `C4ObjectList::DrawIDList` advances through
 /// successive height-square sections of the 7-symbol-wide facet
 /// (src/C4ObjectList.cpp:343-372; src/C4Facet.cpp:44-48).
+pub fn inventory_allocation_rect(viewport: SurfaceRect) -> SurfaceRect {
+    SurfaceRect::new(
+        viewport.x + SYMBOL_BORDER,
+        viewport.y + viewport.height as i32 - SYMBOL_BORDER - SYMBOL_SIZE,
+        (7 * SYMBOL_SIZE) as u32,
+        SYMBOL_SIZE as u32,
+    )
+}
+
+fn inventory_cell_rect(viewport: SurfaceRect, section: usize) -> Option<SurfaceRect> {
+    let allocation = inventory_allocation_rect(viewport);
+    Some(SurfaceRect::new(
+        allocation.x + i32::try_from(section).ok()?.saturating_mul(SYMBOL_SIZE),
+        allocation.y,
+        SYMBOL_SIZE as u32,
+        SYMBOL_SIZE as u32,
+    ))
+}
+
 pub fn draw_inventory(
     surface: &mut Surface,
     font: &HudFont<'_>,
@@ -1400,15 +1508,10 @@ pub(crate) fn draw_inventory_with_gamma(
     inventory: &[InventoryOverlay],
     gamma: Option<&GammaRamp>,
 ) {
-    let origin_x = viewport.x + SYMBOL_BORDER;
-    let origin_y = viewport.y + viewport.height as i32 - SYMBOL_BORDER - SYMBOL_SIZE;
     for (section, item) in inventory.iter().enumerate() {
-        let cell = SurfaceRect::new(
-            origin_x + section as i32 * SYMBOL_SIZE,
-            origin_y,
-            SYMBOL_SIZE as u32,
-            SYMBOL_SIZE as u32,
-        );
+        let Some(cell) = inventory_cell_rect(viewport, section) else {
+            continue;
+        };
         let draw_picture = |surface: &mut Surface, picture: &ImageData, additive: bool| {
             let target = aspect_fit(picture.width() as i32, picture.height() as i32, cell);
             let rect = clonk_gui::Rect::new(
@@ -1452,8 +1555,9 @@ pub fn inventory_region_index(
     point: clonk_gui::Point,
     item_count: usize,
 ) -> Option<usize> {
-    let origin_x = viewport.x + SYMBOL_BORDER;
-    let origin_y = viewport.y + viewport.height as i32 - SYMBOL_BORDER - SYMBOL_SIZE;
+    let allocation = inventory_allocation_rect(viewport);
+    let origin_x = allocation.x;
+    let origin_y = allocation.y;
     let x = point.x.floor() as i32 - origin_x;
     let y = point.y.floor() as i32 - origin_y;
     if x < 0 || !(0..SYMBOL_SIZE).contains(&y) {
@@ -1472,12 +1576,7 @@ pub fn inventory_region_rect(
     if section >= item_count {
         return None;
     }
-    Some(SurfaceRect::new(
-        viewport.x + SYMBOL_BORDER + i32::try_from(section).ok()?.saturating_mul(SYMBOL_SIZE),
-        viewport.y + viewport.height as i32 - SYMBOL_BORDER - SYMBOL_SIZE,
-        SYMBOL_SIZE as u32,
-        SYMBOL_SIZE as u32,
-    ))
+    inventory_cell_rect(viewport, section)
 }
 
 /// Measure C4MouseControl's red caption and apply its viewport-local clamp.
@@ -1597,6 +1696,97 @@ pub struct CommandIcon {
     /// C4Region caption installed over the paired key/image cells.
     pub caption: String,
     pub image: CommandImage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HudCommandCellLayout {
+    pub index: usize,
+    pub side: bool,
+    pub key: SurfaceRect,
+    pub image: SurfaceRect,
+}
+
+impl HudCommandCellLayout {
+    pub fn pair(self) -> SurfaceRect {
+        SurfaceRect::new(
+            self.key.x.min(self.image.x),
+            self.key.y.min(self.image.y),
+            self.key.width.saturating_add(self.image.width),
+            self.key.height.max(self.image.height),
+        )
+    }
+}
+
+/// The two `DrawCursorInfo` command allocations and every command pair that
+/// survives their native truncation order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HudCommandLayout {
+    pub primary: SurfaceRect,
+    pub secondary: SurfaceRect,
+    pub cells: Vec<HudCommandCellLayout>,
+}
+
+pub fn command_layout(viewport: SurfaceRect, icons: &[CommandIcon]) -> Option<HudCommandLayout> {
+    // `if (cgo.Hgt > C4SymbolSize)` (src/C4Viewport.cpp:950).
+    if viewport.height as i32 <= SYMBOL_SIZE {
+        return None;
+    }
+    let size = 2 * SYMBOL_SIZE / 3;
+    let pair_width = 2 * size;
+    let bottom_y = viewport.y + viewport.height as i32 - size;
+    let side_x = viewport.x + viewport.width as i32 - pair_width;
+    let side_height = viewport.height as i32 - size - 5;
+    let mut bottom_width = viewport.width as i32;
+    let mut remaining_side_height = side_height;
+    let mut cells = Vec::new();
+    for (index, icon) in icons.iter().enumerate() {
+        let (key, image) = if icon.side {
+            if remaining_side_height < size || pair_width > viewport.width as i32 {
+                continue;
+            }
+            remaining_side_height -= size;
+            let y = viewport.y + remaining_side_height;
+            (
+                SurfaceRect::new(side_x, y, size as u32, size as u32),
+                SurfaceRect::new(side_x + size, y, size as u32, size as u32),
+            )
+        } else {
+            if bottom_width < size {
+                continue;
+            }
+            bottom_width -= size;
+            let image_x = viewport.x + bottom_width;
+            if bottom_width < size {
+                continue;
+            }
+            bottom_width -= size;
+            (
+                SurfaceRect::new(
+                    viewport.x + bottom_width,
+                    bottom_y,
+                    size as u32,
+                    size as u32,
+                ),
+                SurfaceRect::new(image_x, bottom_y, size as u32, size as u32),
+            )
+        };
+        cells.push(HudCommandCellLayout {
+            index,
+            side: icon.side,
+            key,
+            image,
+        });
+    }
+    Some(HudCommandLayout {
+        primary: SurfaceRect::new(viewport.x, bottom_y, viewport.width, size as u32),
+        secondary: SurfaceRect::new(
+            side_x,
+            viewport.y,
+            pair_width as u32,
+            side_height.max(0) as u32,
+        ),
+        cells,
+    })
 }
 
 /// What fills a command's image cell.
@@ -1910,6 +2100,44 @@ pub fn viewport_button_rect(viewport: SurfaceRect, button: ViewportButton) -> Su
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewportButtonCellLayout {
+    pub button: ViewportButton,
+    pub rect: SurfaceRect,
+}
+
+pub fn viewport_button_cells(
+    viewport: SurfaceRect,
+    show_commands: bool,
+    mouse_viewport: bool,
+    chat_active: bool,
+) -> Vec<ViewportButtonCellLayout> {
+    if !show_commands {
+        return Vec::new();
+    }
+    let buttons: &[ViewportButton] = if mouse_viewport {
+        if chat_active {
+            &[
+                ViewportButton::Help,
+                ViewportButton::PlayerMenu,
+                ViewportButton::Chat,
+            ]
+        } else {
+            &[ViewportButton::Help, ViewportButton::PlayerMenu]
+        }
+    } else {
+        &[ViewportButton::PlayerMenu]
+    };
+    buttons
+        .iter()
+        .copied()
+        .map(|button| ViewportButtonCellLayout {
+            button,
+            rect: viewport_button_rect(viewport, button),
+        })
+        .collect()
+}
+
 /// Hit-test for the clickable mouse-viewport stack. Keyboard/gamepad
 /// viewports draw the menu hint but C++ does not register a region for it.
 pub fn viewport_button_region(
@@ -2007,30 +2235,14 @@ pub fn draw_viewport_buttons_with_gamma(
     menu_key_label: &str,
     gamma: Option<&GammaRamp>,
 ) {
-    if !show_commands {
-        return;
-    }
-    let buttons: &[ViewportButton] = if mouse_viewport {
-        if chat_active {
-            &[
-                ViewportButton::Help,
-                ViewportButton::PlayerMenu,
-                ViewportButton::Chat,
-            ]
-        } else {
-            &[ViewportButton::Help, ViewportButton::PlayerMenu]
-        }
-    } else {
-        &[ViewportButton::PlayerMenu]
-    };
-    for &button in buttons {
+    for cell in viewport_button_cells(viewport, show_commands, mouse_viewport, chat_active) {
         draw_viewport_button_cell(
             surface,
             font,
             hud,
             gui_icons2,
-            viewport_button_rect(viewport, button),
-            button,
+            cell.rect,
+            cell.button,
             menu_key_label,
             show_command_keys,
             gamma,
@@ -2182,43 +2394,18 @@ pub fn command_region_hit(
     point: clonk_gui::Point,
     icons: &[CommandIcon],
 ) -> Option<(usize, SurfaceRect)> {
-    if viewport.height as i32 <= SYMBOL_SIZE {
-        return None;
-    }
+    let layout = command_layout(viewport, icons)?;
     let px = point.x.floor() as i32;
     let py = point.y.floor() as i32;
-    let size = 2 * SYMBOL_SIZE / 3;
-    let size2 = 2 * size;
-    let bottom_y = viewport.y + viewport.height as i32 - size;
-    let mut bottom_wdt = viewport.width as i32;
-    let side_x = viewport.x + viewport.width as i32 - size2;
-    let mut side_hgt = viewport.height as i32 - size - 5;
     let mut found = None;
-
-    for (index, icon) in icons.iter().enumerate() {
-        let pair = if icon.side {
-            if side_hgt < size || size2 > viewport.width as i32 {
-                continue;
-            }
-            side_hgt -= size;
-            SurfaceRect::new(side_x, viewport.y + side_hgt, size2 as u32, size as u32)
-        } else {
-            if bottom_wdt < size {
-                continue;
-            }
-            bottom_wdt -= size;
-            if bottom_wdt < size {
-                continue;
-            }
-            bottom_wdt -= size;
-            SurfaceRect::new(viewport.x + bottom_wdt, bottom_y, size2 as u32, size as u32)
-        };
+    for cells in layout.cells {
+        let pair = cells.pair();
         if px >= pair.x
             && px < pair.x + pair.width as i32
             && py >= pair.y
             && py < pair.y + pair.height as i32
         {
-            found = Some((index, pair));
+            found = Some((cells.index, pair));
         }
     }
     found
@@ -2244,53 +2431,14 @@ pub(crate) fn draw_commands_with_gamma(
     frame: u64,
     gamma: Option<&GammaRamp>,
 ) {
-    // `if (cgo.Hgt > C4SymbolSize)` (src/C4Viewport.cpp:950).
-    if viewport.height as i32 <= SYMBOL_SIZE {
+    let Some(layout) = command_layout(viewport, icons) else {
         return;
-    }
-    let size = 2 * SYMBOL_SIZE / 3;
-    let size2 = 2 * size;
+    };
 
-    // Primary area (bottom, src/C4Viewport.cpp:956).
-    let bottom_y = viewport.y + viewport.height as i32 - size;
-    let mut bottom_wdt = viewport.width as i32;
-    // Secondary area (side, src/C4Viewport.cpp:958).
-    let side_x = viewport.x + viewport.width as i32 - size2;
-    let mut side_hgt = viewport.height as i32 - size - 5;
+    for cells in layout.cells {
+        let icon = &icons[cells.index];
 
-    for icon in icons {
-        let (key_cell, image_cell) = if icon.side {
-            // TruncateSection(C4FCT_Bottom|C4FCT_Half) -> 2*iSize x iSize
-            // slice off the strip bottom; then (C4FCT_Left) splits it.
-            if side_hgt < size || size2 > viewport.width as i32 {
-                continue;
-            }
-            side_hgt -= size;
-            let pair_y = viewport.y + side_hgt;
-            (
-                SurfaceRect::new(side_x, pair_y, size as u32, size as u32),
-                SurfaceRect::new(side_x + size, pair_y, size as u32, size as u32),
-            )
-        } else {
-            // Two TruncateSection(C4FCT_Right) squares: image cell first
-            // (rightmost), key cell next (src/C4Object.cpp:4043-4048).
-            if bottom_wdt < size {
-                continue;
-            }
-            bottom_wdt -= size;
-            let image_x = viewport.x + bottom_wdt;
-            if bottom_wdt < size {
-                continue;
-            }
-            bottom_wdt -= size;
-            let key_x = viewport.x + bottom_wdt;
-            (
-                SurfaceRect::new(key_x, bottom_y, size as u32, size as u32),
-                SurfaceRect::new(image_x, bottom_y, size as u32, size as u32),
-            )
-        };
-
-        draw_command_image_cell_with_gamma(surface, hud, image_cell, &icon.image, gamma);
+        draw_command_image_cell_with_gamma(surface, hud, cells.image, &icon.image, gamma);
         // C4Object::DrawCommand keeps the image and region present, but the
         // exact FlashCom key cell blinks off for Tick35 0..=15.
         if i32::from(icon.com) != flash_command || frame % 35 > 15 {
@@ -2298,7 +2446,7 @@ pub(crate) fn draw_commands_with_gamma(
                 surface,
                 key_font,
                 hud,
-                key_cell,
+                cells.key,
                 icon.com,
                 &icon.key_label,
                 show_command_keys,
@@ -2318,6 +2466,77 @@ pub enum HudBarKind {
     Energy = 0,
     Magic = 1,
     Breath = 2,
+}
+
+pub(crate) fn level_bar_rect_with_cell_width(
+    viewport: SurfaceRect,
+    slot: u32,
+    show_portraits: bool,
+    cell_width: u32,
+) -> Option<SurfaceRect> {
+    if cell_width == 0 || viewport.height as i32 <= 2 * SYMBOL_SIZE + 2 * SYMBOL_BORDER {
+        return None;
+    }
+    let y_offset = if show_portraits { 10 } else { 0 };
+    let height = viewport.height as i32 - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE - y_offset;
+    (height > 0).then(|| {
+        SurfaceRect::new(
+            viewport.x + SYMBOL_BORDER + slot as i32 * (cell_width as i32 + 1),
+            viewport.y + SYMBOL_SIZE + 2 * SYMBOL_BORDER + y_offset,
+            cell_width,
+            height as u32,
+        )
+    })
+}
+
+/// One 1x destination allocation for `C4Facet::DrawEnergyLevelEx`. Remastered
+/// sheets scale back to this native cell width before drawing.
+pub fn level_bar_rect(
+    viewport: SurfaceRect,
+    slot: u32,
+    show_portraits: bool,
+) -> Option<SurfaceRect> {
+    level_bar_rect_with_cell_width(
+        viewport,
+        slot,
+        show_portraits,
+        ENERGY_BARS_NATIVE_SIZE.0 / 6,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct LevelBarSheetLayout<'a> {
+    bars: &'a ImageData,
+    scale: GuiArtScale,
+    source_cell_width: u32,
+    source_cell_height: u32,
+    cell_width: u32,
+    cell_height: u32,
+}
+
+fn level_bar_sheet_layout(hud: &HudGraphics) -> Option<LevelBarSheetLayout<'_>> {
+    let bars = hud.energy_bars.as_ref()?;
+    // The 6x3 grid is derived from the loaded surface, so it is in *source*
+    // pixels; the bar's on-screen footprint is the 1x projection of that cell.
+    let scale = GuiArtScale::of(bars, ENERGY_BARS_NATIVE_SIZE);
+    let source_cell_width = bars.width() / 6;
+    let source_cell_height = bars.height() / 3;
+    let cell_width = scale.scale_down(source_cell_width);
+    let cell_height = scale.scale_down(source_cell_height);
+    (cell_width != 0 && cell_height != 0).then_some(LevelBarSheetLayout {
+        bars,
+        scale,
+        source_cell_width,
+        source_cell_height,
+        cell_width,
+        cell_height,
+    })
+}
+
+/// The live logical bar-cell width, present only when EnergyBars.png can
+/// reach the renderer's draw loop.
+pub(crate) fn level_bar_cell_width(hud: &HudGraphics) -> Option<u32> {
+    level_bar_sheet_layout(hud).map(|layout| layout.cell_width)
 }
 
 /// `C4Facet::DrawEnergyLevelEx`. `slot` is the compact left-to-right position
@@ -2395,38 +2614,19 @@ fn draw_bar(
     y_bar_for_height: impl FnOnce(i32) -> i32,
     gamma: Option<&GammaRamp>,
 ) {
-    let Some(bars) = hud.energy_bars.as_ref() else {
+    let Some(sheet) = level_bar_sheet_layout(hud) else {
         return;
     };
-    // The 6x3 grid is derived from the loaded surface, so it is in *source*
-    // pixels; the bar's on-screen footprint is the 1x projection of that cell.
-    let scale = GuiArtScale::of(bars, ENERGY_BARS_NATIVE_SIZE);
-    let source_cell_w = bars.width() / 6;
-    let source_cell_h = bars.height() / 3;
-    let cell_w = scale.scale_down(source_cell_w);
-    let cell_h = scale.scale_down(source_cell_h);
-    if cell_w == 0 || cell_h == 0 {
+    let Some(rect) =
+        level_bar_rect_with_cell_width(viewport, slot, show_portraits, sheet.cell_width)
+    else {
         return;
-    }
-    let vp_height = viewport.height as i32;
-    // Gate: cgo.Hgt > 2*C4SymbolSize + 2*C4SymbolBorder
-    // (src/C4Viewport.cpp:922).
-    if vp_height <= 2 * SYMBOL_SIZE + 2 * SYMBOL_BORDER {
-        return;
-    }
-    // iYOff = Config.Graphics.ShowPortraits ? 10 : 0
-    // (src/C4Viewport.cpp:927).
-    let y_off = if show_portraits { 10 } else { 0 };
-    let x = viewport.x + SYMBOL_BORDER + slot as i32 * (cell_w as i32 + 1);
-    let y = viewport.y + SYMBOL_SIZE + 2 * SYMBOL_BORDER + y_off;
-    let height = vp_height - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE - y_off;
-    if height <= 0 {
-        return;
-    }
+    };
+    let height = rect.height as i32;
 
     // yBar = Hgt - level*Hgt/range (src/C4Facet.cpp:339).
     let y_bar = y_bar_for_height(height);
-    let cell_h_i = cell_h as i32;
+    let cell_h_i = sheet.cell_height as i32;
     for row in 0..height {
         let (vidx, dy) = if row >= height - cell_h_i {
             (2, row + cell_h_i - height)
@@ -2438,14 +2638,14 @@ fn draw_bar(
         let column = kind as u32 * 2 + u32::from(row < y_bar);
         draw_sheet_cell(
             surface,
-            x,
-            y + row,
-            bars,
-            scale,
-            column * source_cell_w,
-            vidx as u32 * source_cell_h + scale.scale_up(dy as u32),
-            source_cell_w,
-            scale.scale_up(1),
+            rect.x,
+            rect.y + row,
+            sheet.bars,
+            sheet.scale,
+            column * sheet.source_cell_width,
+            vidx as u32 * sheet.source_cell_height + sheet.scale.scale_up(dy as u32),
+            sheet.source_cell_width,
+            sheet.scale.scale_up(1),
             gamma,
         );
     }
@@ -2572,6 +2772,65 @@ pub(crate) fn draw_player_startup_with_gamma(
 
 /// `C4Viewport::DrawPlayerControls` (src/C4Viewport.cpp:1394-1441): the
 /// tutorial-selected command-key grid, including optional and blinking labels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShowControlCellLayout {
+    pub control: u8,
+    pub rect: SurfaceRect,
+}
+
+pub fn show_control_cells(
+    viewport: SurfaceRect,
+    show_control: i32,
+    show_control_position: i32,
+) -> Vec<ShowControlCellLayout> {
+    if show_control == 0 {
+        return Vec::new();
+    }
+    let size = ((viewport.width as i32) / 3).min(7 * viewport.height as i32 / 24);
+    if size <= 0 {
+        return Vec::new();
+    }
+    let (x, y) = match show_control_position {
+        1 => (
+            viewport.x + viewport.width as i32 * 3 / 4 - size / 2,
+            viewport.y + viewport.height as i32 / 2 - size / 2,
+        ),
+        2 => (
+            viewport.x + viewport.width as i32 / 4 - size / 2,
+            viewport.y + viewport.height as i32 / 2 - size / 2,
+        ),
+        3 => (
+            viewport.x + viewport.width as i32 / 4 - size / 2,
+            viewport.y + 15,
+        ),
+        4 => (
+            viewport.x + viewport.width as i32 * 3 / 4 - size / 2,
+            viewport.y + 15,
+        ),
+        _ => (
+            viewport.x + viewport.width as i32 / 2 - size / 2,
+            viewport.y + 15,
+        ),
+    };
+    let cell_width = size / 3;
+    let cell_height = size / 4;
+    if cell_width <= 0 || cell_height <= 0 {
+        return Vec::new();
+    }
+    (0..10)
+        .filter(|control| show_control & (1 << control) != 0)
+        .map(|control| ShowControlCellLayout {
+            control: control as u8,
+            rect: SurfaceRect::new(
+                x + cell_width * (control % 3),
+                y + cell_height * (control / 3),
+                cell_width as u32,
+                cell_height as u32,
+            ),
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw_player_controls(
     surface: &mut Surface,
@@ -2614,57 +2873,17 @@ pub(crate) fn draw_player_controls_with_gamma(
     frame: u64,
     gamma: Option<&GammaRamp>,
 ) {
-    if show_control == 0 {
-        return;
-    }
-    let size = ((viewport.width as i32) / 3).min(7 * viewport.height as i32 / 24);
-    if size <= 0 {
-        return;
-    }
-    let (tx, ty) = match show_control_position {
-        1 => (
-            viewport.x + viewport.width as i32 * 3 / 4 - size / 2,
-            viewport.y + viewport.height as i32 / 2 - size / 2,
-        ),
-        2 => (
-            viewport.x + viewport.width as i32 / 4 - size / 2,
-            viewport.y + viewport.height as i32 / 2 - size / 2,
-        ),
-        3 => (
-            viewport.x + viewport.width as i32 / 4 - size / 2,
-            viewport.y + 15,
-        ),
-        4 => (
-            viewport.x + viewport.width as i32 * 3 / 4 - size / 2,
-            viewport.y + 15,
-        ),
-        _ => (
-            viewport.x + viewport.width as i32 / 2 - size / 2,
-            viewport.y + 15,
-        ),
-    };
-    let cell_width = size / 3;
-    let cell_height = size / 4;
-    if cell_width <= 0 || cell_height <= 0 {
-        return;
-    }
+    let cells = show_control_cells(viewport, show_control, show_control_position);
     let last_control = com_control_index(last_com).0;
     let tick35 = (frame % 35) as i32;
 
-    for control in 0..10 {
-        if show_control & (1 << control) == 0 {
-            continue;
-        }
+    for cell_layout in cells {
+        let control = i32::from(cell_layout.control);
         let mut show_text = show_control & (1 << (control + 10)) != 0;
         if show_control & (1 << (control + 20)) != 0 && tick35 > 18 {
             show_text = false;
         }
-        let cell = SurfaceRect::new(
-            tx + cell_width * (control % 3),
-            ty + cell_height * (control / 3),
-            cell_width as u32,
-            cell_height as u32,
-        );
+        let cell = cell_layout.rect;
         if let Some(control_sheet) = hud.control.as_ref() {
             let scale = GuiArtScale::of(control_sheet, CONTROL_SHEET_NATIVE_SIZE);
             let pressed = i32::from(last_control == control);
@@ -2688,7 +2907,7 @@ pub(crate) fn draw_player_controls_with_gamma(
                 .get(control as usize)
                 .filter(|label| !label.is_empty())
             {
-                let font = if cell_height <= SYMBOL_SIZE {
+                let font = if cell.height as i32 <= SYMBOL_SIZE {
                     regular_font
                 } else {
                     tiny_font
@@ -3902,6 +4121,16 @@ mod tests {
 
         check_eq! { target.get_pixel(200, 66) => Some(Color::opaque(10, 200, 30)) }
         check_eq! { target.get_pixel(200, 68) => Some(Color::opaque(0, 0, 0)) }
+    }
+
+    #[test]
+    fn two_line_product_logo_retains_the_classic_semantic_slot() {
+        let logo = solid_image(972, 440, [10, 200, 30, 255]);
+        let layout = upper_board_logo_layout(400, UpperBoardMode::Full, &logo)
+            .expect("full upper board logo layout");
+
+        check_eq! { layout.slot => SurfaceRect::new(99, 0, 201, 67) }
+        check_eq! { layout.image => SurfaceRect::new(125, 0, 148, 67) }
     }
 
     #[test]

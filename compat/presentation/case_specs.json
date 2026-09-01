@@ -239,8 +239,10 @@
   },
   {
     "id": "hud",
-    "comparison": "pixel",
-    "port_asset_exemptions": {},
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "game/upper-board/branding/logo": "branding"
+    },
     "config_sha256": {
       "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
       "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
@@ -267,8 +269,10 @@
   },
   {
     "id": "ingame-menu",
-    "comparison": "pixel",
-    "port_asset_exemptions": {},
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "game/upper-board/branding/logo": "branding"
+    },
     "config_sha256": {
       "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
       "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
@@ -295,8 +299,10 @@
   },
   {
     "id": "object-menu",
-    "comparison": "pixel",
-    "port_asset_exemptions": {},
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "game/upper-board/branding/logo": "branding"
+    },
     "config_sha256": {
       "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
       "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
@@ -323,8 +329,10 @@
   },
   {
     "id": "gameplay",
-    "comparison": "pixel",
-    "port_asset_exemptions": {},
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "game/upper-board/branding/logo": "branding"
+    },
     "config_sha256": {
       "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
       "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
@@ -351,8 +359,10 @@
   },
   {
     "id": "evaluation",
-    "comparison": "pixel",
-    "port_asset_exemptions": {},
+    "comparison": "layout",
+    "port_asset_exemptions": {
+      "game/upper-board/branding/logo": "branding"
+    },
     "config_sha256": {
       "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
       "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"

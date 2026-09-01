@@ -186,6 +186,35 @@ fn engine_script_menu_title(menu: &clonk_engine::ObjectMenuState) -> String {
     }
 }
 
+/// Semantic identity of one square in `C4Menu::DrawElement`'s optional
+/// command strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineScriptMenuControlKind {
+    EnterKey,
+    Confirm,
+    EnterAllKey,
+    ConfirmAll,
+    CloseKey,
+    Cancel,
+    Exit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineScriptMenuControlLayout {
+    pub kind: EngineScriptMenuControlKind,
+    pub rect: Rect,
+}
+
+/// Extra-bar topology projected from the same truncation sequence used by
+/// the classic renderer. `footer` is the unconsumed area where value,
+/// component, and magic extras are drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineScriptMenuCommandStripLayout {
+    pub rect: Rect,
+    pub controls: Vec<EngineScriptMenuControlLayout>,
+    pub footer: Rect,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EngineScriptMenuLayout {
     pub bounds: Rect,
@@ -206,6 +235,12 @@ pub struct EngineScriptMenuLayout {
     /// — `C4GUI::ScrollWindow` shows the bar on the same condition that
     /// reserves its width (`C4GuiContainers.cpp:477-480`).
     pub scrollbar: Option<Rect>,
+    /// `C4Menu::DrawElement`'s bottom extra bar, present when command
+    /// controls or an `ObjectMenuExtra` footer reserves its 16px row.
+    pub extra_bar: Option<Rect>,
+    /// Captured `Config.Graphics.ShowCommands` value used to size and render
+    /// this live layout's command strip.
+    pub show_commands: bool,
     pub first_index: usize,
     /// Number of item slots which can intersect the client. A partial first
     /// row exposes one additional row at the bottom.
@@ -244,6 +279,57 @@ impl EngineScriptMenuLayout {
             16,
             16,
         )
+    }
+
+    /// Observe the ordered controls and remaining footer area produced by the
+    /// live menu's command-strip draw path. Controls that do not fit are
+    /// omitted exactly like `C4Facet::TruncateSection`.
+    pub fn command_strip_layout(
+        self,
+        menu: &clonk_engine::ObjectMenuState,
+    ) -> Option<EngineScriptMenuCommandStripLayout> {
+        let rect = self.extra_bar?;
+        let mut footer = rect;
+        let mut controls = Vec::new();
+        let mut truncate_control = |kind| {
+            let size = footer.height;
+            if size <= footer.width && size != 0 {
+                let control = EngineScriptMenuControlLayout {
+                    kind,
+                    rect: Rect::new(footer.x, footer.y, size, size),
+                };
+                footer.x += size as i32;
+                footer.width -= size;
+                controls.push(control);
+            }
+        };
+        if self.show_commands {
+            if menu.style != 2 {
+                truncate_control(EngineScriptMenuControlKind::EnterKey);
+                truncate_control(EngineScriptMenuControlKind::Confirm);
+                if usize::try_from(menu.selection)
+                    .ok()
+                    .and_then(|selection| menu.items.get(selection))
+                    .is_some_and(|item| !item.command2.is_empty())
+                {
+                    truncate_control(EngineScriptMenuControlKind::EnterAllKey);
+                    truncate_control(EngineScriptMenuControlKind::ConfirmAll);
+                }
+            }
+            truncate_control(EngineScriptMenuControlKind::CloseKey);
+            truncate_control(
+                if menu.close_command == clonk_engine::ObjectMenuCloseCommand::Exit {
+                    EngineScriptMenuControlKind::Exit
+                } else {
+                    EngineScriptMenuControlKind::Cancel
+                },
+            );
+        }
+        Some(EngineScriptMenuCommandStripLayout {
+            rect,
+            controls,
+            footer,
+        })
     }
 }
 
@@ -1884,6 +1970,15 @@ fn engine_script_menu_layout_impl(
                 (lines * item_height) as u32,
             )
         }),
+        extra_bar: (command_height > 0).then(|| {
+            Rect::new(
+                x + 1,
+                y + height - CLASSIC_COMMAND_HEIGHT - 1,
+                (width - 2) as u32,
+                CLASSIC_COMMAND_HEIGHT as u32,
+            )
+        }),
+        show_commands,
         first_index,
         visible,
     }
@@ -2393,9 +2488,7 @@ fn render_engine_normal_menu(
     );
     let bounds = layout.bounds;
     let x = bounds.x;
-    let y = bounds.y;
     let width = bounds.width as i32;
-    let height = bounds.height as i32;
     let title_height = layout.title.height as i32;
 
     if let Some(decoration) = menu.decoration.as_ref() {
@@ -2629,75 +2722,44 @@ fn render_engine_normal_menu(
         None => surface.clear_clip(),
     }
 
-    if gfx.show_commands || menu.extra != ObjectMenuExtra::None {
-        let extra = Rect::new(
-            x + 1,
-            y + height - CLASSIC_COMMAND_HEIGHT - 1,
-            (width - 2) as u32,
-            CLASSIC_COMMAND_HEIGHT as u32,
-        );
+    if let Some(strip) = layout.command_strip_layout(menu) {
         // C4Menu::DrawFrame divider (C4Menu.cpp:846-849,932-935);
         // CStdDDraw::DrawFrame never rasterizes the bottom-right corner
         // (capture: Drachenfels divider (1208,662) stays background).
-        draw_hv_border(surface, extra, CLASSIC_EXTRA_FRAME_COLOR, gamma);
-        let mut remaining = extra;
-        if gfx.show_commands {
-            let mut truncate_control = || {
-                // C4Facet::TruncateSection(C4FCT_Left) returns an empty facet
-                // without changing the source once another square no longer
-                // fits (C4Facet.cpp:182-217). A five-column normal menu can
-                // therefore show at most five of the six controls requested by
-                // an item with Command2.
-                let size = remaining.height;
-                (size <= remaining.width && size != 0).then(|| {
-                    let cell = Rect::new(remaining.x, remaining.y, size, size);
-                    remaining.x += size as i32;
-                    remaining.width -= size;
-                    cell
-                })
-            };
-            let tiny = tiny_font.unwrap_or(font);
-            if menu.style != 2 {
-                if let Some(cell) = truncate_control() {
-                    draw_command_key(
-                        surface,
-                        gfx,
-                        tiny,
-                        cell.x,
-                        cell.y,
-                        cell.width,
-                        3,
-                        &gfx.throw_key,
-                        gamma,
-                    );
-                }
-                if let Some(cell) = truncate_control() {
+        draw_hv_border(surface, strip.rect, CLASSIC_EXTRA_FRAME_COLOR, gamma);
+        let tiny = tiny_font.unwrap_or(font);
+        for control in &strip.controls {
+            let cell = control.rect;
+            match control.kind {
+                EngineScriptMenuControlKind::EnterKey => draw_command_key(
+                    surface,
+                    gfx,
+                    tiny,
+                    cell.x,
+                    cell.y,
+                    cell.width,
+                    3,
+                    &gfx.throw_key,
+                    gamma,
+                ),
+                EngineScriptMenuControlKind::Confirm => {
                     draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 0, 0, gamma);
                 }
-                if selected
-                    .and_then(|selection| menu.items.get(selection))
-                    .is_some_and(|item| !item.command2.is_empty())
-                {
-                    if let Some(cell) = truncate_control() {
-                        draw_command_key(
-                            surface,
-                            gfx,
-                            tiny,
-                            cell.x,
-                            cell.y,
-                            cell.width,
-                            11,
-                            &gfx.special2_key,
-                            gamma,
-                        );
-                    }
-                    if let Some(cell) = truncate_control() {
-                        draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1, gamma);
-                    }
+                EngineScriptMenuControlKind::EnterAllKey => draw_command_key(
+                    surface,
+                    gfx,
+                    tiny,
+                    cell.x,
+                    cell.y,
+                    cell.width,
+                    11,
+                    &gfx.special2_key,
+                    gamma,
+                ),
+                EngineScriptMenuControlKind::ConfirmAll => {
+                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1, gamma);
                 }
-            }
-            if let Some(cell) = truncate_control() {
-                draw_command_key(
+                EngineScriptMenuControlKind::CloseKey => draw_command_key(
                     surface,
                     gfx,
                     tiny,
@@ -2707,14 +2769,8 @@ fn render_engine_normal_menu(
                     5,
                     &gfx.dig_key,
                     gamma,
-                );
-            }
-            if let Some(cell) = truncate_control() {
-                if menu
-                    .items
-                    .iter()
-                    .any(|item| item.symbol == ObjectMenuSymbol::Exit)
-                {
+                ),
+                EngineScriptMenuControlKind::Exit => {
                     draw_command_image_cell_with_gamma(
                         surface,
                         &gfx.hud,
@@ -2722,11 +2778,13 @@ fn render_engine_normal_menu(
                         &CommandImage::Exit,
                         gamma,
                     );
-                } else {
+                }
+                EngineScriptMenuControlKind::Cancel => {
                     draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 1, 0, gamma);
                 }
             }
         }
+        let remaining = strip.footer;
         let selected_item = selected.and_then(|selection| menu.items.get(selection));
         match menu.extra {
             ObjectMenuExtra::Components => {
@@ -4683,6 +4741,104 @@ mod tests {
     }
 
     #[test]
+    fn engine_script_menu_close_control_does_not_follow_an_exit_item() {
+        // C4Menu::DrawElement chooses the close icon from CloseCommand, while
+        // C4MN_Context independently adds an Exit row for a contained target
+        // (src/C4Menu.cpp:874-880; src/C4ObjectMenu.cpp:426-433).
+        let fallback = clonk_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let mut menu = engine_script_menu_fixture(1, 1);
+        menu.items[0].symbol = ObjectMenuSymbol::Exit;
+        let layout = engine_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, true);
+
+        let close_control = layout
+            .command_strip_layout(&menu)
+            .expect("showing commands reserves the extra bar")
+            .controls
+            .last()
+            .map(|control| control.kind);
+
+        assert_eq!(close_control, Some(EngineScriptMenuControlKind::Cancel));
+    }
+
+    // C4Menu::DrawElement emits the six semantic controls in this exact
+    // order, consuming one left-hand square from the extra bar per control
+    // (src/C4Menu.cpp:843-880; src/C4Facet.cpp:182-217).
+    #[test]
+    fn engine_script_menu_observation_reports_the_rendered_command_strip() {
+        let fallback = clonk_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let mut menu = engine_script_menu_fixture(0, 2);
+        menu.columns = 5;
+        menu.close_command = clonk_engine::ObjectMenuCloseCommand::Exit;
+        menu.items[0].command2 = "ChooseAll()".into();
+        menu.items[1].symbol = ObjectMenuSymbol::Exit;
+        let layout = engine_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, true);
+
+        let strip = layout
+            .command_strip_layout(&menu)
+            .expect("showing commands reserves the extra bar");
+
+        assert_eq!(layout.extra_bar, Some(strip.rect));
+        assert_eq!(
+            strip
+                .controls
+                .iter()
+                .map(|control| control.kind)
+                .collect::<Vec<_>>(),
+            [
+                EngineScriptMenuControlKind::EnterKey,
+                EngineScriptMenuControlKind::Confirm,
+                EngineScriptMenuControlKind::EnterAllKey,
+                EngineScriptMenuControlKind::ConfirmAll,
+                EngineScriptMenuControlKind::CloseKey,
+                EngineScriptMenuControlKind::Exit,
+            ]
+        );
+        assert!(strip.controls.iter().enumerate().all(|(index, control)| {
+            control.rect
+                == Rect::new(
+                    strip.rect.x + index as i32 * CLASSIC_COMMAND_HEIGHT,
+                    strip.rect.y,
+                    CLASSIC_COMMAND_HEIGHT as u32,
+                    CLASSIC_COMMAND_HEIGHT as u32,
+                )
+        }));
+        assert_eq!(
+            strip.footer,
+            Rect::new(
+                strip.rect.x + 6 * CLASSIC_COMMAND_HEIGHT,
+                strip.rect.y,
+                strip.rect.width - 6 * CLASSIC_COMMAND_HEIGHT as u32,
+                strip.rect.height,
+            )
+        );
+    }
+
+    // An Extra footer reserves and draws the same bottom bar even when
+    // Config.Graphics.ShowCommands is disabled; it must not invent command
+    // cells in that mode (src/C4Menu.cpp:843-849,883-920).
+    #[test]
+    fn engine_script_menu_observation_retains_live_command_visibility() {
+        let fallback = clonk_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let mut menu = engine_script_menu_fixture(0, 1);
+        menu.extra = ObjectMenuExtra::Value;
+        let layout = engine_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, false);
+
+        let strip = layout
+            .command_strip_layout(&menu)
+            .expect("the value footer reserves an extra bar");
+
+        assert!(strip.controls.is_empty());
+        assert_eq!(strip.footer, strip.rect);
+
+        menu.extra = ObjectMenuExtra::None;
+        let plain = engine_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, false);
+        assert!(plain.command_strip_layout(&menu).is_none());
+    }
+
+    #[test]
     fn script_menu_scroll_range_is_minimal_pixel_persistent_and_column_aware() {
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
@@ -6621,6 +6777,7 @@ mod tests {
         };
         menu.identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
             .expect("context identification deserializes");
+        menu.close_command = clonk_engine::ObjectMenuCloseCommand::Exit;
         menu.selection = -1;
         menu.items = vec![
             make_item("Put", "HUT3", clonk_engine::ObjectMenuSymbol::Put),
@@ -7596,6 +7753,8 @@ mod tests {
             scroll_y: 0,
             max_scroll_y: 0,
             scrollbar: None,
+            extra_bar: Some(Rect::new(392, 428, 177, 16)),
+            show_commands: true,
             first_index: 0,
             visible: 5,
         };

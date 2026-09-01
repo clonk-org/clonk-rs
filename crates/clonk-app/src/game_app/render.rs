@@ -1664,7 +1664,6 @@ impl GameApp {
                     network_lobby,
                     self.startup.view_flags,
                     &mut self.menu_backdrop_cache,
-                    self.config.compat_profile == crate::settings::CompatProfile::LegacyClonk,
                     defer_native_main_text && !fade_was_active,
                     menu_gamma,
                     frame,
@@ -5588,6 +5587,7 @@ impl GameApp {
                 let ctx = AppCommandContext {
                     engine: &self.engine,
                     bindings: &self.bindings,
+                    gamepad_bindings: &self.gamepad_bindings,
                     snapshot: &self.snapshot,
                     resources: &self.startup_tooltip_resources,
                 };
@@ -6015,8 +6015,14 @@ impl GameApp {
                     gfx.menu_location = menu_location;
                     gfx.menu_scroll_y = menu_scroll_y;
                 }
-                let script_menu_accepts_mouse = self.mouse_control
-                    && self.local_controls.mouse_owner() == Some(script_menu_owner);
+                // C4ObjectMenu::Init creates its title while Object is still
+                // null, so HasMouse sees NO_OWNER and installs the close
+                // control before LocalInit assigns the real object. A later
+                // false HasMouse result does not remove it
+                // (src/C4ObjectMenu.cpp:78-90,499-503;
+                // src/C4Menu.cpp:351-356,1270-1276;
+                // src/C4GuiDialogs.cpp:400-422).
+                let show_script_menu_close_button = true;
                 if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
                     let font =
                         clonk_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
@@ -6050,7 +6056,7 @@ impl GameApp {
                             title_icon.as_ref(),
                             &item_icons,
                             &selected_component_icons,
-                            script_menu_accepts_mouse,
+                            show_script_menu_close_button,
                             script_menu_time,
                             Some(&frame_gamma),
                             explicit_lines,
@@ -6082,7 +6088,7 @@ impl GameApp {
                             title_icon.as_ref(),
                             &item_icons,
                             &selected_component_icons,
-                            script_menu_accepts_mouse,
+                            show_script_menu_close_button,
                             script_menu_time,
                             Some(&frame_gamma),
                             explicit_lines,
@@ -6143,7 +6149,13 @@ impl GameApp {
                     Rect::new(0, 0, surface.width(), surface.height())
                 });
                 if let Some(gfx) = self.ingame_menu_gfx.as_mut() {
-                    gfx.show_close_button = self.local_controls.mouse_owner() == Some(player);
+                    // C4MainMenu::Init calls DoInit while Player is NO_OWNER,
+                    // so SetTitle creates the close button before Init assigns
+                    // the real player. Later SetTitle(false) calls do not
+                    // remove it (src/C4MainMenu.cpp:45-49;
+                    // src/C4Menu.cpp:351-356,1270-1276;
+                    // src/C4GuiDialogs.cpp:400-422).
+                    gfx.show_close_button = true;
                 }
                 if let (Some(menu), Some(gfx)) =
                     (self.ingame_menu.get(player), self.ingame_menu_gfx.as_ref())

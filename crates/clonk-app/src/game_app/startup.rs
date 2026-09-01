@@ -4883,7 +4883,6 @@ impl GameApp {
             None,
             self.startup.view_flags,
             &mut self.menu_backdrop_cache,
-            self.config.compat_profile == crate::settings::CompatProfile::LegacyClonk,
             false,
             &gamma,
             frame,
@@ -5187,14 +5186,13 @@ impl GameApp {
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.pointer_left();
         }
-        let participants_validation =
-            (!crate::presentation_pixel_capture::capture_or_discovery_requested())
-                .then(|| {
-                    self.app_paths
-                        .as_ref()
-                        .map(validate_startup_participant_config)
-                })
-                .flatten();
+        let participants_validation = (!crate::presentation_capture_or_discovery_requested())
+            .then(|| {
+                self.app_paths
+                    .as_ref()
+                    .map(validate_startup_participant_config)
+            })
+            .flatten();
         match participants_validation {
             Some(Ok(())) => self.sync_startup_participant_models(),
             // Preserve legacy-byte configuration instead of corrupting it

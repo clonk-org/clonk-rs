@@ -136,6 +136,15 @@ pub(crate) struct MapPixelClassifier {
     texmap_lookups: Vec<RuntimeTexMapLookup>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MaterialTextureLoadCounts {
+    /// `None` means C++ found no first material source and therefore emitted
+    /// no `LoadMap` count line.
+    pub(crate) texmap_entries: Option<usize>,
+    pub(crate) textures: usize,
+    pub(crate) materials: usize,
+}
+
 impl MapPixelClassifier {
     pub(crate) fn from_runtime_state(state: RuntimeTexMapState) -> Self {
         Self {
@@ -305,19 +314,35 @@ impl MapPixelClassifier {
 /// `None` only when there is no material source at all. A first source
 /// without TexMap.txt still builds from an empty table before
 /// CrossMapMaterials allocates its dynamic entries.
+fn parse_material_enumeration(
+    source: Option<&[u8]>,
+) -> Result<Option<clonk_resources::material::MaterialEnumeration>, ScenarioError> {
+    match source {
+        Some(source) if !source.is_empty() => Ok(Some(
+            clonk_resources::material::MaterialEnumeration::parse(source)?,
+        )),
+        Some(_) | None => Ok(None),
+    }
+}
+
 pub(crate) fn build_map_pixel_classifier(
     group: &Group,
     resolver: &dyn LegacyDefinitionResolver,
 ) -> Result<Option<MapPixelClassifier>, ScenarioError> {
-    // Parse the root savegame ledger before any no-material/no-texmap return:
-    // C++ still calls LoadEnumeration after an empty material loop, and a
-    // listed name must then fail against Num=0.
-    let enumeration = match try_read_group_file_case_insensitive(group, "MatMap.txt")? {
-        Some(source) if !source.is_empty() => Some(
-            clonk_resources::material::MaterialEnumeration::parse(&source)?,
-        ),
-        Some(_) | None => None,
-    };
+    build_map_pixel_classifier_with_loaded_counts(group, resolver, |_| {})
+}
+
+/// Builds the classifier while publishing the three counts C4Game logs before
+/// it attempts `Material.LoadEnumeration` (`C4Game.cpp:940-987`). The callback
+/// intentionally runs before a bad `MatMap.txt` can reject the load.
+pub(crate) fn build_map_pixel_classifier_with_loaded_counts(
+    group: &Group,
+    resolver: &dyn LegacyDefinitionResolver,
+    mut report_loaded_counts: impl FnMut(MaterialTextureLoadCounts),
+) -> Result<Option<MapPixelClassifier>, ScenarioError> {
+    // Read the root savegame ledger now, but parse it only after the material
+    // counts have been published: C++ calls LoadEnumeration after those logs.
+    let enumeration_source = try_read_group_file_case_insensitive(group, "MatMap.txt")?;
     let mut material_groups = Vec::new();
     let mut scenario_material_root = None;
     match group.open_child("Material.c4g") {
@@ -337,6 +362,12 @@ pub(crate) fn build_map_pixel_classifier(
     }
 
     let Some(first_group) = material_groups.first() else {
+        report_loaded_counts(MaterialTextureLoadCounts {
+            texmap_entries: None,
+            textures: 0,
+            materials: 0,
+        });
+        let enumeration = parse_material_enumeration(enumeration_source.as_deref())?;
         if let Some(name) = enumeration
             .as_ref()
             .and_then(|enumeration| enumeration.names().first())
@@ -471,6 +502,20 @@ pub(crate) fn build_map_pixel_classifier(
     let material_loads: Vec<_> = material_libraries.iter().collect();
     let mut material_library =
         clonk_resources::MaterialLibrary::from_overloaded_loads(&material_loads).ok();
+    report_loaded_counts(MaterialTextureLoadCounts {
+        texmap_entries: Some(
+            texmap
+                .as_ref()
+                .map(clonk_resources::texmap::TextureMap::loaded_entry_count)
+                .unwrap_or_default(),
+        ),
+        textures: texture_inventory.len(),
+        materials: material_library
+            .as_ref()
+            .map(|library| library.iter().count())
+            .unwrap_or_default(),
+    });
+    let enumeration = parse_material_enumeration(enumeration_source.as_deref())?;
 
     // Savegames retain the numeric material order in root MatMap.txt. C++
     // applies this pairwise-swap ledger after every material source has

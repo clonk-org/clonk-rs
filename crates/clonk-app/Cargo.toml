@@ -11,6 +11,12 @@ publish.workspace = true
 
 [features]
 default = []
+# Audited C++/Rust presentation acquisition and comparison. Off by default so
+# the shipped application carries neither capture dispatch nor RNG tracing.
+presentation-capture = [
+    "clonk-app-netplay/presentation-capture",
+    "clonk-engine/presentation-capture",
+]
 app-test-shard-mode = []
 app-test-shard-1 = ["app-test-shard-mode"]
 app-test-shard-2 = ["app-test-shard-mode"]
@@ -101,12 +107,12 @@ windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Noti
 # `#[cfg(test)]` gates that covered them before the crate splits and stay out
 # of production builds.
 clonk-app-menus = { path = "../clonk-app-menus", features = ["test-hooks"] }
-clonk-app-netplay = { path = "../clonk-app-netplay", features = ["test-hooks"] }
+clonk-app-netplay = { path = "../clonk-app-netplay", features = ["presentation-capture", "test-hooks"] }
 clonk-audio = { path = "../clonk-audio", features = ["test-hooks"] }
 flate2 = "1"
 # Keep clonk-engine's property-test dependencies in the app test graph so adding
 # clonk-engine or the full workspace does not rebuild shared transitive crates.
-clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
+clonk-engine = { path = "../clonk-engine", features = ["presentation-capture", "test-graph"] }
 # Every comparison target includes clonk-app. Request clonk-network's test-only
 # Tokio feature here as well so app-only and workspace test graphs share one
 # Tokio fingerprint without enabling test utilities in production builds.
