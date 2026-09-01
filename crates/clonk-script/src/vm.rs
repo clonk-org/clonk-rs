@@ -6106,16 +6106,19 @@ impl<'a> Vm<'a> {
                 "parse error at {line}:{column}: {message}"
             ))),
             Stmt::VarDecl { name, init } => {
-                let tracked = match init {
-                    Some(expr) => self.evaluate_tracked(expr, env, depth)?,
-                    None => TrackedValue::runtime(Value::Nil),
-                };
-                // Vars are FUNCTION-scoped in C4Aul: the hoisted slot
-                // (declared at function entry) receives the value — a
-                // `var` inside a block must not shadow it. Address the
-                // function-var table directly because a same-name parameter
-                // remains the bare-name binding but has a distinct slot.
-                env.assign_function_var_tracked(name, tracked)?;
+                // A declaration without `=` emits no bytecode at all in
+                // C4Aul: Parse_Var only reaches AB_IVARN inside its `=`
+                // branch (C4AulParse.cpp:3252-3283), so the hoisted slot
+                // keeps whatever it already holds.
+                if let Some(expr) = init {
+                    let tracked = self.evaluate_tracked(expr, env, depth)?;
+                    // Vars are FUNCTION-scoped in C4Aul: the hoisted slot
+                    // (declared at function entry) receives the value — a
+                    // `var` inside a block must not shadow it. Address the
+                    // function-var table directly because a same-name parameter
+                    // remains the bare-name binding but has a distinct slot.
+                    env.assign_function_var_tracked(name, tracked)?;
+                }
                 Ok(ControlFlow::Normal)
             }
             Stmt::Assignment { target, value } => {

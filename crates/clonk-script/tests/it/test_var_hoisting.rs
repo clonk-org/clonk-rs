@@ -92,3 +92,44 @@ eval_cases! {
                  return item;\n\
              }" => Value::Int(12);
 }
+
+eval_cases! {
+    // A `var` statement without `=` compiles to no bytecode at all:
+    // C4AulParseState::Parse_Var emits AB_IVARN only inside its `=` branch
+    // (C4AulParse.cpp:3252-3283), so the hoisted slot keeps its value.
+    plain_var_declaration_without_initializer_preserves_existing_value:
+            "func Test() {\n\
+                 var x = 7;\n\
+                 var x;\n\
+                 return x;\n\
+             }" => Value::Int(7);
+
+    // An unreachable `continue` denies the function a compiled plan, so this
+    // runs on the AST-walk VM and must agree with the compiled form above.
+    plain_var_declaration_without_initializer_preserves_existing_value_in_ast_vm:
+            "func Test() {\n\
+                 var x = 7;\n\
+                 while (false) { continue; }\n\
+                 var x;\n\
+                 return x;\n\
+             }" => Value::Int(7);
+
+    // The same holds for a multi-name declaration: none of `a`, `b`, `c` has
+    // an `=`, so all three keep the values assigned before the statement.
+    plain_multi_var_declaration_preserves_every_existing_value_in_ast_vm:
+            "func Test() {\n\
+                 var a = 1, b = 2, c = 4;\n\
+                 while (false) { continue; }\n\
+                 var a, b, c;\n\
+                 return a + b + c;\n\
+             }" => Value::Int(7);
+
+    // Only the name that carries `=` is stored; the bare ones are untouched.
+    mixed_var_declaration_stores_only_the_initialized_name_in_ast_vm:
+            "func Test() {\n\
+                 var a = 1, b = 2;\n\
+                 while (false) { continue; }\n\
+                 var a, b = 30;\n\
+                 return a * 100 + b;\n\
+             }" => Value::Int(130);
+}
