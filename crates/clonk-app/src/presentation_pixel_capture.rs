@@ -4073,7 +4073,7 @@ mod tests {
                 "lines": []
             }, {
                 "path": "startup/main/branding/logo",
-                "role": "image",
+                "role": "brand-slot",
                 "rect": {"x": 854, "y": 29, "width": 384, "height": 128},
                 "visible": true,
                 "port_asset": "branding",
@@ -4183,7 +4183,7 @@ mod tests {
                 "lines": []
             }, {
                 "path": "startup/main/branding/logo",
-                "role": "image",
+                "role": "brand-slot",
                 "rect": {"x": 854, "y": 29, "width": 384, "height": 128},
                 "visible": true,
                 "port_asset": "branding",

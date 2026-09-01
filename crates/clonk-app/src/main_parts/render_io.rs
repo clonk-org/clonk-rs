@@ -876,12 +876,20 @@ pub(crate) fn render_startup_underlay(
     }
 }
 
-pub(crate) fn startup_main_logo_geometry(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StartupMainLogoLayout {
+    /// The product-brand allocation inherited from the native startup layout.
+    pub(crate) slot: (i32, i32, i32, i32),
+    /// The aspect-preserving destination of the active Clonk Rust artwork.
+    pub(crate) image: (i32, i32, i32, i32),
+}
+
+pub(crate) fn startup_main_logo_layout(
     surface_width: i32,
     surface_height: i32,
     logo_width: u32,
     logo_height: u32,
-) -> (i32, i32, i32, i32) {
+) -> StartupMainLogoLayout {
     // The vertical footprint of the classic 960x320 logo at C++'s 0.4 zoom.
     const CLASSIC_LOGO_MAX_HEIGHT: i32 = 128;
 
@@ -894,7 +902,10 @@ pub(crate) fn startup_main_logo_geometry(
     }
     let logo_x = surface_width * 30 / 31 - logo_w;
     let logo_y = surface_height / 21 - 5;
-    (logo_x, logo_y, logo_w, logo_h)
+    StartupMainLogoLayout {
+        slot: (surface_width * 30 / 31 - 384, logo_y, 384, 128),
+        image: (logo_x, logo_y, logo_w, logo_h),
+    }
 }
 
 pub(crate) fn scenario_list_scrollbar_visible(
@@ -1255,7 +1266,7 @@ pub(crate) fn render_startup_frame(
                     let width = surface.width() as i32;
                     let height = surface.height() as i32;
                     let (logo_x, logo_y, logo_w, logo_h) =
-                        startup_main_logo_geometry(width, height, logo.width(), logo.height());
+                        startup_main_logo_layout(width, height, logo.width(), logo.height()).image;
                     let logo_rect = clonk_gui::Rect::new(
                         logo_x as f32,
                         logo_y as f32,

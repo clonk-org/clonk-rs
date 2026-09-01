@@ -4,6 +4,7 @@
 use crate::presentation_layout::{
     LayoutElement, LayoutLine, LayoutRect, LayoutTrace, LAYOUT_TRACE_SCHEMA,
 };
+use crate::startup_main_logo_layout;
 use clonk_frontend::{main_menu_layout, StartupMainMenu};
 use clonk_graphics::clonk_font::{CapturedClonkText, ClonkFont, TextAlign};
 use std::collections::BTreeSet;
@@ -522,7 +523,7 @@ pub(crate) fn runtime_base_trace(
         // never substituted with the legacy asset.
         empty_element(
             "game/upper-board/branding/logo",
-            "image",
+            "brand-slot",
             surface_layout_rect(logo_slot),
             Some(BRANDING),
         ),
@@ -1253,17 +1254,14 @@ fn grouped_row_elements<'a>(
 pub(crate) fn startup_main_trace(
     menu: &StartupMainMenu,
     participants_label: &str,
-    _logo_size: (u32, u32),
+    logo_size: (u32, u32),
     commands: &[CapturedClonkText],
     gui_fonts: &clonk_frontend::ClonkFontSet,
 ) -> Result<LayoutTrace, StartupLayoutTraceError> {
     let layout = main_menu_layout(WIDTH, HEIGHT);
     let font = |command: &CapturedClonkText| gui_font(gui_fonts, command);
-    // The comparison records the native brand allocation, while the renderer
-    // aspect-fits Clonk Rust's product artwork without changing its pixels or
-    // proportions. Branding is the declared port-authored node on this term.
-    let (logo_x, logo_y, logo_width, logo_height) =
-        (WIDTH * 30 / 31 - 384, HEIGHT / 21 - 5, 384, 128);
+    let logo_layout = startup_main_logo_layout(WIDTH, HEIGHT, logo_size.0, logo_size.1);
+    let (logo_x, logo_y, logo_width, logo_height) = logo_layout.slot;
     let participant = menu.participants_rect(participants_label);
     let mut elements = vec![
         empty_element(
@@ -1274,7 +1272,7 @@ pub(crate) fn startup_main_trace(
         ),
         empty_element(
             "startup/main/branding/logo",
-            "image",
+            "brand-slot",
             layout_rect(logo_x, logo_y, logo_width, logo_height),
             Some(BRANDING),
         ),
@@ -1282,7 +1280,7 @@ pub(crate) fn startup_main_trace(
             "startup/main/branding/version",
             "label",
             layout_rect(854, 168, 394, gui_fonts.text.line_height),
-            (WIDTH * 39 / 40, HEIGHT / 18 + logo_height),
+            (WIDTH * 39 / 40, HEIGHT / 18 + logo_layout.image.3),
             Some(BRANDING),
             commands,
             &font,
@@ -2285,7 +2283,9 @@ fn startup_main_trace_for_logo_size(logo_size: (u32, u32)) -> LayoutTrace {
     let mut surface = Surface::new(WIDTH as u32, HEIGHT as u32, PixelFormat::Rgba8888);
     surface.begin_clonk_text_capture();
     menu.render(&mut surface, participants);
-    let logo_height = 128;
+    let logo_height = startup_main_logo_layout(WIDTH, HEIGHT, logo_size.0, logo_size.1)
+        .image
+        .3;
     fonts.text.draw(
         &mut surface,
         WIDTH * 39 / 40,
@@ -2689,6 +2689,7 @@ mod tests {
         let version = element("startup/main/branding/version");
         let footer = element("startup/main/branding/fan-project");
 
+        assert_eq!(logo.role, "brand-slot");
         assert_eq!(logo.rect, layout_rect(854, 29, 384, 128));
         assert_eq!(logo.port_asset.as_deref(), Some(BRANDING));
         assert_eq!(
@@ -2727,6 +2728,18 @@ mod tests {
             .expect("logo element");
 
         assert_eq!(logo.rect, layout_rect(854, 29, 384, 128));
+    }
+
+    #[test]
+    fn startup_main_version_trace_follows_the_fitted_product_logo() {
+        let trace = startup_main_trace_for_logo_size((1_000, 100));
+        let version = trace
+            .elements
+            .iter()
+            .find(|element| element.path == "startup/main/branding/version")
+            .expect("version element at the fitted logo anchor");
+
+        assert_eq!(version.caption, "Version 0.20.2");
     }
 
     #[test]
@@ -3075,6 +3088,7 @@ mod tests {
             ]
         );
         let logo = &trace.elements[2];
+        assert_eq!(logo.role, "brand-slot");
         assert_eq!(logo.rect, layout_rect(539, 0, 201, 67));
         assert_eq!(logo.port_asset.as_deref(), Some(BRANDING));
         assert!(trace

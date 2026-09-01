@@ -150,7 +150,7 @@
       "applies_to": "Every screen whose pixels are all oracle-authored."
     },
     "layout": {
-      "summary": "Widget geometry and text layout, not pixel equality: the same ordered controls, semantic roles, visibility, rects and resolved-line geometry. Captions and resolved line text are exact except at the individually declared port-asset nodes whose product text is intentionally different. The pixel term is not applied to a screen on this term, because the port's own artwork cannot equal the oracle's at any resolution - the difference is texture detail across the whole asset, not a rounding residue.",
+      "summary": "Widget geometry and text layout, not pixel equality: the same ordered controls, semantic roles, visibility, rects and resolved-line geometry. A brand-slot records the shared outer allocation while each product's artwork keeps its own aspect ratio inside it; it is not reported as the rendered image rectangle. Captions and resolved line text are exact except at the individually declared port-asset nodes whose product text is intentionally different. The pixel term is not applied to a screen on this term, because the port's own artwork cannot equal the oracle's at any resolution - the difference is texture detail across the whole asset, not a rounding residue.",
       "applies_to": "Screens that render one or more of `port_assets`.",
       "authority": "clonk-org/clonk-rs#1298",
       "note": "Chosen over shipping the oracle's branding and 1x art inside the profile. The port's identity and its super-resolved startup art are deliberate product features, and clonk-org/clonk-rs#587 forbids masking port-version text or product features, so no mask could make a pixel term pass on these screens either."

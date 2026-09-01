@@ -166,7 +166,9 @@ super-resolved startup art is promised the same *layout* — the same ordered
 controls, semantic roles, visibility, rects and wrapping geometry — and not the
 same pixels. Captions and resolved line text remain exact except at the
 individually declared port-asset nodes whose product text is intentionally
-different. This is not a softening to make a failing comparison pass: running it
+different. For product logos, a `brand-slot` is the shared outer allocation;
+the Clonk Rust artwork keeps its own aspect ratio inside that slot, and the slot
+is never presented as the image's raster bounds. This is not a softening to make a failing comparison pass: running it
 showed the renderer is not what fails. On `startup-main`, excluding the port's
 logo, version string and footer and the cursor the C++ F9 capture bakes in, the
 remaining 823,144 pixels are 99.93% bit-identical and 100.00% within one channel

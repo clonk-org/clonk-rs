@@ -46,8 +46,10 @@ macro_rules! startup_fixture {
 
 #[test]
 fn two_line_product_logo_keeps_classic_startup_footprint() {
-    let (_, logo_y, logo_width, logo_height) = startup_main_logo_geometry(800, 600, 972, 440);
+    let layout = startup_main_logo_layout(800, 600, 972, 440);
+    let (_, logo_y, logo_width, logo_height) = layout.image;
     main_assert_eq!((logo_width, logo_height) => (282, 128), "the two-line logo keeps the classic 960x320 logo's 0.4x height",);
+    main_assert_eq!(layout.slot => (390, 23, 384, 128), "the semantic slot is layout metadata, not substitute artwork");
 
     let first_button = clonk_frontend::main_menu_layout(800, 600).buttons[0];
     main_assert!(

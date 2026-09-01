@@ -64,7 +64,7 @@ pub struct LayoutElement {
     pub role: String,
     pub rect: LayoutRect,
     pub visible: bool,
-    /// The manifest-declared port-authored asset class whose text may differ.
+    /// The manifest-declared port-authored asset class whose content may differ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_asset: Option<String>,
     pub caption: String,

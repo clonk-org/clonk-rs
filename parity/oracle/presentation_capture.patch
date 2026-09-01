@@ -1807,7 +1807,7 @@ index 9542728ef..353b03214 100644
 +			logoZoom *= 960.f / nativeLogo.Wdt;
 +			const C4Rect logo{upper.X + static_cast<int32_t>(upper.Wdt / 2 - (nativeLogo.Wdt / 2) * logoZoom), upper.Y,
 +				static_cast<int32_t>(nativeLogo.Wdt * logoZoom), static_cast<int32_t>(nativeLogo.Hgt * logoZoom)};
-+			builder.elements.push_back(Empty("game/upper-board/branding/logo", "image", logo, true, "branding"));
++			builder.elements.push_back(Empty("game/upper-board/branding/logo", "brand-slot", logo, true, "branding"));
 +
 +			const int32_t lineHeight = Game.GraphicsResource.FontRegular.GetLineHeight();
 +			const char *const scenarioTitle = Game.Parameters.ScenarioTitle.getData();
@@ -2839,7 +2839,7 @@ index 45c9ebe0f..27b949d23 100644
 +	std::vector<C4PresentationCapture::LayoutElement> elements;
 +	elements.reserve(11);
 +	elements.push_back(C4PresentationCapture::Empty("startup/main/background", "image", background, IsVisible()));
-+	elements.push_back(C4PresentationCapture::Empty("startup/main/branding/logo", "image", logo_rect, IsVisible(), "branding"));
++	elements.push_back(C4PresentationCapture::Empty("startup/main/branding/logo", "brand-slot", logo_rect, IsVisible(), "branding"));
 +	elements.push_back({"startup/main/branding/version", "label", version_rect, IsVisible(), "branding", version, {{version, version_rect}}});
 +	constexpr std::array<const char *, 6> button_paths{
 +		"startup/main/buttons/start-game",
