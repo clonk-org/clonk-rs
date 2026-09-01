@@ -8137,6 +8137,10 @@ pub struct Engine {
     /// Observation only; see `EffectDispatchStats`. Behind a `Cell` because a
     /// context is built from `&self`.
     pub(crate) effect_dispatch_stats: std::cell::Cell<EffectDispatchStats>,
+    /// Validation-only copy of C4Weather::Init's single initial Rain gate.
+    /// Capturing the existing result must not consume another synchronized
+    /// RNG draw.
+    pub(crate) weather_initial_rain_gate: Option<i32>,
     /// Observation only; see `ActivationTimings`.
     pub(crate) activation_timings: ActivationTimings,
     /// Observation only; see `PlacementTimings`.
@@ -10509,6 +10513,7 @@ impl Engine {
         script_constants::register_script_constants_in_global_table(&script_global_consts);
         let mut engine = Self {
             effect_dispatch_stats: std::cell::Cell::default(),
+            weather_initial_rain_gate: None,
             activation_timings: ActivationTimings::default(),
             placement_timings: PlacementTimings::default(),
             snapshot_timings: std::cell::Cell::new(SnapshotTimings::default()),

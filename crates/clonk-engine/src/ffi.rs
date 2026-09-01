@@ -341,6 +341,56 @@ pub struct LcEngineRuntimeEnvironmentState {
     pub sky_color_b: u8,
 }
 
+const RUNTIME_WEATHER_ABI_VERSION: u32 = 1;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LcEngineRuntimeScenarioValue {
+    pub standard: i32,
+    pub random: i32,
+    pub minimum: i32,
+    pub maximum: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LcEngineRuntimeWeatherSnapshot {
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub tick_10: i32,
+    pub tick_35: i32,
+    pub tick_1000: i32,
+    pub season: i32,
+    pub year_speed: i32,
+    pub season_delay: i32,
+    pub wind: i32,
+    pub wind_target: i32,
+    pub temperature: i32,
+    pub temperature_range: i32,
+    pub climate: i32,
+    pub meteorite_level: i32,
+    pub volcano_level: i32,
+    pub earthquake_level: i32,
+    pub lightning_level: i32,
+    pub initial_rain_gate: i32,
+    pub start_season: LcEngineRuntimeScenarioValue,
+    pub scenario_year_speed: LcEngineRuntimeScenarioValue,
+    pub scenario_climate: LcEngineRuntimeScenarioValue,
+    pub scenario_rain: LcEngineRuntimeScenarioValue,
+    pub scenario_lightning: LcEngineRuntimeScenarioValue,
+    pub scenario_wind: LcEngineRuntimeScenarioValue,
+    pub scenario_meteorite: LcEngineRuntimeScenarioValue,
+    pub scenario_volcano: LcEngineRuntimeScenarioValue,
+    pub scenario_earthquake: LcEngineRuntimeScenarioValue,
+    pub precipitation_material: [u8; 16],
+    pub no_gamma: u8,
+    pub no_initialize: u8,
+    pub scenario_no_gamma: u8,
+    pub initial_rain_gate_valid: u8,
+    pub precipitation_material_len: u8,
+    pub reserved: [u8; 3],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LcEngineRuntimeLandscapeSlice {
@@ -418,6 +468,10 @@ pub struct RuntimeHandle {
     control_clients: ControlClientRegistry,
     /// One-shot latch for the RNG-ledger divergence report.
     rng_mismatch_reported: bool,
+    /// Independently collected C++ weather state awaiting the matching live
+    /// snapshot comparison. Consuming this per frame makes omitted bridge
+    /// instrumentation fail closed.
+    pending_weather: Option<(u64, LcEngineRuntimeWeatherSnapshot)>,
 }
 
 impl RecorderHandle {
@@ -454,6 +508,7 @@ impl RuntimeHandle {
             player_info_clients: HashMap::new(),
             control_clients: ControlClientRegistry::default(),
             rng_mismatch_reported: false,
+            pending_weather: None,
         }
     }
 
@@ -2140,6 +2195,239 @@ fn comparable_snapshot(snapshot: &SimulationSnapshot) -> SimulationSnapshot {
     }
 }
 
+fn runtime_weather_mismatch(
+    expected: &crate::EnvironmentSettings,
+    drivers: Option<&crate::scenario::LegacyWeatherInit>,
+    initial_rain_gate: Option<i32>,
+    frame: u64,
+    actual: &LcEngineRuntimeWeatherSnapshot,
+) -> Option<String> {
+    macro_rules! compare_field {
+        ($name:expr, $rust:expr, $cpp:expr) => {
+            if $rust != $cpp {
+                return Some(format!("weather {} rust {}, cpp {}", $name, $rust, $cpp));
+            }
+        };
+    }
+
+    compare_field!("tick_10", (frame % 10) as i32, actual.tick_10);
+    compare_field!("tick_35", (frame % 35) as i32, actual.tick_35);
+    compare_field!("tick_1000", (frame % 1_000) as i32, actual.tick_1000);
+    compare_field!("season", expected.season, actual.season);
+    compare_field!("year_speed", expected.year_speed, actual.year_speed);
+    compare_field!("season_delay", expected.season_delay, actual.season_delay);
+    compare_field!("wind", expected.wind, actual.wind);
+    compare_field!("wind_target", expected.wind_target, actual.wind_target);
+    compare_field!("temperature", expected.temperature, actual.temperature);
+    compare_field!(
+        "temperature_range",
+        expected.temperature_range,
+        actual.temperature_range
+    );
+    compare_field!("climate", expected.climate, actual.climate);
+    compare_field!(
+        "meteorite_level",
+        expected.meteorite,
+        actual.meteorite_level
+    );
+    compare_field!("volcano_level", expected.volcano, actual.volcano_level);
+    compare_field!(
+        "earthquake_level",
+        expected.earthquake,
+        actual.earthquake_level
+    );
+    compare_field!(
+        "lightning_level",
+        expected.lightning,
+        actual.lightning_level
+    );
+    compare_field!("no_gamma", u8::from(expected.no_gamma), actual.no_gamma);
+    compare_field!(
+        "initial_rain_gate_valid",
+        u8::from(initial_rain_gate.is_some()),
+        actual.initial_rain_gate_valid
+    );
+    if let Some(initial_rain_gate) = initial_rain_gate {
+        compare_field!(
+            "initial_rain_gate",
+            initial_rain_gate,
+            actual.initial_rain_gate
+        );
+    }
+
+    let drivers = drivers?;
+    compare_field!(
+        "no_initialize",
+        u8::from(drivers.no_initialize),
+        actual.no_initialize
+    );
+    compare_field!(
+        "scenario_no_gamma",
+        u8::from(drivers.no_gamma),
+        actual.scenario_no_gamma
+    );
+    let expected_scenario_value =
+        |value: crate::scenario::LegacyC4SVal| LcEngineRuntimeScenarioValue {
+            standard: value.std,
+            random: value.rnd,
+            minimum: value.min,
+            maximum: value.max,
+        };
+    let scenario_values = [
+        (
+            "start_season",
+            expected_scenario_value(drivers.season),
+            actual.start_season,
+        ),
+        (
+            "scenario_year_speed",
+            expected_scenario_value(drivers.year_speed),
+            actual.scenario_year_speed,
+        ),
+        (
+            "scenario_climate",
+            expected_scenario_value(drivers.climate),
+            actual.scenario_climate,
+        ),
+        (
+            "scenario_rain",
+            expected_scenario_value(drivers.rain),
+            actual.scenario_rain,
+        ),
+        (
+            "scenario_lightning",
+            expected_scenario_value(drivers.lightning),
+            actual.scenario_lightning,
+        ),
+        (
+            "scenario_wind",
+            expected_scenario_value(drivers.wind),
+            actual.scenario_wind,
+        ),
+        (
+            "scenario_meteorite",
+            expected_scenario_value(drivers.meteorite),
+            actual.scenario_meteorite,
+        ),
+        (
+            "scenario_volcano",
+            expected_scenario_value(drivers.volcano),
+            actual.scenario_volcano,
+        ),
+        (
+            "scenario_earthquake",
+            expected_scenario_value(drivers.earthquake),
+            actual.scenario_earthquake,
+        ),
+    ];
+    for (name, rust, cpp) in scenario_values {
+        compare_field!(&format!("{name}.standard"), rust.standard, cpp.standard);
+        compare_field!(&format!("{name}.random"), rust.random, cpp.random);
+        compare_field!(&format!("{name}.minimum"), rust.minimum, cpp.minimum);
+        compare_field!(&format!("{name}.maximum"), rust.maximum, cpp.maximum);
+    }
+
+    let mut precipitation_material = [0; 16];
+    let bytes = drivers.precipitation.as_bytes();
+    let length = bytes.len().min(precipitation_material.len() - 1);
+    precipitation_material[..length].copy_from_slice(&bytes[..length]);
+    compare_field!(
+        "precipitation_material_len",
+        length as u8,
+        actual.precipitation_material_len
+    );
+    if precipitation_material != actual.precipitation_material {
+        return Some(format!(
+            "weather precipitation_material rust {:?}, cpp {:?}",
+            precipitation_material, actual.precipitation_material
+        ));
+    }
+
+    compare_field!(
+        "base_wind",
+        expected.base_wind,
+        actual.scenario_wind.standard
+    );
+    compare_field!(
+        "wind_variation",
+        expected.wind_variation,
+        actual.scenario_wind.random
+    );
+    compare_field!(
+        "wind_period",
+        expected.wind_period,
+        if actual.scenario_wind.random == 0 {
+            0
+        } else {
+            2_000
+        }
+    );
+    compare_field!(
+        "wind_update_interval",
+        expected.wind_update_interval,
+        if actual.scenario_wind.random == 0 {
+            0
+        } else {
+            1_000
+        }
+    );
+    compare_field!("wind_update_timer", expected.wind_update_timer, 0);
+    compare_field!("wind_min", expected.wind_min, actual.scenario_wind.minimum);
+    compare_field!("wind_max", expected.wind_max, actual.scenario_wind.maximum);
+    compare_field!(
+        "season_min",
+        expected.season_min,
+        actual.start_season.minimum
+    );
+    compare_field!(
+        "season_max",
+        expected.season_max,
+        actual.start_season.maximum
+    );
+    compare_field!("temperature_variation", expected.temperature_variation, 0);
+    compare_field!("temperature_period", expected.temperature_period, 0);
+    compare_field!("temperature_phase", expected.temperature_phase, 0);
+    compare_field!("time_of_day", expected.time_of_day, 0);
+    compare_field!("time_speed", expected.time_speed, 0);
+
+    let ordered_rain_min = actual
+        .scenario_rain
+        .minimum
+        .min(actual.scenario_rain.maximum);
+    let ordered_rain_max = actual
+        .scenario_rain
+        .minimum
+        .max(actual.scenario_rain.maximum);
+    let precipitation_strength = actual
+        .scenario_rain
+        .standard
+        .clamp(ordered_rain_min, ordered_rain_max)
+        .clamp(-100, 100);
+    compare_field!(
+        "precipitation_strength",
+        expected.precipitation_strength,
+        precipitation_strength
+    );
+    let gated_precipitation = (actual.initial_rain_gate_valid != 0)
+        .then(|| actual.initial_rain_gate.clamp(0, 100) as u8 as i32);
+    let precipitation = if actual.no_initialize != 0 {
+        precipitation_strength
+    } else if frame == 0 || precipitation_strength == 0 {
+        gated_precipitation.unwrap_or(precipitation_strength)
+    } else {
+        precipitation_strength
+    };
+    compare_field!("precipitation", expected.precipitation, precipitation);
+    if let Some(color) = expected.sky_color {
+        return Some(format!(
+            "weather sky_color rust rgb({},{},{}), cpp none",
+            color.r, color.g, color.b
+        ));
+    }
+
+    None
+}
+
 fn runtime_snapshot_mismatch(
     expected: &SimulationSnapshot,
     actual: &SimulationSnapshot,
@@ -2892,6 +3180,7 @@ fn load_scenario_into_runtime(
         runtime.player_info_clients.clear();
     }
     runtime.rng_mismatch_reported = false;
+    runtime.pending_weather = None;
     Ok(())
 }
 
@@ -3059,6 +3348,7 @@ pub extern "C" fn lc_engine_runtime_reset(
         set_error(error_out, "runtime handle is null".into());
         return false;
     };
+    runtime.pending_weather = None;
 
     let Some(path) = runtime.scenario_path.clone() else {
         runtime.engine = Engine::with_seed(runtime.seed);
@@ -3369,6 +3659,7 @@ fn compare_prepared_frame(
     runtime: &mut RuntimeHandle,
     frame: u64,
     snapshot: &SimulationSnapshot,
+    weather: &LcEngineRuntimeWeatherSnapshot,
     rng_hold: u32,
     rng_count: i32,
 ) -> Option<String> {
@@ -3377,9 +3668,74 @@ fn compare_prepared_frame(
         Some(entries) => expected.controls = entries.clone(),
         None => expected.controls.clear(),
     }
+    let drivers = runtime.engine.legacy_weather_init();
+    let initial_rain_gate = runtime.engine.weather_initial_rain_gate;
     rng_ledger_divergence(runtime, frame, rng_hold, rng_count)
+        .or_else(|| {
+            runtime_weather_mismatch(
+                &runtime.engine.environment(),
+                Some(&drivers),
+                initial_rain_gate,
+                frame,
+                weather,
+            )
+        })
         .or_else(|| runtime_snapshot_mismatch(&expected, snapshot))
         .map(|detail| format!("frame {frame}: {detail}"))
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_supply_weather_snapshot(
+    handle: *mut RuntimeHandle,
+    frame: u64,
+    snapshot: *const LcEngineRuntimeWeatherSnapshot,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+    let Some(snapshot) = (unsafe { snapshot.as_ref() }) else {
+        set_error(error_out, "native weather snapshot is null".into());
+        return false;
+    };
+    if snapshot.abi_version != RUNTIME_WEATHER_ABI_VERSION {
+        set_error(
+            error_out,
+            format!(
+                "native weather ABI version {} does not match {}",
+                snapshot.abi_version, RUNTIME_WEATHER_ABI_VERSION
+            ),
+        );
+        return false;
+    }
+    let expected_size = std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32;
+    if snapshot.struct_size != expected_size {
+        set_error(
+            error_out,
+            format!(
+                "native weather snapshot size {} does not match {}",
+                snapshot.struct_size, expected_size
+            ),
+        );
+        return false;
+    }
+    if let Some((pending_frame, _)) = runtime.pending_weather {
+        set_error(
+            error_out,
+            format!("native weather snapshot already pending for frame {pending_frame}"),
+        );
+        return false;
+    }
+
+    runtime.pending_weather = Some((frame, *snapshot));
+    true
 }
 
 #[no_mangle]
@@ -3412,10 +3768,31 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     rng_count: i32,
     error_out: *mut *mut c_char,
 ) -> bool {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
     let Some(runtime) = (unsafe { handle.as_mut() }) else {
         set_error(error_out, "runtime handle is null".into());
         return false;
     };
+
+    let Some((weather_frame, weather)) = runtime.pending_weather.take() else {
+        set_error(
+            error_out,
+            format!("frame {frame}: native weather snapshot missing"),
+        );
+        return false;
+    };
+    if weather_frame != frame {
+        set_error(
+            error_out,
+            format!("frame {frame}: native weather snapshot is for frame {weather_frame}"),
+        );
+        return false;
+    }
 
     let snapshot = match unsafe {
         make_snapshot(
@@ -3459,7 +3836,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             );
             return false;
         }
-        if let Some(detail) = compare_prepared_frame(runtime, frame, &snapshot, rng_hold, rng_count)
+        if let Some(detail) =
+            compare_prepared_frame(runtime, frame, &snapshot, &weather, rng_hold, rng_count)
         {
             set_error(error_out, detail);
             return false;
@@ -3491,7 +3869,9 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     // registers are required to agree. Checking only frame 0 left the ledger
     // silent for the whole run, so a slip surfaced later as an unexplained
     // state difference instead of naming the frame it happened on.
-    if let Some(detail) = compare_prepared_frame(runtime, frame, &snapshot, rng_hold, rng_count) {
+    if let Some(detail) =
+        compare_prepared_frame(runtime, frame, &snapshot, &weather, rng_hold, rng_count)
+    {
         set_error(error_out, detail);
         return false;
     }
@@ -3653,6 +4033,8 @@ pub extern "C" fn lc_engine_runtime_import_state_json(
     // by scenario/replay loading (or earlier controls) across this optional
     // world-state import, exactly as the C++ game does.
     runtime.rng_mismatch_reported = false;
+    runtime.pending_weather = None;
+    runtime.engine.weather_initial_rain_gate = None;
 
     true
 }
@@ -5367,8 +5749,15 @@ global func Step(state, frame, random)
         let rng = runtime.engine.debug_rng_clone();
         let snapshot = runtime.engine.snapshot();
 
-        let detail = compare_prepared_frame(&mut runtime, 0, &snapshot, rng.hold, rng.count + 23)
-            .expect("a differing draw count at frame 0 is a divergence");
+        let detail = compare_prepared_frame(
+            &mut runtime,
+            0,
+            &snapshot,
+            &LcEngineRuntimeWeatherSnapshot::default(),
+            rng.hold,
+            rng.count + 23,
+        )
+        .expect("a differing draw count at frame 0 is a divergence");
         assert!(
             detail.contains("RNG ledger") && detail.contains(&(rng.count + 23).to_string()),
             "the report must name the ledger and both counts: {detail}"
@@ -6125,6 +6514,724 @@ global func Step(state, frame, random)
         assert_eq!(state.sky_color_r, 10);
         assert_eq!(state.sky_color_g, 20);
         assert_eq!(state.sky_color_b, 30);
+    }
+
+    #[test]
+    fn runtime_weather_comparison_reports_cpp_wind_without_object_observation() {
+        // C4Weather.h:32-36 stores weather independently of C4Object state;
+        // the live bridge must compare it even when no object calls GetWind.
+        let rust = EnvironmentSettings::new(35);
+        let cpp = LcEngineRuntimeWeatherSnapshot {
+            wind: -12,
+            ..LcEngineRuntimeWeatherSnapshot::default()
+        };
+
+        assert_eq!(
+            runtime_weather_mismatch(&rust, None, None, 0, &cpp),
+            Some("weather wind rust 35, cpp -12".into())
+        );
+    }
+
+    #[test]
+    fn runtime_weather_snapshot_has_a_fixed_width_c_layout() {
+        // C4Constants.h:60 fixes material names at 15 bytes plus NUL; the
+        // validation ABI uses only fixed-width integers around that buffer.
+        assert_eq!(std::mem::size_of::<LcEngineRuntimeScenarioValue>(), 16);
+        assert_eq!(std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>(), 240);
+        assert_eq!(
+            std::mem::offset_of!(LcEngineRuntimeWeatherSnapshot, initial_rain_gate),
+            68
+        );
+        assert_eq!(
+            std::mem::offset_of!(LcEngineRuntimeWeatherSnapshot, start_season),
+            72
+        );
+        assert_eq!(
+            std::mem::offset_of!(LcEngineRuntimeWeatherSnapshot, precipitation_material),
+            216
+        );
+        assert_eq!(
+            std::mem::offset_of!(LcEngineRuntimeWeatherSnapshot, no_gamma),
+            232
+        );
+        assert_eq!(
+            std::mem::offset_of!(LcEngineRuntimeWeatherSnapshot, reserved),
+            237
+        );
+    }
+
+    fn weather_scenario_value(
+        standard: i32,
+        random: i32,
+        minimum: i32,
+        maximum: i32,
+    ) -> crate::scenario::LegacyC4SVal {
+        crate::scenario::LegacyC4SVal::new(standard, random, minimum, maximum)
+    }
+
+    fn weather_drivers() -> crate::scenario::LegacyWeatherInit {
+        crate::scenario::LegacyWeatherInit {
+            season: weather_scenario_value(41, 3, 4, 96),
+            year_speed: weather_scenario_value(17, 2, 0, 100),
+            climate: weather_scenario_value(25, 5, 0, 100),
+            wind: weather_scenario_value(7, 70, -80, 90),
+            rain: weather_scenario_value(39, 6, 0, 100),
+            precipitation: "Acid".into(),
+            lightning: weather_scenario_value(27, 4, 0, 100),
+            meteorite: weather_scenario_value(24, 3, 0, 100),
+            volcano: weather_scenario_value(25, 2, 0, 100),
+            earthquake: weather_scenario_value(26, 1, 0, 100),
+            no_initialize: false,
+            no_gamma: false,
+        }
+    }
+
+    fn native_scenario_value(value: crate::scenario::LegacyC4SVal) -> LcEngineRuntimeScenarioValue {
+        LcEngineRuntimeScenarioValue {
+            standard: value.std,
+            random: value.rnd,
+            minimum: value.min,
+            maximum: value.max,
+        }
+    }
+
+    fn native_material_name(value: &str) -> [u8; 16] {
+        let mut bytes = [0; 16];
+        let source = value.as_bytes();
+        let length = source.len().min(bytes.len() - 1);
+        bytes[..length].copy_from_slice(&source[..length]);
+        bytes
+    }
+
+    fn apply_legacy_weather_metadata(
+        environment: &mut EnvironmentSettings,
+        drivers: &crate::scenario::LegacyWeatherInit,
+        initial_rain_gate: Option<i32>,
+        frame: u64,
+    ) {
+        environment.base_wind = drivers.wind.std;
+        environment.wind_variation = drivers.wind.rnd;
+        environment.wind_period = if drivers.wind.rnd == 0 { 0 } else { 2_000 };
+        environment.wind_update_interval = if drivers.wind.rnd == 0 { 0 } else { 1_000 };
+        environment.wind_update_timer = 0;
+        environment.wind_min = drivers.wind.min;
+        environment.wind_max = drivers.wind.max;
+        environment.season_min = drivers.season.min;
+        environment.season_max = drivers.season.max;
+        let strength = drivers.rain.base().clamp(-100, 100);
+        environment.precipitation_strength = strength;
+        environment.precipitation = if drivers.no_initialize {
+            strength
+        } else if frame == 0 || strength == 0 {
+            initial_rain_gate
+                .map(|gate| gate.clamp(0, 100) as u8 as i32)
+                .unwrap_or(strength)
+        } else {
+            strength
+        };
+    }
+
+    fn matching_native_weather(
+        environment: &EnvironmentSettings,
+        drivers: &crate::scenario::LegacyWeatherInit,
+        frame: u64,
+    ) -> LcEngineRuntimeWeatherSnapshot {
+        LcEngineRuntimeWeatherSnapshot {
+            abi_version: RUNTIME_WEATHER_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32,
+            tick_10: (frame % 10) as i32,
+            tick_35: (frame % 35) as i32,
+            tick_1000: (frame % 1_000) as i32,
+            season: environment.season,
+            year_speed: environment.year_speed,
+            season_delay: environment.season_delay,
+            wind: environment.wind,
+            wind_target: environment.wind_target,
+            temperature: environment.temperature,
+            temperature_range: environment.temperature_range,
+            climate: environment.climate,
+            meteorite_level: environment.meteorite,
+            volcano_level: environment.volcano,
+            earthquake_level: environment.earthquake,
+            lightning_level: environment.lightning,
+            initial_rain_gate: 0,
+            start_season: native_scenario_value(drivers.season),
+            scenario_year_speed: native_scenario_value(drivers.year_speed),
+            scenario_climate: native_scenario_value(drivers.climate),
+            scenario_rain: native_scenario_value(drivers.rain),
+            scenario_lightning: native_scenario_value(drivers.lightning),
+            scenario_wind: native_scenario_value(drivers.wind),
+            scenario_meteorite: native_scenario_value(drivers.meteorite),
+            scenario_volcano: native_scenario_value(drivers.volcano),
+            scenario_earthquake: native_scenario_value(drivers.earthquake),
+            precipitation_material: native_material_name(&drivers.precipitation),
+            no_gamma: u8::from(environment.no_gamma),
+            no_initialize: u8::from(drivers.no_initialize),
+            scenario_no_gamma: u8::from(drivers.no_gamma),
+            initial_rain_gate_valid: 0,
+            precipitation_material_len: drivers.precipitation.len().min(15) as u8,
+            reserved: [0; 3],
+        }
+    }
+
+    #[test]
+    fn runtime_weather_comparison_covers_native_state_and_future_drivers() {
+        // C4Weather.cpp:72-139 consumes these live fields and C4S inputs;
+        // C4Game.cpp:1907-1911 owns the three weather tick phases.
+        let drivers = weather_drivers();
+        let mut rust = EnvironmentSettings::new(35);
+        rust.wind_target = -9;
+        rust.temperature = -15;
+        rust.temperature_range = 22;
+        rust.climate = 25;
+        rust.season = 41;
+        rust.year_speed = 17;
+        rust.season_delay = 123;
+        rust.lightning = 27;
+        rust.meteorite = 24;
+        rust.volcano = 25;
+        rust.earthquake = 26;
+        rust.no_gamma = false;
+        let frame = 1_234;
+        apply_legacy_weather_metadata(&mut rust, &drivers, None, frame);
+        let matching = matching_native_weather(&rust, &drivers, frame);
+
+        assert_eq!(
+            runtime_weather_mismatch(&rust, Some(&drivers), None, frame, &matching),
+            None
+        );
+
+        let mutations: &[(&str, fn(&mut LcEngineRuntimeWeatherSnapshot))] = &[
+            ("tick_10", |state| state.tick_10 += 1),
+            ("tick_35", |state| state.tick_35 += 1),
+            ("tick_1000", |state| state.tick_1000 += 1),
+            ("season", |state| state.season += 1),
+            ("year_speed", |state| state.year_speed += 1),
+            ("season_delay", |state| state.season_delay += 1),
+            ("wind", |state| state.wind += 1),
+            ("wind_target", |state| state.wind_target += 1),
+            ("temperature", |state| state.temperature += 1),
+            ("temperature_range", |state| state.temperature_range += 1),
+            ("climate", |state| state.climate += 1),
+            ("meteorite_level", |state| state.meteorite_level += 1),
+            ("volcano_level", |state| state.volcano_level += 1),
+            ("earthquake_level", |state| state.earthquake_level += 1),
+            ("lightning_level", |state| state.lightning_level += 1),
+            ("no_gamma", |state| state.no_gamma ^= 1),
+            ("no_initialize", |state| state.no_initialize ^= 1),
+            ("scenario_no_gamma", |state| state.scenario_no_gamma ^= 1),
+            ("start_season.standard", |state| {
+                state.start_season.standard += 1
+            }),
+            ("start_season.minimum", |state| {
+                state.start_season.minimum += 1
+            }),
+            ("scenario_year_speed.random", |state| {
+                state.scenario_year_speed.random += 1
+            }),
+            ("scenario_climate.maximum", |state| {
+                state.scenario_climate.maximum += 1
+            }),
+            ("scenario_rain.standard", |state| {
+                state.scenario_rain.standard += 1
+            }),
+            ("scenario_lightning.random", |state| {
+                state.scenario_lightning.random += 1
+            }),
+            ("scenario_wind.minimum", |state| {
+                state.scenario_wind.minimum += 1
+            }),
+            ("scenario_meteorite.maximum", |state| {
+                state.scenario_meteorite.maximum += 1
+            }),
+            ("scenario_volcano.standard", |state| {
+                state.scenario_volcano.standard += 1
+            }),
+            ("scenario_earthquake.random", |state| {
+                state.scenario_earthquake.random += 1
+            }),
+            ("precipitation_material", |state| {
+                state.precipitation_material[0] ^= 1
+            }),
+            ("precipitation_material_len", |state| {
+                state.precipitation_material_len += 1
+            }),
+        ];
+
+        for &(field, mutate) in mutations {
+            let mut cpp = matching;
+            mutate(&mut cpp);
+            let detail = runtime_weather_mismatch(&rust, Some(&drivers), None, frame, &cpp)
+                .unwrap_or_else(|| panic!("{field} mismatch must fail"));
+            assert!(
+                detail.starts_with(&format!("weather {field} rust ")),
+                "unexpected {field} diagnostic: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_weather_comparison_uses_the_captured_initial_rain_gate() {
+        // C4Weather.cpp:49-57 evaluates Rain once for the cloud gate and then
+        // separately per cloud; validation must capture, never repeat, it.
+        let mut drivers = weather_drivers();
+        drivers.rain = weather_scenario_value(0, 50, 0, 100);
+        let mut rust = EnvironmentSettings::new(0);
+        apply_legacy_weather_metadata(&mut rust, &drivers, Some(37), 0);
+        let mut cpp = matching_native_weather(&rust, &drivers, 0);
+        cpp.initial_rain_gate = 37;
+        cpp.initial_rain_gate_valid = 1;
+
+        assert_eq!(
+            runtime_weather_mismatch(&rust, Some(&drivers), Some(37), 0, &cpp),
+            None
+        );
+
+        cpp.initial_rain_gate += 1;
+        assert_eq!(
+            runtime_weather_mismatch(&rust, Some(&drivers), Some(37), 0, &cpp),
+            Some("weather initial_rain_gate rust 37, cpp 38".into())
+        );
+    }
+
+    #[test]
+    fn weather_init_latches_the_existing_rain_draw_without_consuming_another() {
+        // C4Weather.cpp:36-64 makes nine scenario-value draws for this
+        // zero-cloud fixture when rain is enabled, and eight when
+        // NoInitialize skips the single gate draw; each cloud adds three.
+        let mut drivers = weather_drivers();
+        drivers.rain = weather_scenario_value(1, 0, 0, 100);
+        let mut engine = Engine::with_seed(7);
+        let before = engine.debug_rng_clone().count;
+        engine
+            .apply_weather_init(&drivers)
+            .expect("weather init succeeds");
+        assert_eq!(engine.debug_rng_clone().count - before, 9);
+        assert_eq!(engine.weather_initial_rain_gate, Some(1));
+
+        drivers.no_initialize = true;
+        let before = engine.debug_rng_clone().count;
+        engine
+            .apply_weather_init(&drivers)
+            .expect("NoInitialize weather init succeeds");
+        assert_eq!(engine.debug_rng_clone().count - before, 8);
+        assert_eq!(engine.weather_initial_rain_gate, None);
+    }
+
+    #[test]
+    fn runtime_weather_comparison_covers_legacy_derived_and_absent_fields() {
+        // C4Weather.cpp:72-101 consumes the retained Wind/StartSeason C4S
+        // values; C4Weather.h:32-36 has no extra scheduler/time/sky fields.
+        let mut drivers = weather_drivers();
+        drivers.rain = weather_scenario_value(0, 50, 0, 100);
+        let gate = 37;
+        let mut rust = EnvironmentSettings::new(0);
+        apply_legacy_weather_metadata(&mut rust, &drivers, Some(gate), 0);
+        let mut cpp = matching_native_weather(&rust, &drivers, 0);
+        cpp.initial_rain_gate = gate;
+        cpp.initial_rain_gate_valid = 1;
+
+        assert_eq!(
+            runtime_weather_mismatch(&rust, Some(&drivers), Some(gate), 0, &cpp),
+            None
+        );
+
+        let mutations: &[(&str, fn(&mut EnvironmentSettings))] = &[
+            ("base_wind", |state| state.base_wind += 1),
+            ("wind_variation", |state| state.wind_variation += 1),
+            ("wind_period", |state| state.wind_period += 1),
+            ("wind_update_interval", |state| {
+                state.wind_update_interval += 1
+            }),
+            ("wind_update_timer", |state| state.wind_update_timer += 1),
+            ("wind_min", |state| state.wind_min += 1),
+            ("wind_max", |state| state.wind_max += 1),
+            ("season_min", |state| state.season_min += 1),
+            ("season_max", |state| state.season_max += 1),
+            ("temperature_variation", |state| {
+                state.temperature_variation += 1
+            }),
+            ("temperature_period", |state| state.temperature_period += 1),
+            ("temperature_phase", |state| state.temperature_phase += 1),
+            ("time_of_day", |state| state.time_of_day += 1),
+            ("time_speed", |state| state.time_speed += 1),
+            ("precipitation", |state| state.precipitation += 1),
+            ("precipitation_strength", |state| {
+                state.precipitation_strength += 1
+            }),
+            ("sky_color", |state| {
+                state.sky_color = Some(crate::RgbColor::new(1, 2, 3))
+            }),
+        ];
+
+        for &(field, mutate) in mutations {
+            let mut changed = rust;
+            mutate(&mut changed);
+            let detail = runtime_weather_mismatch(&changed, Some(&drivers), Some(gate), 0, &cpp)
+                .unwrap_or_else(|| panic!("{field} mismatch must fail"));
+            assert!(
+                detail.starts_with(&format!("weather {field} rust ")),
+                "unexpected {field} diagnostic: {detail}"
+            );
+        }
+    }
+
+    fn compare_empty_runtime_frame(
+        runtime: &mut RuntimeHandle,
+        frame: u64,
+        error_out: *mut *mut c_char,
+    ) -> bool {
+        let rng = runtime.engine.debug_rng_clone();
+        compare_empty_runtime_frame_with_rng(runtime, frame, rng.hold, rng.count, error_out)
+    }
+
+    fn compare_empty_runtime_frame_with_rng(
+        runtime: &mut RuntimeHandle,
+        frame: u64,
+        rng_hold: u32,
+        rng_count: i32,
+        error_out: *mut *mut c_char,
+    ) -> bool {
+        lc_engine_runtime_compare_snapshot(
+            runtime,
+            frame,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            rng_hold,
+            rng_count,
+            error_out,
+        )
+    }
+
+    #[test]
+    fn runtime_comparison_fails_closed_without_same_frame_weather() {
+        // RustEngineBridge.cpp:2127-2154 is the normal live comparison call;
+        // an unpatched pinned bridge must fail instead of omitting weather.
+        let mut runtime = RuntimeHandle::new();
+        let mut error_ptr = ptr::null_mut();
+
+        assert!(!compare_empty_runtime_frame(
+            &mut runtime,
+            0,
+            &mut error_ptr
+        ));
+        assert!(!error_ptr.is_null());
+        let detail = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        lc_engine_string_free(error_ptr);
+        assert_eq!(detail, "frame 0: native weather snapshot missing");
+    }
+
+    #[test]
+    fn runtime_comparison_consumes_supplied_same_frame_weather() {
+        // RustEngineBridge.cpp:2197-2207 after oracle-weather.patch supplies
+        // and compares the same post-C4Weather::Execute frame; the payload is
+        // a one-shot value.
+        let mut runtime = RuntimeHandle::new();
+        let environment = runtime.engine.environment();
+        let drivers = runtime.engine.legacy_weather_init();
+        let mut environment = environment;
+        apply_legacy_weather_metadata(&mut environment, &drivers, None, 0);
+        runtime.engine.set_environment(environment);
+        let weather = matching_native_weather(&environment, &drivers, 0);
+        let mut error_ptr = ptr::null_mut();
+
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            0,
+            &weather,
+            &mut error_ptr,
+        ));
+        assert!(error_ptr.is_null());
+        assert!(compare_empty_runtime_frame(&mut runtime, 0, &mut error_ptr));
+        assert!(error_ptr.is_null());
+        assert!(runtime.pending_weather.is_none());
+    }
+
+    #[test]
+    fn runtime_comparison_matches_weather_after_advancing_a_live_frame() {
+        // RustEngineBridge.cpp:2197-2207 after oracle-weather.patch supplies
+        // frame 1 to the ordinary advancing comparison branch.
+        let mut runtime = RuntimeHandle::new();
+        let drivers = runtime.engine.legacy_weather_init();
+        let mut initial_environment = runtime.engine.environment();
+        apply_legacy_weather_metadata(&mut initial_environment, &drivers, None, 1);
+        runtime.engine.set_environment(initial_environment);
+
+        let mut expected = RuntimeHandle::new();
+        expected.engine.set_environment(initial_environment);
+        expected.advance_to_frame(1).expect("frame 1 advances");
+        let expected_environment = expected.engine.environment();
+        let weather = matching_native_weather(&expected_environment, &drivers, 1);
+        let rng = expected.engine.debug_rng_clone();
+        let mut error_ptr = ptr::null_mut();
+
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            1,
+            &weather,
+            &mut error_ptr,
+        ));
+        assert!(compare_empty_runtime_frame_with_rng(
+            &mut runtime,
+            1,
+            rng.hold,
+            rng.count,
+            &mut error_ptr,
+        ));
+        assert!(error_ptr.is_null());
+        assert_eq!(runtime.engine.frame(), 1);
+        assert!(runtime.pending_weather.is_none());
+    }
+
+    #[test]
+    fn runtime_weather_supply_rejects_a_duplicate_pending_frame() {
+        // RustEngineBridge.cpp:2197-2207 after oracle-weather.patch submits
+        // exactly once immediately before compare; accepting a replacement
+        // would hide bridge skew.
+        let mut runtime = RuntimeHandle::new();
+        let weather = LcEngineRuntimeWeatherSnapshot {
+            abi_version: RUNTIME_WEATHER_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32,
+            ..LcEngineRuntimeWeatherSnapshot::default()
+        };
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            7,
+            &weather,
+            &mut error_ptr,
+        ));
+
+        assert!(!lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            7,
+            &weather,
+            &mut error_ptr,
+        ));
+        let detail = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        lc_engine_string_free(error_ptr);
+        assert_eq!(
+            detail,
+            "native weather snapshot already pending for frame 7"
+        );
+    }
+
+    #[test]
+    fn runtime_weather_supply_rejects_wrong_abi_and_size() {
+        let expected_size = std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32;
+        let cases = [
+            (
+                LcEngineRuntimeWeatherSnapshot {
+                    abi_version: RUNTIME_WEATHER_ABI_VERSION + 1,
+                    struct_size: expected_size,
+                    ..LcEngineRuntimeWeatherSnapshot::default()
+                },
+                format!(
+                    "native weather ABI version {} does not match {}",
+                    RUNTIME_WEATHER_ABI_VERSION + 1,
+                    RUNTIME_WEATHER_ABI_VERSION
+                ),
+            ),
+            (
+                LcEngineRuntimeWeatherSnapshot {
+                    abi_version: RUNTIME_WEATHER_ABI_VERSION,
+                    struct_size: expected_size - 1,
+                    ..LcEngineRuntimeWeatherSnapshot::default()
+                },
+                format!(
+                    "native weather snapshot size {} does not match {expected_size}",
+                    expected_size - 1
+                ),
+            ),
+        ];
+
+        for (weather, expected) in cases {
+            let mut runtime = RuntimeHandle::new();
+            let mut error_ptr = ptr::null_mut();
+            assert!(!lc_engine_runtime_supply_weather_snapshot(
+                &mut runtime,
+                0,
+                &weather,
+                &mut error_ptr,
+            ));
+            let detail = unsafe { CStr::from_ptr(error_ptr) }
+                .to_string_lossy()
+                .into_owned();
+            lc_engine_string_free(error_ptr);
+            assert_eq!(detail, expected);
+            assert!(runtime.pending_weather.is_none());
+        }
+    }
+
+    #[test]
+    fn runtime_comparison_rejects_a_weather_snapshot_for_another_frame() {
+        let mut runtime = RuntimeHandle::new();
+        let weather = LcEngineRuntimeWeatherSnapshot {
+            abi_version: RUNTIME_WEATHER_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32,
+            ..LcEngineRuntimeWeatherSnapshot::default()
+        };
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            1,
+            &weather,
+            &mut error_ptr,
+        ));
+
+        assert!(!compare_empty_runtime_frame(
+            &mut runtime,
+            0,
+            &mut error_ptr
+        ));
+        let detail = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        lc_engine_string_free(error_ptr);
+        assert_eq!(detail, "frame 0: native weather snapshot is for frame 1");
+        assert!(runtime.pending_weather.is_none());
+    }
+
+    #[test]
+    fn runtime_state_import_clears_a_pending_weather_snapshot() {
+        // C4Weather.cpp:287-301 restores live weather as part of game state;
+        // a payload collected before that boundary must not survive it.
+        let mut runtime = RuntimeHandle::new();
+        let mut error_ptr = ptr::null_mut();
+        let state_ptr = lc_engine_runtime_export_state_json(&mut runtime, &mut error_ptr);
+        assert!(!state_ptr.is_null());
+        let state = unsafe { CStr::from_ptr(state_ptr) }.to_owned();
+        lc_engine_string_free(state_ptr);
+
+        let weather = LcEngineRuntimeWeatherSnapshot {
+            abi_version: RUNTIME_WEATHER_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32,
+            ..LcEngineRuntimeWeatherSnapshot::default()
+        };
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            0,
+            &weather,
+            &mut error_ptr,
+        ));
+        assert!(runtime.pending_weather.is_some());
+
+        assert!(lc_engine_runtime_import_state_json(
+            &mut runtime,
+            state.as_ptr(),
+            &mut error_ptr,
+        ));
+        assert!(runtime.pending_weather.is_none());
+    }
+
+    #[test]
+    fn runtime_reset_clears_a_pending_weather_snapshot() {
+        let mut runtime = RuntimeHandle::new();
+        let weather = LcEngineRuntimeWeatherSnapshot {
+            abi_version: RUNTIME_WEATHER_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32,
+            ..LcEngineRuntimeWeatherSnapshot::default()
+        };
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            0,
+            &weather,
+            &mut error_ptr,
+        ));
+        assert!(runtime.pending_weather.is_some());
+
+        assert!(lc_engine_runtime_reset(&mut runtime, &mut error_ptr));
+        assert!(error_ptr.is_null());
+        assert!(runtime.pending_weather.is_none());
+    }
+
+    #[test]
+    fn runtime_comparison_reports_the_weather_field_and_frame() {
+        // C4Weather.h:32-36 is independent of the object list; the normal
+        // bridge report must identify the first field at its compared frame.
+        let mut runtime = RuntimeHandle::new();
+        let drivers = weather_drivers();
+        let environment = EnvironmentSettings::new(0);
+        runtime.engine.set_environment(environment);
+        let mut weather = matching_native_weather(&environment, &drivers, 0);
+        weather.wind = 1;
+        let mut error_ptr = ptr::null_mut();
+
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            0,
+            &weather,
+            &mut error_ptr,
+        ));
+        assert!(!compare_empty_runtime_frame(
+            &mut runtime,
+            0,
+            &mut error_ptr
+        ));
+        let detail = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        lc_engine_string_free(error_ptr);
+        assert_eq!(detail, "frame 0: weather wind rust 0, cpp 1");
+    }
+
+    #[test]
+    fn runtime_comparison_detects_a_rust_weather_fault_before_object_state() {
+        // C4Weather.cpp:94-102 advances Wind before object-independent state
+        // is reported; perturbing Rust must fail with an empty object list.
+        let mut runtime = RuntimeHandle::new();
+        let drivers = runtime.engine.legacy_weather_init();
+        let mut matching_environment = runtime.engine.environment();
+        apply_legacy_weather_metadata(&mut matching_environment, &drivers, None, 0);
+        runtime.engine.set_environment(matching_environment);
+        let weather = matching_native_weather(&matching_environment, &drivers, 0);
+
+        let mut faulted = matching_environment;
+        faulted.wind += 1;
+        faulted.wind_target += 1;
+        runtime.engine.set_environment(faulted);
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            0,
+            &weather,
+            &mut error_ptr,
+        ));
+        assert!(!compare_empty_runtime_frame(
+            &mut runtime,
+            0,
+            &mut error_ptr
+        ));
+        let detail = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        lc_engine_string_free(error_ptr);
+        assert_eq!(detail, "frame 0: weather wind rust 1, cpp 0");
     }
 
     #[test]

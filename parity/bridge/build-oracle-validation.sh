@@ -44,12 +44,30 @@ done
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ORACLE_ROOT=$(cd "$ORACLE_ROOT" && pwd)
+ORACLE_PATCH="$REPO_ROOT/parity/bridge/oracle-weather.patch"
 
 # The oracle must be at the pin. A drifted checkout is a *wrong* oracle, not a
 # slightly stale one, so this is a hard error rather than a warning.
 head=$(git -C "$ORACLE_ROOT" rev-parse HEAD)
 if [ "$head" != "$PIN" ]; then
 	echo "error: $ORACLE_ROOT is at $head, not the pin $PIN" >&2
+	exit 1
+fi
+
+# Keep the oracle commit fixed while layering the reviewed weather transport
+# instrumentation needed by this checkout. Refuse a partial or drifted patch:
+# neither applying nor cleanly reversing the complete patch is trustworthy.
+if [ ! -f "$ORACLE_PATCH" ]; then
+	echo "error: missing oracle weather patch: $ORACLE_PATCH" >&2
+	exit 1
+fi
+if git -C "$ORACLE_ROOT" apply --check "$ORACLE_PATCH" >/dev/null 2>&1; then
+	git -C "$ORACLE_ROOT" apply "$ORACLE_PATCH"
+	echo "==> applied the oracle weather instrumentation patch"
+elif git -C "$ORACLE_ROOT" apply --reverse --check "$ORACLE_PATCH" >/dev/null 2>&1; then
+	echo "==> oracle weather instrumentation patch already applied"
+else
+	echo "error: oracle weather patch is partially applied or does not match $PIN" >&2
 	exit 1
 fi
 

@@ -295,6 +295,53 @@ typedef struct LcEngineRuntimeEnvironmentState {
     uint8_t sky_color_b;
 } LcEngineRuntimeEnvironmentState;
 
+#define LC_ENGINE_RUNTIME_WEATHER_ABI_VERSION 1u
+#define LC_ENGINE_RUNTIME_PRECIPITATION_CAPACITY 16u
+
+typedef struct LcEngineRuntimeScenarioValue {
+    int32_t standard;
+    int32_t random;
+    int32_t minimum;
+    int32_t maximum;
+} LcEngineRuntimeScenarioValue;
+
+typedef struct LcEngineRuntimeWeatherSnapshot {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    int32_t tick_10;
+    int32_t tick_35;
+    int32_t tick_1000;
+    int32_t season;
+    int32_t year_speed;
+    int32_t season_delay;
+    int32_t wind;
+    int32_t wind_target;
+    int32_t temperature;
+    int32_t temperature_range;
+    int32_t climate;
+    int32_t meteorite_level;
+    int32_t volcano_level;
+    int32_t earthquake_level;
+    int32_t lightning_level;
+    int32_t initial_rain_gate;
+    LcEngineRuntimeScenarioValue start_season;
+    LcEngineRuntimeScenarioValue scenario_year_speed;
+    LcEngineRuntimeScenarioValue scenario_climate;
+    LcEngineRuntimeScenarioValue scenario_rain;
+    LcEngineRuntimeScenarioValue scenario_lightning;
+    LcEngineRuntimeScenarioValue scenario_wind;
+    LcEngineRuntimeScenarioValue scenario_meteorite;
+    LcEngineRuntimeScenarioValue scenario_volcano;
+    LcEngineRuntimeScenarioValue scenario_earthquake;
+    uint8_t precipitation_material[LC_ENGINE_RUNTIME_PRECIPITATION_CAPACITY];
+    uint8_t no_gamma;
+    uint8_t no_initialize;
+    uint8_t scenario_no_gamma;
+    uint8_t initial_rain_gate_valid;
+    uint8_t precipitation_material_len;
+    uint8_t reserved[3];
+} LcEngineRuntimeWeatherSnapshot;
+
 typedef struct LcEngineRuntimeObjectStateArray LcEngineRuntimeObjectStateArray;
 typedef struct LcEngineRuntimeLandscapeArray LcEngineRuntimeLandscapeArray;
 typedef struct LcEngineRuntimePathResult LcEngineRuntimePathResult;
@@ -311,6 +358,12 @@ LcEngineRuntimeObjectStateSlice lc_engine_runtime_object_states_slice(
     const LcEngineRuntimeObjectStateArray *buffer);
 void lc_engine_runtime_object_states_free(
     LcEngineRuntimeObjectStateArray *buffer);
+
+bool lc_engine_runtime_supply_weather_snapshot(
+    LcEngineRuntimeHandle *handle,
+    uint64_t frame,
+    const LcEngineRuntimeWeatherSnapshot *snapshot,
+    char **error_message);
 
 bool lc_engine_runtime_compare_snapshot(
     LcEngineRuntimeHandle *handle,

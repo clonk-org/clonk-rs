@@ -308,7 +308,7 @@ jobs:
             apt: libasound2-dev libudev-dev
             command: |
               failed=0
-              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked || failed=1
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked --features clonk-engine-unit-tests/ffi || failed=1
               cargo xtask parity verify || failed=1
               exit "$failed"
           - name: remaining workspace 1/2
@@ -324,6 +324,7 @@ jobs:
               cargo clippy --version || failed=1
               rustfmt --version || failed=1
               cargo fmt --all -- --check || failed=1
+              cargo clippy -p clonk-engine-unit-tests --tests --features ffi --locked -- -D warnings || failed=1
               # Issue references must name their repository: this one is public,
               # and a bare "#28" collides across clonk-rs and LegacyClonk. The
               # CLO- and M##-P#-L### trackers are not resolvable from this

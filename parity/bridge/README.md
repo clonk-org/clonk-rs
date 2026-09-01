@@ -1,10 +1,11 @@
 # Shadow-diff bridge ABI
 
 `lc_engine_ffi.h` is the C ABI the pinned oracle's `USE_RUST_ENGINE_VALIDATION`
-bridge (`src/rust/RustEngineBridge.cpp`) calls, copied verbatim from the oracle
-commit `7d43b47b7d789b533f32d005e64596e0a07019cd`
-(`rust/include/lc_engine_ffi.h`). It is vendored here so the contract is
-versioned next to the implementation instead of living only in a C++ checkout —
+bridge (`src/rust/RustEngineBridge.cpp`) calls. It starts from the header in
+oracle commit `7d43b47b7d789b533f32d005e64596e0a07019cd`
+(`rust/include/lc_engine_ffi.h`) and carries the current tree's reviewed live
+validation extensions. It is vendored here so the contract is versioned next
+to the implementation instead of living only in a C++ checkout —
 `crates/clonk-engine/src/ffi.rs` (feature `ffi`) is what satisfies it.
 
 This bridge complements the committed primitive golden in
@@ -35,9 +36,15 @@ parity/bridge/build-oracle-validation.sh --oracle-root <path>
 
 That builds the pinned oracle with `-DUSE_RUST_ENGINE_VALIDATION=ON` linking
 **this** tree, rather than the Rust snapshot bundled at the oracle commit. The
-script is not a convenience wrapper — three things have to be true at once or
+script is not a convenience wrapper — four things have to be true at once or
 the build silently uses the wrong engine, or does not configure at all:
 
+- **The pinned source predates this tree's weather transport.** The script
+  applies `parity/bridge/oracle-weather.patch` on top of the unchanged pinned
+  commit. The patch is validation instrumentation only: it captures the
+  already-evaluated rain gate and supplies the native weather payload. The
+  script accepts either a wholly unapplied or a wholly applied patch and
+  rejects partial or otherwise drifted source.
 - **The pinned `CMakeLists.txt` cannot configure this option as shipped.** It
   carries a literal backspace (`0x08`) glued to the `clonk_engine_static` target
   name in all three places it appears, so CMake rejects the name as invalid
@@ -66,6 +73,24 @@ LC_RUST_ENGINE_RECORD=<path> ./clonk    # C++ snapshots as JSON, for triage
 ```
 
 Divergences are reported as `Rust runtime parity mismatch: ...`.
+
+To prove that independently transported weather is active even when no object
+reads it, compare a normal armed run with one that perturbs only the native
+payload's wind value:
+
+```sh
+LC_RUST_ENGINE_RUNTIME=1 ./clonk
+
+LC_RUST_ENGINE_RUNTIME=1 \
+LC_RUST_ENGINE_RUNTIME_WEATHER_FAULT=wind \
+./clonk
+```
+
+The normal run leaves the payload untouched. On an otherwise matching run, the
+fault-injected command must stop at its first comparison with a diagnostic of
+the form
+`frame N: weather wind rust X, cpp Y`; it is a wiring check, not a scenario
+parity result.
 
 ### Counting events across a run
 
@@ -122,20 +147,67 @@ result.
 
 ## Comparison boundary
 
-The normal loop compares the frame number, synchronized RNG ledger, ordered
-live-object snapshots and definition histogram, global effects, particles,
-crew selection and roles, eliminated/known crew ownership, per-player HUD core,
-controls, and network-packet snapshots. Object comparison includes raw fixed
-position, velocity, and rotation state; do not replace those fields with their
-whole-pixel mirrors.
+The normal, non-authoritative loop compares the frame number, synchronized RNG
+ledger, independently executing weather/environment state, ordered live-object
+snapshots and definition histogram, global effects, particles, crew selection
+and roles, eliminated/known crew ownership, per-player HUD core, controls, and
+network-packet snapshots. Object comparison includes raw fixed position,
+velocity, and rotation state; do not replace those fields with their whole-pixel
+mirrors.
 
-Two determinism-critical planes are not transmitted into the normal comparison:
+### Weather/environment handoff
 
-- **Weather/environment state:** `lc_engine_runtime_compare_snapshot` has no
-  environment parameter. `lc_engine_runtime_export_environment` only reads the
-  Rust state for authoritative mode; it does not provide the independently
-  executing C++ values. A clean run says nothing about weather until
-  clonk-org/clonk-rs#1261 is complete.
+The C++ bridge captures `Game.Weather` from `RustEngineBridge::OnFrame`. That
+call is the end-of-frame boundary of a successful `C4Game::Execute`: the
+frame's `C4Weather::Execute` has completed, as have the later landscape,
+player, script, input, rule, game-over, and sync-check work. Immediately before
+the ordinary snapshot comparison, C++ supplies that post-weather/end-of-frame
+payload with `lc_engine_runtime_supply_weather_snapshot`; Rust advances through
+the same frame and compares the payload before its object snapshot.
+
+The versioned, fixed-width payload carries:
+
+- the frame's `iTick10`, `iTick35`, and `iTick1000` phases;
+- live `Season`, `YearSpeed`, `SeasonDelay`, `Wind`, `TargetWind`,
+  `Temperature`, `TemperatureRange`, `Climate`, `MeteoriteLevel`,
+  `VolcanoLevel`, `EarthquakeLevel`, `LightningLevel`, and `NoGamma`;
+- every future-driving `C4SVal` member (`Std`, `Rnd`, `Min`, and `Max`) for
+  `StartSeason`, `YearSpeed`, `Climate`, `Rain`, `Lightning`, `Wind`,
+  `Meteorite`, `Volcano`, and `Earthquake`;
+- scenario `NoInitialize` and weather `NoGamma`, the fixed 16-byte
+  precipitation material name and its length, and the one-time initial rain
+  gate plus a validity flag; and
+- ABI version, the fixed 240-byte structure size, and reserved transport bytes.
+  The version and size are validated before any semantic field is read; the
+  material length and reserved bytes are transport metadata, while the fixed
+  material bytes are the compared value.
+
+The bridge also checks Rust-only storage against the exact legacy invariants it
+represents. `base_wind`, variation and bounds come from the scenario wind
+driver; a nonzero wind random range implies period `2000` and update interval
+`1000` (otherwise both are zero), and the update timer is zero. Season bounds
+come from `StartSeason`. Temperature variation/period/phase and time-of-day/
+speed are zero, and legacy weather has no separate sky color. Precipitation
+strength is the bounded scenario rain base; initialized precipitation is tied
+to the captured rain gate, while `NoInitialize` retains the strength directly.
+This makes those extra Rust fields assertions about C++ state rather than
+uncompared extensions.
+
+`C4Weather::Init` evaluates the initial `Rain` gate before it evaluates any
+per-cloud strengths. The oracle instrumentation records that already-produced
+gate value at the call site and transports it later; it never calls
+`Rain.Evaluate()` again, so observation consumes no synchronized RNG draw. If
+`NoInitialize` skips the evaluation, the validity flag remains false.
+
+The handoff is deliberately fail-closed and one-shot. A missing payload, an ABI
+or size mismatch, a duplicate pending payload, or a payload tagged for another
+frame fails validation. The normal comparison consumes exactly one same-frame
+payload. A semantic mismatch reports the compared frame and the first differing
+weather field, for example `frame 0: weather wind rust 0, cpp 1`.
+Authoritative mode is unchanged and does not use this comparison handoff.
+
+One determinism-critical plane remains outside the normal comparison:
+
 - **Landscape/material state:** each engine generates and mutates its own
   landscape in a normal run, but `runtime_snapshot_mismatch` has no landscape
   checksum or byte-plane comparison. `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE`
