@@ -95,23 +95,14 @@ the fields carried by its comparison ABI matched. The historical
 `parity/reports/goldrush_seed_424242.json` remains scoped to its bundled
 revision.
 
-The weather/environment part added for clonk-org/clonk-rs#1261 is held by the
-FFI contract tests in `crates/clonk-engine/src/ffi.rs`. They pin the fixed-width
-ABI, same-frame one-shot handoff, fail-closed omission and frame skew, every
-live field and future-driving scenario value, the derived legacy-only
-invariants, the carried initial rain gate, and the first-field/frame diagnostic.
-The reviewed oracle patch stores the existing first `Rain.Evaluate()` result
-and branches on that same value, so the observation adds no RNG draw. This is
-code-and-test evidence for the transport and comparison contract; it does not
-assert that a particular live oracle scenario was run successfully.
-
-Pending: clonk-org/clonk-rs#1240 adds the live landscape and material planes.
-clonk-org/clonk-rs#516 owns the missing attached-`DoMovement` raw-state
-differential matrix, and clonk-org/clonk-rs#1243 owns landscape-aware
-`LineConnect` routing. Until those issues close, the bounded primitive golden
-and a clean shadow-diff run do not prove the corresponding parts of the
-simulation promise; the golden's keys are the authoritative inventory of what
-`cargo xtask parity verify` covers.
+Pending: clonk-org/clonk-rs#1261 adds independently evolving weather and
+environment state to the live comparison; clonk-org/clonk-rs#1240 adds the
+live landscape and material planes. clonk-org/clonk-rs#516 owns the missing
+attached-`DoMovement` raw-state differential matrix, and
+clonk-org/clonk-rs#1243 owns landscape-aware `LineConnect` routing. Until those
+issues close, the bounded primitive golden and a clean shadow-diff run do not
+prove the corresponding parts of the simulation promise; the golden's keys are
+the authoritative inventory of what `cargo xtask parity verify` covers.
 
 ### Control
 
@@ -373,8 +364,8 @@ matching what a C++ peer computes, not passing its resource negotiation. The
 entry is kept in the manifest rather than removed, so the limitation is stated
 where the contract is read.
 
-The nine pending evidence entries name eight issues:
-clonk-org/clonk-rs#1240, clonk-org/clonk-rs#516, and
+The ten pending evidence entries name nine issues:
+clonk-org/clonk-rs#1261, clonk-org/clonk-rs#1240, clonk-org/clonk-rs#516, and
 clonk-org/clonk-rs#1243 (simulation),
 clonk-org/clonk-rs#586 (control and transport, once each),
 clonk-org/clonk-rs#583 (transport), clonk-org/clonk-rs#1241 (presentation), and

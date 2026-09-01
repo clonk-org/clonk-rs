@@ -39,13 +39,13 @@
           "kind": "document",
           "value": "parity/bridge/README.md",
           "status": "held",
-          "note": "The current-tree full-scenario C++ shadow-diff bridge is operational (clonk-org/clonk-rs#585). Its normal non-authoritative ABI now carries independently executing weather/environment state; it still does not claim live-landscape coverage."
+          "note": "The current-tree full-scenario C++ shadow-diff bridge is operational (clonk-org/clonk-rs#585). It compares the fields its ABI carries; it does not claim weather or live-landscape coverage."
         },
         {
-          "kind": "test",
-          "value": "crates/clonk-engine/src/ffi.rs (runtime weather shadow-diff contract)",
-          "status": "held",
-          "note": "Fixed-width ABI, same-frame fail-closed handoff, live fields, future drivers, derived legacy invariants, captured rain gate, fault sensitivity, and first-field/frame diagnostics for clonk-org/clonk-rs#1261. This is held test evidence, not a claim that a live oracle scenario passed."
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#1261",
+          "status": "pending",
+          "note": "The live shadow diff does not carry or compare independently evolving weather and environment state."
         },
         {
           "kind": "issue",
