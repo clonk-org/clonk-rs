@@ -1118,7 +1118,13 @@ fn render_runtime_layout_capture(
             )?);
             elements
         }
-        PixelCaptureCase::Hud | PixelCaptureCase::Gameplay => Vec::new(),
+        PixelCaptureCase::Gameplay => {
+            let viewport = snapshot.active_viewports.first().ok_or_else(|| {
+                anyhow::anyhow!("gameplay semantic capture has no active viewport")
+            })?;
+            runtime_capture_global_message_elements(app, viewport, fonts, case.id())?
+        }
+        PixelCaptureCase::Hud => Vec::new(),
         PixelCaptureCase::NetworkLobby | PixelCaptureCase::Loader => unreachable!(),
     };
     let trace = crate::presentation_layout_producers::runtime_base_trace(
@@ -3246,6 +3252,69 @@ mod tests {
         assert_eq!(app.engine.frame(), 180);
         assert_eq!(checkpoint.simulation_seed, 587);
         assert_eq!(checkpoint.render_ordinal, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn gameplay_layout_capture_contains_the_live_tutorial_message() -> Result<()> {
+        // C4Viewport::DrawOverlay unconditionally visits Game.Messages, and
+        // C4GameMessage::Draw lays out the portrait-backed tutorial message
+        // (src/C4Viewport.cpp:836-854; src/C4GameMessage.cpp:99-170,348-353).
+        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let scenario = crate::resolve_next_mission_scenario(
+            &app.scensel.catalog,
+            PixelCaptureCase::Gameplay.scenario(),
+        )
+        .expect("tracked Tutorial02 scenario");
+        let checkpoint = stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Gameplay)?;
+
+        let rendered = render_runtime_layout_capture(
+            &mut app,
+            PixelCaptureCase::Gameplay,
+            checkpoint.render_ordinal,
+        )?;
+        let layout: crate::presentation_layout::LayoutTrace =
+            serde_json::from_slice(&rendered.layout)?;
+        let element = |path| {
+            layout
+                .elements
+                .iter()
+                .find(|element| element.path == path)
+                .unwrap_or_else(|| panic!("missing {path}"))
+        };
+
+        assert_eq!(
+            element("game/viewport/0/message/0/background").rect,
+            crate::presentation_layout::LayoutRect {
+                x: 640,
+                y: 144,
+                width: 290,
+                height: 64,
+            }
+        );
+        assert_eq!(
+            element("game/viewport/0/message/0/portrait").rect,
+            crate::presentation_layout::LayoutRect {
+                x: 640,
+                y: 144,
+                width: 64,
+                height: 64,
+            }
+        );
+        let text = element("game/viewport/0/message/0/text");
+        assert_eq!(
+            text.rect,
+            crate::presentation_layout::LayoutRect {
+                x: 714,
+                y: 144,
+                width: 216,
+                height: 44,
+            }
+        );
+        assert_eq!(
+            text.caption,
+            "Grab the hot air balloon by\npressing 'down'."
+        );
         Ok(())
     }
 
