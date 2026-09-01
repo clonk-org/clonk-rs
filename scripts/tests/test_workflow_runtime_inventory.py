@@ -17,6 +17,9 @@ RELEASE_BUILD_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release-build.y
 RELEASE_PREBUILD_WORKFLOW = (
     REPOSITORY / ".github" / "workflows" / "release-prebuild.yml"
 )
+DEPENDENCY_LICENSES_WORKFLOW = (
+    REPOSITORY / ".github" / "workflows" / "dependency-licenses.yml"
+)
 MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
 MSVC_RUNTIME_VALIDATION = REPOSITORY / "scripts" / "validate-msvc-runtime.sh"
 WINDOWS_INSTALLER = REPOSITORY / "scripts" / "windows-installer.nsi"
@@ -64,6 +67,10 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             RELEASE_WORKFLOW,
             RELEASE_BUILD_WORKFLOW,
             RELEASE_PREBUILD_WORKFLOW,
+            # This one pushes, and still checks out without credentials: it
+            # runs the branch's own generator, so the token reaches the working
+            # tree only in the step that publishes the result.
+            DEPENDENCY_LICENSES_WORKFLOW,
         ):
             source = workflow.read_text(encoding="utf-8")
             blocks = [

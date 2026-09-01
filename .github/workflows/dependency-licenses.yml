@@ -1,0 +1,136 @@
+name: Dependency licenses
+
+# The shipped license corpus is generated from the dependency graph, so it goes
+# stale the moment Cargo.lock moves. `landing.yml`'s hermetic freshness check
+# catches that during admission; a human then has to check the branch out and
+# push the regenerated output, which for a bot's pull request is the whole
+# reason it cannot land by itself. Weekly `lockFileMaintenance` plus the daily
+# compatible-update group makes that a recurring hand-off.
+#
+# Renovate cannot regenerate it: the Mend-hosted app runs no
+# `postUpgradeTasks`. This workflow does it on the bot's own branches instead.
+# Everywhere else it stays skipped, so the corpus remains an explicit reviewed
+# commit for human-authored changes and the admission check keeps guarding it.
+
+on:
+  pull_request:
+    # Exactly the inputs the generated graph reads. A github-actions bump moves
+    # no dependency, so it needs no registry fetch.
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/generate_dependency_licenses.py'
+      - '.github/workflows/dependency-licenses.yml'
+    types: [opened, synchronize, reopened]
+
+# The App token below carries the write. Nothing here needs it from the Actions
+# token, which cannot retrigger a workflow with it anyway.
+permissions:
+  contents: read
+
+concurrency:
+  # One regeneration per branch. A superseded run has nothing to contribute:
+  # the run for the newer head regenerates from the newer lockfile.
+  group: "dependency-licenses-${{ github.event.pull_request.number }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  regenerate:
+    name: Regenerate the dependency license corpus
+    # Renovate's own branches in this repository, and nothing else. A fork
+    # names its head branch whatever it likes, so the `renovate/` prefix alone
+    # would run untrusted code in a job that can mint a write-scoped token.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login == 'renovate[bot]'
+      && startsWith(github.head_ref, 'renovate/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # A `GITHUB_TOKEN` push triggers no workflow, so it would advance the head
+      # to a commit with no checks at all and leave the pull request
+      # permanently blocked -- strictly worse than the red it replaces. An App
+      # installation token is an ordinary actor and retriggers normally.
+      - name: Create regeneration App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      # The head branch itself, not the merge commit: the regeneration has to
+      # be pushed back onto it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 1
+          # The generator this job runs comes from the branch. Keeping the
+          # token out of `.git/config` means only the publishing step below
+          # ever holds it, rather than every command in between.
+          persist-credentials: false
+
+      # No `submodules:` key and no native packages: `cargo fetch` downloads
+      # sources and `cargo metadata` reads manifests. Neither builds anything.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+
+      # The generator reads each package's license text out of the local
+      # registry. The freshness check in `landing.yml` is hermetic precisely to
+      # avoid this; the row that regenerates cannot.
+      - name: Populate the cargo registry
+        run: cargo fetch --locked
+
+      - name: Regenerate the corpus
+        run: python3 scripts/generate_dependency_licenses.py
+
+      - name: Publish a regenerated corpus
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          corpus=(
+            crates/clonk-frontend/src/dependency_licenses.index
+            crates/clonk-frontend/src/dependency_licenses.txt
+          )
+          if git diff --quiet -- "${corpus[@]}"; then
+            echo "dependency license corpus is already current"
+            exit 0
+          fi
+
+          git config user.name "clonk-rs-release[bot]"
+          git config user.email "311066358+clonk-rs-release[bot]@users.noreply.github.com"
+          # Explicit paths, never the whole tree: this row regenerates two
+          # files and must not carry anything else the branch happens to hold.
+          git add -- "${corpus[@]}"
+          git commit -m "chore: regenerate the dependency license corpus"
+
+          git remote set-url origin \
+            "https://x-access-token:${TOKEN}@github.com/${REPOSITORY}.git"
+          if git push \
+            --force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}" \
+            origin "HEAD:refs/heads/${HEAD_REF}"; then
+            echo "pushed a regenerated corpus onto ${HEAD_REF}"
+            exit 0
+          fi
+
+          # Renovate force-pushes the branch whenever it rebases, and on this
+          # repository that happens often. Losing the lease means the branch
+          # already moved, and the run for that head regenerates from the
+          # lockfile it actually carries -- convergence, not a failure.
+          remote=$(git ls-remote origin "refs/heads/${HEAD_REF}" | cut -f1)
+          if [[ "$remote" != "$HEAD_SHA" ]]; then
+            echo "${HEAD_REF} advanced to ${remote:-(deleted)} while regenerating;"
+            echo "the run for that commit publishes instead"
+            exit 0
+          fi
+          exit 1

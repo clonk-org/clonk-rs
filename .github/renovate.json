@@ -11,6 +11,7 @@
   "description": [
     "Dependency updates land without a human. `main` requires no approving review, and every check that decides whether an update is safe — the full test shards, clippy, parity and engine snapshots — runs as the `Landing gate` on the merge-group tree, not on the pull request. A maintainer pressing merge therefore adds no signal that the queue has not already produced, so `automerge` presses it instead.",
     "`platformAutomerge` is what makes that work against a required merge queue: Renovate must not merge the branch through its own API call, it has to hand the pull request to GitHub's native auto-merge, which enqueues an entry. This is Renovate's default and is spelled out because the whole arrangement rests on it.",
+    "`.github/workflows/dependency-licenses.yml` regenerates the shipped license corpus on these branches, because the Mend-hosted app runs no `postUpgradeTasks` and every cargo update would otherwise open red on the `Dependency license corpus` check. It commits as the release App, which Renovate would read as a branch a user modified and then refuse to rebase or update — hence `gitIgnoredAuthors` below.",
     "Two gates deliberately survive. A release still soaks for `minimumReleaseAge` before a pull request exists at all, and the `dependencyDashboardApproval` rules below mean a major or 0.x minor bump opens nothing until a maintainer ticks it — so those are reviewed before they are ever queued, not after."
   ],
   "timezone": "America/Chicago",
@@ -18,6 +19,7 @@
   "automerge": true,
   "platformAutomerge": true,
   "labels": ["dependencies"],
+  "gitIgnoredAuthors": ["311066358+clonk-rs-release[bot]@users.noreply.github.com"],
   "prConcurrentLimit": 5,
   "prHourlyLimit": 0,
   "lockFileMaintenance": {

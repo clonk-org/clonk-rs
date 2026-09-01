@@ -55,8 +55,9 @@ jobs:
 
   # The generated license index follows Cargo.lock. Run its hermetic freshness
   # check while the pull request is still in admission, so a dependency bump
-  # cannot first fail after it has occupied a merge-queue slot. Renovate stays
-  # read-only: the maintainer or bot must commit regenerated output separately.
+  # cannot first fail after it has occupied a merge-queue slot. This job stays
+  # read-only; `dependency-licenses.yml` commits the regenerated output on
+  # Renovate's branches, and a human-authored change regenerates it by hand.
   dependency-license-corpus:
     name: Dependency license corpus
     if: github.event_name == 'pull_request'
