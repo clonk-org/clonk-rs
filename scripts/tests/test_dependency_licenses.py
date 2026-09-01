@@ -5,9 +5,13 @@ row that has not fetched them does not have. These checks are deliberately
 hermetic instead: they compare the generated index against `Cargo.lock`, which
 is the file that actually changes when a dependency is added, removed or
 bumped, so a stale corpus is caught wherever they run.
+
+The last class covers the workflow that keeps the corpus current on Renovate's
+own branches, because a bot cannot answer the freshness check by hand.
 """
 
 import pathlib
+import re
 import tomllib
 import unittest
 
@@ -16,6 +20,7 @@ from _repo import REPOSITORY
 CORPUS = REPOSITORY / "crates/clonk-frontend/src/dependency_licenses.txt"
 INDEX = REPOSITORY / "crates/clonk-frontend/src/dependency_licenses.index"
 GENERATOR = REPOSITORY / "scripts/generate_dependency_licenses.py"
+REGENERATION_WORKFLOW = REPOSITORY / ".github/workflows/dependency-licenses.yml"
 
 
 def index_entries() -> list[tuple[str, str, str]]:
@@ -95,6 +100,83 @@ class DependencyLicenseCorpusTests(unittest.TestCase):
         generator = GENERATOR.read_text(encoding="utf-8")
         self.assertIn("python3 scripts/generate_dependency_licenses.py", generator)
         self.assertIn("--check", generator)
+
+
+class RenovateRegenerationWorkflowTests(unittest.TestCase):
+    """Renovate moves Cargo.lock, so something has to move the corpus with it.
+
+    The Mend-hosted app runs no `postUpgradeTasks`, so it cannot regenerate the
+    corpus itself, and every cargo pull request it opens would otherwise sit red
+    on the freshness check above until a human pushed the output by hand.
+    """
+
+    def workflow(self) -> str:
+        return REGENERATION_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_it_regenerates_only_on_renovate_branches_of_this_repository(self):
+        # A fork chooses its own head branch name, so the `renovate/` prefix on
+        # its own would hand a write-scoped token to untrusted code.
+        workflow = self.workflow()
+
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            workflow,
+        )
+        self.assertIn(
+            "github.event.pull_request.user.login == 'renovate[bot]'", workflow
+        )
+        self.assertIn("startsWith(github.head_ref, 'renovate/')", workflow)
+
+    def test_it_pushes_with_an_app_token_rather_than_the_actions_token(self):
+        # A `GITHUB_TOKEN` push retriggers nothing, so it would advance the head
+        # to a commit carrying no checks and leave the pull request permanently
+        # blocked -- strictly worse than the red it replaces.
+        workflow = self.workflow()
+
+        self.assertIn("actions/create-github-app-token@", workflow)
+        self.assertIn("client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}", workflow)
+        self.assertIn("private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}", workflow)
+        self.assertIn("permission-contents: write", workflow)
+        self.assertNotIn("secrets.GITHUB_TOKEN", workflow)
+
+    def test_it_fetches_the_crate_sources_the_generator_reads(self):
+        # The freshness check is hermetic precisely because it has no registry;
+        # the row that regenerates needs one, and needs no build to get it.
+        workflow = self.workflow()
+
+        self.assertIn("cargo fetch --locked", workflow)
+        self.assertIn("python3 scripts/generate_dependency_licenses.py", workflow)
+        self.assertIn("- 'Cargo.lock'", workflow)
+        self.assertIn("- '**/Cargo.toml'", workflow)
+
+    def test_it_commits_only_the_generated_corpus(self):
+        workflow = self.workflow()
+
+        for path in (CORPUS, INDEX):
+            self.assertIn(str(path.relative_to(REPOSITORY)), workflow)
+        self.assertNotIn("git add -A", workflow)
+        self.assertNotIn("git add .", workflow)
+
+    def test_its_commit_subject_is_a_conventional_commit(self):
+        # The queue squashes, and `squash_merge_commit_message` is
+        # COMMIT_MESSAGES, so this subject reaches the body of a commit on main.
+        workflow = self.workflow()
+
+        subject = re.search(r'git commit -m "([^"]+)"', workflow)
+        self.assertIsNotNone(subject, "the workflow makes no commit")
+        self.assertRegex(
+            subject.group(1),
+            r"^(build|chore|ci|docs|feat|fix|perf|refactor|style|test)!?: .+",
+        )
+
+    def test_a_renovate_force_push_supersedes_the_run_instead_of_failing_it(self):
+        # Renovate force-pushes the branch whenever it rebases, which on this
+        # repository is often. The run for the new head regenerates anyway, so
+        # losing the lease is convergence, not a failure to report.
+        workflow = self.workflow()
+
+        self.assertIn("--force-with-lease=", workflow)
+        self.assertIn("synchronize", workflow)
 
 
 if __name__ == "__main__":

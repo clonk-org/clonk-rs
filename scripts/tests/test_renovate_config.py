@@ -46,6 +46,18 @@ class RenovateConfigTests(unittest.TestCase):
 
         self.assertTrue(config["platformAutomerge"])
 
+    def test_the_corpus_regeneration_commit_does_not_freeze_the_branch(self):
+        # Renovate treats a branch whose head it did not author as modified and
+        # then refuses to rebase or update it. The regeneration workflow commits
+        # as the release App, so without this exemption the first regeneration
+        # would strand the branch it was meant to unblock.
+        config = load_config()
+
+        self.assertIn(
+            "311066358+clonk-rs-release[bot]@users.noreply.github.com",
+            config["gitIgnoredAuthors"],
+        )
+
     def test_lock_file_maintenance_states_its_own_cadence(self):
         # Renovate defaults `lockFileMaintenance.schedule` to
         # ["before 4am on monday"], and a child object's own schedule wins over
