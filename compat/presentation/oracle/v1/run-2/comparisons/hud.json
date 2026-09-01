@@ -5,7 +5,7 @@
   },
   "case_id": "hud",
   "comparator": {
-    "binary_sha256": "4215b4a1afd2a4bfddf09ebd3b90c18707450d9c29cc12dde18f99881d7934c1",
+    "binary_sha256": "28a623b549f29e926505bbad5355f2b39e7c3d7c2f56dfa4b9a22126286f6139",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",
