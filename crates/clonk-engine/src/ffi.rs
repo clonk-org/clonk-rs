@@ -7971,6 +7971,7 @@ ByClient=0
                         style: 0,
                         equal_item_height: false,
                         permanent: false,
+                        close_command: crate::ObjectMenuCloseCommand::None,
                         location: None,
                         location_reset_generation: 0,
                         runtime_id: 0,

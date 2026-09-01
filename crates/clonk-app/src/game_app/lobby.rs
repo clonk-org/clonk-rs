@@ -4715,6 +4715,7 @@ impl GameApp {
             fallback: self.startup_game_graphics_resources(),
             liquid_animation_enabled: self.assets.liquid_animation_enabled(),
         };
+        let global_system_scripts = self.global_scripts_for_session();
         if let Some(staged) = self.staged_network_host_scenario.as_ref() {
             let frontend = staged.frontend.clone();
             let scenario_path = frontend
@@ -4728,6 +4729,7 @@ impl GameApp {
                 .collect::<Vec<_>>();
             return Ok(LobbyPreloadJob {
                 graphics,
+                global_system_scripts,
                 source: LobbyPreloadJobSource::Host {
                     frontend,
                     scenario_path,
@@ -4742,6 +4744,7 @@ impl GameApp {
                 .ok_or_else(|| "selected host scenario has no preload key".to_string())?;
             return Ok(LobbyPreloadJob {
                 graphics,
+                global_system_scripts,
                 source: LobbyPreloadJobSource::CatalogHost { frontend, key },
             });
         }
@@ -4786,6 +4789,7 @@ impl GameApp {
         .map_err(|error| error.to_string())?;
         Ok(LobbyPreloadJob {
             graphics,
+            global_system_scripts,
             source: LobbyPreloadJobSource::Client {
                 join_data,
                 scenario_resources,
@@ -4801,7 +4805,11 @@ impl GameApp {
     pub(crate) fn run_lobby_preload_job(
         job: LobbyPreloadJob,
     ) -> std::result::Result<LobbyPreloadArtifact, String> {
-        let LobbyPreloadJob { graphics, source } = job;
+        let LobbyPreloadJob {
+            graphics,
+            global_system_scripts,
+            source,
+        } = job;
         match source {
             LobbyPreloadJobSource::Host {
                 frontend,
@@ -4841,11 +4849,13 @@ impl GameApp {
             LobbyPreloadJobSource::CatalogHost { frontend, key } => {
                 let resolver =
                     InstallDefinitionResolver::new(graphics.app_paths.clone().map(Arc::new));
-                let scenario = load_scenario_with_definition_load(
+                let scenario = load_scenario_with_definition_load_and_progress(
                     &key.scenario_path,
                     &resolver,
                     &key.languages,
                     &key.definition_load,
+                    &global_system_scripts,
+                    |_, _| {},
                 )
                 .map_err(|error| format!("failed to preload host scenario: {error}"))?;
                 let definition_paths = scenario
@@ -4968,7 +4978,7 @@ impl GameApp {
                         .unwrap_or_default();
                     let random_seed = u64::from(join_data.parameters.random_seed as u32);
                     let scenario =
-                        Scenario::load_network_from_path_with_languages_and_seed_and_packs(
+                        Scenario::load_network_from_path_with_languages_and_seed_and_packs_and_global_scripts(
                             &working_path,
                             &definition_groups,
                             &material_groups,
@@ -4976,6 +4986,7 @@ impl GameApp {
                             &languages,
                             random_seed,
                             &language_packs,
+                            &global_system_scripts,
                         )
                         .map_err(|error| error.to_string())?;
                     validate_client_network_scenario(&scenario)?;
@@ -7160,72 +7171,38 @@ impl GameApp {
         self.process_classic_lobby_actions(actions)
     }
 
-    /// State the operating mode in the lobby, so the profile is visible
-    /// *before* anyone commits to the session.
-    ///
-    /// Only the host announces, because only the host's setting decides what
-    /// the session actually runs: `session_control_mode` resolves the host's
-    /// `initial_status.control_mode`, and every client adopts the received
-    /// `status.control_mode` rather than applying its own. A joining client
-    /// stating its local profile here would assert a promise about a session
-    /// its configuration has no part in — the host may be running the normal
-    /// profile. Surfacing the *host's* advertised profile to a client is the
-    /// missing half; the reference already carries it as `CompatProfile=`
-    /// (`clonk-network/src/advertise.rs:131-135`) and nothing reads it yet
-    /// (clonk-org/clonk-rs#583, clonk-org/clonk-rs#588).
-    ///
-    /// Only a non-default profile says anything. `CompatProfile::Normal`
-    /// promises nothing and is what every session runs today, so announcing it
-    /// would add a line to a C++-mirrored surface for no information — the
-    /// default lobby stays exactly as it was.
-    fn announce_compat_profile_in_lobby(&mut self) {
+    /// The port-only report shown without changing the C++ lobby's native log.
+    fn compat_profile_lobby_notice_report(&self) -> Option<(String, bool)> {
         if self.config.compat_profile == crate::settings::CompatProfile::Normal {
-            return;
+            return None;
         }
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        let report = if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             // A client never states the session's profile -- the host owns
             // that. What it can answer for is its own request, and
             // clonk-org/clonk-rs#588 forbids letting that be downgraded in
-            // silence, so a request the contract cannot back is reported here
-            // and nowhere else.
-            let report = crate::compat_readiness::blocked_join_report(
+            // silence, so a request the contract cannot back is reported in a
+            // modal notice and nowhere inside the lobby log.
+            crate::compat_readiness::blocked_join_report(self.config.compat_profile.display_name())
+        } else {
+            // clonk-org/clonk-rs#588: a blocked profile is reported and not
+            // claimed, without changing the native lobby surface.
+            let blocked = crate::compat_readiness::blocked_profile_report(
                 self.config.compat_profile.display_name(),
             );
-            if let Some(lobby) = self.network_lobby.as_mut() {
-                for text in report {
-                    lobby.push_log(clonk_frontend::game_lobby::LobbyLogLine {
-                        text,
-                        color: [0xff, 0xd0, 0x60, 0xff],
-                    });
-                }
-            }
-            return;
-        }
-        // clonk-org/clonk-rs#588: the contract's fail-closed readiness rule is
-        // only worth having if the host is told *before* anyone joins. A
-        // blocked profile is reported and not claimed; discovering it mid-round
-        // costs everyone in a lockstep session their round.
-        let report = crate::compat_readiness::blocked_profile_report(
-            self.config.compat_profile.display_name(),
-        );
-        let lines = if report.is_empty() {
-            vec![(
-                format!(
+            if blocked.is_empty() {
+                vec![format!(
                     "Compatibility profile: {}",
                     self.config.compat_profile.display_name()
-                ),
-                [0xff, 0xff, 0xff, 0xff],
-            )]
-        } else {
-            report
-                .into_iter()
-                .map(|text| (text, [0xff, 0xd0, 0x60, 0xff]))
-                .collect()
-        };
-        if let Some(lobby) = self.network_lobby.as_mut() {
-            for (text, color) in lines {
-                lobby.push_log(clonk_frontend::game_lobby::LobbyLogLine { text, color });
+                )]
+            } else {
+                blocked
             }
+        };
+        if report.is_empty() {
+            None
+        } else {
+            let blocked = !crate::compat_readiness::is_ready();
+            Some((report.join("\n"), blocked))
         }
     }
 
@@ -7234,9 +7211,8 @@ impl GameApp {
     /// [`Self::compat_profile`] is what the player *asked for* and is never
     /// rewritten; this is what the contract can currently back. They differ
     /// only while `compat_readiness::blockers` is non-empty, and the difference
-    /// is always reported first — `announce_compat_profile_in_lobby` says so in
-    /// the lobby log, so this is a refusal a player can see rather than a
-    /// silent downgrade (clonk-org/clonk-rs#588).
+    /// is reported in the port-only lobby notice, so this is a refusal a player
+    /// can see rather than a silent downgrade (clonk-org/clonk-rs#588).
     ///
     /// Advertisement and admission are clonk-org/clonk-rs#583's subject; this
     /// is the single honest answer they will read.
@@ -7251,6 +7227,73 @@ impl GameApp {
     }
 
     pub(crate) fn open_network_lobby(&mut self) {
+        if let Err(error) = self.open_network_lobby_with_compat_notice(false) {
+            tracing::error!(%error, "failed to present compatibility-profile lobby notice");
+            self.status_text = format!("Unable to open network lobby: {error}");
+        }
+    }
+
+    pub(crate) fn open_network_lobby_with_compat_notice(
+        &mut self,
+        finish_classic_command_line_host_entry: bool,
+    ) -> Result<(), EngineError> {
+        // Preserve C++ DoLobby ordering: lobby activation and its initial
+        // status acknowledgement precede this port-only child dialog.
+        self.open_network_lobby_admitted();
+        if let Some(existing_finish) =
+            self.dialogs
+                .messages
+                .iter_mut()
+                .find_map(|dialog| match &mut dialog.continuation {
+                    MessageDialogContinuation::CompatProfileLobbyNotice {
+                        finish_classic_command_line_host_entry,
+                    } => Some(finish_classic_command_line_host_entry),
+                    _ => None,
+                })
+        {
+            *existing_finish |= finish_classic_command_line_host_entry;
+            return Ok(());
+        }
+        if let Some((report, blocked)) = self.compat_profile_lobby_notice_report() {
+            if self.console_mode || self.headless {
+                if blocked {
+                    for line in report.lines() {
+                        tracing::error!(message = line, "compatibility-profile notice");
+                    }
+                } else {
+                    tracing::info!(message = %report, "compatibility-profile notice");
+                }
+                if finish_classic_command_line_host_entry {
+                    self.finish_classic_command_line_host_entry()?;
+                }
+                return Ok(());
+            }
+            let icon = if blocked {
+                clonk_frontend::message_dialog::MessageDialogIcon::ERROR
+            } else {
+                clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY
+            };
+            return self.push_message_dialog(
+                clonk_frontend::message_dialog::MessageDialogState::new(
+                    report,
+                    "Compatibility profile",
+                    clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL,
+                    icon,
+                    clonk_frontend::message_dialog::MessageDialogSize::Regular,
+                    false,
+                ),
+                MessageDialogContinuation::CompatProfileLobbyNotice {
+                    finish_classic_command_line_host_entry,
+                },
+            );
+        }
+        if finish_classic_command_line_host_entry {
+            self.finish_classic_command_line_host_entry()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn open_network_lobby_admitted(&mut self) {
         self.close_context_menu_silently();
         self.replace_startup_view(StartupView::NetworkLobby);
         self.menu_state.set_pointer_position(None);
@@ -7271,7 +7314,6 @@ impl GameApp {
             self.scenario_label = "Network lobby unavailable".to_string();
         }
         self.sync_network_lobby_game_option_state();
-        self.announce_compat_profile_in_lobby();
         self.status_text.clear();
         self.acknowledge_initial_lobby_status_if_ready();
     }

@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-1/rust/artifacts/hud.layout.json",
+    "sha256": "8e858b86c227a3f0327ce275b631388e90bf7f3cc4a420892722c0510fd815f8"
+  },
+  "case_id": "hud",
+  "comparator": {
+    "binary_sha256": "28a623b549f29e926505bbad5355f2b39e7c3d7c2f56dfa4b9a22126286f6139",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "layout",
+  "reference": {
+    "path": "run-1/cpp/artifacts/hud.layout.json",
+    "sha256": "8e858b86c227a3f0327ce275b631388e90bf7f3cc4a420892722c0510fd815f8"
+  },
+  "run_id": "run-1",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"hud\",\"comparison\":\"layout\",\"status\":\"match\"}\n"
+}

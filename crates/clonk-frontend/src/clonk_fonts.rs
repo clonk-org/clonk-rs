@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use clonk_graphics::clonk_font::{
     compose_glyph_cell, font_image_lookup_tag, inline_image_token, line_height_for,
     markup_blit_color, scaled_font_image_width, skip_markup_tag, CapturedClonkText,
-    CapturedFontImage, ClonkFont, ClonkFontRole, FontImageProvider, FontImageRef, GlyphCell,
-    TextAlign,
+    CapturedFontImage, ClonkFont, ClonkFontRole, FontAtlasFacet, FontImageProvider, FontImageRef,
+    GlyphCell, PrerenderedFontAtlas, TextAlign,
 };
 use clonk_graphics::{
     ClipperProjection, Color, GammaRamp, GpuBlend, GpuCommand, GpuOuterModulation, GpuSampler,
@@ -1680,16 +1680,21 @@ fn loaded_glyph_cell(
     let pixels = if shadow {
         compose_glyph_cell(&cov, cov_w, cov_h, cell_w, cell_height, at_x, at_y)
     } else {
-        // Same transparent-white padding as the shadowed branch: shadowSize is
-        // 0 here, so C++'s copy loop covers only the bitmap and the rest of the
-        // cell keeps the surface memset (src/C4Surface.cpp:1113).
+        // Untouched padding keeps the transparent-white surface memset, while
+        // every visited bitmap texel is written through SetPixDw; a zero-alpha
+        // write becomes transparent black (src/StdFont.cpp:224-258;
+        // src/C4Surface.cpp:732-733).
         let mut pixels = vec![CELL_PADDING; cell_w.saturating_mul(cell_height)];
         for y in 0..cov_h {
             for x in 0..cov_w {
                 let (target_x, target_y) = (at_x + x, at_y + y);
                 if target_x < cell_w && target_y < cell_height {
-                    pixels[target_y * cell_w + target_x] =
-                        Color::new(255, 255, 255, cov[y * cov_w + x]);
+                    let coverage = cov[y * cov_w + x];
+                    pixels[target_y * cell_w + target_x] = if coverage == 0 {
+                        Color::new(0, 0, 0, 0)
+                    } else {
+                        Color::new(255, 255, 255, coverage)
+                    };
                 }
             }
         }
@@ -1864,8 +1869,11 @@ fn compose_scaled_glyph_cell(
             };
             if let (Some(target_x), Some(target_y)) = (at_x.checked_add(x), at_y.checked_add(y)) {
                 if target_x < cell_w && target_y < cell_h {
-                    cell[target_y * cell_w + target_x] =
-                        Color::new(r as u8, g as u8, b as u8, (255 - out_alpha_inverted) as u8);
+                    cell[target_y * cell_w + target_x] = if out_alpha_inverted == 255 {
+                        Color::new(0, 0, 0, 0)
+                    } else {
+                        Color::new(r as u8, g as u8, b as u8, (255 - out_alpha_inverted) as u8)
+                    };
                 }
             }
         }
@@ -2099,6 +2107,17 @@ pub fn build_prerendered_font(
             _ => None,
         }
     };
+    let mut atlas_pixels = rgba
+        .chunks_exact(4)
+        .map(|pixel| {
+            if pixel[3] == 0 {
+                Color::transparent()
+            } else {
+                Color::new(pixel[0], pixel[1], pixel[2], pixel[3])
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut atlas_facets = Vec::new();
     let mut gfx_line_height = 1;
     while gfx_line_height < height && delimiter(pixel(0, gfx_line_height)).is_none() {
         gfx_line_height += 1;
@@ -2120,14 +2139,29 @@ pub fn build_prerendered_font(
             x += 1;
         }
         let glyph_width = x - start;
+        if x < width {
+            for cell_y in 0..gfx_line_height {
+                let index = (y + cell_y) as usize * width as usize + x as usize;
+                atlas_pixels[index] = Color::new(0, 0, 0, 0);
+            }
+        }
         let mut pixels = Vec::with_capacity(glyph_width as usize * gfx_line_height as usize);
         for cell_y in 0..gfx_line_height {
             for cell_x in 0..glyph_width {
-                let [r, g, b, a] = pixel(start + cell_x, y + cell_y);
-                pixels.push(Color::new(r, g, b, a));
+                let index = (y + cell_y) as usize * width as usize + (start + cell_x) as usize;
+                pixels.push(atlas_pixels[index]);
             }
         }
         if let Some(character) = cp1252_to_char(byte) {
+            atlas_facets.push((
+                character,
+                FontAtlasFacet {
+                    x: start,
+                    y,
+                    width: glyph_width,
+                    height: gfx_line_height,
+                },
+            ));
             font.add_glyph(
                 character,
                 GlyphCell {
@@ -2140,11 +2174,21 @@ pub fn build_prerendered_font(
         if x >= width || line_break {
             y = y.saturating_add(gfx_line_height).saturating_add(1);
             x = 0;
+            let delimiter_y = y.saturating_sub(1);
+            if delimiter_y < height {
+                for delimiter_x in 0..width {
+                    let index = delimiter_y as usize * width as usize + delimiter_x as usize;
+                    atlas_pixels[index] = Color::new(0, 0, 0, 0);
+                }
+            }
             if y.saturating_add(gfx_line_height) > height {
                 break;
             }
         }
     }
+    let atlas = PrerenderedFontAtlas::new(width, height, atlas_pixels, atlas_facets)
+        .context("bitmap font atlas dimensions or facets are invalid")?;
+    font.set_prerendered_atlas(atlas);
     Ok(font)
 }
 
@@ -3428,6 +3472,22 @@ mod tests {
                 .iter()
                 .any(|pixel| pixel.a > 0 && pixel.r == 0 && pixel.g == 0 && pixel.b == 0),
             "control glyph should retain a baked black shadow"
+        );
+    }
+
+    #[test]
+    fn tooltip_zero_coverage_bitmap_texels_are_transparent_black() {
+        let tooltip = build_tooltip_font(&endeavour_bytes()).expect("build tooltip font");
+        let cell = tooltip.glyph('A').expect("tooltip A glyph");
+
+        // C++ visits every FreeType bitmap texel and writes it with SetPixDw
+        // (src/StdFont.cpp:224-258); zero inverted alpha is canonicalized to
+        // transparent black by C4Surface::SetPixDw (src/C4Surface.cpp:732-733).
+        assert!(
+            cell.pixels
+                .iter()
+                .any(|pixel| *pixel == Color::new(0, 0, 0, 0)),
+            "visited zero-coverage texels must differ from untouched white padding"
         );
     }
 

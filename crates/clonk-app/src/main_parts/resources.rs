@@ -3053,6 +3053,7 @@ pub(crate) fn load_scenario_with_definition_load(
         resolver,
         languages,
         definition_load,
+        &[],
         |_, _| {},
     )
 }
@@ -3062,35 +3063,38 @@ pub(crate) fn load_scenario_with_definition_load_and_progress<F>(
     resolver: &InstallDefinitionResolver,
     languages: &[String],
     definition_load: &ScenarioDefinitionLoad,
+    global_system_scripts: &[(String, String)],
     mut progress: F,
 ) -> Result<Scenario, ScenarioError>
 where
-    F: FnMut(i32, &'static str),
+    F: FnMut(i32, &str),
 {
     let group = open_group_path_for_folder_map(path)?;
     match definition_load {
         ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_definition_selection_and_prefix_and_progress(
+        } => Scenario::load_from_group_with_languages_and_definition_selection_and_prefix_and_global_scripts_and_progress(
             &group,
             resolver,
             languages,
             &[] as &[String],
             Some(modules.as_slice()),
             definition_root.as_deref(),
+            global_system_scripts,
             &mut progress,
         ),
         ScenarioDefinitionLoad::Seed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_definition_selection_and_prefix_and_progress(
+        } => Scenario::load_from_group_with_languages_and_definition_selection_and_prefix_and_global_scripts_and_progress(
             &group,
             resolver,
             languages,
             modules,
             None,
             definition_root.as_deref(),
+            global_system_scripts,
             &mut progress,
         ),
     }
@@ -3128,6 +3132,7 @@ fn load_scenario_with_definition_load_and_seed_and_startup_player_count(
         definition_load,
         random_seed,
         startup_player_count,
+        &[],
         |_, _| {},
     )
 }
@@ -3139,17 +3144,18 @@ pub(crate) fn load_scenario_with_definition_load_and_seed_and_startup_player_cou
     definition_load: &ScenarioDefinitionLoad,
     random_seed: u64,
     startup_player_count: i32,
+    global_system_scripts: &[(String, String)],
     mut progress: F,
 ) -> Result<Scenario, ScenarioError>
 where
-    F: FnMut(i32, &'static str),
+    F: FnMut(i32, &str),
 {
     let group = open_group_path_for_folder_map(path)?;
     match definition_load {
         ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_progress(
+        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_global_scripts_and_progress(
             &group,
             resolver,
             languages,
@@ -3158,12 +3164,13 @@ where
             Some(modules.as_slice()),
             definition_root.as_deref(),
             startup_player_count,
+            global_system_scripts,
             &mut progress,
         ),
         ScenarioDefinitionLoad::Seed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_progress(
+        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_global_scripts_and_progress(
             &group,
             resolver,
             languages,
@@ -3172,6 +3179,7 @@ where
             None,
             definition_root.as_deref(),
             startup_player_count,
+            global_system_scripts,
             &mut progress,
         ),
     }
@@ -3186,10 +3194,11 @@ pub(crate) fn load_fresh_scenario_with_valid_generated_landscape<F>(
     definition_load: &ScenarioDefinitionLoad,
     initial_random_seed: u64,
     startup_player_count: i32,
+    global_system_scripts: &[(String, String)],
     mut progress: F,
 ) -> std::result::Result<(Scenario, u64), String>
 where
-    F: FnMut(i32, &'static str),
+    F: FnMut(i32, &str),
 {
     let mut random_seed = u64::from(initial_random_seed as u32);
     for rejected in 0..AUTHORITATIVE_WORLDGEN_SEED_ATTEMPTS {
@@ -3201,6 +3210,7 @@ where
                 definition_load,
                 random_seed,
                 startup_player_count,
+                global_system_scripts,
                 &mut progress,
             )
             .map_err(|error| error.to_string())?;

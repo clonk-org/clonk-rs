@@ -74,6 +74,22 @@ macro_rules! audio_fixture {
 }
 
 #[test]
+fn presentation_capture_audio_backend_loads_samples_without_an_output_device() {
+    // C4AudioSystemSdl.cpp:284-286 decodes the sample bank while capture uses
+    // its dummy driver; headless Rust must retain that live resource behavior.
+    let system =
+        runtime_audio_system(&AudioOptions::default(), ResamplingMode::Default, true).test_value();
+
+    let sound = system.load_sound(&silent_pcm_wav(20)).test_value();
+
+    main_assert_eq!(sound.duration_ms() => Some(20));
+    main_assert!(
+        system.load_sound(b"not decodable audio").is_err(),
+        "headless capture audio must validate sample bytes instead of accepting inert handles"
+    );
+}
+
+#[test]
 fn console_quit_is_global_and_headless_loop_exits_cleanly() {
     let mut app = new_state_only_menu_app(320, 200);
     for mode in [AppMode::Menu, AppMode::Loading, AppMode::Running] {

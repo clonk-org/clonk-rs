@@ -876,12 +876,20 @@ pub(crate) fn render_startup_underlay(
     }
 }
 
-pub(crate) fn startup_main_logo_geometry(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StartupMainLogoLayout {
+    /// The product-brand allocation inherited from the native startup layout.
+    pub(crate) slot: (i32, i32, i32, i32),
+    /// The aspect-preserving destination of the active Clonk Rust artwork.
+    pub(crate) image: (i32, i32, i32, i32),
+}
+
+pub(crate) fn startup_main_logo_layout(
     surface_width: i32,
     surface_height: i32,
     logo_width: u32,
     logo_height: u32,
-) -> (i32, i32, i32, i32) {
+) -> StartupMainLogoLayout {
     // The vertical footprint of the classic 960x320 logo at C++'s 0.4 zoom.
     const CLASSIC_LOGO_MAX_HEIGHT: i32 = 128;
 
@@ -894,7 +902,21 @@ pub(crate) fn startup_main_logo_geometry(
     }
     let logo_x = surface_width * 30 / 31 - logo_w;
     let logo_y = surface_height / 21 - 5;
-    (logo_x, logo_y, logo_w, logo_h)
+    StartupMainLogoLayout {
+        slot: (surface_width * 30 / 31 - 384, logo_y, 384, 128),
+        image: (logo_x, logo_y, logo_w, logo_h),
+    }
+}
+
+pub(crate) fn scenario_list_scrollbar_visible(
+    scenario_menu: &MenuState,
+    layout: &clonk_frontend::startup_scensel::ScenSelLayout,
+    book_fonts: &clonk_frontend::startup_scensel::BookFontSet,
+) -> bool {
+    let item_height = clonk_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+    let pitch = item_height + 1;
+    let viewport_height = layout.list.h - 6;
+    scenario_menu.scenario_list_max_scroll(viewport_height, pitch) > 0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -938,6 +960,22 @@ pub(crate) fn render_startup_frame(
     }
     {
         let surface = graphics.surface_mut();
+        let scenario_list_scrollbar_visible = if view == StartupView::ScenarioBrowser {
+            assets
+                .clonk_fonts
+                .as_ref()
+                .zip(assets.book_fonts.as_ref())
+                .is_some_and(|(fonts, book_fonts)| {
+                    let layout = clonk_frontend::startup_scensel::scen_sel_layout(
+                        surface.width() as i32,
+                        surface.height() as i32,
+                        fonts,
+                    );
+                    scenario_list_scrollbar_visible(scenario_menu, &layout, book_fonts)
+                })
+        } else {
+            false
+        };
         let backdrop_key = StartupBackdropKey {
             view,
             width: surface.width(),
@@ -945,6 +983,7 @@ pub(crate) fn render_startup_frame(
             fair_crew: flags.fair_crew,
             record: flags.record,
             network_host_selector: scenario_selector_mode == ScenarioSelectorMode::NetworkHost,
+            scenario_list_scrollbar_visible,
         };
 
         // C++-faithful parity renderers draw their own backgrounds.
@@ -1020,6 +1059,7 @@ pub(crate) fn render_startup_frame(
                                 surface,
                                 &dlg_assets,
                                 fonts,
+                                scenario_list_scrollbar_visible,
                                 Some(gamma),
                             );
                         });
@@ -1226,7 +1266,7 @@ pub(crate) fn render_startup_frame(
                     let width = surface.width() as i32;
                     let height = surface.height() as i32;
                     let (logo_x, logo_y, logo_w, logo_h) =
-                        startup_main_logo_geometry(width, height, logo.width(), logo.height());
+                        startup_main_logo_layout(width, height, logo.width(), logo.height()).image;
                     let logo_rect = clonk_gui::Rect::new(
                         logo_x as f32,
                         logo_y as f32,
@@ -1749,10 +1789,11 @@ pub(crate) fn collect_viewport_inputs_from_physical_state<'a>(
 }
 
 /// [`draw_commands::CommandContext`] over the live engine, the local
-/// keyboard bindings and the current snapshot.
+/// keyboard/gamepad bindings and the current snapshot.
 pub(crate) struct AppCommandContext<'a> {
     pub(crate) engine: &'a Engine,
     pub(crate) bindings: &'a KeyboardBindings,
+    pub(crate) gamepad_bindings: &'a GamepadBindings,
     pub(crate) snapshot: &'a SimulationSnapshot,
     pub(crate) resources: &'a HashMap<String, String>,
 }
@@ -1850,15 +1891,35 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
         self.engine.definition_shape_rect(definition_id)
     }
 
-    fn key_label(&self, _owner: i32, control: i32) -> String {
-        // PlrControlKeyName (src/C4Viewport.cpp:1363-1374): the local
-        // keyboard set's key for the CON_* index, short name. The
-        // ControlBindingId order IS the CON_* order (src/C4Constants.h:158).
-        usize::try_from(control)
+    fn key_label(&self, owner: i32, control: i32) -> String {
+        // PlrControlKeyName (src/C4Viewport.cpp:1363-1374): the owning
+        // player's selected keyboard set's key for the CON_* index, short
+        // name. The ControlBindingId order IS the CON_* order
+        // (src/C4Constants.h:158).
+        let binding = usize::try_from(control)
             .ok()
-            .and_then(|index| ControlBindingId::ALL.get(index).copied())
-            .and_then(|binding| self.bindings.key_for(binding))
-            .map(format_key_label)
+            .and_then(|index| ControlBindingId::ALL.get(index).copied());
+        let control_set = self
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .map(|player| player.control_set);
+        binding
+            .zip(control_set)
+            .map(|(binding, control_set)| {
+                if (0..4).contains(&control_set) {
+                    self.bindings
+                        .key_for_set(control_set as usize, binding)
+                        .map(format_key_label)
+                        .unwrap_or_default()
+                } else if (4..8).contains(&control_set) {
+                    self.gamepad_bindings
+                        .key_label_for_set((control_set - 4) as usize, binding)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default()
     }
 

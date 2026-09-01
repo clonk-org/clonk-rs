@@ -1437,26 +1437,32 @@ global func Step(state, frame, random)
             &[] as &[String],
             None,
             None,
-            |progress, log| reported.push((progress, log)),
+            |progress, log| reported.push((progress, log.to_owned())),
         ).test_value();
 
         let checkpoints = reported
             .iter()
             .map(|(progress, _)| *progress)
             .collect::<Vec<_>>();
+        // Native publishes progress-only 56/57/58/60 callbacks around the
+        // script, texture, and material log lines (src/C4Game.cpp:2593-2638).
         assert_eq!(
             checkpoints,
             [
-                4, 8, 11, 35, 40, 56, 57, 58, 60, 70, 80, 87, 88, 89, 90, 91, 92, 93
+                4, 8, 11, 35, 40, 56, 56, 57, 57, 57, 58, 60, 70, 80, 87, 88, 89, 90, 91,
+                92, 93
             ]
         );
         assert!(
             checkpoints.windows(2).all(|pair| pair[0] <= pair[1]),
             "loader progress must never regress: {checkpoints:?}"
         );
-        assert!(reported.iter().all(|(progress, log)| {
-            !log.trim().is_empty() || matches!(progress, 11 | 35)
-        }));
+        assert!(
+            reported.iter().all(|(progress, log)| {
+                !log.trim().is_empty() || matches!(progress, 11 | 35 | 56 | 57 | 58 | 60)
+            }),
+            "unexpected empty loader status: {reported:?}"
+        );
     }
 
     #[test]
@@ -1489,6 +1495,90 @@ global func Step(state, frame, random)
                 .collect::<Vec<_>>(),
             [60, 70, 80, 87, 88]
         );
+    }
+
+    #[test]
+    fn material_load_logs_precede_a_failed_enumeration() {
+        // C4Game logs the first TexMap count and the final texture/material
+        // totals before Material.LoadEnumeration may reject MatMap.txt
+        // (src/C4Game.cpp:940-987).
+        let dir = test_tempdir();
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir(&materials).test_value();
+        write_test_file(materials.join("TexMap.txt"), "20=Earth-Rough\n");
+        write_test_file(
+            scenario_dir.join("MatMap.txt"),
+            "[Enumeration]\nMissing\n",
+        );
+        let group = Group::open(&scenario_dir).test_value();
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+        let mut reported = Vec::new();
+
+        let error =
+            Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
+                &group,
+                &resolver,
+                &["US"],
+                &[] as &[String],
+                None,
+                None,
+                |progress, log| reported.push((progress, log.to_owned())),
+            )
+            .expect_err("the missing enumerated material rejects the load");
+
+        assert!(matches!(
+            error,
+            ScenarioError::MaterialEnumeration(
+                clonk_resources::material::MaterialEnumerationError::MissingMaterial(ref name)
+            ) if name == "Missing"
+        ));
+        assert_eq!(
+            reported
+                .iter()
+                .filter(|(progress, log)| *progress == 57 && !log.is_empty())
+                .map(|(_, log)| log.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Texture table holds 1 entries.",
+                "0 textures loaded.",
+                "0 materials loaded.",
+            ]
+        );
+    }
+
+    #[test]
+    fn scenario_unresolved_inherited_counts_as_a_link_error() {
+        // C4AulScript::Parse counts an unresolved hard inherited() on every
+        // ordinary script host, including Scenario Script.c, before the link
+        // summary is emitted (src/C4AulParse.cpp:3563-3586;
+        // src/C4AulLink.cpp:299-303).
+        let dir = test_tempdir();
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict 2\nfunc Orphan() { return inherited(); }\n",
+        );
+        let group = Group::open(&scenario_dir).test_value();
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+        let mut reported = Vec::new();
+
+        Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
+            &group,
+            &resolver,
+            &["US"],
+            &[] as &[String],
+            None,
+            None,
+            |_, log| reported.push(log.to_owned()),
+        )
+        .test_value();
+
+        let summary = reported
+            .iter()
+            .find(|line| line.starts_with("C4AulScriptEngine linked - "))
+            .expect("the loader reports its script link summary");
+        assert!(summary.ends_with(", 1 error"), "summary was `{summary}`");
     }
 
     #[test]
@@ -1683,21 +1773,25 @@ global func Step(state, frame, random)
             &["US"],
             0,
             &LanguagePacks::default(),
-            |progress, log| reported.push((progress, log)),
+            |progress, log| reported.push((progress, log.to_owned())),
         ).test_value();
 
         assert_eq!(
             reported
                 .iter()
                 .map(|(progress, _)| *progress)
-                .collect::<Vec<_>>(),
+            .collect::<Vec<_>>(),
             [
-                4, 8, 11, 35, 40, 56, 57, 58, 60, 70, 80, 87, 88, 89, 90, 91, 92, 93
+                4, 8, 11, 35, 40, 56, 56, 57, 57, 57, 58, 60, 70, 80, 87, 88, 89, 90, 91,
+                92, 93
             ]
         );
-        assert!(reported.iter().all(|(progress, log)| {
-            !log.trim().is_empty() || matches!(progress, 11 | 35)
-        }));
+        assert!(
+            reported.iter().all(|(progress, log)| {
+                !log.trim().is_empty() || matches!(progress, 11 | 35 | 56 | 57 | 58 | 60)
+            }),
+            "unexpected empty loader status: {reported:?}"
+        );
     }
 
     #[test]
@@ -2340,11 +2434,13 @@ global func Step(state, frame, random)
                 .iter()
                 .map(|(_, source)| source.as_str())
                 .collect::<Vec<_>>(),
+            // Pinned C++ oracle: src/C4ComponentHost.cpp:155-205 makes
+            // LoadAppend prefix every successfully read script component.
             [
-                "// zulu\n",
-                "// native\n",
-                "// child-marked\n",
-                "// alpha\n",
+                "\n// zulu\n",
+                "\n// native\n",
+                "\n// child-marked\n",
+                "\n// alpha\n",
             ]
         );
     }
@@ -2369,7 +2465,28 @@ global func Step(state, frame, random)
                 .iter()
                 .find(|(name, _)| name == "Good.c")
                 .map(|(_, source)| source.as_str()),
-            Some("// good\n")
+            // Pinned C++ oracle: src/C4ComponentHost.cpp:155-205 prefixes a
+            // successfully read component, but the failed host above stays empty.
+            Some("\n// good\n")
+        );
+    }
+
+    #[test]
+    fn system_script_load_append_truncates_component_at_first_nul() {
+        // Pinned C++ oracle: src/C4ComponentHost.cpp:195-210 passes each
+        // readable component through SCopy, which stops at its first NUL.
+        let directory = test_tempdir();
+        write_test_file(
+            directory.path().join("Probe.c"),
+            b"// visible\n\0// ignored\n",
+        );
+        let group = Group::open(directory.path()).test_value();
+
+        let scripts = load_system_scripts(&group).test_value();
+
+        assert_eq!(
+            scripts,
+            [("Probe.c".to_owned(), "\n// visible\n".to_owned())]
         );
     }
 

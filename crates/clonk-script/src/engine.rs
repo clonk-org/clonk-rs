@@ -971,23 +971,20 @@ pub struct Script {
     var_decls: Vec<VarDecl>, // Script-level variable declarations
     string_literals: Vec<String>,
     parse_diagnostics: Vec<ParseError>,
-    /// Lines this script's source occupies, for the link summary's line count.
-    ///
-    /// `C4AulScript::Parse` accumulates `SGetLine(Script.getData(), ...end)`
-    /// into `Game.ScriptEngine.lineCnt` (`C4AulParse.cpp:3601`), which is the
-    /// 1-based line number at the end of the source.
+    /// Newline positions in this script's source, for the link summary's line
+    /// count. `C4AulScript::Parse` accumulates the zero-based
+    /// `SGetLine(Script.getData(), ...end)` (`C4AulParse.cpp:3601`;
+    /// `C4Strings.cpp:380-390`).
     source_lines: usize,
 }
 
-/// `SGetLine` over a whole source: the 1-based line number at its end.
-///
-/// An empty source is zero lines; otherwise it is the newline count plus one
-/// for the final line, whether or not it ends in a newline.
+/// `SGetLine` over a whole source: the zero-based line position at its end.
 fn count_source_lines(source: &str) -> usize {
-    if source.is_empty() {
-        return 0;
-    }
-    source.bytes().filter(|byte| *byte == b'\n').count() + usize::from(!source.ends_with('\n'))
+    source
+        .bytes()
+        .take_while(|byte| *byte != 0)
+        .filter(|byte| *byte == b'\n')
+        .count()
 }
 
 impl Script {
@@ -4092,11 +4089,13 @@ mod tests {
     /// the *old* tree on every link after the first.
     #[test]
     fn replace_script_counts_the_replacement_alone() {
+        // Pinned C++ oracle: src/C4Strings.cpp:380-390 counts newline bytes
+        // before the end pointer; an unterminated one-line source is line 0.
         let mut engine = Engine::new();
         engine
             .load_script("func Probe() { return 1; }")
             .expect("base script loads");
-        assert_eq!(engine.linked_source_lines(), 1);
+        assert_eq!(engine.linked_source_lines(), 0);
 
         engine.replace_script(
             compile("func Probe() { return 2; }\nfunc Other() { return 7; }\n"),
@@ -4108,6 +4107,13 @@ mod tests {
             2,
             "the host counts its current script, not the one it replaced"
         );
+    }
+
+    #[test]
+    fn source_line_count_stops_at_first_nul() {
+        // Pinned C++ oracle: src/C4Strings.cpp:380-390 stops SGetLine's scan
+        // when the C string reaches its first NUL, even before cpPosition.
+        assert_eq!(count_source_lines("visible\n\0hidden\nhidden\n"), 1);
     }
 
     #[test]

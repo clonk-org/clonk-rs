@@ -3048,9 +3048,11 @@ mod tests {
         }
         assert_eq!(
             (changed, bounds, hash),
-            // The dialog is rendered on transparent black here; ordered
-            // layers now retain source-over alpha instead of forcing A=255.
-            (114, (545, 363, 550, 382), 0xe279_9eba_5278_c371)
+            // C4GuiEdit.cpp:613-620 draws byte A6 at 1.5x, and
+            // StdFont.cpp:902-925 samples its shared atlas facet. That includes
+            // the adjacent CP1252 columns and the transparent texels written
+            // by AddRenderedChar (StdFont.cpp:224-258).
+            (121, (544, 363, 550, 382), 0x08b8_42e9_a771_6fcd)
         );
     }
 

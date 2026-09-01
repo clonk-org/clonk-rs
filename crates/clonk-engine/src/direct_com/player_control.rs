@@ -400,7 +400,21 @@ impl Engine {
             .get(&self.objects[base_index].definition_id)
             .is_some_and(|definition| definition.auto_context_menu());
         if auto_context {
+            let crew_id = self.objects[crew_index].id;
+            let base_id = self.objects[base_index].id;
             self.open_context_menu(crew_index, base_index, true, None)?;
+            if let Some(menu) = self
+                .find_object_index(crew_id)
+                .and_then(|crew_index| self.objects[crew_index].state.menu.as_mut())
+                .filter(|menu| {
+                    !menu.user_menu
+                        && menu.permanent
+                        && menu.identification == Value::Int(14)
+                        && menu.refill_object == Some(base_id)
+                })
+            {
+                menu.close_command = crate::ObjectMenuCloseCommand::Exit;
+            }
         }
         Ok(())
     }
@@ -1124,6 +1138,7 @@ impl Engine {
                 style: 1,
                 equal_item_height: false,
                 permanent,
+                close_command: crate::ObjectMenuCloseCommand::None,
                 location: None,
                 runtime_id: next_internal_object_menu_refill_token(),
                 extra: crate::ObjectMenuExtra::default(),
@@ -1379,6 +1394,7 @@ impl Engine {
             style: 2,
             equal_item_height: false,
             permanent: true,
+            close_command: crate::ObjectMenuCloseCommand::None,
             location: None,
             runtime_id: next_internal_object_menu_refill_token(),
             extra: crate::ObjectMenuExtra::default(),

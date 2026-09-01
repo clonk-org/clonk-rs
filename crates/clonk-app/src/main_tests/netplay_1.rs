@@ -4669,6 +4669,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
             fair_crew: false,
             record: false,
             network_host_selector: false,
+            scenario_list_scrollbar_visible: false,
         }),
         pixels: vec![1],
         retained: None,
@@ -4991,6 +4992,7 @@ fn network_join_applies_active_scenario_gui_overrides() {
                 fallback: app.startup_game_graphics_resources(),
                 liquid_animation_enabled: app.assets.liquid_animation_enabled(),
             },
+            global_system_scripts: app.global_scripts_for_session(),
             source: LobbyPreloadJobSource::Client {
                 join_data,
                 scenario_resources: Some(scenario_resources.clone()),

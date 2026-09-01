@@ -15,6 +15,7 @@ pub struct TexMapEntry {
 pub struct TextureMap {
     /// Entries by texmap index (0..128). Index 0 is sky (never mapped).
     entries: Vec<Option<TexMapEntry>>,
+    loaded_entry_count: usize,
     pub overload_materials: bool,
     pub overload_textures: bool,
 }
@@ -71,6 +72,7 @@ impl TextureMap {
     pub fn parse_bytes(source: &[u8]) -> Self {
         let mut map = Self {
             entries: vec![None; 128],
+            loaded_entry_count: 0,
             overload_materials: false,
             overload_textures: false,
         };
@@ -116,6 +118,7 @@ impl TextureMap {
                 material: clonk_script::c4_string_from_bytes(&pair[..hyphen]),
                 texture: clonk_script::c4_string_from_bytes(&pair[hyphen + 1..]),
             });
+            map.loaded_entry_count += 1;
         }
         map
     }
@@ -131,6 +134,7 @@ impl TextureMap {
     pub fn parse_flags_bytes(source: &[u8]) -> Self {
         let mut map = Self {
             entries: vec![None; 128],
+            loaded_entry_count: 0,
             overload_materials: false,
             overload_textures: false,
         };
@@ -152,6 +156,12 @@ impl TextureMap {
 
     pub fn entry(&self, index: u8) -> Option<&TexMapEntry> {
         self.entries.get((index & !IFT_BIT) as usize)?.as_ref()
+    }
+
+    /// Number returned by C4TextureMap::LoadMap before Init removes invalid
+    /// mappings or CrossMapMaterials allocates dynamic ones.
+    pub fn loaded_entry_count(&self) -> usize {
+        self.loaded_entry_count
     }
 
     /// The material name a map pixel byte selects (IFT bit stripped);
@@ -215,6 +225,17 @@ mod tests {
         assert_eq!(map.material_for_pixel(126), Some("Earth"));
         assert_eq!(map.material_for_pixel(127), None);
         assert_eq!(map.material_for_pixel(255), None, "255 = 127|IFT stays sky");
+    }
+
+    #[test]
+    fn loaded_entry_count_includes_replaced_slots() {
+        // Pinned C++ oracle: src/C4Texture.cpp:117-137,198-227 increments
+        // LoadMap's result after every successful AddEntry, including a
+        // later source line that replaces an occupied numeric slot.
+        let map = TextureMap::parse("20=Water-Liquid\n20=Earth-Rough\n");
+
+        assert_eq!(map.loaded_entry_count(), 2);
+        assert_eq!(map.material_for_pixel(20), Some("Earth"));
     }
 
     #[test]

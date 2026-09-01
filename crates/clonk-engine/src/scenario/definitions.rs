@@ -211,7 +211,7 @@ fn report_resolved_definition_progress(
     min_progress: i32,
     max_progress: i32,
     last_progress: &mut i32,
-    report_progress: &mut dyn FnMut(i32, &'static str),
+    report_progress: &mut dyn FnMut(i32, &str),
 ) {
     let progress = resolve_definition_progress(min_progress, max_progress, child_path);
     if progress > *last_progress || (progress == *last_progress && !line.is_empty()) {
@@ -262,7 +262,7 @@ pub(in crate::scenario) fn collect_definitions_from_group<S: AsRef<str> + Sync>(
     sound_effect_groups: &mut Vec<Group>,
     output: &mut Vec<CollectedDefinition>,
 ) -> Result<(), ScenarioError> {
-    let mut ignore_progress = |_: i32, _: &'static str| {};
+    let mut ignore_progress = |_: i32, _: &str| {};
     collect_definitions_from_group_with_progress(
         group,
         load_system_groups,
@@ -294,7 +294,7 @@ pub(in crate::scenario) fn collect_definitions_from_group_with_progress<S: AsRef
     min_progress: i32,
     max_progress: i32,
     completion_line: &'static str,
-    report_progress: &mut dyn FnMut(i32, &'static str),
+    report_progress: &mut dyn FnMut(i32, &str),
 ) -> Result<(), ScenarioError> {
     let mut buffered_events = Vec::new();
     let mut last_progress = min_progress;
@@ -926,7 +926,7 @@ mod tests {
             10,
             40,
             &mut last_progress,
-            &mut |progress, line| reported.push((progress, line)),
+            &mut |progress, line| reported.push((progress, line.to_owned())),
         );
         report_resolved_definition_progress(
             &[],
@@ -934,12 +934,15 @@ mod tests {
             10,
             40,
             &mut last_progress,
-            &mut |progress, line| reported.push((progress, line)),
+            &mut |progress, line| reported.push((progress, line.to_owned())),
         );
 
         assert_eq!(
             reported,
-            [(40, ""), (40, "Definition metadata and sources collected")]
+            [
+                (40, String::new()),
+                (40, "Definition metadata and sources collected".to_owned())
+            ]
         );
     }
 }

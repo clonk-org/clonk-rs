@@ -120,6 +120,10 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             compat_profile::command(&tail)
         }
+        Some("presentation") => {
+            let tail: Vec<String> = args.collect();
+            compat_profile::presentation_command(&tail)
+        }
         Some("update-manifest") => {
             let tail: Vec<String> = args.collect();
             update_manifest_command(&tail)
@@ -134,7 +138,7 @@ fn main() -> Result<()> {
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package [--skip-build] [--no-archive] [--components=none|engine|all]\n                                      Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [--profile <p>]     Emit the staticlib/cdylib the C++ shadow-diff bridge links (parity/bridge/README.md).\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask compat verify           Verify the machine-readable LegacyClonk compatibility-profile contract (compat/profile.json, docs/COMPAT_PROFILE.md).\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir> --content-commit <sha> --content-sha256 <hex> --content-size <bytes>  Describe the update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard."
+        "Usage:\n  cargo xtask package [--skip-build] [--no-archive] [--components=none|engine|all]\n                                      Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [--profile <p>]     Emit the staticlib/cdylib the C++ shadow-diff bridge links (parity/bridge/README.md).\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask compat verify           Verify the machine-readable LegacyClonk compatibility-profile contract (compat/profile.json, docs/COMPAT_PROFILE.md).\n  cargo xtask presentation verify-current --profile <p> --output-dir <dir>  Capture current Rust twice and compare every case to accepted C++ evidence.\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir> --content-commit <sha> --content-sha256 <hex> --content-size <bytes>  Describe the update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard."
     );
 }
 

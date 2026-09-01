@@ -2647,6 +2647,11 @@ pub(crate) struct AudioContext {
     /// C4SoundSystem selects RXSound only while Game.IsRunning; startup and
     /// scenario initialization use the independent FESamples toggle.
     synchronous_game_running: bool,
+    #[cfg(any(test, feature = "presentation-capture"))]
+    /// Presentation acquisition fast-forwards simulation without a window
+    /// scheduler. Pin its logical sound-instance clock so muted one-shots age
+    /// by native game ticks instead of host wall time.
+    presentation_capture_now: Option<Instant>,
     /// Where a sound's object stood when the engine queued the call, for
     /// objects that did not survive into the snapshot this frame applies
     /// against. Entries live only as long as an instance refers to them.
@@ -2712,7 +2717,62 @@ pub(crate) fn reconnect_audio_context(engine: &mut Engine, audio: Option<&Shared
     engine.configure_synchronous_sound_host(audio.map(SharedAudioContext::handle));
 }
 
+pub(crate) fn runtime_audio_system(
+    options: &AudioOptions,
+    resampling_mode: ResamplingMode,
+    device_independent_capture: bool,
+) -> Result<AudioSystem, AudioError> {
+    if device_independent_capture {
+        return Ok(AudioSystem::new_null_with_resampling(
+            options.max_channels,
+            resampling_mode,
+        ));
+    }
+
+    #[cfg(test)]
+    {
+        let audio_resources_enabled = options.sound_enabled
+            || options.music_enabled
+            || options.menu_music_enabled
+            || options.menu_sound_enabled
+            || options.voice_enabled;
+        Ok(if audio_resources_enabled {
+            AudioSystem::new_null_with_resampling(options.max_channels, resampling_mode)
+        } else {
+            AudioSystem::new_deferred_null_with_resampling(options.max_channels, resampling_mode)
+        })
+    }
+    #[cfg(not(test))]
+    {
+        AudioSystem::new_with_resampling(options.max_channels, resampling_mode)
+    }
+}
+
 impl AudioContext {
+    fn sound_instance_now(&self) -> Instant {
+        #[cfg(any(test, feature = "presentation-capture"))]
+        if let Some(now) = self.presentation_capture_now {
+            return now;
+        }
+        Instant::now()
+    }
+
+    #[cfg(any(test, feature = "presentation-capture"))]
+    pub(crate) fn install_presentation_capture_clock(&mut self) {
+        self.presentation_capture_now = Some(Instant::now());
+    }
+
+    #[cfg(any(test, feature = "presentation-capture"))]
+    pub(crate) fn advance_presentation_capture_clock(&mut self, elapsed: Duration) {
+        let now = self
+            .presentation_capture_now
+            .as_mut()
+            .expect("presentation capture clock must be installed before it advances");
+        *now = now
+            .checked_add(elapsed)
+            .expect("presentation capture clock cannot overflow");
+    }
+
     #[cfg(test)]
     pub(crate) fn try_new(options: AudioOptions) -> Result<Self, AudioError> {
         Self::try_new_with_paths(options, None)
@@ -2730,20 +2790,18 @@ impl AudioContext {
         } else {
             ResamplingMode::Default
         };
+        #[cfg(feature = "presentation-capture")]
+        let device_independent_capture =
+            crate::presentation_pixel_capture::capture_or_discovery_requested();
+        #[cfg(not(feature = "presentation-capture"))]
+        let device_independent_capture = false;
         #[cfg(test)]
         let audio_resources_enabled = options.sound_enabled
             || options.music_enabled
             || options.menu_music_enabled
             || options.menu_sound_enabled
             || options.voice_enabled;
-        #[cfg(test)]
-        let system = if audio_resources_enabled {
-            AudioSystem::new_null_with_resampling(options.max_channels, resampling_mode)
-        } else {
-            AudioSystem::new_deferred_null_with_resampling(options.max_channels, resampling_mode)
-        };
-        #[cfg(not(test))]
-        let system = AudioSystem::new_with_resampling(options.max_channels, resampling_mode)?;
+        let system = runtime_audio_system(&options, resampling_mode, device_independent_capture)?;
         #[cfg(test)]
         let (resolver, music_resolver) = if audio_resources_enabled {
             (
@@ -2781,6 +2839,8 @@ impl AudioContext {
             rendered_object_audibility: HashMap::new(),
             synchronous_sound_viewports: Vec::new(),
             synchronous_game_running: false,
+            #[cfg(any(test, feature = "presentation-capture"))]
+            presentation_capture_now: None,
             emitter_positions: HashMap::new(),
             resolver,
             music_resolver,
@@ -2991,10 +3051,7 @@ impl AudioContext {
                     catalog
                         .select_enabled_with(playlist.as_deref(), recent.as_ref(), |range| {
                             debug_assert!(range > 0);
-                            // SAFETY: C rand takes no arguments and C guarantees a
-                            // non-negative result. The process-global lock above
-                            // serializes this shared unsynced stream with the loader.
-                            (unsafe { rand() } as usize) % range
+                            classic_safe_random_unlocked(range)
                         })
                         .cloned()
                 }
@@ -3782,7 +3839,7 @@ impl AudioContext {
             target,
             volume,
             custom_falloff,
-            started_at: Instant::now(),
+            started_at: self.sound_instance_now(),
             detached_mix: initial_mix,
         };
         let (mut mix_volume, pan) = initial_execute_mix.unwrap_or_else(|| {
@@ -4040,7 +4097,7 @@ impl AudioContext {
         viewports: &[ActiveViewportProjection],
         game_running: bool,
     ) {
-        let now = Instant::now();
+        let now = self.sound_instance_now();
         let mut finished = Vec::new();
         let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
         let rendered_object_audibility = &self.rendered_object_audibility;
@@ -5497,6 +5554,11 @@ pub(crate) enum MessageDialogContinuation {
     },
     NetworkRuntimeJoin {
         reference: clonk_network::NetworkGameReference,
+    },
+    /// A port-only compatibility-profile report shown over the already-open
+    /// C++-mirrored network lobby without adding text to its native log.
+    CompatProfileLobbyNotice {
+        finish_classic_command_line_host_entry: bool,
     },
     NetworkServerRedirect {
         address: String,

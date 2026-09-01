@@ -55,12 +55,70 @@ impl MessageFontMetrics<'_> {
 
 struct GlobalMessageLayout {
     text: String,
+    text_width: i32,
+    text_height: i32,
     color: [u8; 4],
     alignment: TextAlign,
     frame: Option<Rect>,
     portrait: Option<GuiRect>,
     text_x: i32,
     text_y: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GlobalMessagePresentationLayout {
+    pub background: Rect,
+    pub portrait: Rect,
+    pub text: Rect,
+    pub caption: String,
+}
+
+/// Returns the same portrait-message geometry consumed by the logical
+/// renderer without painting it.
+///
+/// Pinned C++ oracle: `src/C4GameMessage.cpp:99-170`.
+pub(crate) fn global_message_presentation_layout(
+    font: &ClonkFont,
+    viewport: Rect,
+    message: &MessageSnapshot,
+    decoration: Option<&ObjectMenuFrameDecoration>,
+    images: &dyn FontImageProvider,
+) -> Result<GlobalMessagePresentationLayout, &'static str> {
+    let layout = layout_global_message(
+        MessageFontMetrics::Logical(font),
+        viewport,
+        message,
+        decoration,
+        images,
+    )?;
+    let background = layout
+        .frame
+        .ok_or("semantic global message has no decorated background")?;
+    let portrait = layout
+        .portrait
+        .ok_or("semantic global message has no portrait")?;
+    let portrait = Rect::new(
+        portrait.origin.x.round() as i32,
+        portrait.origin.y.round() as i32,
+        portrait.size.width.max(0.0).round() as u32,
+        portrait.size.height.max(0.0).round() as u32,
+    );
+    let text_x = match layout.alignment {
+        TextAlign::Left => layout.text_x,
+        TextAlign::Center => layout.text_x - layout.text_width / 2,
+        TextAlign::Right => layout.text_x - layout.text_width,
+    };
+    Ok(GlobalMessagePresentationLayout {
+        background,
+        portrait,
+        text: Rect::new(
+            text_x,
+            layout.text_y,
+            layout.text_width.max(0) as u32,
+            layout.text_height.max(0) as u32,
+        ),
+        caption: layout.text,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -429,6 +487,8 @@ fn layout_global_message(
 
     Ok(GlobalMessageLayout {
         text: draw_text,
+        text_width,
+        text_height,
         color,
         alignment,
         frame,

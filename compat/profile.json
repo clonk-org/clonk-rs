@@ -155,7 +155,7 @@
       ]
     },
     "presentation": {
-      "statement": "Painter order, coordinates, sampling, blending, gamma placement, and resource state equal the oracle; GPU sampling is verified by readback against the software renderer with the documented one-byte cross-driver tolerance (docs/RENDERING_PARITY.md). Every opt-in presentation divergence is forced off and every first-run configuration default equals the C++ default. Whole-screen equality is promised as pixels only where every pixel is oracle-authored; a screen that renders the port's own branding or its super-resolved startup art is promised the same layout - the same controls at the same rects with the same captions, wrapping and ordering - and not the same pixels, because different source art cannot meet a pixel term at any resolution. compat/presentation_captures.json records which screens are on which term and the port-authored asset classes that put them there (clonk-org/clonk-rs#1298).",
+      "statement": "Painter order, coordinates, sampling, blending, gamma placement, and resource state equal the oracle; GPU sampling is verified by readback against the software renderer with the documented one-byte cross-driver tolerance (docs/RENDERING_PARITY.md). Every opt-in presentation divergence is forced off and every first-run configuration default equals the C++ default. Whole-screen equality is promised as pixels only where every pixel is oracle-authored; a screen that renders the port's own branding or its super-resolved startup art is promised the same layout - the same ordered controls, semantic roles, visibility, rects and wrapping geometry - and not the same pixels, because different source art cannot meet a pixel term at any resolution. A brand-slot records the shared outer allocation while the Clonk Rust artwork keeps its own aspect ratio inside it; the slot is not represented as the rendered image rectangle. Captions and resolved line text remain exact except at the individually declared port-asset nodes whose product text is intentionally different. compat/presentation_captures.json records which screens are on which term and the port-authored asset classes that put them there (clonk-org/clonk-rs#1298).",
       "evidence": [
         {
           "kind": "document",
@@ -170,10 +170,10 @@
           "note": "Options, viewport, and GUI pixel parity against the C++ F9 captures."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#587",
-          "status": "pending",
-          "note": "C++/Rust presentation capture diffs for the profile; compat/presentation_captures.json enumerates the screens, the shared capture geometry, the comparison terms and the approved masks. Six startup screens were captured and measured on 2026-08-26 and are now on the layout term rather than the pixel term (clonk-org/clonk-rs#1298); they stay pending until a layout comparison is run, and the remaining seven still need capture pairs."
+          "kind": "test",
+          "value": ".github/workflows/landing.yml (presentation captures)",
+          "status": "held",
+          "note": "The landing gate revalidates accepted C++/Rust evidence for all thirteen screens: six startup screens with port-authored branding or art and five runtime screens carrying the Clonk Rust logo use the layout term approved by clonk-org/clonk-rs#1298, while network-lobby and loader use the pixel term."
         },
         {
           "kind": "issue",

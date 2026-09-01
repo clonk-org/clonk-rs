@@ -1,0 +1,3866 @@
+{
+  "builds": {
+    "cpp": {
+      "binary": {
+        "path": "builds/cpp/binary",
+        "sha256": "b934ce802188c8a7cab3d7d16ecfd8afa3c40d44a9809b6159acdd6b34633de4",
+        "size_bytes": 17199608
+      },
+      "capture_patch_sha256": "e2b84c1a8c4db811f819bd0ddeb3a7f988f2412cb8cd9b7a9db7540ba30c17de",
+      "producer": "legacyclonk-capture-patch-v1",
+      "profile": "oracle-native",
+      "recipe": {
+        "commands": [
+          {
+            "argv": [
+              "cmake",
+              "-S",
+              ".",
+              "-B",
+              "build",
+              "-G",
+              "Ninja",
+              "-DCMAKE_BUILD_TYPE=Debug",
+              "-DUSE_TESTS=OFF",
+              "-DUSE_LTO=OFF",
+              "-DUSE_PCH=OFF",
+              "-DUSE_RUST_ENGINE_VALIDATION=OFF",
+              "-DUSE_RUST_CONFIG=OFF",
+              "-DUSE_RUST_GROUP_VALIDATION=OFF",
+              "-DUSE_RUST_GUI_VALIDATION=OFF",
+              "-DUSE_MINIUPNPC=OFF",
+              "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3",
+              "-Dfmt_DIR=/opt/homebrew/Cellar/fmt/11.1.2/lib/cmake/fmt",
+              "-DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3",
+              "-DOPENSSL_INCLUDE_DIR=/opt/homebrew/opt/openssl@3/include"
+            ],
+            "cwd": "work/oracle-source",
+            "environment": {
+              "CARGO_INCREMENTAL": "0",
+              "LANG": "C",
+              "LC_ALL": "C",
+              "TZ": "UTC"
+            }
+          },
+          {
+            "argv": [
+              "cmake",
+              "--build",
+              "build",
+              "--target",
+              "clonk",
+              "-j",
+              "4"
+            ],
+            "cwd": "work/oracle-source",
+            "environment": {
+              "CARGO_INCREMENTAL": "0",
+              "LANG": "C",
+              "LC_ALL": "C",
+              "TZ": "UTC"
+            }
+          }
+        ],
+        "sha256": "3e96183be23cf5b0d2be15866a120d1e816e2960d429f6f999cebec8fdb0d53a"
+      },
+      "source_tree": "3859b3715b7f58d0c461cf45dc226593a2b0d687"
+    },
+    "rust": {
+      "binary": {
+        "path": "builds/rust/binary",
+        "sha256": "28a623b549f29e926505bbad5355f2b39e7c3d7c2f56dfa4b9a22126286f6139",
+        "size_bytes": 47953600
+      },
+      "capture_patch_sha256": null,
+      "producer": "clonk-rs-capture-driver-v1",
+      "profile": "legacy-clonk",
+      "recipe": {
+        "commands": [
+          {
+            "argv": [
+              "cargo",
+              "build",
+              "--locked",
+              "--release",
+              "-p",
+              "clonk-app",
+              "--features",
+              "presentation-capture"
+            ],
+            "cwd": "work/rust-source",
+            "environment": {
+              "CARGO_INCREMENTAL": "0",
+              "LANG": "C",
+              "LC_ALL": "C",
+              "TZ": "UTC"
+            }
+          }
+        ],
+        "sha256": "5dd31be0efc425f25b94fa67ac7f908edf76c6d36213b4310c7bad49ac0f55a6"
+      },
+      "source_tree": "ca12102c9083889037eaf4e1bd1c1749fdffedc3"
+    }
+  },
+  "case_specs": [
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "startup-main/fade-complete",
+        "number": 2
+      },
+      "id": "startup-main",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "startup/main/branding/fan-project": "branding",
+        "startup/main/branding/logo": "branding",
+        "startup/main/branding/version": "branding"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": null
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 0,
+          "seed": 587,
+          "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "simulation": {
+          "calls": 0,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "direct-startup-dialog"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "startup-scenario-selection/fade-complete",
+        "number": 2
+      },
+      "id": "startup-scenario-selection",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "startup/scenario-selection/background": "super-resolved-startup-art"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": null
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 0,
+          "seed": 587,
+          "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "simulation": {
+          "calls": 0,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "direct-startup-dialog"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "startup-network-browser/fade-complete",
+        "number": 2
+      },
+      "id": "startup-network-browser",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "startup/network-browser/background": "super-resolved-startup-art"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": null
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 0,
+          "seed": 587,
+          "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "simulation": {
+          "calls": 0,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "direct-startup-dialog"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "startup-player-selection/fade-complete",
+        "number": 2
+      },
+      "id": "startup-player-selection",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "startup/player-selection/background": "super-resolved-startup-art"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": null
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 0,
+          "seed": 587,
+          "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "simulation": {
+          "calls": 0,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "direct-startup-dialog"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "startup-options/fade-complete",
+        "number": 2
+      },
+      "id": "startup-options",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "startup/options/tabs/paper": "super-resolved-startup-art"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": null
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 0,
+          "seed": 587,
+          "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "simulation": {
+          "calls": 0,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "direct-startup-dialog"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "startup-about/fade-complete",
+        "number": 2
+      },
+      "id": "startup-about",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "startup/about/branding/fan-project": "branding"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": null
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 0,
+          "seed": 587,
+          "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "simulation": {
+          "calls": 0,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "direct-startup-dialog"
+      }
+    },
+    {
+      "comparison": "pixel",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "lobby-notice-acknowledged/render-ordinal-2",
+        "number": 2
+      },
+      "id": "network-lobby",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {},
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": "Tutorial.c4f/Tutorial01.c4s"
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 3,
+          "seed": 587,
+          "trace_sha256": "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"
+        },
+        "simulation": {
+          "calls": 0,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "network-host-lobby-v1"
+      }
+    },
+    {
+      "comparison": "pixel",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "loader-progress-60-fixed-log/render-ordinal-2",
+        "number": 2
+      },
+      "id": "loader",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {},
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": "Tutorial.c4f/Tutorial01.c4s"
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 3,
+          "seed": 587,
+          "trace_sha256": "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"
+        },
+        "simulation": {
+          "calls": 0,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "scenario-loader-v1"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "state-frame-90/render-ordinal-1",
+        "number": 90
+      },
+      "id": "hud",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "game/upper-board/branding/logo": "branding"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": "Tutorial.c4f/Tutorial01.c4s"
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 1,
+          "seed": 587,
+          "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"
+        },
+        "simulation": {
+          "calls": 585,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "tutorial01-frame-v1"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "state-frame-90/render-ordinal-2",
+        "number": 90
+      },
+      "id": "ingame-menu",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "game/upper-board/branding/logo": "branding"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": "Tutorial.c4f/Tutorial01.c4s"
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 1,
+          "seed": 587,
+          "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"
+        },
+        "simulation": {
+          "calls": 585,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "tutorial01-activate-menu-main-v1"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "state-frame-410/tooltip-render-ordinal-90",
+        "number": 410
+      },
+      "id": "object-menu",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "game/upper-board/branding/logo": "branding"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": "Tutorial.c4f/Tutorial03.c4s"
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 7,
+          "seed": 587,
+          "trace_sha256": "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6"
+        },
+        "simulation": {
+          "calls": 890,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "tutorial03-object-menu-input-v1"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "state-frame-180/render-ordinal-1",
+        "number": 180
+      },
+      "id": "gameplay",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "game/upper-board/branding/logo": "branding"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": "Tutorial.c4f/Tutorial02.c4s"
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 1,
+          "seed": 587,
+          "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"
+        },
+        "simulation": {
+          "calls": 581,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "tutorial02-frame-v1"
+      }
+    },
+    {
+      "comparison": "layout",
+      "config_sha256": {
+        "cpp": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "rust": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb"
+      },
+      "frame": {
+        "checkpoint": "state-frame-90/evaluation-open/render-ordinal-2",
+        "number": 90
+      },
+      "id": "evaluation",
+      "locale": {
+        "charset": "Windows-1252",
+        "lang": "C",
+        "language": "US",
+        "lc_all": "C",
+        "tz": "UTC"
+      },
+      "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "port_asset_exemptions": {
+        "game/upper-board/branding/logo": "branding"
+      },
+      "runtime_resources": {
+        "cpp": {
+          "graphics": {
+            "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+            "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+          },
+          "system": {
+            "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+            "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+          }
+        },
+        "rust": {
+          "graphics": {
+            "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+            "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+          },
+          "system": {
+            "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+            "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+          }
+        }
+      },
+      "scenario": {
+        "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9",
+        "path": "Tutorial.c4f/Tutorial01.c4s"
+      },
+      "seeds": {
+        "presentation": {
+          "algorithm": "darwin-libc-rand-park-miller-v1",
+          "calls": 1,
+          "seed": 587,
+          "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"
+        },
+        "simulation": {
+          "calls": 585,
+          "seed": 587
+        }
+      },
+      "trigger": {
+        "id": "tutorial01-game-over-v1"
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "cases": [
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/startup-main.layout.json",
+            "sha256": "4cea5dc472ef74291e331800acf6a9a92a6741ed519af1b3e2e8a5c103996ca0",
+            "size_bytes": 2797
+          },
+          "comparison": "layout",
+          "id": "startup-main",
+          "receipt": {
+            "path": "run-1/comparisons/startup-main.json",
+            "sha256": "c7424f91da5abd3963ee98dddbc12839b9f4effa322ba4361ff4c4f63c8bb651",
+            "size_bytes": 776
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/startup-main.layout.json",
+            "sha256": "55bfca7120925e0be491652e93bb31915999beecc2828158b7caeec84e009883",
+            "size_bytes": 2939
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/startup-scenario-selection.layout.json",
+            "sha256": "277b5938987214748f8974cf9f4dbe916286edb728017631c5e7da566fa53ea4",
+            "size_bytes": 3898
+          },
+          "comparison": "layout",
+          "id": "startup-scenario-selection",
+          "receipt": {
+            "path": "run-1/comparisons/startup-scenario-selection.json",
+            "sha256": "3b3128c9d03e0bc0138899fe1da89f420e96639bac9486a465219c1f52fbb8f8",
+            "size_bytes": 832
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/startup-scenario-selection.layout.json",
+            "sha256": "277b5938987214748f8974cf9f4dbe916286edb728017631c5e7da566fa53ea4",
+            "size_bytes": 3898
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/startup-network-browser.layout.json",
+            "sha256": "78f0e321d588722c17d738afa8002513022a663fcb81548c19cc6224ef5d8963",
+            "size_bytes": 3638
+          },
+          "comparison": "layout",
+          "id": "startup-network-browser",
+          "receipt": {
+            "path": "run-1/comparisons/startup-network-browser.json",
+            "sha256": "2ff2b6b7b510ce9b2212a2bc4e0e2c021b6c4c6b6060257c4179261578ce4a8a",
+            "size_bytes": 820
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/startup-network-browser.layout.json",
+            "sha256": "78f0e321d588722c17d738afa8002513022a663fcb81548c19cc6224ef5d8963",
+            "size_bytes": 3638
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/startup-player-selection.layout.json",
+            "sha256": "ba1cf4fd37d9cff92cf2118d0b873ea9e41d8bfbaea558f51372c883ccea88d9",
+            "size_bytes": 3827
+          },
+          "comparison": "layout",
+          "id": "startup-player-selection",
+          "receipt": {
+            "path": "run-1/comparisons/startup-player-selection.json",
+            "sha256": "05e50cb4567aaf49a49048f9cd2e8e5d713c1271f881c7f6e5c26454360cc319",
+            "size_bytes": 824
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/startup-player-selection.layout.json",
+            "sha256": "ba1cf4fd37d9cff92cf2118d0b873ea9e41d8bfbaea558f51372c883ccea88d9",
+            "size_bytes": 3827
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/startup-options.layout.json",
+            "sha256": "486e232bf35594fbdd4d21c7751faed8994040a94236118ba296c9ce60086990",
+            "size_bytes": 6218
+          },
+          "comparison": "layout",
+          "id": "startup-options",
+          "receipt": {
+            "path": "run-1/comparisons/startup-options.json",
+            "sha256": "bd474e05fbed4bdfa1185b99c310b0d1705d1dd4cb8a8cd9ea11c0c1663ebd36",
+            "size_bytes": 788
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/startup-options.layout.json",
+            "sha256": "486e232bf35594fbdd4d21c7751faed8994040a94236118ba296c9ce60086990",
+            "size_bytes": 6218
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/startup-about.layout.json",
+            "sha256": "b8eb1194dbd9ca10ab9a1935825e327b7870a071951bf63f4d3a664dcb6b970e",
+            "size_bytes": 10933
+          },
+          "comparison": "layout",
+          "id": "startup-about",
+          "receipt": {
+            "path": "run-1/comparisons/startup-about.json",
+            "sha256": "d15c34d11e77365f86c9959acd2d9e483a39667b60264de94a23d3f91177a9a2",
+            "size_bytes": 780
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/startup-about.layout.json",
+            "sha256": "5cc8b9e5f4241bda80138d0a990ca558124f5b1d5135c015629a3542f0092280",
+            "size_bytes": 11045
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/network-lobby.png",
+            "sha256": "1a334d9875a14f88b7746fa97542dbc44ae925ff8b19ddbbf7e35ef763b7d129",
+            "size_bytes": 1396765
+          },
+          "comparison": "pixel",
+          "id": "network-lobby",
+          "receipt": {
+            "path": "run-1/comparisons/network-lobby.json",
+            "sha256": "f487d9c6fc48ff8fd0a57fb8f2ad5c1ec8052f305a05c86be21d849fe8c7981b",
+            "size_bytes": 762
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/network-lobby.png",
+            "sha256": "b706758453274ec5d7fd110d319c3dfd144e5e21fc37d4b37a7e3ae6b96fb3c7",
+            "size_bytes": 1245117
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/loader.png",
+            "sha256": "8c988253871026db291789aade2d96efc894dade769be1811171a37dce24e9de",
+            "size_bytes": 1646581
+          },
+          "comparison": "pixel",
+          "id": "loader",
+          "receipt": {
+            "path": "run-1/comparisons/loader.json",
+            "sha256": "0ae591af1194fba0491587927dbb5caef2da22b4fec87e9cb0f66281899b37fe",
+            "size_bytes": 734
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/loader.png",
+            "sha256": "c595a4f535533e78bed2971d871e68c62702809cb2cf20b8df07b452d721ccd7",
+            "size_bytes": 1470719
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/hud.layout.json",
+            "sha256": "8e858b86c227a3f0327ce275b631388e90bf7f3cc4a420892722c0510fd815f8",
+            "size_bytes": 2877
+          },
+          "comparison": "layout",
+          "id": "hud",
+          "receipt": {
+            "path": "run-1/comparisons/hud.json",
+            "sha256": "0edb3ceb824990e174090252502425d44d31e2ebff945585bd000761de9a4c69",
+            "size_bytes": 740
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/hud.layout.json",
+            "sha256": "8e858b86c227a3f0327ce275b631388e90bf7f3cc4a420892722c0510fd815f8",
+            "size_bytes": 2877
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/ingame-menu.layout.json",
+            "sha256": "3d0ecde9f19e2a17286626dbac9af51a2c796f26dc7e412722610be285b2edff",
+            "size_bytes": 5776
+          },
+          "comparison": "layout",
+          "id": "ingame-menu",
+          "receipt": {
+            "path": "run-1/comparisons/ingame-menu.json",
+            "sha256": "7c29a1ff3d606757b855b7fe3346401af52b97ec5c05ee8e876d7092e8f5cfb3",
+            "size_bytes": 772
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/ingame-menu.layout.json",
+            "sha256": "3d0ecde9f19e2a17286626dbac9af51a2c796f26dc7e412722610be285b2edff",
+            "size_bytes": 5776
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/object-menu.layout.json",
+            "sha256": "d1ba94be5436db289830e35e58829d10823ffda1c86d9d4ecd95bde067a2e26a",
+            "size_bytes": 6649
+          },
+          "comparison": "layout",
+          "id": "object-menu",
+          "receipt": {
+            "path": "run-1/comparisons/object-menu.json",
+            "sha256": "e261acc69c360955aea1ccc7c3a0b1b323feb89ebd65aa1ed840f72eea6ebab9",
+            "size_bytes": 772
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/object-menu.layout.json",
+            "sha256": "d1ba94be5436db289830e35e58829d10823ffda1c86d9d4ecd95bde067a2e26a",
+            "size_bytes": 6649
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/gameplay.layout.json",
+            "sha256": "28506a9e50477f6242eac202e08b893b586300ac78024bd61440eabfaa9aef48",
+            "size_bytes": 4358
+          },
+          "comparison": "layout",
+          "id": "gameplay",
+          "receipt": {
+            "path": "run-1/comparisons/gameplay.json",
+            "sha256": "9fdbaef1d8bcd5805a23cc9458f0a5d1a0d08a4d62d5dc697db1bfe56ccdfb8e",
+            "size_bytes": 760
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/gameplay.layout.json",
+            "sha256": "28506a9e50477f6242eac202e08b893b586300ac78024bd61440eabfaa9aef48",
+            "size_bytes": 4358
+          }
+        },
+        {
+          "actual": {
+            "path": "run-1/rust/artifacts/evaluation.layout.json",
+            "sha256": "c64a8ceaf1b4a4a4ae336e8f344ab29c3c2303550defeac9d0fa43f546871149",
+            "size_bytes": 6305
+          },
+          "comparison": "layout",
+          "id": "evaluation",
+          "receipt": {
+            "path": "run-1/comparisons/evaluation.json",
+            "sha256": "47cd73285eb712c0e733fca375226a5f8d5685332c50443e3c465ed30ad99c70",
+            "size_bytes": 768
+          },
+          "reference": {
+            "path": "run-1/cpp/artifacts/evaluation.layout.json",
+            "sha256": "c64a8ceaf1b4a4a4ae336e8f344ab29c3c2303550defeac9d0fa43f546871149",
+            "size_bytes": 6305
+          }
+        }
+      ],
+      "id": "run-1"
+    },
+    {
+      "cases": [
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/startup-main.layout.json",
+            "sha256": "4cea5dc472ef74291e331800acf6a9a92a6741ed519af1b3e2e8a5c103996ca0",
+            "size_bytes": 2797
+          },
+          "comparison": "layout",
+          "id": "startup-main",
+          "receipt": {
+            "path": "run-2/comparisons/startup-main.json",
+            "sha256": "b2a4f3f6d859f0ca3099f0cfc2bcea38c83274e0b21f2db8ca8233ce762cfa4f",
+            "size_bytes": 776
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/startup-main.layout.json",
+            "sha256": "55bfca7120925e0be491652e93bb31915999beecc2828158b7caeec84e009883",
+            "size_bytes": 2939
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/startup-scenario-selection.layout.json",
+            "sha256": "277b5938987214748f8974cf9f4dbe916286edb728017631c5e7da566fa53ea4",
+            "size_bytes": 3898
+          },
+          "comparison": "layout",
+          "id": "startup-scenario-selection",
+          "receipt": {
+            "path": "run-2/comparisons/startup-scenario-selection.json",
+            "sha256": "7a43c07b209d48969550dd73bca5e12505b49ceae1b823f439b083867907609a",
+            "size_bytes": 832
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/startup-scenario-selection.layout.json",
+            "sha256": "277b5938987214748f8974cf9f4dbe916286edb728017631c5e7da566fa53ea4",
+            "size_bytes": 3898
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/startup-network-browser.layout.json",
+            "sha256": "78f0e321d588722c17d738afa8002513022a663fcb81548c19cc6224ef5d8963",
+            "size_bytes": 3638
+          },
+          "comparison": "layout",
+          "id": "startup-network-browser",
+          "receipt": {
+            "path": "run-2/comparisons/startup-network-browser.json",
+            "sha256": "f63978dd9ca716444e81ac9e1c6a2329d964a89f1d3e43d84bdd1642d05435d0",
+            "size_bytes": 820
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/startup-network-browser.layout.json",
+            "sha256": "78f0e321d588722c17d738afa8002513022a663fcb81548c19cc6224ef5d8963",
+            "size_bytes": 3638
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/startup-player-selection.layout.json",
+            "sha256": "ba1cf4fd37d9cff92cf2118d0b873ea9e41d8bfbaea558f51372c883ccea88d9",
+            "size_bytes": 3827
+          },
+          "comparison": "layout",
+          "id": "startup-player-selection",
+          "receipt": {
+            "path": "run-2/comparisons/startup-player-selection.json",
+            "sha256": "34d1106b203f7e61f6a8108b52e96558292be16f6eb2a5f25b58618fc611803b",
+            "size_bytes": 824
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/startup-player-selection.layout.json",
+            "sha256": "ba1cf4fd37d9cff92cf2118d0b873ea9e41d8bfbaea558f51372c883ccea88d9",
+            "size_bytes": 3827
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/startup-options.layout.json",
+            "sha256": "486e232bf35594fbdd4d21c7751faed8994040a94236118ba296c9ce60086990",
+            "size_bytes": 6218
+          },
+          "comparison": "layout",
+          "id": "startup-options",
+          "receipt": {
+            "path": "run-2/comparisons/startup-options.json",
+            "sha256": "132f6bf4787a962b41d82510f1a42ded86ce89ced12860c7e79aa0732f28cc43",
+            "size_bytes": 788
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/startup-options.layout.json",
+            "sha256": "486e232bf35594fbdd4d21c7751faed8994040a94236118ba296c9ce60086990",
+            "size_bytes": 6218
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/startup-about.layout.json",
+            "sha256": "b8eb1194dbd9ca10ab9a1935825e327b7870a071951bf63f4d3a664dcb6b970e",
+            "size_bytes": 10933
+          },
+          "comparison": "layout",
+          "id": "startup-about",
+          "receipt": {
+            "path": "run-2/comparisons/startup-about.json",
+            "sha256": "8f7988380d963677a648b96e867e57ebb8ae13eef1fc43a98a54acbaa39b0a98",
+            "size_bytes": 780
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/startup-about.layout.json",
+            "sha256": "5cc8b9e5f4241bda80138d0a990ca558124f5b1d5135c015629a3542f0092280",
+            "size_bytes": 11045
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/network-lobby.png",
+            "sha256": "1a334d9875a14f88b7746fa97542dbc44ae925ff8b19ddbbf7e35ef763b7d129",
+            "size_bytes": 1396765
+          },
+          "comparison": "pixel",
+          "id": "network-lobby",
+          "receipt": {
+            "path": "run-2/comparisons/network-lobby.json",
+            "sha256": "3664bac96f455f3981e96944821d04db260182819b8803c752ba9bd3566e48d4",
+            "size_bytes": 762
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/network-lobby.png",
+            "sha256": "b706758453274ec5d7fd110d319c3dfd144e5e21fc37d4b37a7e3ae6b96fb3c7",
+            "size_bytes": 1245117
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/loader.png",
+            "sha256": "8c988253871026db291789aade2d96efc894dade769be1811171a37dce24e9de",
+            "size_bytes": 1646581
+          },
+          "comparison": "pixel",
+          "id": "loader",
+          "receipt": {
+            "path": "run-2/comparisons/loader.json",
+            "sha256": "66804e5da71d2bb33780e7d75b03c4246ed7b9806351db1845546bced9f9cccb",
+            "size_bytes": 734
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/loader.png",
+            "sha256": "c595a4f535533e78bed2971d871e68c62702809cb2cf20b8df07b452d721ccd7",
+            "size_bytes": 1470719
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/hud.layout.json",
+            "sha256": "8e858b86c227a3f0327ce275b631388e90bf7f3cc4a420892722c0510fd815f8",
+            "size_bytes": 2877
+          },
+          "comparison": "layout",
+          "id": "hud",
+          "receipt": {
+            "path": "run-2/comparisons/hud.json",
+            "sha256": "e1decfac85cef30d027f2a293419592a6e7e127c7da52cb8eba4f3a66284ffee",
+            "size_bytes": 740
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/hud.layout.json",
+            "sha256": "8e858b86c227a3f0327ce275b631388e90bf7f3cc4a420892722c0510fd815f8",
+            "size_bytes": 2877
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/ingame-menu.layout.json",
+            "sha256": "3d0ecde9f19e2a17286626dbac9af51a2c796f26dc7e412722610be285b2edff",
+            "size_bytes": 5776
+          },
+          "comparison": "layout",
+          "id": "ingame-menu",
+          "receipt": {
+            "path": "run-2/comparisons/ingame-menu.json",
+            "sha256": "cc216c7137f4cfa40bca3479f81fff66fc288c114dc5eb913cc9575316507bf0",
+            "size_bytes": 772
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/ingame-menu.layout.json",
+            "sha256": "3d0ecde9f19e2a17286626dbac9af51a2c796f26dc7e412722610be285b2edff",
+            "size_bytes": 5776
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/object-menu.layout.json",
+            "sha256": "d1ba94be5436db289830e35e58829d10823ffda1c86d9d4ecd95bde067a2e26a",
+            "size_bytes": 6649
+          },
+          "comparison": "layout",
+          "id": "object-menu",
+          "receipt": {
+            "path": "run-2/comparisons/object-menu.json",
+            "sha256": "85ba9edc7f543f578c808b05418f3f034db6141c7728a6081dfecfd4a4c60309",
+            "size_bytes": 772
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/object-menu.layout.json",
+            "sha256": "d1ba94be5436db289830e35e58829d10823ffda1c86d9d4ecd95bde067a2e26a",
+            "size_bytes": 6649
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/gameplay.layout.json",
+            "sha256": "28506a9e50477f6242eac202e08b893b586300ac78024bd61440eabfaa9aef48",
+            "size_bytes": 4358
+          },
+          "comparison": "layout",
+          "id": "gameplay",
+          "receipt": {
+            "path": "run-2/comparisons/gameplay.json",
+            "sha256": "ee8e00bfdf0670c195e35e9435f9ea73655dfe911e28cfbd1e80c6f177663b36",
+            "size_bytes": 760
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/gameplay.layout.json",
+            "sha256": "28506a9e50477f6242eac202e08b893b586300ac78024bd61440eabfaa9aef48",
+            "size_bytes": 4358
+          }
+        },
+        {
+          "actual": {
+            "path": "run-2/rust/artifacts/evaluation.layout.json",
+            "sha256": "c64a8ceaf1b4a4a4ae336e8f344ab29c3c2303550defeac9d0fa43f546871149",
+            "size_bytes": 6305
+          },
+          "comparison": "layout",
+          "id": "evaluation",
+          "receipt": {
+            "path": "run-2/comparisons/evaluation.json",
+            "sha256": "2e8ae55f05dd08ae64d5be6196498047dbb331d24c68d3cd61b01481373852b0",
+            "size_bytes": 768
+          },
+          "reference": {
+            "path": "run-2/cpp/artifacts/evaluation.layout.json",
+            "sha256": "c64a8ceaf1b4a4a4ae336e8f344ab29c3c2303550defeac9d0fa43f546871149",
+            "size_bytes": 6305
+          }
+        }
+      ],
+      "id": "run-2"
+    }
+  ],
+  "contract": {
+    "capture_manifest": {
+      "contract_sha256": "616d508612e1ff29cb09a91b54dc82c7c0a1a96108b47ccb65a1e25f47517941",
+      "path": "compat/presentation_captures.json"
+    },
+    "case_specs": {
+      "path": "compat/presentation/case_specs.json",
+      "sha256": "dd294f980bdebb014e37a43d774e8f191eee5eb34d37836b56a9ec090b0e6332"
+    },
+    "compat_profile": {
+      "contract_sha256": "0a002b9778959b86196dd6f0e05a955a960ed9c3899e729b77e1f5f2c09db7aa",
+      "path": "compat/profile.json"
+    },
+    "geometry": {
+      "height": 720,
+      "scale": 100,
+      "width": 1280
+    },
+    "launcher": {
+      "retained_path": "launcher/acquire_presentation_oracle.py",
+      "sha256": "b38482af2b5bc296e169e4f5b9ce8230685b25d913c549f0357095227223616f",
+      "source_path": "scripts/acquire_presentation_oracle.py"
+    },
+    "normalization": {
+      "color": "rgb-or-rgba8-srgb",
+      "cpp_savepng_readback": "real-height-minus-one-minus-y",
+      "pointer_input": {
+        "button": "none",
+        "help": false,
+        "modifiers": [],
+        "position": [
+          32,
+          32
+        ]
+      }
+    }
+  },
+  "inputs": {
+    "configs": {
+      "cpp": {
+        "path": "inputs/cpp.config",
+        "profile": "oracle-native",
+        "sha256": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "size_bytes": 959
+      },
+      "rust": {
+        "path": "inputs/rust.config",
+        "profile": "legacy-clonk",
+        "sha256": "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb",
+        "size_bytes": 959
+      }
+    },
+    "network_references": {
+      "path": "inputs/network-references.json",
+      "sha256": "922c7ccf941069bafd38a18e3ed71a747eadaa0c2a037b4e34422ce7312c8bf4",
+      "size_bytes": 82
+    },
+    "player": {
+      "id": "presentation-player",
+      "path": "inputs/Presentation.c4p",
+      "sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
+      "size_bytes": 235
+    },
+    "rust_source_inventory": {
+      "path": "inputs/rust-source-inputs.json",
+      "sha256": "b3cc51e17e91e7a87dfcf050c76e740b00953e296320edea0ebe5a3600e64a9d",
+      "size_bytes": 298313
+    }
+  },
+  "patch": {
+    "base_commit": "7d43b47b7d789b533f32d005e64596e0a07019cd",
+    "retained_path": "inputs/cpp-capture.patch",
+    "sha256": "e2b84c1a8c4db811f819bd0ddeb3a7f988f2412cb8cd9b7a9db7540ba30c17de",
+    "source_path": "parity/oracle/presentation_capture.patch"
+  },
+  "runs": [
+    {
+      "engines": {
+        "cpp": {
+          "cases": [
+            {
+              "id": "startup-main",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:main",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-main",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/startup-main",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/startup-main.json",
+                "sha256": "5275cf5eb7bfe647f87893b9d99e58e7bb9ec9aadbe82e7761e7908dcc7abf49",
+                "size_bytes": 1846
+              }
+            },
+            {
+              "id": "startup-scenario-selection",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:scen",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/startup-scenario-selection",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/startup-scenario-selection.json",
+                "sha256": "6059b34bf285ad0b4f5cce69064b0423d365503c93be43f0720324a2c2ad51c7",
+                "size_bytes": 1902
+              }
+            },
+            {
+              "id": "startup-network-browser",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:net",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-network-browser",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/startup-network-browser",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/startup-network-browser.json",
+                "sha256": "e8f6343ef391bb03c88a048795feac4c1343a5a0157efb28327a873b0bdfa410",
+                "size_bytes": 1889
+              }
+            },
+            {
+              "id": "startup-player-selection",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:plrsel",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-player-selection",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/startup-player-selection",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/startup-player-selection.json",
+                "sha256": "663ec85c2787b5ef6fb757268ccf11ea3dfd6980e430f4250c2bd0a205ce30b7",
+                "size_bytes": 1893
+              }
+            },
+            {
+              "id": "startup-options",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:options",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-options",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/startup-options",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/startup-options.json",
+                "sha256": "1665447294197fec93e7b661a129f138c2b17875b2fa9b3c42389e62df3cb92e",
+                "size_bytes": 1858
+              }
+            },
+            {
+              "id": "startup-about",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:about",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-about",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/startup-about",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/startup-about.json",
+                "sha256": "0823ff8c6f59fc3e8d2ca5683b3421a9a020bd9eef5cf664889f6339ce6bcdfb",
+                "size_bytes": 1851
+              }
+            },
+            {
+              "id": "network-lobby",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/network",
+                  "/lobby",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "network-lobby",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/network-lobby",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/network-lobby.json",
+                "sha256": "0a68112d353a9fb3169265d25cd63b2ec07c63b3d9365cf0080bfc32b207ac1a",
+                "size_bytes": 1730
+              }
+            },
+            {
+              "id": "loader",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "loader",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/loader.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/loader",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/loader.json",
+                "sha256": "697aede0ac5d07eb0088c2ac0683ae46127ccf7732ca80f9a084c8846ab1dc5b",
+                "size_bytes": 1716
+              }
+            },
+            {
+              "id": "hud",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "hud",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/hud.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/hud",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/hud.json",
+                "sha256": "18cc4e33a2e3c75c944bda9bf7011f80e54f37f25faeb974819728000adfac5c",
+                "size_bytes": 1849
+              }
+            },
+            {
+              "id": "ingame-menu",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "ingame-menu",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/ingame-menu",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/ingame-menu.json",
+                "sha256": "ca181bc7fa82621ed38b724f297fc67da02b4baebc4173aac7fd9c923b59e5a9",
+                "size_bytes": 1886
+              }
+            },
+            {
+              "id": "object-menu",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "object-menu",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/object-menu",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/object-menu.json",
+                "sha256": "26d0592eab3d0f622772e28bd3147d851ee16c0e77bf8f4ce5b5a0042214c93a",
+                "size_bytes": 1896
+              }
+            },
+            {
+              "id": "gameplay",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "gameplay",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/gameplay",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/gameplay.json",
+                "sha256": "f51663d16a2dea8b21c909c7ed211bf9a7c9e52a4fee1e9942fa3f92ab75daf7",
+                "size_bytes": 1866
+              }
+            },
+            {
+              "id": "evaluation",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "evaluation",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/cpp/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/cpp/evaluation",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/cpp/receipts/evaluation.json",
+                "sha256": "37fd83d476c2c0e717d9ad9b2dca93cca144d40bd2e52eb04df96f244efe1adb",
+                "size_bytes": 1890
+              }
+            }
+          ]
+        },
+        "rust": {
+          "cases": [
+            {
+              "id": "startup-main",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-main",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/startup-main",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/startup-main.json",
+                "sha256": "96e8a440349f4fd799b0e87c386fb899e02bddbfc3e6a4c2f061d65b2907d9a1",
+                "size_bytes": 1847
+              }
+            },
+            {
+              "id": "startup-scenario-selection",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/startup-scenario-selection",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/startup-scenario-selection.json",
+                "sha256": "314addb2e369d3f21ee4a7a673419a8fd46e787f4ba01a9d2b0d693780bf8f78",
+                "size_bytes": 1903
+              }
+            },
+            {
+              "id": "startup-network-browser",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-network-browser",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/startup-network-browser",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/startup-network-browser.json",
+                "sha256": "f4e3012224570e17958401a2c5efd0d95901885813e2831d3d55752933ab39d1",
+                "size_bytes": 1890
+              }
+            },
+            {
+              "id": "startup-player-selection",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-player-selection",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/startup-player-selection",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/startup-player-selection.json",
+                "sha256": "037103a3588e2d0484f12d334d62331debbe615192b4b4140c8d75ee743b6e76",
+                "size_bytes": 1895
+              }
+            },
+            {
+              "id": "startup-options",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-options",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/startup-options",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/startup-options.json",
+                "sha256": "45d880eed5f422d9a274baad75381b61805d6ba1e919e04c375cc6aeec8ca954",
+                "size_bytes": 1859
+              }
+            },
+            {
+              "id": "startup-about",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-about",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/startup-about",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/startup-about.json",
+                "sha256": "c5f13f61f13bc095b5bb1d374167daaf7ffdb86c6886683da953438045899dcd",
+                "size_bytes": 1852
+              }
+            },
+            {
+              "id": "network-lobby",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "network-lobby",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/network-lobby",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/network-lobby.json",
+                "sha256": "48728b5ef3acf6627722c118c22724f1674d38696f50cdd463e8de76f1ccb728",
+                "size_bytes": 1730
+              }
+            },
+            {
+              "id": "loader",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "loader",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/loader.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/loader",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/loader.json",
+                "sha256": "524b98b3f54812890b1b59e70bf4c4195712854de8e8b7829110b37455a59b06",
+                "size_bytes": 1716
+              }
+            },
+            {
+              "id": "hud",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "hud",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/hud.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/hud",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/hud.json",
+                "sha256": "6bcbb0957921b533177113845df5e09ef8a12e5cda2f7eaf651136e1ea2e5cc4",
+                "size_bytes": 1851
+              }
+            },
+            {
+              "id": "ingame-menu",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "ingame-menu",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/ingame-menu",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/ingame-menu.json",
+                "sha256": "a118e3c339b478853844572d221357965b676b4f0f61ada64b284808e7a8039e",
+                "size_bytes": 1888
+              }
+            },
+            {
+              "id": "object-menu",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "object-menu",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/object-menu",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/object-menu.json",
+                "sha256": "ee81012abc924e08dd56edc2555ad47b9e78b0702ecf1c51692078202e8d4757",
+                "size_bytes": 1898
+              }
+            },
+            {
+              "id": "gameplay",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "gameplay",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/gameplay",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/gameplay.json",
+                "sha256": "8cf904293c45453763a4399b75e74e9d8ae35cf9f21c0bc8396bb072b50c08ad",
+                "size_bytes": 1868
+              }
+            },
+            {
+              "id": "evaluation",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "evaluation",
+                  "CLONK_PRESENTATION_NONCE": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-1/rust/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-1",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-1/rust/evaluation",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-1/rust/receipts/evaluation.json",
+                "sha256": "e4094b116b2d1e471157b9f24a7bcb49af87b7dd46f0790226209d3aefe77eb5",
+                "size_bytes": 1892
+              }
+            }
+          ]
+        }
+      },
+      "id": "run-1",
+      "launcher_receipt": {
+        "path": "run-1/launcher-receipt.json",
+        "sha256": "721a8cf3cb4cf7b1274f7b6c82c75efd1c18208e9777fbdcd9934922dc9417e1",
+        "size_bytes": 4095
+      },
+      "nonce": "64a2d8c1f0691e6a2906d874f00e498a82e2bf2b86d77006d7ab4bf4109ef7b5"
+    },
+    {
+      "engines": {
+        "cpp": {
+          "cases": [
+            {
+              "id": "startup-main",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:main",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-main",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/startup-main",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/startup-main.json",
+                "sha256": "6e9845899fa77eb56696d9344bb98e04a143fc87129e85bdc4cc742bf2b9b1d0",
+                "size_bytes": 1846
+              }
+            },
+            {
+              "id": "startup-scenario-selection",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:scen",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/startup-scenario-selection",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/startup-scenario-selection.json",
+                "sha256": "36f40782748dbe1a274db8f7780d8949dc42790474c9e03e5524045f54f5fb0f",
+                "size_bytes": 1902
+              }
+            },
+            {
+              "id": "startup-network-browser",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:net",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-network-browser",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/startup-network-browser",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/startup-network-browser.json",
+                "sha256": "7bbebbd677a4a0b7fafd9b2a7bf4d400d91b6a5495aae170169a343dc240e5ac",
+                "size_bytes": 1889
+              }
+            },
+            {
+              "id": "startup-player-selection",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:plrsel",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-player-selection",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/startup-player-selection",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/startup-player-selection.json",
+                "sha256": "97716209dbfa599626308494dc01e9540553a14bfefabd6eba5c73be599c4351",
+                "size_bytes": 1893
+              }
+            },
+            {
+              "id": "startup-options",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:options",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-options",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/startup-options",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/startup-options.json",
+                "sha256": "c7f87bf2289cdec71c1fc053b719a133c74730bb828921ca0e71c8da3ef5e906",
+                "size_bytes": 1858
+              }
+            },
+            {
+              "id": "startup-about",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/startup:about",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-about",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/startup-about",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/startup-about.json",
+                "sha256": "85a42053b2f1422447d0416e48fcf5a39b5d6ebb29a3c2e9db8532d6c0a569a7",
+                "size_bytes": 1851
+              }
+            },
+            {
+              "id": "network-lobby",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/network",
+                  "/lobby",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "network-lobby",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/network-lobby",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/network-lobby.json",
+                "sha256": "135dfc17fc9f8b0f186d567cc1316eb9de9ad9ba75443a164d4f6b3ae6fa59eb",
+                "size_bytes": 1730
+              }
+            },
+            {
+              "id": "loader",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "loader",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/loader.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/loader",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/loader.json",
+                "sha256": "4ba2e266894b6472390e9ef386b8bff7152e0b208ad2e2184ad9d221119c0cbd",
+                "size_bytes": 1716
+              }
+            },
+            {
+              "id": "hud",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "hud",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/hud.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/hud",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/hud.json",
+                "sha256": "ec48b5f8a3f83f78ac593ac054c5c32c02cb29009fb5450f7e175e2fac0be354",
+                "size_bytes": 1849
+              }
+            },
+            {
+              "id": "ingame-menu",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "ingame-menu",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/ingame-menu",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/ingame-menu.json",
+                "sha256": "67339f765c2ec5459f91802d6aa021673e32efe9ab80ec7a50f11adbd2ddc8b5",
+                "size_bytes": 1886
+              }
+            },
+            {
+              "id": "object-menu",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "object-menu",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/object-menu",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/object-menu.json",
+                "sha256": "2745553fffadfd0b5dcbf12c7eca9b0d5a83640c0437326538d4f5a1ed63bed4",
+                "size_bytes": 1896
+              }
+            },
+            {
+              "id": "gameplay",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "gameplay",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/gameplay",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/gameplay.json",
+                "sha256": "e8ad4aaa1fd3157210db7a5107217b24c9ca0f57b54be81f84fa1a027407fb35",
+                "size_bytes": 1866
+              }
+            },
+            {
+              "id": "evaluation",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/cpp.config"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "evaluation",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/cpp/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/cpp/evaluation",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+                    "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+                  },
+                  "system": {
+                    "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+                    "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/cpp/receipts/evaluation.json",
+                "sha256": "98e7784809319a9fbad94310de71d5576dade7d1d59a3dc3c9e842edbc6ffd2c",
+                "size_bytes": 1890
+              }
+            }
+          ]
+        },
+        "rust": {
+          "cases": [
+            {
+              "id": "startup-main",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-main",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/startup-main",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/startup-main.json",
+                "sha256": "b0004936007d97c4997d335b36cbc79be5b4e559ca14ec2eb28f49e11bfbf22d",
+                "size_bytes": 1847
+              }
+            },
+            {
+              "id": "startup-scenario-selection",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/startup-scenario-selection",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/startup-scenario-selection.json",
+                "sha256": "d9df753fc9a12c729a5677149c121b47fed7ffedbde88fcbbab23ee1c9620455",
+                "size_bytes": 1903
+              }
+            },
+            {
+              "id": "startup-network-browser",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-network-browser",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/startup-network-browser",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/startup-network-browser.json",
+                "sha256": "92747a76a1ad41c9f3f25bb00c55a74550e01961e00e1e107c9620c3bc082102",
+                "size_bytes": 1890
+              }
+            },
+            {
+              "id": "startup-player-selection",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-player-selection",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/startup-player-selection",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/startup-player-selection.json",
+                "sha256": "ff7df8c82c052348f5050ff80b9562801919e6539087a731c541add802a1a884",
+                "size_bytes": 1895
+              }
+            },
+            {
+              "id": "startup-options",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-options",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/startup-options",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/startup-options.json",
+                "sha256": "1749898fdaa388a9bb058c26b26e70698157b65d2e0ead374065fedccb4fbe42",
+                "size_bytes": 1859
+              }
+            },
+            {
+              "id": "startup-about",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "startup-about",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/startup-about",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/startup-about.json",
+                "sha256": "60e384716f5f79974499b2e9873a6c878a16b7ebda8931969305d898293d0d1a",
+                "size_bytes": 1852
+              }
+            },
+            {
+              "id": "network-lobby",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "network-lobby",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/network-lobby",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/network-lobby.json",
+                "sha256": "636fad3c0737bf6c2037ad7813393122c73ee968d6b0dbd9b572baa59d1aa10c",
+                "size_bytes": 1730
+              }
+            },
+            {
+              "id": "loader",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "loader",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/loader.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/loader",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/loader.json",
+                "sha256": "bfb1a4583b093a4c68cfaee324b6db835fe680d425c2982da57bad4f8671c00d",
+                "size_bytes": 1716
+              }
+            },
+            {
+              "id": "hud",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "hud",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/hud.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/hud",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/hud.json",
+                "sha256": "7720dd88bb6a1a30240edf17020ca7807b8f2048952a3fa86d11189b7ff75712",
+                "size_bytes": 1851
+              }
+            },
+            {
+              "id": "ingame-menu",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "ingame-menu",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/ingame-menu",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/ingame-menu.json",
+                "sha256": "bf789cb9d360061c611b6515e393c0409325242d09481387f82f6645e98df350",
+                "size_bytes": 1888
+              }
+            },
+            {
+              "id": "object-menu",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "object-menu",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/object-menu",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/object-menu.json",
+                "sha256": "26bc336ebadb9c8ed72556a758b2d50d67c7a3e4029337f42d19bdd41e248972",
+                "size_bytes": 1898
+              }
+            },
+            {
+              "id": "gameplay",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "gameplay",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/gameplay",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/gameplay.json",
+                "sha256": "0bb35fcc17e9eaedab8b93eb21ce5ff5f62cf469ce1ff27a28502721f402794b",
+                "size_bytes": 1868
+              }
+            },
+            {
+              "id": "evaluation",
+              "launch": {
+                "argv": [
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source/target/release/clonk-app",
+                  "--config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust.config",
+                  "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/Presentation.c4p",
+                  "/compatprofile:legacy-clonk"
+                ],
+                "cwd": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/rust-source",
+                "environment": {
+                  "CARGO_INCREMENTAL": "0",
+                  "CLONK_PRESENTATION_CAPTURE": "1",
+                  "CLONK_PRESENTATION_CASE": "evaluation",
+                  "CLONK_PRESENTATION_NONCE": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/run-2/rust/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_RUN_ID": "run-2",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs/rust-source-identity.json",
+                  "LANG": "C",
+                  "LC_ALL": "C",
+                  "LC_CONTENT_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/inputs",
+                  "LC_LANGUAGE": "US",
+                  "LC_USER_DATA_DIR": "/private/tmp/clonk-587-rebased-presentation.vdWWtb/candidate/work/user-data/run-2/rust/evaluation",
+                  "SDL_AUDIODRIVER": "dummy",
+                  "TZ": "UTC"
+                },
+                "runtime_resources": {
+                  "graphics": {
+                    "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+                    "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+                  },
+                  "system": {
+                    "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+                    "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+                  }
+                }
+              },
+              "receipt": {
+                "path": "run-2/rust/receipts/evaluation.json",
+                "sha256": "f27b09aab688283faa32561c35129c38045e53ecd90ba7a24c9b48f27f6ebead",
+                "size_bytes": 1892
+              }
+            }
+          ]
+        }
+      },
+      "id": "run-2",
+      "launcher_receipt": {
+        "path": "run-2/launcher-receipt.json",
+        "sha256": "b1b9d7be171246bfe2d5f73a02416287f640d7bb977ab7c95a25530c9a26622e",
+        "size_bytes": 4095
+      },
+      "nonce": "04f3850c38295cab3f0a97ddf05ba8e6afd5aaea73ac43872a7683a46485f4cc"
+    }
+  ],
+  "schema": "clonk-rs/presentation-oracle/v2",
+  "sources": {
+    "effective_system_scripts_sha256": "be61ec80205e16997e7f00af825522783714fff57f534f3d1c328de182e2eb6b",
+    "fixture_content": {
+      "commit": "ab9094f96838ae9c8cb77555560a8b887231640a",
+      "tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"
+    },
+    "oracle": {
+      "commit": "7d43b47b7d789b533f32d005e64596e0a07019cd",
+      "historical_content_gitlink": "67a54d0e662bda3aa0202134efc065d7bc420872",
+      "planet_tree": "d3df7560ac1a29998bf826076611e5e919d7c779",
+      "system_tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3",
+      "tree": "3859b3715b7f58d0c461cf45dc226593a2b0d687"
+    },
+    "runtime_resources": {
+      "cpp": {
+        "graphics": {
+          "manifest_sha256": "106dcd8d6888d2ceffb8f4c3d0eb06523ec2c04cb272edbfe9fb7453be16334d",
+          "tree": "153c435149fffeb0f6790d95b3c2136278393310"
+        },
+        "system": {
+          "manifest_sha256": "aa10a7d5605d1aab8b09863efe2e8450c71c415c98c18f6cb88e4f47f78c606b",
+          "tree": "dd38a61e74a8f8bda29e66107e5dc3d7008f58c3"
+        }
+      },
+      "rust": {
+        "graphics": {
+          "manifest_sha256": "f76da21d001426afe88a7684214fb02405b36ce2b792f3b4c74a21c3e5ea62d0",
+          "tree": "d6fe6f8be6c83f6ec6237a61f388c033f449c78e"
+        },
+        "system": {
+          "manifest_sha256": "13442695d93af83b17795505894b1afbeefb8132841385b8a9bb7d634cc6e5f9",
+          "tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2"
+        }
+      }
+    },
+    "rust": {
+      "commit": "fda63988586be61faa9fa6aefffd1c517f9ff6f4",
+      "planet_tree": "8bac05fb1db56dec06c6dc3644b3170d81d4ef49",
+      "system_tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2",
+      "tree": "ca12102c9083889037eaf4e1bd1c1749fdffedc3"
+    }
+  }
+}

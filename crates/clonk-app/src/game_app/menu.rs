@@ -3762,6 +3762,9 @@ impl GameApp {
         let activation_refusals = self
             .app_paths
             .as_ref()
+            // The capture fork keeps the audited input byte-exact, and native
+            // player-list construction does not save Config here.
+            .filter(|_| !crate::presentation_capture_or_discovery_requested())
             .map(AppPaths::config_file)
             .map(|config_path| persist_activations(&config_path, &mut self.startup.player_files))
             .transpose();
@@ -4335,6 +4338,17 @@ impl GameApp {
                 self.activate_network_reference_join(reference)?;
             }
             MessageDialogContinuation::NetworkRuntimeJoin { .. } => {}
+            MessageDialogContinuation::CompatProfileLobbyNotice {
+                finish_classic_command_line_host_entry,
+            } => {
+                if result == clonk_frontend::message_dialog::MessageDialogResult::Ok {
+                    if finish_classic_command_line_host_entry {
+                        self.finish_classic_command_line_host_entry()?;
+                    }
+                } else {
+                    self.return_to_menu();
+                }
+            }
             MessageDialogContinuation::NetworkServerRedirect { address }
                 if result == clonk_frontend::message_dialog::MessageDialogResult::Yes =>
             {

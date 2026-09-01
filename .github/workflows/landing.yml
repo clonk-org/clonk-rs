@@ -254,7 +254,7 @@ jobs:
     name: Linux / ${{ matrix.name }}
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.timeout || 15 }}
     # Every required queue row uses a run-scoped lane. The non-cancelling cache
     # producer and cancellable post-merge diagnostics retain their rolling
     # lanes in rust.yml; sharing either here could cancel a required row.
@@ -266,6 +266,9 @@ jobs:
         shell: bash
     strategy:
       fail-fast: false
+      # One Linux row waits so release context plus the two Windows rows never
+      # push an ordinary merge-group run beyond the 20-runner pool.
+      max-parallel: 17
       matrix:
         include:
           - name: app 1/12
@@ -315,12 +318,12 @@ jobs:
             command: cargo nextest run -p clonk-app-menus -p clonk-app-render -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
           - name: workspace quality
             apt: libasound2-dev libudev-dev python3-pil
+            oracle: true
             command: |
               failed=0
               cargo clippy --version || failed=1
               rustfmt --version || failed=1
               cargo fmt --all -- --check || failed=1
-              git fetch --no-tags --depth=1 origin 7d43b47b7d789b533f32d005e64596e0a07019cd || failed=1
               # Issue references must name their repository: this one is public,
               # and a bare "#28" collides across clonk-rs and LegacyClonk. The
               # CLO- and M##-P#-L### trackers are not resolvable from this
@@ -336,7 +339,13 @@ jobs:
               python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py' || failed=1
               cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1
               exit "$failed"
+          - name: presentation captures
+            apt: libasound2-dev libudev-dev
+            oracle: true
+            timeout: 30
+            command: cargo xtask presentation verify-current --profile release --output-dir "$RUNNER_TEMP/presentation-current"
           - name: engine contracts
+            oracle: true
             command: |
               cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
               cargo xtask engine-snapshots verify
@@ -346,6 +355,10 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Fetch pinned LegacyClonk oracle commit
+        if: matrix.oracle == true
+        run: git fetch --no-tags --depth=1 origin 7d43b47b7d789b533f32d005e64596e0a07019cd
 
       - name: Resolve pinned content revision
         id: content
@@ -460,6 +473,18 @@ jobs:
         env:
           SHARD_COMMAND: ${{ matrix.command }}
         run: bash -euo pipefail -c "$SHARD_COMMAND"
+
+      - name: Upload presentation capture failure
+        if: failure() && matrix.name == 'presentation captures'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: presentation-capture-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/presentation-current/run-*/rust/artifacts
+            ${{ runner.temp }}/presentation-current/run-*/rust/receipts
+            ${{ runner.temp }}/presentation-current/verify-current.json
+          if-no-files-found: warn
+          retention-days: 14
 
   windows-smoke:
     name: Windows / ${{ matrix.name }}

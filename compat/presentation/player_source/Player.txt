@@ -1,0 +1,11 @@
+[Player]
+Name=Presentation Host
+Score=42
+TotalPlayingTime=99
+
+[Preferences]
+Color=3
+ColorDw=1122867
+Position=2
+AutoStopControl=1
+AutoContextMenu=1

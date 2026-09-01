@@ -83,6 +83,20 @@ impl Engine {
         self.request_game_over()
     }
 
+    /// Runs the evaluation half that normally closes the synchronized frame
+    /// after a control has triggered game over.
+    ///
+    /// This is exposed for exact control/checkpoint drivers that must preserve
+    /// the current frame number while following `C4Game::DoGameOver()` with
+    /// `C4Game::Evaluate()`.
+    #[doc(hidden)]
+    pub fn evaluate_game_over_from_control(&mut self) -> Result<(), EngineError> {
+        if self.game_over_triggered {
+            self.evaluate_game()?;
+        }
+        Ok(())
+    }
+
     pub fn game_time(&self) -> i32 {
         self.game_time
     }
@@ -728,6 +742,14 @@ impl Engine {
 
     pub fn particle_system(&self) -> &particles::ParticleSystem {
         &self.particle_system
+    }
+
+    /// Seed every engine-owned process-local presentation RNG for a capture.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "presentation-capture"))]
+    pub fn seed_presentation_safe_random(&mut self, seed: u32) {
+        self.particle_system.safe_rng = particles::SafeRng::new(seed);
+        crate::compat::seed_script_safe_random(seed);
     }
 
     /// Set process-local `Config.Graphics.SmokeLevel`. Def-based particles

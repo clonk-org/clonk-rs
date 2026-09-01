@@ -547,6 +547,7 @@ fn command_region_point(app: &GameApp, command: u8) -> GuiPoint {
     let context = AppCommandContext {
         engine: &app.engine,
         bindings: &app.bindings,
+        gamepad_bindings: &app.gamepad_bindings,
         snapshot: &app.snapshot,
         resources: &app.startup_tooltip_resources,
     };
@@ -4316,6 +4317,7 @@ fn two_item_script_menu(cursor: ObjectId) -> clonk_engine::ObjectMenuState {
         style: 0,
         equal_item_height: false,
         permanent: false,
+        close_command: clonk_engine::ObjectMenuCloseCommand::None,
         location: None,
         runtime_id: 0,
         extra: clonk_engine::ObjectMenuExtra::default(),

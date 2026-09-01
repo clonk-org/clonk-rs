@@ -1158,6 +1158,7 @@ impl ScenSelScreen {
             Some("Start Game"),
             true,
             Some((fair_crew, record)),
+            true,
             gamma,
         );
     }
@@ -1177,7 +1178,16 @@ impl ScenSelScreen {
         title: &str,
         gamma: Option<&GammaRamp>,
     ) {
-        Self::render_chrome_impl(surface, assets, gui_fonts, Some(title), false, None, gamma);
+        Self::render_chrome_impl(
+            surface,
+            assets,
+            gui_fonts,
+            Some(title),
+            false,
+            None,
+            true,
+            gamma,
+        );
     }
 
     /// Raster-only selection-independent chrome for the application's static
@@ -1188,9 +1198,19 @@ impl ScenSelScreen {
         surface: &mut Surface,
         assets: &ScenSelAssets,
         gui_fonts: &ClonkFontSet,
+        list_scrollbar_visible: bool,
         gamma: Option<&GammaRamp>,
     ) {
-        Self::render_chrome_impl(surface, assets, gui_fonts, None, false, None, gamma);
+        Self::render_chrome_impl(
+            surface,
+            assets,
+            gui_fonts,
+            None,
+            false,
+            None,
+            list_scrollbar_visible,
+            gamma,
+        );
     }
 
     /// Draws the fullscreen base title and the static CStdFont label owned by
@@ -1244,6 +1264,7 @@ impl ScenSelScreen {
         static_title: Option<&str>,
         draw_back: bool,
         game_options: Option<(bool, bool)>,
+        list_scrollbar_visible: bool,
         gamma: Option<&GammaRamp>,
     ) {
         let layout = scen_sel_layout(surface.width() as i32, surface.height() as i32, gui_fonts);
@@ -1292,8 +1313,10 @@ impl ScenSelScreen {
         // 6. List scrollbar track (visible-but-pinless first-shown quirk,
         // spec §4.3): DrawVBar with sfctBookScroll
         // (C4GuiContainers.cpp:446-473).
-        let bar = &layout.list_scrollbar;
-        draw_vbar(surface, bar.x, bar.y, bar.h, &assets.book_scroll, gamma);
+        if list_scrollbar_visible {
+            let bar = &layout.list_scrollbar;
+            draw_vbar(surface, bar.x, bar.y, bar.h, &assets.book_scroll, gamma);
+        }
 
         // 7-10. Bottom bar in add order: Back, icon buttons
         // (C4StartupScenSelDlg.cpp:1367-1382); the checkbox and Open button
@@ -1939,7 +1962,11 @@ pub fn selection_info_scroll_metrics(
     });
     let text_height = selection_info_lines(info, book_fonts)
         .iter()
-        .map(|(text, font, _)| wrap_line(text, font, content_w).len() as i32 * font.line_height)
+        .enumerate()
+        .map(|(index, (text, font, _))| {
+            wrap_line(text, font, content_w).len() as i32 * font.line_height
+                + if index == 0 { 0 } else { font.line_height / 3 }
+        })
         .sum::<i32>();
     let content_height = picture_height + text_height;
     SelectionInfoScrollMetrics {
@@ -2019,7 +2046,13 @@ pub fn draw_selection_info_scrolled(
                 y += pic_h + 10;
             }
 
-            for (text, font, color) in selection_info_lines(info, book_fonts) {
+            for (index, (text, font, color)) in selection_info_lines(info, book_fonts)
+                .into_iter()
+                .enumerate()
+            {
+                if index > 0 {
+                    y += font.line_height / 3;
+                }
                 for wrapped in wrap_line(&text, font, content_w) {
                     font.draw_with_gamma(
                         surface,
@@ -2741,6 +2774,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn selection_info_indents_each_new_paragraph() {
+        // C4LogBuffer marks each nonempty segment and each later AddTextLine as
+        // a new paragraph; MultilineLabel adds current line-height / 3 before
+        // drawing and sizing it (C4LogBuf.cpp:174-252;
+        // C4GuiLabels.cpp:240-285; C4StartupScenSelDlg.cpp:1607-1616).
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
+        let gui_fonts = crate::clonk_fonts::build_font_set(&ttf).expect("build GUI fonts");
+        let book_fonts = build_book_font_set(&ttf).expect("build book fonts");
+        let layout = scen_sel_layout(1280, 720, &gui_fonts);
+        let assets = test_assets();
+        let info = SelectionInfo {
+            desc: Some("Title\nBody\nNext"),
+            author: Some("Ada"),
+            version: Some("1"),
+            ..SelectionInfo::default()
+        };
+        let mut surface = Surface::new(1280, 720, clonk_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+
+        let metrics = draw_selection_info_scrolled(
+            &mut surface,
+            &layout,
+            &assets,
+            &book_fonts,
+            &info,
+            0,
+            None,
+        );
+        let commands = surface.take_clonk_text_capture();
+
+        assert_eq!(metrics.content_height, 141);
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| (command.text.as_str(), command.y))
+                .collect::<Vec<_>>(),
+            [
+                ("Title", 146),
+                ("Body", 178),
+                ("Next", 207),
+                ("Author: Ada", 236),
+                ("Version 1", 265),
+            ]
+        );
+    }
+
     /// The scenario search is the field clonk-org/clonk-rs#392 names: an IME
     /// has to be able to compose in it, which means the provisional text is
     /// drawn there and the caret follows it.
@@ -2853,7 +2935,10 @@ mod tests {
         }
         assert_eq!(
             (changed, bounds, hash),
-            (104, (165, 468, 170, 485), 0x4ec9_97b4_06dd_f222)
+            // C4GuiEdit.cpp:613-620 draws byte A6 at 1.5x, and
+            // StdFont.cpp:902-925 samples its shared atlas facet. The first
+            // changed column is the adjacent CP1252 glyph sampled by GL_LINEAR.
+            (111, (164, 468, 170, 485), 0x160a_1975_b40b_95b5)
         );
         assert_ne!(
             render(None, text.len(), 20, false).snapshot(),

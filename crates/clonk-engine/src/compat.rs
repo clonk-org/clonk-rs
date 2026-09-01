@@ -109,6 +109,15 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+#[cfg(any(test, feature = "presentation-capture"))]
+pub(crate) fn seed_script_safe_random(seed: u32) {
+    SCRIPT_SAFE_RNG.with(|rng| *rng.borrow_mut() = crate::particles::SafeRng::new(seed));
+}
+
+pub(crate) fn script_safe_random(range: i32) -> i32 {
+    SCRIPT_SAFE_RNG.with(|rng| rng.borrow_mut().random(range))
+}
+
 thread_local! {
     /// C4ObjectMenu::CloseQuerying (C4ObjectMenu.h:64): the per-menu
     /// recursion check for the MenuQueryCancel callback — shared between

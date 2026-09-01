@@ -13,6 +13,7 @@
 //! reference, an unowned divergence, or a content pin that has drifted are
 //! all verification failures, never warnings.
 
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
@@ -624,6 +625,82 @@ pub fn readiness(json: &str) -> Result<(usize, usize)> {
     Ok((pending, blocked))
 }
 
+fn accepted_presentation_verification_command(repo_root: &Path) -> Vec<OsString> {
+    vec![
+        repo_root
+            .join("scripts/acquire_presentation_oracle.py")
+            .into_os_string(),
+        "verify-accepted-index".into(),
+        "--repo-root".into(),
+        repo_root.as_os_str().to_owned(),
+    ]
+}
+
+fn current_presentation_verification_command(
+    repo_root: &Path,
+    arguments: &[String],
+) -> Vec<OsString> {
+    let mut command = vec![
+        repo_root
+            .join("scripts/acquire_presentation_oracle.py")
+            .into_os_string(),
+        "verify-current".into(),
+        "--repo-root".into(),
+        repo_root.as_os_str().to_owned(),
+    ];
+    command.extend(arguments.iter().map(OsString::from));
+    command
+}
+
+fn run_presentation_verification(repo_root: &Path, command: &[OsString]) -> Result<()> {
+    let (script, arguments) = command
+        .split_first()
+        .context("presentation-verification command has no script")?;
+    let status = Command::new("python3")
+        .arg(script)
+        .args(arguments)
+        .current_dir(repo_root)
+        .status()
+        .with_context(|| {
+            format!(
+                "running presentation evidence verifier {}",
+                script.to_string_lossy()
+            )
+        })?;
+    if !status.success() {
+        bail!("presentation evidence verification failed with {status}");
+    }
+    Ok(())
+}
+
+fn verify_accepted_presentation_evidence(repo_root: &Path) -> Result<()> {
+    run_presentation_verification(
+        repo_root,
+        &accepted_presentation_verification_command(repo_root),
+    )
+}
+
+pub fn presentation_command(args: &[String]) -> Result<()> {
+    if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
+        println!(
+            "Usage:\n  cargo xtask presentation verify-current --profile <p> --output-dir <dir>   Capture current Rust twice and compare every case to accepted C++ evidence."
+        );
+        return Ok(());
+    }
+    if args[0] != "verify-current" {
+        bail!(
+            "unknown `presentation` subcommand `{}` (try `cargo xtask presentation --help`)",
+            args[0]
+        );
+    }
+
+    let repo_root = workspace_dir()?;
+    run_presentation_verification(
+        &repo_root,
+        &current_presentation_verification_command(&repo_root, &args[1..]),
+    )
+}
+
 pub fn command(args: &[String]) -> Result<()> {
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
         println!(
@@ -655,6 +732,8 @@ pub fn command(args: &[String]) -> Result<()> {
             issues.len()
         );
     }
+
+    verify_accepted_presentation_evidence(&workspace_dir)?;
 
     let manifest: Manifest = serde_json::from_str(&json)?;
     let (pending, blocked) = readiness(&json)?;
@@ -706,6 +785,54 @@ mod tests {
     fn shipped_manifest() -> String {
         let path = repo_root().join("compat/profile.json");
         std::fs::read_to_string(&path).expect("reading the shipped manifest")
+    }
+
+    #[test]
+    fn compat_presentation_evidence_gate_verifies_only_accepted_captures() {
+        let repository = Path::new("/checkout");
+
+        let command = accepted_presentation_verification_command(repository);
+
+        assert_eq!(
+            command,
+            vec![
+                repository
+                    .join("scripts/acquire_presentation_oracle.py")
+                    .into_os_string(),
+                "verify-accepted-index".into(),
+                "--repo-root".into(),
+                repository.as_os_str().to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn current_presentation_capture_forwards_profile_and_output_directory() {
+        let repository = Path::new("/checkout");
+        let arguments = [
+            "--profile".to_owned(),
+            "test".to_owned(),
+            "--output-dir".to_owned(),
+            "/tmp/current-presentation".to_owned(),
+        ];
+
+        let command = current_presentation_verification_command(repository, &arguments);
+
+        assert_eq!(
+            command,
+            vec![
+                repository
+                    .join("scripts/acquire_presentation_oracle.py")
+                    .into_os_string(),
+                "verify-current".into(),
+                "--repo-root".into(),
+                repository.as_os_str().to_owned(),
+                "--profile".into(),
+                "test".into(),
+                "--output-dir".into(),
+                "/tmp/current-presentation".into(),
+            ]
+        );
     }
 
     /// Parse the shipped manifest, mutate it through `serde_json::Value`, and

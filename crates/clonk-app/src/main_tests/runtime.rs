@@ -1872,6 +1872,37 @@ fn the_remaster_switch_supplies_a_default_that_each_key_can_override() {
 }
 
 #[test]
+fn compatibility_profile_forces_the_entire_remaster_family_off_before_setup() {
+    let config = b"[Graphics]\nRemaster=1\nLandscapeDetail=3\n";
+    let normal = CompatPresentationFeatures::resolve(config, crate::settings::CompatProfile::Normal);
+    runtime_assert_eq!(
+        normal.remaster_family() => [true; 10];
+        normal.landscape_detail => 3;
+        normal.startup_refresh_delay_ms(config, Some(8)) => 8;
+    );
+
+    let legacy = CompatPresentationFeatures::resolve(
+        config,
+        crate::settings::CompatProfile::LegacyClonk,
+    );
+    runtime_assert_eq!(
+        legacy.remaster_family() => [false; 10];
+        legacy.landscape_detail => 1;
+        legacy.startup_refresh_delay_ms(config, Some(8)) => 30;
+    );
+}
+
+#[test]
+fn normal_profile_preserves_landscape_detail_when_shader_landscape_is_disabled() {
+    let config = b"[Graphics]\nShaderLandscape=0\nLandscapeDetail=3\n";
+
+    let normal = CompatPresentationFeatures::resolve(config, crate::settings::CompatProfile::Normal);
+
+    assert!(!normal.shader_landscape);
+    assert_eq!(normal.landscape_detail, 3);
+}
+
+#[test]
 fn landscape_detail_defaults_to_the_cpp_exact_level_and_clamps_hand_edits() {
     // Detail 1 is byte-identical to the CPU composer, so an absent key must
     // leave the composition C++-exact. Everything else is clamped HERE
@@ -2824,6 +2855,77 @@ fn collect_player_overlay_marks_focus_and_energy() {
     assert_eq!(overlay[0].crew_count, 1, "ViewCursor is not roster crew");
     runtime_assert_eq!(overlay[0].crew.len() => 2, "non-roster ViewCursor is projected");
     runtime_assert_eq!(overlay[0].crew.iter().find(|crew| crew.object_id == teammate).map(|crew| (crew.hide_hud_elements, crew.hide_hud_bars)) => Some((0, 0)));
+}
+
+#[test]
+fn command_key_label_uses_the_owning_players_keyboard_set() {
+    let owner = 17;
+    let mut snapshot = SimulationSnapshot::default();
+    snapshot.players.push(PlayerState {
+        id: owner,
+        control_set: 2,
+        ..PlayerState::default()
+    });
+    let mut bindings = KeyboardBindings::load(None);
+    assert!(bindings.rebind_for_set(
+        2,
+        ControlBindingId::PlayerMenu,
+        VirtualKeyCode::F8,
+    ));
+    let gamepad_bindings = GamepadBindings::default();
+    let engine = Engine::new();
+    let resources = HashMap::new();
+    let context = AppCommandContext {
+        engine: &engine,
+        bindings: &bindings,
+        gamepad_bindings: &gamepad_bindings,
+        snapshot: &snapshot,
+        resources: &resources,
+    };
+
+    // C4Object::DrawCommand passes iPlayer into PlrControlKeyName, which reads
+    // that player's selected keyboard set (src/C4Object.cpp:4084-4087;
+    // src/C4Viewport.cpp:1363-1373).
+    runtime_assert_eq!(
+        clonk_app_render::draw_commands::CommandContext::key_label(&context, owner, 9)
+            => format_key_label(VirtualKeyCode::F8),
+        "command labels follow the owner rather than the global Keyboard1 set"
+    );
+}
+
+#[test]
+fn command_key_label_uses_the_owning_players_gamepad_set() {
+    let owner = 17;
+    let mut snapshot = SimulationSnapshot::default();
+    snapshot.players.push(PlayerState {
+        id: owner,
+        control_set: 6,
+        ..PlayerState::default()
+    });
+    let bindings = KeyboardBindings::load(None);
+    let mut gamepad_bindings = GamepadBindings::default();
+    gamepad_bindings.rebind_raw(
+        2,
+        ControlBindingId::PlayerMenu,
+        input::legacy_gamepad_button_key(2, 1).test_value(),
+    );
+    let engine = Engine::new();
+    let resources = HashMap::new();
+    let context = AppCommandContext {
+        engine: &engine,
+        bindings: &bindings,
+        gamepad_bindings: &gamepad_bindings,
+        snapshot: &snapshot,
+        resources: &resources,
+    };
+
+    // PlrControlKeyName subtracts C4P_Control_GamePad1 before looking up the
+    // owner's configured button (src/C4Viewport.cpp:1363-1373).
+    runtime_assert_eq!(
+        clonk_app_render::draw_commands::CommandContext::key_label(&context, owner, 9)
+            => gamepad_bindings.key_label_for_set(2, ControlBindingId::PlayerMenu),
+        "command labels follow the owner's selected gamepad set"
+    );
 }
 
 #[test]

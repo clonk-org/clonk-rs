@@ -1341,6 +1341,7 @@ pub(crate) struct StartupBackdropKey {
     pub(crate) fair_crew: bool,
     pub(crate) record: bool,
     pub(crate) network_host_selector: bool,
+    pub(crate) scenario_list_scrollbar_visible: bool,
 }
 
 /// Restores the cached static layer for `key` into `surface`, or renders it
@@ -6069,7 +6070,10 @@ impl NetworkLobbyState {
             preload: LobbyPreloadState::new(false),
             labels: LobbyLabels::default(),
             logs: Vec::new(),
-            chat_edit: LobbyChatEditView::default(),
+            chat_edit: LobbyChatEditView {
+                cursor_visible: true,
+                ..LobbyChatEditView::default()
+            },
             chat_history_index: -1,
             client_sound_status: HashMap::new(),
             local_client_id,

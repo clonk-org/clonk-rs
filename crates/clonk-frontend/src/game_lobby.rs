@@ -726,26 +726,36 @@ pub fn compose_classic_lobby_player_fallback_icon(
         "active Player raster must not be empty"
     );
     let player = blacken_transparent_pixels(player);
-    let colored = crate::hud::colorize_by_owner(&player, owner_color);
+    let colored = crate::hud::colorize_by_owner_software(&player, owner_color);
     let extent = i32::try_from(CLASSIC_ROSTER_ICON_EXTENT).expect("40 fits i32");
     let bounds = IntRect::new(0, 0, extent, extent);
     let fitted = aspect_fit_roster_raster(colored.width(), colored.height(), bounds);
+    let source = Surface::from_bytes(
+        colored.width(),
+        colored.height(),
+        PixelFormat::Rgba8888,
+        colored.pixels().to_vec(),
+    )?;
     let mut surface = Surface::new(
         CLASSIC_ROSTER_ICON_EXTENT,
         CLASSIC_ROSTER_ICON_EXTENT,
         PixelFormat::Rgba8888,
     );
-    draw_facet_stretch(
-        &mut surface,
-        &colored,
-        (0.0, 0.0, colored.width() as f32, colored.height() as f32),
-        (
-            fitted.x as f32,
-            fitted.y as f32,
-            fitted.w as f32,
-            fitted.h as f32,
-        ),
-        None,
+    surface.fill(Color::new(255, 255, 255, 0));
+    ensure!(
+        clonk_graphics::compositing::copy_stretched(
+            &source,
+            clonk_graphics::Rect::new(0, 0, colored.width(), colored.height()),
+            &mut surface,
+            clonk_graphics::Rect::new(
+                fitted.x,
+                fitted.y,
+                fitted.w.max(0) as u32,
+                fitted.h.max(0) as u32,
+            ),
+        )
+        .is_some(),
+        "active Player raster must fit the fallback surface"
     );
     Ok(ImageData::new(
         CLASSIC_ROSTER_ICON_EXTENT,
@@ -1359,12 +1369,17 @@ pub fn game_lobby_layout(
         right_tab.w - 2 * TAB_SHEET_MARGIN,
         right_tab.h - 2 * TAB_SHEET_MARGIN,
     );
-    let roster_client = roster.with_width(roster.w - SCROLLBAR_EXTENT);
+    let roster_client = IntRect::new(
+        roster.x + LIST_BOX_MARGIN,
+        roster.y + LIST_BOX_MARGIN,
+        (roster.w - 2 * LIST_BOX_MARGIN - SCROLLBAR_EXTENT).max(0),
+        (roster.h - 2 * LIST_BOX_MARGIN).max(0),
+    );
     let roster_scrollbar = IntRect::new(
         roster_client.x + roster_client.w,
-        roster.y,
+        roster_client.y,
         SCROLLBAR_EXTENT,
-        roster.h,
+        roster_client.h,
     );
 
     let mut center = Aligner::new(main.all(), indent_x2, indent_y3);
@@ -1760,7 +1775,10 @@ impl GameLobby {
             option_rows: Vec::new(),
             client_sound_status: HashMap::new(),
             logs: Vec::new(),
-            chat_edit: LobbyChatEditView::default(),
+            chat_edit: LobbyChatEditView {
+                cursor_visible: true,
+                ..LobbyChatEditView::default()
+            },
             chat_scroll: 0,
             chat_max_scroll: 0,
             chat_scroll_pin: 0,
@@ -2471,17 +2489,7 @@ impl GameLobby {
             .tab_buttons
             .iter_mut()
             .for_each(|tab| tab.selected = tab.sheet == Some(self.active_sheet));
-        if self.active_sheet == LobbySheet::Options {
-            // C4GUI::ListBox adds three-pixel margins inside the Tabular
-            // sheet before its ScrollWindow and scrollbar.
-            layout.roster_client.x += LIST_BOX_MARGIN;
-            layout.roster_client.y += LIST_BOX_MARGIN;
-            layout.roster_client.w = (layout.roster_client.w - 2 * LIST_BOX_MARGIN).max(0);
-            layout.roster_client.h = (layout.roster_client.h - 2 * LIST_BOX_MARGIN).max(0);
-            layout.roster_scrollbar.x -= LIST_BOX_MARGIN;
-            layout.roster_scrollbar.y += LIST_BOX_MARGIN;
-            layout.roster_scrollbar.h = (layout.roster_scrollbar.h - 2 * LIST_BOX_MARGIN).max(0);
-        } else if self.active_sheet == LobbySheet::Scenario {
+        if self.active_sheet == LobbySheet::Scenario {
             let bounds = layout.roster;
             layout.roster_client = IntRect::new(
                 bounds.x + SCENARIO_TEXT_LEFT_MARGIN,
@@ -2499,7 +2507,8 @@ impl GameLobby {
                 SCROLLBAR_EXTENT,
                 (bounds.h - 2 * SCENARIO_TEXT_VERTICAL_MARGIN).max(0),
             );
-        } else if self.active_sheet == LobbySheet::Resources && self.preload_button_present {
+        }
+        if self.active_sheet == LobbySheet::Resources && self.preload_button_present {
             let button = IntRect::new(
                 layout.roster.x,
                 layout.roster.y + (layout.roster.h - BUTTON_HEIGHT).max(0),
@@ -5145,6 +5154,7 @@ impl GameLobby {
             self.draw_tab_button(surface, *tab, resources, active, gamma);
         }
 
+        draw_3d_frame(surface, layout.right_tab, gamma);
         draw_engine_box(
             surface,
             layout.right_tab.x,
@@ -5154,7 +5164,6 @@ impl GameLobby {
             STANDARD_BACKGROUND_COLOR,
             gamma,
         );
-        draw_3d_frame(surface, layout.right_tab, gamma);
         if self.active_sheet != LobbySheet::Scenario {
             draw_engine_box(
                 surface,
@@ -6564,6 +6573,9 @@ mod tests {
 
     #[test]
     fn classic_player_fallback_composes_to_40px_before_join_overlay() {
+        // C4Surface::Create initializes the texture backing store to 0xff
+        // (C4Surface.cpp:1110-1113), so aspect-fit bars remain transparent
+        // white around the pixels Blit8 writes.
         let player = ImageData::new(2, 1, vec![0, 0, 255, 255, 200, 20, 10, 255]);
         let icon = compose_classic_lobby_player_fallback_icon(&player, Color::opaque(12, 34, 56))
             .expect("non-empty active Player raster");
@@ -6572,10 +6584,11 @@ mod tests {
             let start = ((y * icon.width() + x) * 4) as usize;
             &icon.pixels()[start..start + 4]
         };
-        assert_eq!(pixel(5, 9), [0, 0, 0, 0]);
-        assert_eq!(pixel(5, 20), [12, 34, 56, 255]);
+        assert_eq!(pixel(5, 9), [255, 255, 255, 0]);
+        // The offscreen Blit8 path applies StdColors.h:159-169 modulation.
+        assert_eq!(pixel(5, 20), [11, 33, 55, 255]);
         assert_eq!(pixel(30, 20), [200, 20, 10, 255]);
-        assert_eq!(pixel(5, 30), [0, 0, 0, 0]);
+        assert_eq!(pixel(5, 30), [255, 255, 255, 0]);
 
         let crew = ImageData::new(1, 1, vec![0, 0, 255, 255]);
         let bounds = IntRect::new(0, 0, 40, 40);
@@ -6593,8 +6606,63 @@ mod tests {
     }
 
     #[test]
+    fn classic_player_fallback_uses_offscreen_blit8_nearest_sampling() {
+        // C4PlayerInfoListBox.cpp:293-294 creates a non-render-target 40x40
+        // surface, so StdDDraw2.cpp:644-645,846-872 selects Blit8's integer
+        // nearest-neighbour source coordinate for the fallback player icon.
+        let player = ImageData::new(
+            3,
+            1,
+            vec![10, 10, 10, 255, 100, 100, 100, 255, 200, 200, 200, 255],
+        );
+        let icon = compose_classic_lobby_player_fallback_icon(&player, Color::opaque(1, 2, 3))
+            .expect("non-empty active Player raster");
+        let pixel = |x: u32, y: u32| {
+            let start = ((y * icon.width() + x) * 4) as usize;
+            &icon.pixels()[start..start + 4]
+        };
+
+        assert_eq!(pixel(13, 20), [10, 10, 10, 255]);
+        assert_eq!(pixel(14, 20), [100, 100, 100, 255]);
+        assert_eq!(pixel(26, 20), [100, 100, 100, 255]);
+        assert_eq!(pixel(27, 20), [200, 200, 200, 255]);
+    }
+
+    #[test]
+    fn classic_player_fallback_uses_blit8_owner_modulation() {
+        // Blit8 asks C4Surface::GetPixDw(..., true) for each source pixel
+        // (C4Surface.cpp:742-755); its ClrByOwner path uses ModulateClr's
+        // divide-by-256 RGB products (C4Surface.cpp:672-700;
+        // StdColors.h:159-169), including 255*255 -> 254.
+        let player = ImageData::new(1, 1, vec![0, 0, 255, 255]);
+        let icon =
+            compose_classic_lobby_player_fallback_icon(&player, Color::opaque(255, 255, 255))
+                .expect("non-empty active Player raster");
+        let center = ((20 * icon.width() + 20) * 4) as usize;
+
+        assert_eq!(&icon.pixels()[center..center + 4], [254, 254, 254, 255]);
+    }
+
+    #[test]
+    fn classic_player_fallback_preserves_partial_alpha_rgb_in_empty_cache() {
+        // Blit8 reaches C4Surface::BltPix (C4Surface.cpp:742-755). The empty
+        // destination has inverted alpha 0xff, so BltAlpha assigns the source
+        // pixel verbatim instead of premultiplying its RGB
+        // (StdColors.h:120-126).
+        let player = ImageData::new(1, 1, vec![40, 40, 40, 128]);
+        let icon = compose_classic_lobby_player_fallback_icon(&player, Color::opaque(12, 34, 56))
+            .expect("partial-alpha Player raster creates the fallback surface");
+        let center = ((20 * icon.width() + 20) * 4) as usize;
+
+        assert_eq!(&icon.pixels()[center..center + 4], [40, 40, 40, 128]);
+    }
+
+    #[test]
     fn joined_player_overlay_matches_cpp_lower_half_shadow_aspect_and_clip() {
-        let crew = ImageData::new(2, 1, vec![0, 0, 255, 255, 0, 0, 255, 255]);
+        // Keep the 2:1 aspect ratio while filling C4Surface's minimum 2px
+        // texture height, so this layout/clip test does not also exercise the
+        // transparent padding row (C4Surface.cpp:182-205,955-991).
+        let crew = ImageData::new(4, 2, [0, 0, 255, 255].repeat(8));
         let icon = LobbyRosterIcon::Standard(7);
         let bounds = IntRect::new(4, 3, 40, 40);
         let clip = IntRect::new(4, 3, 22, 34);
@@ -6745,6 +6813,21 @@ mod tests {
         assert_eq!(layout.game_option_strip, IntRect::new(155, 617, 840, 64));
         assert_eq!(layout.tab_buttons[0].rect, IntRect::new(1170, 81, 16, 16));
         assert_eq!(layout.tab_buttons[3].rect, IntRect::new(1230, 81, 16, 16));
+    }
+
+    #[test]
+    fn players_sheet_applies_the_native_list_box_client_margins() {
+        // C4GUI::ListBox gives its ScrollWindow three-pixel margins before
+        // reserving the scrollbar (src/C4GuiListBox.h:121-125;
+        // src/C4GuiContainers.cpp:477-486).
+        let fonts = endeavour_font_set();
+        let lobby = lobby(LobbyRole::Host, vec![]);
+
+        let layout = lobby.layout(1280, 720, &fonts);
+
+        assert_eq!(layout.roster, IntRect::new(854, 103, 392, 502));
+        assert_eq!(layout.roster_client, IntRect::new(857, 106, 370, 496));
+        assert_eq!(layout.roster_scrollbar, IntRect::new(1227, 106, 16, 496));
     }
 
     #[test]
@@ -7820,9 +7903,10 @@ mod tests {
         let layout = lobby.layout(640, 300, &fonts);
         let empty = lobby.roster_layout(&layout, fonts.text.line_height);
         assert!(empty.rows.is_empty());
-        assert!(lobby
-            .pointer_down(resource_point, &layout, &empty)
-            .is_empty());
+        assert_eq!(
+            lobby.pointer_down(resource_point, &layout, &empty),
+            [LobbyAction::FocusChanged(LobbyControl::OptionsList)]
+        );
         assert!(lobby.request_focused_context(resource_point).is_empty());
         assert_eq!(lobby.selected_roster_id(), Some(&LobbyRosterId::Client(1)));
     }
@@ -8125,6 +8209,17 @@ mod tests {
                 role.game_option_context().button_count()
             );
         }
+    }
+
+    #[test]
+    fn fresh_focused_lobby_starts_with_the_native_visible_chat_caret() {
+        // MainDlg focuses pEdtChat immediately after constructing it, and a
+        // fresh Edit focus shows the caret (src/C4GameLobby.cpp:305-306;
+        // src/C4GuiEdit.cpp:538-546,614-620).
+        let lobby = lobby(LobbyRole::Host, vec![]);
+
+        assert_eq!(lobby.focus(), LobbyControl::ChatInput);
+        assert!(lobby.chat_edit_view().cursor_visible);
     }
 
     #[test]
@@ -8710,14 +8805,16 @@ mod tests {
         let layout = game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, true, false);
         let roster = league_lobby.roster_layout(&layout, 22);
         assert_eq!(roster.rows[0].rect.h, 54);
+        // C4GUI::ListBox applies its three-pixel client margin before laying
+        // out the team and rank columns (src/C4GuiListBox.h:121-125).
         assert_eq!(
             roster.rows[0].team,
-            Some(IntRect::new(917, 129, 285, 26)),
+            Some(IntRect::new(920, 132, 279, 26)),
             "team 0 keeps the exact blank-combo geometry"
         );
         assert_eq!(
             roster.rows[0].rank,
-            Some(IntRect::new(1202, 129, 26, 26)),
+            Some(IntRect::new(1199, 132, 26, 26)),
             "league reserves rank width even without a rank symbol"
         );
 

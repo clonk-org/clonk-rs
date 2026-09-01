@@ -1,15 +1,16 @@
 //! Which screens a compatibility session promises to render like the oracle,
 //! and on what terms a capture pair may be compared.
 //!
-//! `compat/profile.json` names clonk-org/clonk-rs#587 as the presentation
-//! promise's pending evidence; this is the detail behind that entry. Keeping
-//! the list here rather than in a test means the screens, the geometry and the
-//! tolerances are one artifact that the contract gate reads, so a screen cannot
-//! quietly stop being compared.
+//! `compat/profile.json` names the landing presentation-capture test as held
+//! evidence; this is the detail behind that entry. Keeping the list here rather
+//! than in a test means the screens, the geometry and the tolerances are one
+//! artifact that the contract gate reads, so a screen cannot quietly stop being
+//! compared.
 //!
 //! A screen counts as `captured` only once it names a same-resolution C++ and
 //! Rust capture pair. Until then it is `pending` and the profile may not claim
-//! the presentation promise — which is already the case, through #587.
+//! the presentation promise. All thirteen promised screens retain their first
+//! audited pair, and the landing gate reruns the comparison.
 
 use serde::Deserialize;
 #[cfg(test)]
@@ -38,15 +39,15 @@ pub struct CaptureScreen {
     /// (clonk-org/clonk-rs#1298). Defaults to `pixel`, so a screen has to opt
     /// into the weaker term explicitly.
     #[serde(default = "default_comparison")]
-    pub comparison: String,
+    pub comparison: ComparisonTerm,
     /// The `port_assets` classes this screen renders, when it is on the
     /// `layout` term. Naming them is what keeps the weaker term from being a
     /// blanket excuse.
     #[serde(default)]
     pub port_assets: Vec<String>,
-    /// The C++ and Rust capture pair, once there is one.
+    /// The exact C++ and Rust comparison artifacts, once there is a pair.
     #[serde(default)]
-    pub evidence: Vec<String>,
+    pub evidence: Option<CaptureEvidence>,
     /// Why a comparison that has already been run cannot pass.
     ///
     /// A screen with no blocker is pending because nobody has captured it. A
@@ -57,8 +58,27 @@ pub struct CaptureScreen {
     pub blocker: Option<CaptureBlocker>,
 }
 
-fn default_comparison() -> String {
-    "pixel".to_string()
+/// One screen-bound pair of artifacts retained from the first audited run.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CaptureEvidence {
+    /// The C++ reference artifact used by the declared comparison term.
+    pub cpp: String,
+    /// The Rust artifact compared to [`Self::cpp`].
+    pub rust: String,
+}
+
+fn default_comparison() -> ComparisonTerm {
+    ComparisonTerm::Pixel
+}
+
+/// The evidence a screen promises to compare.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ComparisonTerm {
+    /// Pixel equality within the manifest's surface tolerance.
+    Pixel,
+    /// Ordered control geometry, captions and resolved wrapping.
+    Layout,
 }
 
 /// A class of port-authored asset that puts a screen on the `layout` term.
@@ -112,6 +132,16 @@ pub struct CaptureMask {
 pub struct CaptureGeometry {
     pub resolution: String,
     pub scale: u32,
+    pub pointer: CapturePointer,
+}
+
+/// Ambient mouse state normalized as producer input, never hidden from output.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CapturePointer {
+    pub position: [u32; 2],
+    pub button: String,
+    pub modifiers: Vec<String>,
+    pub help: bool,
 }
 
 /// How far two captures may differ and still match.
@@ -208,6 +238,12 @@ impl CaptureSurface {
 pub enum CaptureMismatch {
     /// The manifest does not list the screen, so no terms exist to compare on.
     UnknownScreen { screen: String },
+    /// The caller chose a comparator that does not implement this screen's term.
+    ComparisonTerm {
+        screen: String,
+        expected: ComparisonTerm,
+        actual: ComparisonTerm,
+    },
     /// A capture is not the geometry the manifest fixes for every screen.
     Geometry {
         screen: String,
@@ -282,9 +318,17 @@ pub fn compare_capture(
     reference: &[u8],
     actual: &[u8],
 ) -> Result<(), CaptureMismatch> {
-    if !screens().iter().any(|entry| entry.id == screen) {
-        return Err(CaptureMismatch::UnknownScreen {
+    let terms = screens()
+        .iter()
+        .find(|entry| entry.id == screen)
+        .ok_or_else(|| CaptureMismatch::UnknownScreen {
             screen: screen.to_owned(),
+        })?;
+    if terms.comparison != ComparisonTerm::Pixel {
+        return Err(CaptureMismatch::ComparisonTerm {
+            screen: screen.to_owned(),
+            expected: terms.comparison,
+            actual: ComparisonTerm::Pixel,
         });
     }
 
@@ -410,10 +454,39 @@ mod tests {
     /// never runs, which is the one failure mode this manifest exists to stop.
     #[test]
     fn a_captured_screen_names_the_pair_it_was_compared_against() {
-        for screen in screens().iter().filter(|s| s.status == "captured") {
-            assert!(
-                screen.evidence.len() >= 2,
-                "{}: claims a capture without naming a C++ and a Rust capture",
+        for screen in screens() {
+            if screen.status == "pending" {
+                assert!(
+                    screen.evidence.is_none(),
+                    "{}: pending screen already claims capture evidence",
+                    screen.id
+                );
+                continue;
+            }
+            let evidence = screen
+                .evidence
+                .as_ref()
+                .unwrap_or_else(|| panic!("{}: captured screen names no pair", screen.id));
+            let suffix = match screen.comparison {
+                ComparisonTerm::Pixel => "png",
+                ComparisonTerm::Layout => "layout.json",
+            };
+            assert_eq!(
+                evidence.cpp,
+                format!(
+                    "compat/presentation/oracle/v1/run-1/cpp/artifacts/{}.{}",
+                    screen.id, suffix
+                ),
+                "{}: C++ evidence is detached from its compared artifact",
+                screen.id
+            );
+            assert_eq!(
+                evidence.rust,
+                format!(
+                    "compat/presentation/oracle/v1/run-1/rust/artifacts/{}.{}",
+                    screen.id, suffix
+                ),
+                "{}: Rust evidence is detached from its compared artifact",
                 screen.id
             );
         }
@@ -488,12 +561,14 @@ mod tests {
             .collect::<BTreeSet<_>>();
         for screen in screens() {
             assert!(
-                matches!(screen.comparison.as_str(), "pixel" | "layout"),
-                "{}: unknown comparison term `{}`",
-                screen.id,
-                screen.comparison
+                matches!(
+                    screen.comparison,
+                    ComparisonTerm::Pixel | ComparisonTerm::Layout
+                ),
+                "{}: unknown comparison term",
+                screen.id
             );
-            if screen.comparison == "layout" {
+            if screen.comparison == ComparisonTerm::Layout {
                 assert!(
                     !screen.port_assets.is_empty(),
                     "{}: compared on layout without naming a port asset class",
@@ -513,6 +588,28 @@ mod tests {
                     screen.id
                 );
             }
+        }
+    }
+
+    #[test]
+    fn in_game_product_branding_uses_the_layout_term() {
+        for id in [
+            "hud",
+            "ingame-menu",
+            "object-menu",
+            "gameplay",
+            "evaluation",
+        ] {
+            let screen = screens()
+                .iter()
+                .find(|screen| screen.id == id)
+                .unwrap_or_else(|| panic!("missing capture screen {id}"));
+            assert_eq!(
+                screen.comparison,
+                ComparisonTerm::Layout,
+                "{id} renders the Clonk Rust logo"
+            );
+            assert_eq!(screen.port_assets, ["branding"]);
         }
     }
 
@@ -555,6 +652,14 @@ mod tests {
         assert_eq!(geometry().scale, 100);
     }
 
+    #[test]
+    fn every_capture_pins_the_same_engine_rendered_pointer_input() {
+        assert_eq!(geometry().pointer.position, [32, 32]);
+        assert_eq!(geometry().pointer.button, "none");
+        assert!(geometry().pointer.modifiers.is_empty());
+        assert!(!geometry().pointer.help);
+    }
+
     /// A capture the size the manifest fixes, filled with one colour.
     fn plane(value: u8) -> Vec<u8> {
         let (width, height) = (1_280_usize, 720_usize);
@@ -565,10 +670,29 @@ mod tests {
     fn an_identical_pair_matches_on_either_surface() {
         for surface in [CaptureSurface::Cpu, CaptureSurface::Gpu] {
             assert_eq!(
-                compare_capture("startup-main", surface, 1_280, 720, &plane(9), &plane(9)),
+                compare_capture("network-lobby", surface, 1_280, 720, &plane(9), &plane(9)),
                 Ok(())
             );
         }
+    }
+
+    #[test]
+    fn a_layout_screen_cannot_be_verified_by_the_pixel_comparator() {
+        assert_eq!(
+            compare_capture(
+                "startup-main",
+                CaptureSurface::Cpu,
+                1_280,
+                720,
+                &plane(9),
+                &plane(9),
+            ),
+            Err(CaptureMismatch::ComparisonTerm {
+                screen: "startup-main".to_owned(),
+                expected: ComparisonTerm::Layout,
+                actual: ComparisonTerm::Pixel,
+            })
+        );
     }
 
     /// The software renderer is the exact oracle, so nothing is forgiven there;
@@ -583,7 +707,7 @@ mod tests {
 
         assert!(matches!(
             compare_capture(
-                "startup-main",
+                "network-lobby",
                 CaptureSurface::Cpu,
                 1_280,
                 720,
@@ -598,7 +722,7 @@ mod tests {
         ));
         assert_eq!(
             compare_capture(
-                "startup-main",
+                "network-lobby",
                 CaptureSurface::Gpu,
                 1_280,
                 720,
@@ -609,7 +733,7 @@ mod tests {
         );
         assert!(matches!(
             compare_capture(
-                "startup-main",
+                "network-lobby",
                 CaptureSurface::Gpu,
                 1_280,
                 720,
@@ -639,7 +763,7 @@ mod tests {
             differing_pixels,
             ..
         }) = compare_capture(
-            "startup-main",
+            "network-lobby",
             CaptureSurface::Cpu,
             1_280,
             720,
@@ -660,7 +784,7 @@ mod tests {
     fn a_capture_that_is_not_the_fixed_geometry_is_rejected() {
         assert!(matches!(
             compare_capture(
-                "startup-main",
+                "network-lobby",
                 CaptureSurface::Cpu,
                 640,
                 480,
@@ -671,7 +795,7 @@ mod tests {
         ));
         assert!(matches!(
             compare_capture(
-                "startup-main",
+                "network-lobby",
                 CaptureSurface::Cpu,
                 1_280,
                 720,
@@ -726,20 +850,37 @@ mod tests {
         ));
     }
 
-    /// The profile may not claim presentation while a screen is uncompared.
-    /// This is the same fail-closed reading `compat_readiness` applies, stated
-    /// here so the two cannot drift apart silently.
+    /// The presentation promise is held only when every required screen has
+    /// retained comparison evidence and the landing gate keeps rerunning it.
     #[test]
-    fn an_uncaptured_screen_keeps_the_presentation_promise_pending() {
-        let pending = pending_screens();
-        if pending.is_empty() {
-            return;
-        }
-        let manifest = crate::compat_readiness::profile_manifest_for_tests();
-        assert!(
-            manifest.contains("clonk-org/clonk-rs#587"),
-            "screens are still uncaptured but the profile records no pending \
-             presentation evidence for them"
+    fn every_presentation_capture_is_held_by_the_landing_gate() {
+        assert_eq!(
+            screens().len(),
+            13,
+            "the promised screen set must stay complete"
         );
+        assert!(
+            pending_screens().is_empty(),
+            "every screen must be captured"
+        );
+        assert!(
+            blocked_screens().is_empty(),
+            "no captured screen may remain blocked"
+        );
+
+        let profile: serde_json::Value =
+            serde_json::from_str(crate::compat_readiness::profile_manifest_for_tests())
+                .expect("the embedded compatibility profile is valid JSON");
+        let evidence = profile["promise"]["presentation"]["evidence"]
+            .as_array()
+            .expect("the presentation promise has an evidence array");
+        assert!(evidence.iter().any(|entry| {
+            entry["kind"] == "test"
+                && entry["value"] == ".github/workflows/landing.yml (presentation captures)"
+                && entry["status"] == "held"
+        }));
+        assert!(!evidence
+            .iter()
+            .any(|entry| entry["value"] == "clonk-org/clonk-rs#587"));
     }
 }

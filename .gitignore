@@ -59,6 +59,7 @@ _deps/
 *.orig
 *.rej
 *.patch
+!parity/oracle/presentation_capture.patch
 # Unix core dumps land at the working-directory root and are named `core` or
 # `core.<pid>`. Anchoring and digit-matching keeps the rule from swallowing
 # Rust modules named `core` (an unanchored `core.*` silently excluded
@@ -96,6 +97,7 @@ __pycache__/
 *.c4s
 *.c4m
 *.c4g
+!compat/presentation/player.c4p
 
 # Authorized classic add-on packs live in the install-root namespace.
 !/EkeReloaded.c4d/

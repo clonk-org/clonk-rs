@@ -5,6 +5,36 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScriptLinkSummary {
+    pub(crate) lines: usize,
+    pub(crate) warnings: usize,
+    pub(crate) errors: usize,
+}
+
+impl std::fmt::Display for ScriptLinkSummary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn plural(count: usize) -> &'static str {
+            if count == 1 {
+                ""
+            } else {
+                "s"
+            }
+        }
+
+        write!(
+            formatter,
+            "C4AulScriptEngine linked - {} line{}, {} warning{}, {} error{}",
+            self.lines,
+            plural(self.lines),
+            self.warnings,
+            plural(self.warnings),
+            self.errors,
+            plural(self.errors),
+        )
+    }
+}
+
 impl Engine {
     pub fn global_effects(&self) -> &[EffectState] {
         &self.global_effects
@@ -586,7 +616,7 @@ impl Engine {
     /// (`C4AulParse.cpp:2799`, `:3563-3586`). The call still raises when it
     /// runs — C++ leaves the function with an `AB_ERR` chunk — so this adds
     /// the load-time report the port was missing, not a new failure mode.
-    fn report_unresolved_inherited(&mut self) {
+    fn report_unresolved_inherited(&mut self) -> ScriptLinkSummary {
         // The truncation itself is unconditional. In `C4AulScript::Parse` the
         // jump redirection and `AddBCC(AB_ERR)` sit *outside* ":3566 — do not
         // show errors for System.c4g scripts that appear to be pure #appendto
@@ -604,8 +634,8 @@ impl Engine {
             );
         }
         for source in self.script_link_sources.iter_mut() {
-            // Definitions are covered above; the scenario script carries no
-            // separate host here.
+            // Definitions are covered above; the scenario script is handled
+            // through its dedicated host below.
             let ScriptLinkSource::Script {
                 name,
                 base_script,
@@ -625,12 +655,24 @@ impl Engine {
                 );
             }
         }
+        if let Some(scenario) = self.scenario_script.as_mut() {
+            let suppressed = !scenario.base_script.appends().is_empty();
+            let name = scenario.name.clone();
+            let diagnostics = Arc::make_mut(&mut scenario.script).truncate_unresolved_inherited();
+            if !suppressed {
+                reports.extend(
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| (name.clone(), diagnostic)),
+                );
+            }
+        }
 
         let errors = reports.len();
         for (host, diagnostic) in reports {
             tracing::error!(%host, %diagnostic, "script link error");
         }
-        self.report_link_summary(errors);
+        self.report_link_summary(errors)
     }
 
     /// `C4AulScriptEngine::Link`'s closing tally
@@ -650,7 +692,7 @@ impl Engine {
     /// counts its `Warn` call sites (`C4AulParse.cpp:224,237`), which are not
     /// the same set, so this number is comparable across port runs rather than
     /// against a C++ build.
-    fn report_link_summary(&self, errors: usize) {
+    fn report_link_summary(&self, errors: usize) -> ScriptLinkSummary {
         let (mut lines, mut warnings) = (0_usize, 0_usize);
         let mut tally = |host: &clonk_script::Engine| {
             lines += host.linked_source_lines();
@@ -664,21 +706,17 @@ impl Engine {
                 tally(script);
             }
         }
-
-        fn plural(count: usize) -> &'static str {
-            if count == 1 {
-                ""
-            } else {
-                "s"
-            }
+        if let Some(scenario) = &self.scenario_script {
+            tally(&scenario.script);
         }
 
-        tracing::info!(
-            "C4AulScriptEngine linked - {lines} line{}, {warnings} warning{}, {errors} error{}",
-            plural(lines),
-            plural(warnings),
-            plural(errors),
-        );
+        let summary = ScriptLinkSummary {
+            lines,
+            warnings,
+            errors,
+        };
+        tracing::info!("{summary}");
+        summary
     }
 
     /// Rebuilds the complete script tree from its preparsed hosts. Shared
@@ -814,6 +852,12 @@ impl Engine {
     }
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
+        self.resolve_includes_with_summary().map(drop)
+    }
+
+    pub(crate) fn resolve_includes_with_summary(
+        &mut self,
+    ) -> Result<ScriptLinkSummary, EngineError> {
         self.definition_order.metadata_cache.borrow_mut().take();
         self.definition_order
             .command_snapshot_cache
@@ -958,9 +1002,7 @@ impl Engine {
         // built (`C4AulParse.cpp:1406`); judging it before this point reports
         // an `#appendto` source host whose overload target only exists on the
         // target, and truncating there would then be copied onto the target.
-        self.report_unresolved_inherited();
-
-        Ok(())
+        Ok(self.report_unresolved_inherited())
     }
 
     /// Read-only definition access. Keeping mutation behind engine methods

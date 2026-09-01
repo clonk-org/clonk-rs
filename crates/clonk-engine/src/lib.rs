@@ -4030,6 +4030,22 @@ pub(crate) fn normalize_menu_info_caption(text: impl Into<String>) -> String {
 #[path = "lib_tests/object_menu_byte_tests.rs"]
 mod object_menu_byte_tests;
 
+/// The subset of `C4Menu::CloseCommand` used by object menus. Native object
+/// menus leave the command empty except for `C4Object::AutoContextMenu`, which
+/// installs the Exit command executed by a control close.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectMenuCloseCommand {
+    #[default]
+    None,
+    Exit,
+}
+
+impl ObjectMenuCloseCommand {
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 /// A script-created object menu (C4ObjectMenu; FnCreateMenu →
 /// C4ObjectMenu::Init, C4ObjectMenu.cpp:86-91): the minimal state scripts
 /// can observe — GetMenu reads `identification`, SelectMenuItem moves
@@ -4063,6 +4079,12 @@ pub struct ObjectMenuState {
     pub equal_item_height: bool,
     /// C4Menu::Permanent (SetPermanent, C4Menu.cpp:942-945).
     pub permanent: bool,
+    /// `C4Menu::CloseCommand` semantics used by native object menus. The
+    /// command is empty after menu initialization and becomes Exit only for
+    /// an automatic contained context menu (C4Menu.cpp:282-305;
+    /// C4Object.cpp:2044-2062).
+    #[serde(default, skip_serializing_if = "ObjectMenuCloseCommand::is_none")]
+    pub close_command: ObjectMenuCloseCommand,
     /// Requested top-left in logical viewport-local pixels. `Some` models
     /// `C4MN_Align_Free` plus `C4Menu::SetLocation`; `None` retains the
     /// style's default alignment. The app clamps it after menu sizing.
@@ -4146,6 +4168,7 @@ impl PartialEq for ObjectMenuState {
             && self.style == other.style
             && self.equal_item_height == other.equal_item_height
             && self.permanent == other.permanent
+            && self.close_command == other.close_command
             && self.location == other.location
             && self.extra == other.extra
             && self.extra_data == other.extra_data
@@ -8413,6 +8436,9 @@ pub struct Engine {
     /// Per-player crew info lists (C4Player::CrewInfoList): the roster
     /// GetIdle/New recruit from at join.
     crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
+    /// Process-local `Config.Graphics.AddNewCrewPortraits`. Random portrait
+    /// selection is deliberately outside the synchronized game stream.
+    add_new_crew_portraits: bool,
     /// C4ObjectInfoList traversal order expressed as stable roster indices.
     /// New entries are appended to `crew_rosters` for pointer identity but
     /// inserted at the front here like `C4ObjectInfoList::New`.
@@ -10627,6 +10653,7 @@ impl Engine {
                 ..ScenarioSectionState::default()
             },
             crew_rosters: HashMap::new(),
+            add_new_crew_portraits: true,
             crew_info_order: HashMap::new(),
             crew_object_infos: Rc::new(HashMap::new()),
             crew_ranks: Rc::new(HashMap::new()),
@@ -10673,6 +10700,17 @@ impl Engine {
     /// The synchronized seed retained in `Game.Parameters.RandomSeed`.
     pub fn random_seed(&self) -> u64 {
         self.random_seed
+    }
+
+    /// Mirror the capture fork's `C4Startup::Execute` RNG pin without
+    /// rebuilding FRndBuf3, which native startup leaves untouched.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "presentation-capture"))]
+    pub fn pin_presentation_startup_random_state(&mut self, seed: u64) {
+        self.random_seed = seed;
+        self.rng.hold = seed as u32;
+        self.rng.count = 0;
+        crate::particles::reset_presentation_safe_random_after_fix_random();
     }
 
     /// Apply the C++ network client's control clock before synchronized

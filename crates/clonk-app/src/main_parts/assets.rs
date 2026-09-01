@@ -733,18 +733,20 @@ pub(crate) fn run_headless_server(
     // other renderer, so the logical surface keeps its ordinary size. Nothing
     // presents it.
     let (logical_width, logical_height) = DisplayOptions::default().actual_size();
-    let mut app = GameApp::new_with_debug_hud(
+    let compat_profile = resolve_classic_compat_profile(app_paths.map(|paths| &**paths), classic);
+    let mut app = GameApp::new_with_debug_hud_for_profile(
         logical_width,
         logical_height,
         AudioOptions::silenced(),
         app_paths.map(|paths| &**paths),
         runtime,
         false,
+        compat_profile,
     )
     .context("failed to initialise headless server state")?;
     app.headless = true;
     app.set_display_mode(DisplayMode::Window);
-    app.apply_classic_command_line(classic)?;
+    app.apply_classic_command_line_with_profile(classic, compat_profile)?;
     app.auto_start_sandbox = cli.sandbox;
     app.launch_classic_command_line_join()
         .context("failed to start command-line network join")?;
@@ -1018,7 +1020,7 @@ impl ScenarioLoadingReporter {
     /// log sink appends to, so a worker thread's log event between two
     /// milestones keeps its position instead of either source replacing the
     /// other (`src/C4Log.cpp:208-243`).
-    pub(crate) fn report(&mut self, progress: i32, line: &'static str) {
+    pub(crate) fn report(&mut self, progress: i32, line: &str) {
         self.last_progress = self.last_progress.max(progress.clamp(0, 99));
         clonk_logging::push_loader_log_line(line);
         let _ = self.sender.send(ScenarioLoadingEvent::LoaderFrame {
@@ -1405,6 +1407,7 @@ pub(crate) struct LobbyPreloadGraphicsContext {
 
 pub(crate) struct LobbyPreloadJob {
     pub(crate) graphics: LobbyPreloadGraphicsContext,
+    pub(crate) global_system_scripts: Vec<(String, String)>,
     pub(crate) source: LobbyPreloadJobSource,
 }
 
@@ -1467,9 +1470,23 @@ pub(crate) enum LobbyPreloadTaskState {
 
 extern "C" {
     pub(crate) fn rand() -> std::os::raw::c_int;
+    #[cfg(any(test, feature = "presentation-capture"))]
+    fn srand(seed: std::os::raw::c_uint);
+}
+
+#[cfg(any(test, feature = "presentation-capture"))]
+pub(crate) fn seed_classic_safe_random(seed: u32) {
+    let _guard = lock_unpoisoned(&CLASSIC_SAFE_RANDOM_LOCK);
+    // SAFETY: C guarantees `srand` accepts every unsigned seed. The same
+    // process-global lock serializes this with all `rand` consumers.
+    unsafe { srand(seed) };
 }
 
 pub(crate) fn classic_safe_random_unlocked(range: usize) -> usize {
+    #[cfg(any(test, feature = "presentation-capture"))]
+    if let Some(value) = clonk_engine::particles::presentation_safe_random_capture_range(range) {
+        return value;
+    }
     if range == 0 {
         return 0;
     }
@@ -1546,10 +1563,11 @@ fn select_loader_with_safe_random(
     let _guard = CLASSIC_SAFE_RANDOM_LOCK
         .lock()
         .map_err(|_| anyhow!("classic SafeRandom lock was poisoned"))?;
-    select_loader_source(
+    select_loader_source_with_directory_order(
         groups,
         graphics,
         specification,
+        presentation_capture_or_discovery_requested(),
         classic_safe_random_unlocked,
     )
 }
@@ -1558,6 +1576,16 @@ pub(crate) fn select_loader_source(
     groups: &[Group],
     graphics: &Group,
     specification: &str,
+    next_mod: impl FnMut(usize) -> usize,
+) -> Result<SelectedLoaderSource> {
+    select_loader_source_with_directory_order(groups, graphics, specification, false, next_mod)
+}
+
+pub(crate) fn select_loader_source_with_directory_order(
+    groups: &[Group],
+    graphics: &Group,
+    specification: &str,
+    canonical_directory_order: bool,
     mut next_mod: impl FnMut(usize) -> usize,
 ) -> Result<SelectedLoaderSource> {
     let patterns = loader_patterns(specification)?;
@@ -1567,15 +1595,30 @@ pub(crate) fn select_loader_source(
     // C4LoaderScreen's GroupSet pass uses png, jpeg, jpg, doubles all of
     // those reservoir slots, then visits bmp.
     for group in groups {
-        seek_loader_candidates(group, &patterns.png, &mut count, &mut chosen, &mut next_mod)?;
         seek_loader_candidates(
             group,
-            &patterns.jpeg,
+            &patterns.png,
+            canonical_directory_order,
             &mut count,
             &mut chosen,
             &mut next_mod,
         )?;
-        seek_loader_candidates(group, &patterns.jpg, &mut count, &mut chosen, &mut next_mod)?;
+        seek_loader_candidates(
+            group,
+            &patterns.jpeg,
+            canonical_directory_order,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
+        seek_loader_candidates(
+            group,
+            &patterns.jpg,
+            canonical_directory_order,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
         count = count
             .checked_mul(2)
             .context("classic loader reservoir count overflow")?;
@@ -1583,7 +1626,14 @@ pub(crate) fn select_loader_source(
             count <= i32::MAX as usize,
             "classic loader reservoir exceeds C++ int range"
         );
-        seek_loader_candidates(group, &patterns.bmp, &mut count, &mut chosen, &mut next_mod)?;
+        seek_loader_candidates(
+            group,
+            &patterns.bmp,
+            canonical_directory_order,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
     }
     if count > 0 {
         return chosen.context("classic loader reservoir selected no local candidate");
@@ -1593,6 +1643,7 @@ pub(crate) fn select_loader_source(
     seek_loader_candidates(
         graphics,
         &patterns.png,
+        canonical_directory_order,
         &mut count,
         &mut chosen,
         &mut next_mod,
@@ -1600,6 +1651,7 @@ pub(crate) fn select_loader_source(
     seek_loader_candidates(
         graphics,
         &patterns.jpg,
+        canonical_directory_order,
         &mut count,
         &mut chosen,
         &mut next_mod,
@@ -1607,6 +1659,7 @@ pub(crate) fn select_loader_source(
     seek_loader_candidates(
         graphics,
         &patterns.jpeg,
+        canonical_directory_order,
         &mut count,
         &mut chosen,
         &mut next_mod,
@@ -1621,6 +1674,7 @@ pub(crate) fn select_loader_source(
     seek_loader_candidates(
         graphics,
         &patterns.bmp,
+        canonical_directory_order,
         &mut count,
         &mut chosen,
         &mut next_mod,
@@ -1629,7 +1683,14 @@ pub(crate) fn select_loader_source(
     if count == 0 {
         // The final fallback intentionally excludes bmp.
         for pattern in ["Loader*.png", "Loader*.jpg", "Loader*.jpeg"] {
-            seek_loader_candidates(graphics, pattern, &mut count, &mut chosen, &mut next_mod)?;
+            seek_loader_candidates(
+                graphics,
+                pattern,
+                canonical_directory_order,
+                &mut count,
+                &mut chosen,
+                &mut next_mod,
+            )?;
         }
     }
 
@@ -1692,12 +1753,17 @@ pub(crate) fn loader_patterns(specification: &str) -> Result<LoaderPatterns> {
 fn seek_loader_candidates(
     group: &Group,
     wildcard: &str,
+    canonical_directory_order: bool,
     count: &mut usize,
     chosen: &mut Option<SelectedLoaderSource>,
     next_mod: &mut impl FnMut(usize) -> usize,
 ) -> Result<()> {
     let wildcard = clonk_script::c4_string_bytes(wildcard);
-    for entry in group.entries()? {
+    let mut entries = group.entries()?;
+    if canonical_directory_order && group.is_directory() {
+        sort_directory_loader_entries_for_presentation_capture(&mut entries);
+    }
+    for entry in entries {
         if !classic_wildcard_match(&wildcard, &entry.name_bytes) {
             continue;
         }
@@ -1722,6 +1788,31 @@ fn seek_loader_candidates(
         }
     }
     Ok(())
+}
+
+fn sort_directory_loader_entries_for_presentation_capture(entries: &mut [GroupEntry]) {
+    // Acquisition writes the capture resource tree in Git tree order.
+    // Preserve the pinned Darwin oracle's observed folder scan when Linux
+    // readdir exposes the materialized files in a different order. Packed
+    // groups and ordinary product runs retain their C4Group entry order.
+    entries.sort_by(git_tree_entry_order);
+}
+
+fn git_tree_entry_order(left: &GroupEntry, right: &GroupEntry) -> std::cmp::Ordering {
+    let common_length = left.name_bytes.len().min(right.name_bytes.len());
+    let prefix_order = left.name_bytes[..common_length].cmp(&right.name_bytes[..common_length]);
+    if prefix_order != std::cmp::Ordering::Equal || left.name_bytes.len() == right.name_bytes.len()
+    {
+        return prefix_order;
+    }
+    let byte_at_end = |entry: &GroupEntry| {
+        entry
+            .name_bytes
+            .get(common_length)
+            .copied()
+            .unwrap_or(if entry.is_directory { b'/' } else { 0 })
+    };
+    byte_at_end(left).cmp(&byte_at_end(right))
 }
 
 pub(crate) fn classic_wildcard_match(wildcard: &[u8], value: &[u8]) -> bool {
@@ -8138,6 +8229,52 @@ pub(crate) fn test_scenario_load(
     }
 }
 
+pub(crate) fn resolve_classic_compat_profile(
+    app_paths: Option<&AppPaths>,
+    classic: &ClassicCommandLine,
+) -> CompatProfile {
+    let persisted_config =
+        app_paths.and_then(|paths| clonk_core::std_config::Config::load(paths.config_file()).ok());
+    crate::settings::resolve_compat_profile(persisted_config.as_ref(), classic.compat_profile)
+}
+
+pub(crate) fn prepare_capture_app(
+    mut app: GameApp,
+    classic: &ClassicCommandLine,
+    compat_profile: CompatProfile,
+) -> Result<GameApp> {
+    anyhow::ensure!(
+        app.config.compat_profile == compat_profile,
+        "presentation capture app was constructed for {:?}, not {:?}",
+        app.config.compat_profile,
+        compat_profile
+    );
+    app.apply_classic_command_line_with_profile(classic, compat_profile)?;
+    Ok(app)
+}
+
+pub(crate) fn build_capture_app(
+    classic: &ClassicCommandLine,
+    app_paths: Option<&Arc<AppPaths>>,
+    runtime: RuntimeConfig,
+) -> Result<GameApp> {
+    let compat_profile = resolve_classic_compat_profile(app_paths.map(|paths| &**paths), classic);
+    prepare_capture_app(
+        GameApp::new_with_debug_hud_for_profile(
+            1280,
+            720,
+            AudioOptions::load(app_paths.map(|paths| &**paths)),
+            app_paths.map(|paths| &**paths),
+            runtime,
+            false,
+            compat_profile,
+        )
+        .context("failed to initialise app for presentation capture")?,
+        classic,
+        compat_profile,
+    )
+}
+
 /// Headless: boot the sandbox scenario, advance `test_frames` simulation frames,
 /// render one in-game frame to the renderer's CPU surface, and write it as a PNG.
 /// No window/event loop, so the in-game scene can be captured for rendering-parity
@@ -8145,21 +8282,15 @@ pub(crate) fn test_scenario_load(
 pub(crate) fn run_sandbox_dump(
     dump_path: &std::path::Path,
     test_frames: u32,
+    classic: &ClassicCommandLine,
     app_paths: Option<&Arc<AppPaths>>,
     runtime: RuntimeConfig,
 ) -> Result<()> {
     use std::thread;
     use std::time::Duration;
 
-    let mut app = GameApp::new_with_debug_hud(
-        1280,
-        720,
-        AudioOptions::default(),
-        app_paths.map(|v| &**v),
-        runtime,
-        false,
-    )
-    .context("failed to initialise app for frame dump")?;
+    let mut app = build_capture_app(classic, app_paths, runtime)
+        .context("failed to initialise app for frame dump")?;
     app.auto_start_sandbox = true;
 
     // Pump update() until async boot finishes and the sandbox auto-starts (Running).
@@ -8228,21 +8359,15 @@ fn options_sheet_by_name(name: &str) -> Option<clonk_frontend::startup_options_d
 pub(crate) fn run_menu_dump(
     dump_path: &std::path::Path,
     menu_view: &str,
+    classic: &ClassicCommandLine,
     app_paths: Option<&Arc<AppPaths>>,
     runtime: RuntimeConfig,
 ) -> Result<()> {
     use std::thread;
     use std::time::Duration;
 
-    let mut app = GameApp::new_with_debug_hud(
-        1280,
-        720,
-        AudioOptions::default(),
-        app_paths.map(|v| &**v),
-        runtime,
-        false,
-    )
-    .context("failed to initialise app for menu dump")?;
+    let mut app = build_capture_app(classic, app_paths, runtime)
+        .context("failed to initialise app for menu dump")?;
 
     // Pump update() until async boot finishes and the startup menu is shown.
     let mut booted = false;
@@ -8857,6 +8982,74 @@ pub(crate) fn configured_remaster(config: &[u8]) -> bool {
 fn configured_remaster_feature(config: &[u8], key: &str) -> bool {
     clonk_app_netplay::configured_native_boolean(config, "Graphics", key)
         .unwrap_or_else(|| configured_remaster(config))
+}
+
+/// The ten presentation-only remaster switches after the compatibility
+/// profile has overlaid the native configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CompatPresentationFeatures {
+    pub(crate) high_dpi_cursor: bool,
+    pub(crate) mipmaps: bool,
+    pub(crate) smooth_landscape: bool,
+    pub(crate) fine_fog_of_war: bool,
+    pub(crate) hd_exact_blits: bool,
+    pub(crate) shader_landscape: bool,
+    pub(crate) loader_aspect: bool,
+    pub(crate) snap_text_to_pixels: bool,
+    pub(crate) sky_dither: bool,
+    pub(crate) smooth_presentation: bool,
+    pub(crate) landscape_detail: u32,
+}
+
+impl CompatPresentationFeatures {
+    pub(crate) fn resolve(config: &[u8], profile: CompatProfile) -> Self {
+        let allowed = profile == CompatProfile::Normal;
+        let shader_landscape = allowed && configured_shader_landscape(config);
+        Self {
+            high_dpi_cursor: allowed && configured_high_dpi_cursor(config),
+            mipmaps: allowed && configured_mipmaps(config),
+            smooth_landscape: allowed && configured_smooth_landscape(config),
+            fine_fog_of_war: allowed && configured_fine_fog_of_war(config),
+            hd_exact_blits: allowed && configured_hd_exact_blits(config),
+            shader_landscape,
+            loader_aspect: allowed && configured_loader_aspect(config),
+            snap_text_to_pixels: allowed && configured_snap_text_to_pixels(config),
+            sky_dither: allowed && configured_sky_dither(config),
+            smooth_presentation: allowed && configured_smooth_presentation(config),
+            landscape_detail: if allowed {
+                configured_landscape_detail(config)
+            } else {
+                1
+            },
+        }
+    }
+
+    pub(crate) const fn remaster_family(self) -> [bool; 10] {
+        [
+            self.high_dpi_cursor,
+            self.mipmaps,
+            self.smooth_landscape,
+            self.fine_fog_of_war,
+            self.hd_exact_blits,
+            self.shader_landscape,
+            self.loader_aspect,
+            self.snap_text_to_pixels,
+            self.sky_dither,
+            self.smooth_presentation,
+        ]
+    }
+
+    pub(crate) fn startup_refresh_delay_ms(
+        self,
+        config: &[u8],
+        display_refresh_period_ms: Option<u64>,
+    ) -> u64 {
+        if self.smooth_presentation {
+            effective_max_refresh_delay_ms(config, display_refresh_period_ms)
+        } else {
+            configured_max_refresh_delay_ms(config)
+        }
+    }
 }
 
 /// `Graphics.HighDpiCursor`: opt in to the physical-width cursor ladder. This

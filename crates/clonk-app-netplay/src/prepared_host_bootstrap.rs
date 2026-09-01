@@ -343,6 +343,7 @@ struct PreparedLeagueGeneratedLandscapeLoader {
     graphics_groups: Vec<Group>,
     languages: Vec<String>,
     language_packs: LanguagePacks,
+    global_system_scripts: Vec<(String, String)>,
     /// Saved games preserve their serialized landscape when a league Start
     /// response supplies a different seed.
     reload_generated_landscape_for_league_start: bool,
@@ -350,7 +351,7 @@ struct PreparedLeagueGeneratedLandscapeLoader {
 
 impl PreparedLeagueGeneratedLandscapeLoader {
     fn load(&self, random_seed: u32) -> Result<Scenario, ScenarioError> {
-        Scenario::load_network_from_group_with_languages_and_seed_and_packs(
+        Scenario::load_network_from_group_with_languages_and_seed_and_packs_and_global_scripts(
             &self.scenario_group,
             &self.definition_groups,
             &self.material_groups,
@@ -358,6 +359,7 @@ impl PreparedLeagueGeneratedLandscapeLoader {
             &self.languages,
             u64::from(random_seed),
             &self.language_packs,
+            &self.global_system_scripts,
         )
     }
 
@@ -368,9 +370,9 @@ impl PreparedLeagueGeneratedLandscapeLoader {
         report_progress: F,
     ) -> Result<Scenario, ScenarioError>
     where
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
-        Scenario::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
+        Scenario::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress(
             &self.scenario_group,
             &self.definition_groups,
             &self.material_groups,
@@ -379,6 +381,7 @@ impl PreparedLeagueGeneratedLandscapeLoader {
             random_seed,
             &self.language_packs,
             startup_player_count,
+            &self.global_system_scripts,
             report_progress,
         )
     }
@@ -415,7 +418,7 @@ impl PreparedHostScenarioLoad {
         report_progress: F,
     ) -> Result<Scenario, ScenarioError>
     where
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let Self {
             retained,
@@ -1118,8 +1121,17 @@ pub(crate) fn league_checksum_start() -> u32 {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // C4LeagueClient uses `rand() | rand() << 16` before each request.
-    let low = unsafe { c_rand() } as u32;
-    let high = unsafe { c_rand() } as u32;
+    let raw_random = || {
+        #[cfg(any(test, feature = "presentation-capture"))]
+        if let Some(value) = clonk_engine::particles::presentation_safe_random_capture_raw_value() {
+            return value;
+        }
+        // SAFETY: `rand` has no pointer preconditions and the enclosing
+        // CLASSIC_SAFE_RANDOM_LOCK serializes ordinary native draws.
+        (unsafe { c_rand() }) as u32
+    };
+    let low = raw_random();
+    let high = raw_random();
     low | high.wrapping_shl(16)
 }
 
@@ -1181,6 +1193,12 @@ impl ProcessInitialHostTeamAssignmentOracle {
 
 impl InitialHostTeamAssignmentOracle for ProcessInitialHostTeamAssignmentOracle {
     fn safe_random(&mut self, range: i32) -> i32 {
+        #[cfg(any(test, feature = "presentation-capture"))]
+        if let Some(value) =
+            clonk_engine::particles::presentation_safe_random_capture_signed_range(range)
+        {
+            return value;
+        }
         if range == 0 {
             return 0;
         }
@@ -1370,6 +1388,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     prepare_host_bootstrap_with_staged_scenario_and_team_assignment_oracle(
         spec,
         None,
+        &[],
         team_assignment_oracle,
     )
 }
@@ -1377,6 +1396,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
 pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_oracle(
     spec: PreparedHostBootstrapSpec<'_>,
     staged_scenario: Option<Scenario>,
+    global_system_scripts: &[(String, String)],
     team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
 ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
     validate_inputs(&spec)?;
@@ -1414,14 +1434,18 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
     );
     let mut scenario = match staged_scenario {
         Some(scenario) => scenario,
-        None => Scenario::load_from_group_with_languages_and_definition_selection_and_prefix(
-            &scenario_group,
-            &definition_resolver,
-            spec.languages,
-            spec.initial_definition_modules,
-            spec.fixed_definition_modules,
-            spec.selector_definition_root,
-        )?,
+        None => {
+            Scenario::load_from_group_with_languages_and_definition_selection_and_prefix_and_global_scripts_and_progress(
+                &scenario_group,
+                &definition_resolver,
+                spec.languages,
+                spec.initial_definition_modules,
+                spec.fixed_definition_modules,
+                spec.selector_definition_root,
+                global_system_scripts,
+                |_, _| {},
+            )?
+        }
     };
     let lobby_metadata = scenario
         .lobby_metadata()
@@ -1677,6 +1701,7 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
                 spec.languages,
                 spec.language_packs,
                 initial_seed,
+                global_system_scripts,
             )?;
         scenario = accepted_scenario;
         parameters.random_seed = accepted_seed as i32;
@@ -1799,6 +1824,7 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         graphics_groups: graphics_groups.clone(),
         languages: spec.languages.to_vec(),
         language_packs: spec.language_packs.clone(),
+        global_system_scripts: global_system_scripts.to_vec(),
         reload_generated_landscape_for_league_start: !is_save_game
             && scenario.generated_landscape_seed_retry_applies(),
     });
@@ -2027,18 +2053,21 @@ fn load_fresh_network_scenario_with_seed_retry(
     languages: &[String],
     language_packs: &LanguagePacks,
     initial_seed: u32,
+    global_system_scripts: &[(String, String)],
 ) -> Result<(Scenario, u32, usize), PrepareHostBootstrapError> {
     let mut random_seed = initial_seed;
     for rejected_seeds in 0..GENERATED_LANDSCAPE_SEED_ATTEMPTS {
-        let scenario = Scenario::load_network_from_group_with_languages_and_seed_and_packs(
-            scenario_group,
-            definition_groups,
-            material_groups,
-            graphics_groups,
-            languages,
-            u64::from(random_seed),
-            language_packs,
-        )?;
+        let scenario =
+            Scenario::load_network_from_group_with_languages_and_seed_and_packs_and_global_scripts(
+                scenario_group,
+                definition_groups,
+                material_groups,
+                graphics_groups,
+                languages,
+                u64::from(random_seed),
+                language_packs,
+                global_system_scripts,
+            )?;
         if !scenario.generated_landscape_requires_seed_retry() {
             return Ok((scenario, random_seed, rejected_seeds));
         }

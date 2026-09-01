@@ -1406,10 +1406,12 @@ impl GameApp {
         self.config.show_folder_maps = load_show_folder_maps(paths);
         self.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
         let native_config = load_native_config_bytes(paths);
+        let presentation_features =
+            CompatPresentationFeatures::resolve(&native_config, self.config.compat_profile);
         self.allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
         self.max_refresh_delay_ms = configured_max_refresh_delay_ms(&native_config);
-        self.startup_refresh_delay_ms =
-            crate::effective_max_refresh_delay_ms(&native_config, self.display_refresh_period_ms);
+        self.startup_refresh_delay_ms = presentation_features
+            .startup_refresh_delay_ms(&native_config, self.display_refresh_period_ms);
         let record = load_recording_flag(paths);
         self.startup.view_flags.record = record;
         self.records.enabled = record && self.records.directory.is_some();
@@ -1918,6 +1920,14 @@ impl GameApp {
         &self,
     ) -> clonk_frontend::startup_options_dlg::OptionsLabels {
         let text = |key: &str, fallback: &str| self.runtime_resource_text(key, fallback);
+        let sound_sheet =
+            if self.config.compat_profile == crate::settings::CompatProfile::LegacyClonk {
+                text("IDS_DLG_SOUND", "Sound")
+            } else {
+                // The ordinary port sheet also hosts voice chat and keeps its
+                // port-specific caption (clonk-org/clonk-rs#452).
+                text("IDS_DLG_AUDIO", "Audio")
+            };
         clonk_frontend::startup_options_dlg::OptionsLabels {
             // The caption strips its mnemonic marker like every FullscreenDialog title.
             title: text("IDS_DLG_OPTIONS", "&Options").replace('&', ""),
@@ -1933,11 +1943,7 @@ impl GameApp {
             sheets: [
                 text("IDS_DLG_PROGRAM", "Program"),
                 text("IDS_DLG_GRAPHICS", "Graphics"),
-                // Port-only id. C++ captions this sheet `IDS_DLG_SOUND`, which
-                // the ingame menu still uses for its own Sound entry; the port
-                // also hosts the voice-chat group here, so the caption reads
-                // "Audio" (clonk-org/clonk-rs#452).
-                text("IDS_DLG_AUDIO", "Audio"),
+                sound_sheet,
                 text("IDS_DLG_KEYBOARD", "Keyboard"),
                 text("IDS_DLG_GAMEPAD", "Gamepad"),
                 text("IDS_DLG_NETWORK", "Network"),

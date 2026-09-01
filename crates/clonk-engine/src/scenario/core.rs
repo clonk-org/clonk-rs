@@ -303,17 +303,15 @@ pub(in crate::scenario) fn scenario_may_need_map_callbacks(
         .any(|entry| legacy_group_wildcard_match(b"Sect*.c4g", &entry.name_bytes)))
 }
 
-fn scenario_map_callback_functions(
+fn scenario_script_link_report(
     script: Option<&ScenarioScriptSource>,
     definitions: &[ScenarioDefinition],
     definition_load_steps: &[DefinitionLoadStep],
+    global_system_scripts: &[(String, String)],
     scenario_system_scripts: &[(String, String)],
-) -> Result<HashSet<String>, ScenarioError> {
-    let Some(script) = script else {
-        return Ok(HashSet::new());
-    };
-
+) -> Result<(HashSet<String>, String), ScenarioError> {
     let mut linker = Engine::new();
+    linker.install_global_scripts(global_system_scripts);
     for step in definition_load_steps {
         match step {
             DefinitionLoadStep::Definition(id) => {
@@ -344,15 +342,25 @@ fn scenario_map_callback_functions(
         }
     }
 
-    match linker.load_scenario_script_with_convention(&script.name, &script.source, true) {
-        Ok(()) => {}
-        Err(EngineError::Script { .. }) => return Ok(HashSet::new()),
-        Err(other) => return Err(other.into()),
-    }
+    let scenario_script_loaded = match script {
+        Some(script) => {
+            match linker.load_scenario_script_with_convention(&script.name, &script.source, true) {
+                Ok(()) => true,
+                Err(EngineError::Script { .. }) => false,
+                Err(other) => return Err(other.into()),
+            }
+        }
+        None => false,
+    };
     linker.install_scenario_global_scripts(scenario_system_scripts);
     linker.resolve_appends();
-    linker.resolve_includes()?;
-    Ok(linker.scenario_local_function_names())
+    let summary = linker.resolve_includes_with_summary()?;
+    let map_callback_functions = if scenario_script_loaded {
+        linker.scenario_local_function_names()
+    } else {
+        HashSet::new()
+    };
+    Ok((map_callback_functions, summary.to_string()))
 }
 
 #[derive(Debug, Clone)]
@@ -2050,6 +2058,28 @@ impl Scenario {
         Self::load_from_path_with_languages_and_seed(path, resolver, languages, 0)
     }
 
+    /// Loads a scenario with the process `System.c4g` hosts included in its
+    /// script-link preview while preserving the default definition selection.
+    pub fn load_from_path_with_languages_and_global_scripts<R, S>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        global_system_scripts: &[(String, String)],
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
+        let group = Group::open(path)?;
+        Self::load_from_group_with_languages_and_seed_and_global_scripts(
+            &group,
+            resolver,
+            languages,
+            0,
+            global_system_scripts,
+        )
+    }
+
     /// Loads a non-fixed legacy scenario with the caller's initial definition
     /// list. A non-empty, non-`LocalOnly` scenario preset replaces this seed;
     /// `LocalOnly` or an empty preset retains it. This models the startup path
@@ -2304,7 +2334,7 @@ impl Scenario {
     where
         S: AsRef<str>,
     {
-        Self::load_network_from_path_with_languages_and_seed_and_packs_and_progress(
+        Self::load_network_from_path_with_languages_and_seed_and_packs_and_global_scripts(
             path,
             definition_groups,
             material_groups,
@@ -2312,6 +2342,36 @@ impl Scenario {
             languages,
             random_seed,
             language_packs,
+            &[],
+        )
+    }
+
+    /// Network-client loader whose link preview includes the process
+    /// `System.c4g` hosts already installed before `LoadScenarioScripts`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_path_with_languages_and_seed_and_packs_and_global_scripts<S>(
+        path: impl AsRef<Path>,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+        global_system_scripts: &[(String, String)],
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+    {
+        Self::load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress(
+            path,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+            legacy_startup_player_count(),
+            global_system_scripts,
             |_, _| {},
         )
     }
@@ -2332,7 +2392,7 @@ impl Scenario {
     ) -> Result<Self, ScenarioError>
     where
         S: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         Self::load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
             path,
@@ -2366,10 +2426,46 @@ impl Scenario {
     ) -> Result<Self, ScenarioError>
     where
         S: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
+    {
+        Self::load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress(
+            path,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+            startup_player_count,
+            &[],
+            report_progress,
+        )
+    }
+
+    /// Startup-player-count network loader whose link preview includes the
+    /// process `System.c4g` hosts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress<
+        S,
+        F,
+    >(
+        path: impl AsRef<Path>,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+        startup_player_count: i32,
+        global_system_scripts: &[(String, String)],
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+        F: FnMut(i32, &str),
     {
         let group = Group::open(path)?;
-        Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
+        Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress(
             &group,
             definition_groups,
             material_groups,
@@ -2378,6 +2474,7 @@ impl Scenario {
             random_seed,
             language_packs,
             startup_player_count,
+            global_system_scripts,
             report_progress,
         )
     }
@@ -2398,7 +2495,7 @@ impl Scenario {
     where
         S: AsRef<str>,
     {
-        Self::load_network_from_group_with_languages_and_seed_and_packs_and_progress(
+        Self::load_network_from_group_with_languages_and_seed_and_packs_and_global_scripts(
             group,
             definition_groups,
             material_groups,
@@ -2406,6 +2503,36 @@ impl Scenario {
             languages,
             random_seed,
             language_packs,
+            &[],
+        )
+    }
+
+    /// Group-backed network loader whose link preview includes the process
+    /// `System.c4g` hosts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_group_with_languages_and_seed_and_packs_and_global_scripts<S>(
+        group: &Group,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+        global_system_scripts: &[(String, String)],
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+    {
+        Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress(
+            group,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+            legacy_startup_player_count(),
+            global_system_scripts,
             |_, _| {},
         )
     }
@@ -2425,7 +2552,7 @@ impl Scenario {
     ) -> Result<Self, ScenarioError>
     where
         S: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
             group,
@@ -2456,11 +2583,48 @@ impl Scenario {
         random_seed: u64,
         language_packs: &LanguagePacks,
         startup_player_count: i32,
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+        F: FnMut(i32, &str),
+    {
+        Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress(
+            group,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+            startup_player_count,
+            &[],
+            report_progress,
+        )
+    }
+
+    /// Most-general authoritative network loader. Existing entry points
+    /// delegate here with no process-global scripts so non-application callers
+    /// retain their previous behavior.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_global_scripts_and_progress<
+        S,
+        F,
+    >(
+        group: &Group,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+        startup_player_count: i32,
+        global_system_scripts: &[(String, String)],
         mut report_progress: F,
     ) -> Result<Self, ScenarioError>
     where
         S: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         let definition_modules = (0..definition_groups.len())
@@ -2473,16 +2637,19 @@ impl Scenario {
             graphics_groups,
             language_packs,
         };
-        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
             group,
             &resolver,
             &languages,
             random_seed,
             &[],
+            None,
             Some(&definition_modules),
+            None,
             None,
             startup_player_count,
             false,
+            global_system_scripts,
             &mut report_progress,
         )
     }
@@ -2532,6 +2699,38 @@ impl Scenario {
             &[],
             None,
             None,
+        )
+    }
+
+    /// Default-definition group loader whose link preview includes the process
+    /// `System.c4g` hosts.
+    pub fn load_from_group_with_languages_and_seed_and_global_scripts<R, S>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        global_system_scripts: &[(String, String)],
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
+        let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        let mut ignore_progress = |_: i32, _: &str| {};
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
+            group,
+            resolver,
+            &languages,
+            random_seed,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            legacy_startup_player_count(),
+            true,
+            global_system_scripts,
+            &mut ignore_progress,
         )
     }
 
@@ -2633,7 +2832,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
         M: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress(
             group,
@@ -2667,9 +2866,45 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
         M: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
-        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_progress(
+        Self::load_from_group_with_languages_and_definition_selection_and_prefix_and_global_scripts_and_progress(
+            group,
+            resolver,
+            languages,
+            initial_modules,
+            fixed_modules,
+            definition_prefix,
+            &[],
+            report_progress,
+        )
+    }
+
+    /// Loader-reporting prefix variant whose link preview includes the process
+    /// `System.c4g` hosts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_definition_selection_and_prefix_and_global_scripts_and_progress<
+        R,
+        S,
+        M,
+        F,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_prefix: Option<&Path>,
+        global_system_scripts: &[(String, String)],
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+        F: FnMut(i32, &str),
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_global_scripts_and_progress(
             group,
             resolver,
             languages,
@@ -2678,6 +2913,7 @@ impl Scenario {
             fixed_modules,
             definition_prefix,
             legacy_startup_player_count(),
+            global_system_scripts,
             report_progress,
         )
     }
@@ -2743,7 +2979,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
         M: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let initial_spellings = initial_modules
             .iter()
@@ -2777,6 +3013,7 @@ impl Scenario {
             definition_root.map(DefinitionPathExpansion::DirectoryRoot),
             startup_player_count,
             true,
+            &[],
             &mut report_progress,
         )
     }
@@ -2796,13 +3033,54 @@ impl Scenario {
         fixed_modules: Option<&[M]>,
         definition_prefix: Option<&Path>,
         startup_player_count: i32,
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+        F: FnMut(i32, &str),
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_global_scripts_and_progress(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            initial_modules,
+            fixed_modules,
+            definition_prefix,
+            startup_player_count,
+            &[],
+            report_progress,
+        )
+    }
+
+    /// Loader-reporting variant that starts the native link preview with the
+    /// process `System.c4g` hosts already installed, as `InitScriptEngine`
+    /// does before `LoadScenarioScripts` (`C4Game.cpp:2767-2794,2593-2608`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_global_scripts_and_progress<
+        R,
+        S,
+        M,
+        F,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_prefix: Option<&Path>,
+        startup_player_count: i32,
+        global_system_scripts: &[(String, String)],
         mut report_progress: F,
     ) -> Result<Self, ScenarioError>
     where
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
         M: AsRef<str>,
-        F: FnMut(i32, &'static str),
+        F: FnMut(i32, &str),
     {
         let initial_spellings = initial_modules
             .iter()
@@ -2837,6 +3115,7 @@ impl Scenario {
             definition_prefix.map(DefinitionPathExpansion::LiteralPrefix),
             startup_player_count,
             true,
+            global_system_scripts,
             &mut report_progress,
         )
     }
@@ -2887,7 +3166,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
-        let mut ignore_progress = |_: i32, _: &'static str| {};
+        let mut ignore_progress = |_: i32, _: &str| {};
         Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count_and_progress(
             group,
             resolver,
@@ -2914,7 +3193,7 @@ impl Scenario {
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
         startup_player_count: i32,
-        report_progress: &mut dyn FnMut(i32, &'static str),
+        report_progress: &mut dyn FnMut(i32, &str),
     ) -> Result<Self, ScenarioError>
     where
         R: LegacyDefinitionResolver,
@@ -2933,6 +3212,7 @@ impl Scenario {
             selector_definition_root.map(DefinitionPathExpansion::DirectoryRoot),
             startup_player_count,
             true,
+            &[],
             report_progress,
         )
     }
@@ -2950,7 +3230,7 @@ impl Scenario {
         selector_definition_root: Option<&Path>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
-        report_progress: &mut dyn FnMut(i32, &'static str),
+        report_progress: &mut dyn FnMut(i32, &str),
     ) -> Result<Self, ScenarioError> {
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
             group,
@@ -2964,6 +3244,7 @@ impl Scenario {
             selector_definition_root.map(DefinitionPathExpansion::DirectoryRoot),
             startup_player_count,
             discover_folder_definitions,
+            &[],
             report_progress,
         )
     }
@@ -2981,7 +3262,8 @@ impl Scenario {
         definition_path_expansion: Option<DefinitionPathExpansion<'_>>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
-        report_progress: &mut dyn FnMut(i32, &'static str),
+        global_system_scripts: &[(String, String)],
+        report_progress: &mut dyn FnMut(i32, &str),
     ) -> Result<Self, ScenarioError> {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
@@ -2997,6 +3279,7 @@ impl Scenario {
                 definition_path_expansion,
                 startup_player_count,
                 discover_folder_definitions,
+                global_system_scripts,
                 report_progress,
             ),
             Err(err) => Err(err),
@@ -3153,7 +3436,8 @@ impl Scenario {
         definition_path_expansion: Option<DefinitionPathExpansion<'_>>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
-        report_progress: &mut dyn FnMut(i32, &'static str),
+        global_system_scripts: &[(String, String)],
+        report_progress: &mut dyn FnMut(i32, &str),
     ) -> Result<Self, ScenarioError> {
         let indexed_group = group.is_directory().then(|| group.indexed()).transpose()?;
         let group = indexed_group.as_ref().unwrap_or(group);
@@ -3533,25 +3817,38 @@ impl Scenario {
             scenario_origin.as_deref(),
             languages,
         )?;
-        report_progress(56, "Scenario script sources loaded");
-        let map_callback_functions = if scenario_may_need_map_callbacks(group)? {
-            scenario_map_callback_functions(
-                script.as_ref(),
-                &collected,
-                &definition_load_steps,
-                &scenario_system_scripts,
-            )?
+        let needs_map_callbacks = scenario_may_need_map_callbacks(group)?;
+        report_progress(56, "");
+        let (linked_map_callback_functions, script_link_report) = scenario_script_link_report(
+            script.as_ref(),
+            &collected,
+            &definition_load_steps,
+            global_system_scripts,
+            &scenario_system_scripts,
+        )?;
+        // C4AulLink.cpp:299-303 emits this exact dynamic link summary after
+        // C4Game has published init progress 56 (C4Game.cpp:2593-2608).
+        report_progress(56, &script_link_report);
+        let map_callback_functions = if needs_map_callbacks {
+            linked_map_callback_functions
         } else {
             HashSet::new()
         };
-        report_progress(57, "Scenario callback names indexed");
-        let mut classifier = build_map_pixel_classifier(group, resolver)?;
-        report_progress(58, "Material and texture-map data decoded");
+        report_progress(57, "");
+        let mut classifier =
+            build_map_pixel_classifier_with_loaded_counts(group, resolver, |counts| {
+                if let Some(entries) = counts.texmap_entries {
+                    report_progress(57, &format!("Texture table holds {entries} entries."));
+                }
+                report_progress(57, &format!("{} textures loaded.", counts.textures));
+                report_progress(57, &format!("{} materials loaded.", counts.materials));
+            })?;
         let material_library = classifier
             .as_ref()
             .and_then(MapPixelClassifier::material_library)
             .cloned();
-        report_progress(60, "Material library prepared");
+        report_progress(58, "");
+        report_progress(60, "");
         let mut post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
         let mut prepared_map_creator = None;
         let mut landscape = load_legacy_landscape_with_progress(

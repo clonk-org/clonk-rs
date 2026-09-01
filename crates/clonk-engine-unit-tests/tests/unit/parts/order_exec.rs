@@ -3411,6 +3411,7 @@ fn exec_base_clears_base_when_the_flag_is_lost() -> Result<(), EngineError> {
                 style: 1,
                 equal_item_height: false,
                 permanent: true,
+                close_command: clonk_engine::ObjectMenuCloseCommand::None,
                 location: None,
                 runtime_id: 0,
                 extra: ObjectMenuExtra::default(),

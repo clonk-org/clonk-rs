@@ -1276,6 +1276,7 @@ impl GameApp {
         let preloaded_scenario = (!retry_generated_landscape)
             .then_some(preloaded_scenario)
             .flatten();
+        let global_system_scripts = self.global_scripts_for_session();
 
         thread::spawn(move || {
             let mut reporter = ScenarioLoadingReporter::new(sender);
@@ -1295,6 +1296,7 @@ impl GameApp {
                                 &definition_load,
                                 u64::from(replay.random_seed as u32),
                                 replay.startup_player_count,
+                                &global_system_scripts,
                                 |progress, line| reporter.report(progress, line),
                             )
                             .map(|scenario| (scenario, None))
@@ -1309,6 +1311,7 @@ impl GameApp {
                                 offline_random_seed
                                     .expect("fresh offline loading freezes a random seed"),
                                 startup_player_count,
+                                &global_system_scripts,
                                 |progress, line| reporter.report(progress, line),
                             )
                             .map(|(scenario, random_seed)| (scenario, Some(random_seed)))
@@ -1321,6 +1324,7 @@ impl GameApp {
                                 &definition_load,
                                 offline_random_seed.unwrap_or(0),
                                 startup_player_count,
+                                &global_system_scripts,
                                 |progress, line| reporter.report(progress, line),
                             )
                             .map(|scenario| (scenario, None))
@@ -1331,6 +1335,7 @@ impl GameApp {
                             &resolver,
                             &languages,
                             &definition_load,
+                            &global_system_scripts,
                             |progress, line| reporter.report(progress, line),
                         )
                         .map(|scenario| (scenario, None))
@@ -1835,6 +1840,9 @@ impl GameApp {
             }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
+        engine.set_add_new_crew_portraits(
+            load_options_graphics_state(self.app_paths.as_ref()).add_new_crew_portraits,
+        );
         reconnect_audio_context(&mut engine, self.sound.context.as_ref());
         if let Some(audio) = self.sound.context.as_ref() {
             audio.borrow_mut().clear_object_sound_instances();
@@ -2014,6 +2022,19 @@ impl GameApp {
         self.advance_scenario_loader(94, "Definitions, scripts, landscape, and objects activated");
         let restored_music_enabled = initial_game_data
             .map(|game_data| engine.reconcile_music_after_restore(game_data.music_enabled));
+
+        // C4Game::InitGame starts scenario music before returning to
+        // C4Application::GameTick, which then initializes players and calls
+        // InitGameFinal/Script.Initialize (C4Game.cpp:2544,2733). In
+        // particular, Initialize must not enable music early enough to make
+        // this default selection consume SafeRandom.
+        self.sound.runtime_music_enabled = self
+            .sound
+            .context
+            .as_ref()
+            .is_some_and(|audio| audio.borrow().options.music_enabled);
+        self.sound.runtime_music_enabled |= restored_music_enabled.unwrap_or(false);
+        self.play_scenario_audio(&path);
 
         let pending_offline_joins = if !network_game {
             if offline_startup_players.is_some() {
@@ -2617,7 +2638,6 @@ impl GameApp {
         ));
         self.active_description_definition_modules = effective_description_definition_modules;
         self.records.playback = control_playback;
-        self.play_scenario_audio(&path);
         if initial_game_data.is_some() {
             let restored_music_level = self.engine.music_level();
             if let Some(audio) = self.sound.context.as_ref() {

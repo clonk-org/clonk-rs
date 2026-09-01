@@ -1551,6 +1551,63 @@ fn duplicate_music_records_exclude_only_the_record_that_started() {
 }
 
 #[test]
+fn capture_setup_rejects_a_profile_resolved_after_construction() {
+    use crate::settings::CompatProfile;
+
+    let classic = parse_classic_command_line(&[OsString::from(
+        "/compatprofile:legacy-clonk",
+    )]);
+    let error = prepare_capture_app(
+        new_state_only_menu_app(320, 200),
+        &classic,
+        CompatProfile::LegacyClonk,
+    )
+    .err()
+    .test_value();
+
+    main_assert!(error
+        .to_string()
+        .contains("presentation capture app was constructed"));
+}
+
+#[test]
+fn capture_profile_is_resolved_before_profile_sensitive_assets() {
+    clonk_logging::init();
+
+    let dir = tempdir();
+    let repository = test_repository_root();
+    let _guard = test_env_guard(repository, dir.path());
+    let app_paths = Arc::new(test_app_paths());
+    let mut config = Config::new();
+    config.set_in(Some("Graphics"), "Remaster", "true");
+    fs::create_dir_all(app_paths.config_file().parent().test_value()).test_value();
+    config.save(app_paths.config_file()).test_value();
+    let classic = parse_classic_command_line(&[OsString::from(
+        "/compatprofile:legacy-clonk",
+    )]);
+
+    let mut app = build_capture_app(
+        &classic,
+        Some(&app_paths),
+        test_runtime_config_with("Player", false),
+    )
+    .test_value();
+
+    main_assert!(!app
+        .assets
+        .startup_native_font_source
+        .as_ref()
+        .test_value()
+        .snap_to_pixels);
+    main_assert!(!app.graphics.hd_exact_blits());
+    app.configure_native_startup_fonts(1.0, false);
+    main_assert!(!app
+        .loader_render_config
+        .test_value()
+        .aspect_fill());
+}
+
+#[test]
 fn menu_dump_writes_main_menu_png_at_1280x720() {
     clonk_logging::init();
 
@@ -1562,6 +1619,7 @@ fn menu_dump_writes_main_menu_png_at_1280x720() {
     run_menu_dump(
         &path,
         "main",
+        &ClassicCommandLine::default(),
         Some(&app_paths),
         test_runtime_config_with("Player", false),
     )
@@ -1620,6 +1678,7 @@ fn two_menu_dumps_are_byte_identical_once_the_capture_procedure_has_a_player() {
         run_menu_dump(
             &path,
             "main",
+            &ClassicCommandLine::default(),
             Some(&app_paths),
             test_runtime_config_with("Player", false),
         )

@@ -4041,14 +4041,23 @@ pub(in crate::scenario) fn load_system_scripts_with_components_and_diagnostics<S
                 continue;
             }
         };
-        let source = clonk_script::c4_string_from_bytes(&bytes);
+        // LoadAppend copies each component through SCopy before MakeScript
+        // localizes it, so bytes at and after the first NUL are not source.
+        let visible = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+        let source = clonk_script::c4_string_from_bytes(visible);
         let source = localize_script_source_with_components_and_diagnostics(
             components,
             &source,
             languages,
             &mut report_diagnostic,
         )?;
-        sources.push((name, source));
+        // C4ScriptHost routes every readable System.c4g component through
+        // C4ComponentHost::LoadAppend, which prefixes even the first file
+        // with one newline (C4ComponentHost.cpp:155-205).
+        let mut prefixed = String::with_capacity(source.len() + 1);
+        prefixed.push('\n');
+        prefixed.push_str(&source);
+        sources.push((name, prefixed));
     }
     Ok(sources)
 }

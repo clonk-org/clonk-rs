@@ -779,6 +779,50 @@ pub enum IngameMenuPointerTarget {
     Background,
 }
 
+/// One item cell that survives the menu client's scroll-window clipping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IngameMenuPresentationItemLayout {
+    pub index: usize,
+    pub rect: Rect,
+}
+
+/// Semantic identity of the four cells in `C4Menu`'s optional command bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IngameMenuControlKind {
+    EnterKey,
+    Confirm,
+    CloseKey,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IngameMenuPresentationControlLayout {
+    pub kind: IngameMenuControlKind,
+    pub rect: Rect,
+}
+
+/// Overflow-bar geometry and whether its classic image facet is available to
+/// the renderer. A needed bar with no `Scroll.png` facet remains laid out but
+/// invisible, matching a null `C4Facet` in C++.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IngameMenuPresentationScrollbarLayout {
+    pub rect: Rect,
+    pub visible: bool,
+}
+
+/// Read-only geometry projected from the same `MenuLayout` used for drawing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IngameMenuPresentationLayout {
+    pub bounds: Rect,
+    pub title: Rect,
+    pub close_button: Option<Rect>,
+    pub client: Rect,
+    pub visible_items: Vec<IngameMenuPresentationItemLayout>,
+    pub extra_bar: Option<Rect>,
+    pub controls: Vec<IngameMenuPresentationControlLayout>,
+    pub scrollbar: Option<IngameMenuPresentationScrollbarLayout>,
+}
+
 impl IngameMenuState {
     fn new(
         page: MenuPage,
@@ -1871,6 +1915,53 @@ impl IngameMenuState {
         self.layout(area, font, gfx).close_button_rect()
     }
 
+    /// Returns the geometry the current classic menu render will present.
+    /// This is an observation API: every rectangle is projected from the
+    /// private layout consumed by [`Self::render_with_gamma`].
+    pub fn presentation_layout(
+        &self,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+    ) -> IngameMenuPresentationLayout {
+        let layout = self.layout(area, font, gfx);
+        let extra_bar = gfx.show_commands.then(|| layout.extra_bar_rect());
+        let controls = if gfx.show_commands {
+            let kinds = [
+                IngameMenuControlKind::EnterKey,
+                IngameMenuControlKind::Confirm,
+                IngameMenuControlKind::CloseKey,
+                IngameMenuControlKind::Cancel,
+            ];
+            kinds
+                .into_iter()
+                .zip(layout.control_rects())
+                .map(|(kind, rect)| IngameMenuPresentationControlLayout { kind, rect })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        IngameMenuPresentationLayout {
+            bounds: layout.bounds,
+            title: layout.title_rect(),
+            close_button: gfx.show_close_button.then(|| layout.close_button_rect()),
+            client: layout.client_rect(),
+            visible_items: layout
+                .visible_item_rects(self.items.len())
+                .into_iter()
+                .map(|(index, rect)| IngameMenuPresentationItemLayout { index, rect })
+                .collect(),
+            extra_bar,
+            controls,
+            scrollbar: layout
+                .scrollbar
+                .map(|rect| IngameMenuPresentationScrollbarLayout {
+                    rect,
+                    visible: gfx.scroll.is_some(),
+                }),
+        }
+    }
+
     /// Menu geometry per `C4Menu::InitLocation`/`InitSize`
     /// (C4Menu.cpp:642-783), including the five-column 35px normal grid.
     fn layout(&self, area: Rect, font: &HudFont<'_>, gfx: &IngameMenuGraphics) -> MenuLayout {
@@ -2079,6 +2170,38 @@ impl MenuLayout {
         let client_bottom = client.y.saturating_add(client.height as i32);
         (bottom > client.y && y < client_bottom)
             .then(|| Rect::new(x, y, self.cell_width as u32, self.item_height as u32))
+    }
+
+    fn visible_item_rects(&self, item_count: usize) -> Vec<(usize, Rect)> {
+        let first_row = usize::try_from(self.scroll_y / self.item_height).unwrap_or_default();
+        let visible_rows = self.lines as usize + usize::from(self.scroll_y % self.item_height != 0);
+        let columns = usize::try_from(self.columns).unwrap_or(1);
+        let first = first_row.saturating_mul(columns);
+        let visible = visible_rows.saturating_mul(columns);
+        (first..item_count.min(first.saturating_add(visible)))
+            .filter_map(|index| self.item_rect(index).map(|rect| (index, rect)))
+            .collect()
+    }
+
+    fn extra_bar_rect(&self) -> Rect {
+        Rect::new(
+            self.bounds.x + 1,
+            self.bounds.y + self.bounds.height as i32 - MN_SYMBOL_SIZE - 1,
+            (self.bounds.width as i32 - 2) as u32,
+            MN_SYMBOL_SIZE as u32,
+        )
+    }
+
+    fn control_rects(&self) -> [Rect; 4] {
+        let extra = self.extra_bar_rect();
+        std::array::from_fn(|index| {
+            Rect::new(
+                extra.x + index as i32 * extra.height as i32,
+                extra.y,
+                extra.height,
+                extra.height,
+            )
+        })
     }
 }
 
@@ -2366,7 +2489,6 @@ fn draw_menu(
 ) {
     let bounds = layout.bounds;
     let (x0, y0) = (bounds.x, bounds.y);
-    let (w, h) = (bounds.width as i32, bounds.height as i32);
 
     // Dialog background + 3D frame (C4GUI::Dialog::DrawElement,
     // C4GuiDialogs.cpp:537-550).
@@ -2458,16 +2580,8 @@ fn draw_menu(
         .map(|clip| clip.intersection(client).unwrap_or(Rect::new(0, 0, 0, 0)))
         .unwrap_or(client);
     surface.set_clip(client_clip);
-    let first_row = usize::try_from(layout.scroll_y / layout.item_height).unwrap_or_default();
-    let visible_rows =
-        layout.lines as usize + usize::from(layout.scroll_y % layout.item_height != 0);
-    let columns = usize::try_from(layout.columns).unwrap_or(1);
-    let first = first_row.saturating_mul(columns);
-    let visible = visible_rows.saturating_mul(columns);
-    for (index, item) in menu.items().iter().enumerate().skip(first).take(visible) {
-        let Some(row_rect) = layout.item_rect(index) else {
-            continue;
-        };
+    for (index, row_rect) in layout.visible_item_rects(menu.items().len()) {
+        let item = &menu.items()[index];
         let item_y = row_rect.y;
         // Selection mark: filled red box (C4MenuItem::DrawElement,
         // C4Menu.cpp:152-154).
@@ -2531,18 +2645,12 @@ fn draw_menu(
     // Bottom bar with the menu controls (C4Menu::DrawElement,
     // C4Menu.cpp:823-880).
     if gfx.show_commands {
-        let extra = Rect::new(
-            x0 + 1,
-            y0 + h - MN_SYMBOL_SIZE - 1,
-            (w - 2) as u32,
-            MN_SYMBOL_SIZE as u32,
-        );
+        let extra = layout.extra_bar_rect();
         // divider frame in palette color 80 (#440000) (C4Menu.cpp:932-935);
         // CStdDDraw::DrawFrame never rasterizes the bottom-right corner
         // (capture: Drachenfels divider (1208,662) stays background).
         draw_hv_frame(surface, extra, EXTRA_FRAME_COLOR, gamma);
-        let cell = extra.height;
-        let mut cx = extra.x;
+        let [enter_key, confirm, close_key, cancel] = layout.control_rects();
         let tiny = tiny_font.unwrap_or(font);
         // Enter: key cap with the Throw command + OK symbol
         // (C4Menu.cpp:857-864).
@@ -2550,31 +2658,37 @@ fn draw_menu(
             surface,
             gfx,
             tiny,
-            cx,
-            extra.y,
-            cell,
+            enter_key.x,
+            enter_key.y,
+            enter_key.width,
             3,
             &gfx.throw_key,
             gamma,
         );
-        cx += cell as i32;
-        draw_ok_cancel(surface, gfx, cx, extra.y, cell, 0, 0, gamma);
-        cx += cell as i32;
+        draw_ok_cancel(
+            surface,
+            gfx,
+            confirm.x,
+            confirm.y,
+            confirm.width,
+            0,
+            0,
+            gamma,
+        );
         // Close: key cap with the Dig command + cancel symbol
         // (C4Menu.cpp:874-880).
         draw_command_key(
             surface,
             gfx,
             tiny,
-            cx,
-            extra.y,
-            cell,
+            close_key.x,
+            close_key.y,
+            close_key.width,
             5,
             &gfx.dig_key,
             gamma,
         );
-        cx += cell as i32;
-        draw_ok_cancel(surface, gfx, cx, extra.y, cell, 1, 0, gamma);
+        draw_ok_cancel(surface, gfx, cancel.x, cancel.y, cancel.width, 1, 0, gamma);
     }
 
     // Tooltip with the info caption after the selection has rested
@@ -4108,6 +4222,71 @@ mod tests {
         assert_eq!(layout.bounds.height as i32, expected_height);
         assert_eq!(layout.lines, 7);
         assert_eq!(layout.scroll_y, 0);
+    }
+
+    // C4Menu::DrawElement draws the title/client/item geometry followed by
+    // the four command cells and overflow bar (C4Menu.cpp:804-880;
+    // C4GuiContainers.cpp:309-470).
+    #[test]
+    fn presentation_layout_reports_only_geometry_the_menu_draws() {
+        use clonk_graphics::BitmapFont;
+
+        let menu = long_menu(8);
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let gfx = IngameMenuGraphics {
+            scroll: Some(ImageData::new(1, 1, vec![0, 0, 0, 0])),
+            show_commands: true,
+            show_close_button: true,
+            ..IngameMenuGraphics::default()
+        };
+        let area = Rect::new(0, 0, 640, 148);
+
+        let presentation = menu.presentation_layout(area, &font, &gfx);
+
+        assert_eq!(presentation.bounds, menu.bounds(area, &font, &gfx));
+        assert_eq!(
+            presentation.close_button,
+            Some(menu.close_button_rect(area, &font, &gfx))
+        );
+        assert_eq!(
+            presentation
+                .visible_items
+                .iter()
+                .map(|item| item.index)
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        let extra = presentation.extra_bar.expect("command bar is drawn");
+        assert_eq!(
+            presentation
+                .controls
+                .iter()
+                .map(|control| control.kind)
+                .collect::<Vec<_>>(),
+            [
+                IngameMenuControlKind::EnterKey,
+                IngameMenuControlKind::Confirm,
+                IngameMenuControlKind::CloseKey,
+                IngameMenuControlKind::Cancel,
+            ]
+        );
+        assert!(presentation
+            .controls
+            .iter()
+            .enumerate()
+            .all(|(index, control)| {
+                control.rect
+                    == Rect::new(
+                        extra.x + index as i32 * extra.height as i32,
+                        extra.y,
+                        extra.height,
+                        extra.height,
+                    )
+            }));
+        let scrollbar = presentation.scrollbar.expect("short menu overflows");
+        assert!(scrollbar.visible, "the Scroll.png facet is loaded");
+        assert_eq!(scrollbar.rect.height, presentation.client.height);
     }
 
     #[test]

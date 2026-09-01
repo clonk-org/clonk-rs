@@ -184,9 +184,9 @@ pub fn is_ready() -> bool {
 
 /// How many blockers to name individually before summarising the rest.
 ///
-/// The lobby log is a C++-mirrored surface with a small visible area, and a
-/// player cannot act on fourteen lines anyway. Naming a few by id and counting
-/// the remainder keeps the message actionable while staying quotable.
+/// The lobby notice dialog has a small visible area, and a player cannot act on
+/// fourteen lines anyway. Naming a few by id and counting the remainder keeps
+/// the message actionable while staying quotable.
 const REPORTED_BLOCKERS: usize = 4;
 
 /// The lines to show a host that asked for a profile the contract cannot back.

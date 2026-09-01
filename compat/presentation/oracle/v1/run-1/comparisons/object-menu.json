@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-1/rust/artifacts/object-menu.layout.json",
+    "sha256": "d1ba94be5436db289830e35e58829d10823ffda1c86d9d4ecd95bde067a2e26a"
+  },
+  "case_id": "object-menu",
+  "comparator": {
+    "binary_sha256": "28a623b549f29e926505bbad5355f2b39e7c3d7c2f56dfa4b9a22126286f6139",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "layout",
+  "reference": {
+    "path": "run-1/cpp/artifacts/object-menu.layout.json",
+    "sha256": "d1ba94be5436db289830e35e58829d10823ffda1c86d9d4ecd95bde067a2e26a"
+  },
+  "run_id": "run-1",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"object-menu\",\"comparison\":\"layout\",\"status\":\"match\"}\n"
+}
