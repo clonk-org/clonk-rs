@@ -56,8 +56,60 @@ of the shipped binaries; do not edit by hand.
 """
 
 
+def activated_dependencies(package: dict, features: list[str]) -> set[str]:
+    """The optional dependencies a package's resolved features actually enable.
+
+    An optional dependency is enabled by `dep:<name>`, by the implicit feature
+    of the same name, or by a non-weak `<name>/<feature>` reference. A weak
+    `<name>?/<feature>` enables nothing, yet still puts the package in the
+    resolve graph: flate2's default `runtime_detection` carries `zlib-rs?/std`,
+    so zlib-rs is an edge of a build that never compiles it.
+    """
+    table = package.get("features", {})
+    # An implicit feature carries the name of the dependency it enables, so the
+    # resolved feature names are candidates in their own right.
+    activated = set(features)
+    for feature in features:
+        for value in table.get(feature, []):
+            name, separator, _ = value.partition("/")
+            if separator:
+                if not name.endswith("?"):
+                    activated.add(name)
+            elif value.startswith("dep:"):
+                activated.add(value.removeprefix("dep:"))
+    return activated
+
+
+def is_compiled_in(dependent: dict, activated: set[str], name: str) -> bool:
+    """Whether an edge reaches the binary rather than only the resolve graph.
+
+    Reads the dependent's manifest declarations, never the edge's target: the
+    corpus deliberately covers every platform, so a Windows- or macOS-only
+    package stays attributed on a Linux run.
+    """
+    declarations = [
+        declaration
+        for declaration in dependent["dependencies"]
+        if declaration["name"] == name and declaration.get("kind") != "dev"
+    ]
+    if not declarations:
+        # Nothing in the manifest explains the edge. Attribution errs towards
+        # listing a package over dropping one the binary does link.
+        return True
+    if any(not declaration.get("optional") for declaration in declarations):
+        return True
+    return any(
+        (declaration.get("rename") or declaration["name"]) in activated
+        for declaration in declarations
+    )
+
+
 def release_graph(metadata: dict) -> list[dict]:
-    """Every external package reachable from a shipped binary, non-dev only."""
+    """Every external package a shipped binary compiles in, non-dev only.
+
+    Reachability in `resolve` is not enough: it also carries optional
+    dependencies no activated feature enables, which no binary ever builds.
+    """
     packages = {package["id"]: package for package in metadata["packages"]}
     root = metadata["workspace_root"]
     workspace = {
@@ -82,11 +134,17 @@ def release_graph(metadata: dict) -> list[dict]:
         if identifier in seen:
             continue
         seen.add(identifier)
-        for dependency in nodes[identifier]["deps"]:
+        dependent = packages[identifier]
+        node = nodes[identifier]
+        activated = activated_dependencies(dependent, node["features"])
+        for dependency in node["deps"]:
             kinds = {kind.get("kind") for kind in dependency.get("dep_kinds", [])}
             # `None` is an ordinary dependency and "build" produces code that is
             # compiled in; only "dev" reaches no shipped binary.
             if kinds and kinds <= {"dev"}:
+                continue
+            name = packages[dependency["pkg"]]["name"]
+            if not is_compiled_in(dependent, activated, name):
                 continue
             stack.append(dependency["pkg"])
 

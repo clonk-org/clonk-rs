@@ -10,6 +10,7 @@ The last class covers the workflow that keeps the corpus current on Renovate's
 own branches, because a bot cannot answer the freshness check by hand.
 """
 
+import importlib.util
 import pathlib
 import re
 import tomllib
@@ -21,6 +22,13 @@ CORPUS = REPOSITORY / "crates/clonk-frontend/src/dependency_licenses.txt"
 INDEX = REPOSITORY / "crates/clonk-frontend/src/dependency_licenses.index"
 GENERATOR = REPOSITORY / "scripts/generate_dependency_licenses.py"
 REGENERATION_WORKFLOW = REPOSITORY / ".github/workflows/dependency-licenses.yml"
+
+SPEC = importlib.util.spec_from_file_location("generate_dependency_licenses", GENERATOR)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+WORKSPACE_ROOT = "/workspace"
 
 
 def index_entries() -> list[tuple[str, str, str]]:
@@ -41,6 +49,76 @@ def locked_packages() -> dict[str, set[str]]:
     return packages
 
 
+def declaration(name, *, optional=False, kind=None, rename=None, target=None):
+    """One entry of a package's manifest dependency table, as cargo reports it."""
+    return {
+        "name": name,
+        "optional": optional,
+        "kind": kind,
+        "rename": rename,
+        "target": target,
+    }
+
+
+def package(name, *, dependencies=(), features=None, workspace=False):
+    root = WORKSPACE_ROOT if workspace else "/registry"
+    return {
+        "id": f"{name} 1.0.0",
+        "name": name,
+        "version": "1.0.0",
+        "license": "MIT",
+        "manifest_path": f"{root}/{name}/Cargo.toml",
+        "dependencies": list(dependencies),
+        "features": dict(features or {}),
+    }
+
+
+def node(name, *, deps=(), features=()):
+    return {
+        "id": f"{name} 1.0.0",
+        "features": list(features),
+        "deps": list(deps),
+    }
+
+
+def edge(name, *, kind=None, target=None):
+    return {
+        "name": name.replace("-", "_"),
+        "pkg": f"{name} 1.0.0",
+        "dep_kinds": [{"kind": kind, "target": target}],
+    }
+
+
+def graph(packages, nodes, *, entry_dependencies=(), entry_deps=()):
+    """Metadata for a workspace whose shipped binaries all reach `entry_deps`.
+
+    `release_graph` refuses to run unless every shipped binary is a workspace
+    member, so the four of them are always present; only the first carries the
+    edges a test cares about.
+    """
+    binaries = sorted(MODULE.SHIPPED_BINARIES)
+    members = [
+        package(
+            name,
+            workspace=True,
+            dependencies=entry_dependencies if name == binaries[0] else (),
+        )
+        for name in binaries
+    ]
+    member_nodes = [
+        node(name, deps=entry_deps if name == binaries[0] else ()) for name in binaries
+    ]
+    return {
+        "workspace_root": WORKSPACE_ROOT,
+        "packages": members + list(packages),
+        "resolve": {"nodes": member_nodes + list(nodes)},
+    }
+
+
+def attributed(metadata):
+    return [entry["name"] for entry in MODULE.release_graph(metadata)]
+
+
 class DependencyLicenseCorpusTests(unittest.TestCase):
     def test_every_attributed_package_is_locked_at_that_version(self):
         locked = locked_packages()
@@ -58,6 +136,20 @@ class DependencyLicenseCorpusTests(unittest.TestCase):
                     f"{name} is attributed at {version}, which Cargo.lock does "
                     "not carry; regenerate the corpus",
                 )
+
+    def test_an_optional_dependency_no_binary_compiles_is_absent(self):
+        # flate2's default `runtime_detection` mentions zlib-rs only weakly, so
+        # the lock carries it and no build compiles it: `cargo tree --workspace
+        # --target all -i zlib-rs` prints nothing. The dialog says the listed
+        # packages are linked, so a merely locked package must not appear.
+        attributed = {name for name, _, _ in index_entries()}
+        self.assertIn("flate2", attributed)
+        self.assertIn("miniz_oxide", attributed)
+        self.assertFalse(
+            "zlib-rs" in attributed,
+            "zlib-rs is attributed but no shipped binary compiles it; "
+            "regenerate with scripts/generate_dependency_licenses.py",
+        )
 
     def test_the_index_is_sorted_and_free_of_duplicates(self):
         entries = [(name, version) for name, version, _ in index_entries()]
@@ -100,6 +192,264 @@ class DependencyLicenseCorpusTests(unittest.TestCase):
         generator = GENERATOR.read_text(encoding="utf-8")
         self.assertIn("python3 scripts/generate_dependency_licenses.py", generator)
         self.assertIn("--check", generator)
+
+
+class ReleaseGraphTests(unittest.TestCase):
+    """What the walk counts as compiled in, edge by edge.
+
+    `Cargo.lock` and `resolve.nodes` record an optional dependency as soon as a
+    feature mentions it, even weakly, so the resolve graph is a superset of
+    what any binary compiles. The About dialog says "Clonk Rust links the
+    packages listed below", so the walk has to read activated features too.
+    """
+
+    def test_a_weakly_referenced_optional_dependency_is_not_attributed(self):
+        # flate2 1.1.10's default `runtime_detection` carries `zlib-rs?/std`.
+        # A weak reference enables nothing, so the backend the binary compiles
+        # is miniz_oxide and zlib-rs is never built.
+        metadata = graph(
+            packages=[
+                package(
+                    "flate2",
+                    dependencies=[
+                        declaration("miniz_oxide", optional=True),
+                        declaration("zlib-rs", optional=True),
+                    ],
+                    features={
+                        "default": ["rust_backend", "runtime_detection"],
+                        "rust_backend": ["miniz_oxide", "any_impl"],
+                        "runtime_detection": ["zlib-rs?/std"],
+                        "miniz_oxide": ["any_impl", "dep:miniz_oxide"],
+                        "zlib-rs": ["dep:zlib-rs"],
+                        "any_impl": [],
+                    },
+                ),
+                package("miniz_oxide"),
+                package("zlib-rs"),
+            ],
+            nodes=[
+                node(
+                    "flate2",
+                    deps=[edge("miniz_oxide"), edge("zlib-rs")],
+                    features=[
+                        "any_impl",
+                        "default",
+                        "miniz_oxide",
+                        "runtime_detection",
+                        "rust_backend",
+                    ],
+                ),
+                node("miniz_oxide"),
+                node("zlib-rs"),
+            ],
+            entry_dependencies=[declaration("flate2")],
+            entry_deps=[edge("flate2")],
+        )
+        self.assertEqual(attributed(metadata), ["flate2", "miniz_oxide"])
+
+    def test_an_optional_dependency_a_dep_reference_enables_is_attributed(self):
+        # Cargo materializes the implicit feature an optional dependency gets
+        # as `dep:<name>`, so this is the shape metadata reports for most of
+        # the graph.
+        metadata = graph(
+            packages=[
+                package(
+                    "host",
+                    dependencies=[declaration("serde", optional=True)],
+                    features={"serde": ["dep:serde"]},
+                ),
+                package("serde"),
+            ],
+            nodes=[
+                node("host", deps=[edge("serde")], features=["serde"]),
+                node("serde"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(attributed(metadata), ["host", "serde"])
+
+    def test_an_enabled_feature_named_after_the_dependency_is_enough(self):
+        # An implicit feature carries the name of the dependency it enables.
+        # Cargo spells it out in the feature table, but reading the name alone
+        # keeps attribution erring towards listing a package if it ever stops.
+        metadata = graph(
+            packages=[
+                package(
+                    "host",
+                    dependencies=[declaration("serde", optional=True)],
+                ),
+                package("serde"),
+            ],
+            nodes=[
+                node("host", deps=[edge("serde")], features=["serde"]),
+                node("serde"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(attributed(metadata), ["host", "serde"])
+
+    def test_a_non_weak_feature_reference_activates_the_optional_dependency(self):
+        # `serde/std` enables serde itself; only `serde?/std` does not.
+        metadata = graph(
+            packages=[
+                package(
+                    "host",
+                    dependencies=[declaration("serde", optional=True)],
+                    features={"default": ["serde/std"]},
+                ),
+                package("serde"),
+            ],
+            nodes=[
+                node("host", deps=[edge("serde")], features=["default"]),
+                node("serde"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(attributed(metadata), ["host", "serde"])
+
+    def test_an_unactivated_optional_dependency_drops_what_it_alone_reaches(self):
+        # The whole subtree behind an uncompiled edge is uncompiled too.
+        metadata = graph(
+            packages=[
+                package(
+                    "host",
+                    dependencies=[declaration("backend", optional=True)],
+                    features={"backend": ["dep:backend"]},
+                ),
+                package("backend", dependencies=[declaration("sys")]),
+                package("sys"),
+            ],
+            nodes=[
+                node("host", deps=[edge("backend")], features=["default"]),
+                node("backend", deps=[edge("sys")]),
+                node("sys"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(attributed(metadata), ["host"])
+
+    def test_a_renamed_optional_dependency_is_read_under_its_alias(self):
+        # Features name a renamed dependency by its alias, never by the
+        # package it resolves to.
+        metadata = graph(
+            packages=[
+                package(
+                    "host",
+                    dependencies=[
+                        declaration("rustls", optional=True, rename="tls"),
+                    ],
+                    features={"secure": ["dep:tls"]},
+                ),
+                package("rustls"),
+            ],
+            nodes=[
+                node("host", deps=[edge("rustls")], features=["secure"]),
+                node("rustls"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(attributed(metadata), ["host", "rustls"])
+
+    def test_a_dependency_optional_only_for_dev_stays_attributed(self):
+        # The optional declaration a `dev` edge carries says nothing about the
+        # ordinary edge that compiles the package in.
+        metadata = graph(
+            packages=[
+                package(
+                    "host",
+                    dependencies=[
+                        declaration("shared"),
+                        declaration("shared", optional=True, kind="dev"),
+                    ],
+                ),
+                package("shared"),
+            ],
+            nodes=[
+                node("host", deps=[edge("shared")]),
+                node("shared"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(attributed(metadata), ["host", "shared"])
+
+    def test_a_dev_only_edge_reaches_no_binary(self):
+        metadata = graph(
+            packages=[
+                package("host", dependencies=[declaration("harness", kind="dev")]),
+                package("harness"),
+            ],
+            nodes=[
+                node("host", deps=[edge("harness", kind="dev")]),
+                node("harness"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(attributed(metadata), ["host"])
+
+    def test_a_foreign_platform_dependency_stays_attributed(self):
+        # The corpus ships on every platform, so a Windows-only package must
+        # be attributed by a Linux run. Activated features are read; the
+        # target the edge carries deliberately is not.
+        metadata = graph(
+            packages=[
+                package(
+                    "host",
+                    dependencies=[
+                        declaration("windows-sys", target="cfg(windows)"),
+                        declaration(
+                            "core-foundation",
+                            optional=True,
+                            target='cfg(target_os = "macos")',
+                        ),
+                    ],
+                    features={"apple": ["dep:core-foundation"]},
+                ),
+                package("windows-sys"),
+                package("core-foundation"),
+            ],
+            nodes=[
+                node(
+                    "host",
+                    deps=[
+                        edge("windows-sys", target="cfg(windows)"),
+                        edge("core-foundation", target='cfg(target_os = "macos")'),
+                    ],
+                    features=["apple"],
+                ),
+                node("windows-sys"),
+                node("core-foundation"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(
+            attributed(metadata), ["core-foundation", "host", "windows-sys"]
+        )
+
+    def test_an_edge_with_no_manifest_declaration_is_attributed(self):
+        # Attribution errs towards listing a package rather than dropping one
+        # the binary does link, so an edge the manifest tables cannot explain
+        # is kept.
+        metadata = graph(
+            packages=[
+                package("host"),
+                package("mystery"),
+            ],
+            nodes=[
+                node("host", deps=[edge("mystery")]),
+                node("mystery"),
+            ],
+            entry_dependencies=[declaration("host")],
+            entry_deps=[edge("host")],
+        )
+        self.assertEqual(attributed(metadata), ["host", "mystery"])
 
 
 class RenovateRegenerationWorkflowTests(unittest.TestCase):
