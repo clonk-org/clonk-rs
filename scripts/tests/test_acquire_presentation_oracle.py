@@ -1164,6 +1164,18 @@ class PinAndGitTests(unittest.TestCase):
                 MODULE.PINNED_CPP_RUNTIME_RESOURCES,
             )
 
+    def test_tracked_case_specs_bind_the_current_runtime_resources(self):
+        specs = MODULE.load_json(REPOSITORY / MODULE.CASE_SPECS_SOURCE_PATH)
+        runtime_resources = MODULE.expected_runtime_resources(
+            REPOSITORY,
+            REPOSITORY,
+            "HEAD",
+        )
+
+        for spec in specs:
+            with self.subTest(case=spec["id"]):
+                self.assertEqual(spec["runtime_resources"], runtime_resources)
+
     def test_tracked_case_specs_bind_the_pinned_fixture_content_tree(self):
         specs = MODULE.load_json(REPOSITORY / MODULE.CASE_SPECS_SOURCE_PATH)
         fixture_content_tree = MODULE.tree_oid(
