@@ -34,6 +34,7 @@ pub enum VirtualPlayerError {
     MilestoneNotReached {
         milestone: String,
         frame: u64,
+        diagnostics: String,
     },
     Timeout {
         milestone: String,
@@ -74,10 +75,14 @@ impl fmt::Display for VirtualPlayerError {
                     "control {control} is not a press/release control"
                 )
             }
-            Self::MilestoneNotReached { milestone, frame } => {
+            Self::MilestoneNotReached {
+                milestone,
+                frame,
+                diagnostics,
+            } => {
                 write!(
                     formatter,
-                    "milestone `{milestone}` was not reached at frame {frame}"
+                    "milestone `{milestone}` was not reached at frame {frame}; {diagnostics}"
                 )
             }
             Self::Timeout {
@@ -341,9 +346,15 @@ impl<'engine> VirtualPlayer<'engine> {
         if reached(self.engine) {
             Ok(())
         } else {
+            // A route that ends a bounded recovery loop without reaching its
+            // goal fails here rather than in a `wait_until`, so carry the same
+            // observable state a timeout would have reported.
+            let mut recent = VecDeque::with_capacity(1);
+            self.remember_observable_state(&mut recent);
             Err(VirtualPlayerError::MilestoneNotReached {
                 milestone: milestone.into(),
                 frame: self.engine.frame(),
+                diagnostics: self.timeout_diagnostics(recent),
             })
         }
     }
