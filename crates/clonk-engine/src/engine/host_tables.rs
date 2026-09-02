@@ -835,6 +835,7 @@ impl Engine {
                 .values()
                 .map(|section| section.name.as_str()),
         )
+        .with_scenario_section_switch_in_flight(self.scenario_section_state.switch_in_flight)
         .with_scenario_section_landscape_extents(self.scenario_section_state.sections.values().map(
             |section| {
                 (

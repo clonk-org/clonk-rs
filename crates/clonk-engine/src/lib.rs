@@ -7458,6 +7458,10 @@ pub(crate) struct DefinitionOrderState {
 /// `pCurrentScenarioSection`. Held flat they read as five unrelated fields,
 /// and the invariant that `order` names exactly the registered members of
 /// `sections` has nowhere to live.
+///
+/// `switch_in_flight` is not registry state but the window those five parts
+/// are being rewritten in. C++ expresses it with its own call stack, because
+/// `FnLoadScenarioSection` performs the switch inline; this port cannot.
 #[derive(Clone, Default)]
 pub(crate) struct ScenarioSectionState {
     /// Runtime-loadable `Sect*.c4g` payloads plus the implicit main section.
@@ -7474,6 +7478,14 @@ pub(crate) struct ScenarioSectionState {
     pub(crate) current_registered: bool,
     pub(crate) current: String,
     pub(crate) last_flags: Option<i32>,
+    /// Set while `C4Game::LoadScenarioSection` would still be on the stack —
+    /// that is, across the object-removal and global-effect Stop callbacks the
+    /// switch itself dispatches (C4Game.cpp:4190-4208). Native reaches those
+    /// callbacks from inside `FnLoadScenarioSection`, so the calling script's
+    /// own re-entry guard is still set when they run; the deferred player
+    /// command this port uses arrives after that guard has been cleared, and
+    /// the marker is what lets the host function tell the two apart.
+    pub(crate) switch_in_flight: bool,
 }
 
 #[derive(Clone)]

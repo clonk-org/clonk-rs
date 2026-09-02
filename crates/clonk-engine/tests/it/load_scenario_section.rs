@@ -107,3 +107,36 @@ fn replayed_section_load_realigns_random_count_and_random3_across_runs() {
     assert_eq!(first_checks[0], (501, 0));
     assert_eq!(first_checks, second_checks);
 }
+
+#[test]
+fn tower_of_despair_level_switch_ignores_the_reload_its_own_callbacks_request() {
+    // Tower of Despair reaches a level through `_LVL::DoLoadLevel`, which sets
+    // the pack's `g_sect_is_loading` guard, calls LoadScenarioSection and
+    // clears the guard again. Native runs the switch inside that call, so the
+    // Destruction and global-effect Stop callbacks it dispatches see the guard
+    // set and take `DoLoadLevel`'s early return. This port defers the switch,
+    // so those callbacks run with the guard already cleared and each one asks
+    // for another switch: before the host function refused a re-entrant
+    // request this overflowed the native stack and killed the process
+    // (clonk-org/clonk-rs#1388).
+    let mut engine = load_installed_scenario("Collection.c4f/Puzzles.c4f/S2Tower.c4s", 0);
+    // The pack's lobby postpones its own team selection, and an unselected
+    // local player never reaches ScenarioInit.
+    let player = crate::support::real_scenario::join_local_player_on_team(&mut engine, "Alex", 1);
+    for _ in 0..20 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert_eq!(engine.debug_current_scenario_section(), "Lobby");
+
+    // `LoadLevel(index, path, plr)` is the scenario-script entry the cave
+    // entrance menu binds; level 1 of the normal path is the training room.
+    crate::support::TestValueExt::test_value(engine.call_scenario_script_function(
+        "LoadLevel",
+        vec![Value::Int(1), Value::Int(0), Value::Int(player)],
+    ));
+    for _ in 0..20 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+
+    assert_eq!(engine.debug_current_scenario_section(), "Training");
+}
