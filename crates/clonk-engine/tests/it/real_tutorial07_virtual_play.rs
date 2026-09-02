@@ -578,25 +578,98 @@ fn return_from_hut_and_collect_gold(
         }
     }
     if !clonk_carries(player.engine(), clonk, "GOLD") {
-        player.tap(COM_DIG)?;
-        player.wait_until(
-            "the Clonk digs into the remaining GOLD seam",
-            40,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name == "Dig")
-            },
-        )?;
-        player.press(COM_DOWN)?;
-        let collected_gold = player.hold_until(
-            COM_LEFT,
+        // A diagonal tunnel can finish a few pixels above the freed chunk.
+        // Re-aim from the current Clonk/GOLD positions whenever Dig returns
+        // to Walk instead of assuming one DownLeft segment must collect it.
+        for dig_attempt in 1..=4 {
+            if clonk_carries(player.engine(), clonk, "GOLD") {
+                break;
+            }
+            let clonk_snapshot = player
+                .engine()
+                .object_snapshot(clonk)
+                .expect("the Clonk survives the GOLD recovery route");
+            let clonk_position = clonk_snapshot.position;
+            let target = player
+                .engine()
+                .snapshot()
+                .objects
+                .into_iter()
+                .filter(|object| object.definition_id == "GOLD" && object.container.is_none())
+                .min_by_key(|object| {
+                    (object.position.x - clonk_position.x).abs()
+                        + (object.position.y - clonk_position.y).abs()
+                })
+                .expect("Tutorial07 retains a GOLD chunk in the seam");
+            let (horizontal, direction, segment_goal_x) =
+                if target.position.x < clonk_position.x - 3 {
+                    (COM_LEFT, Direction::Left, target.position.x)
+                } else if target.position.x > clonk_position.x + 3 {
+                    (COM_RIGHT, Direction::Right, target.position.x)
+                } else if clonk_snapshot.direction == Direction::Left {
+                    (COM_LEFT, Direction::Left, clonk_position.x - 12)
+                } else {
+                    (COM_RIGHT, Direction::Right, clonk_position.x + 12)
+                };
+            if player
+                .engine()
+                .object_snapshot(clonk)
+                .is_none_or(|object| object.action.name != "Dig")
+            {
+                player.reset_input_ledger_with_control_style(true)?;
+                player.hold_until(
+                    horizontal,
+                    format!("the Clonk faces GOLD before dig attempt {dig_attempt}"),
+                    20,
+                    |engine| {
+                        clonk_carries(engine, clonk, "GOLD")
+                            || engine
+                                .object_snapshot(clonk)
+                                .is_some_and(|object| object.direction == direction)
+                    },
+                )?;
+                if clonk_carries(player.engine(), clonk, "GOLD") {
+                    break;
+                }
+                player.reset_input_ledger_with_control_style(true)?;
+                player.tap(COM_DIG)?;
+                player.wait_until(
+                    format!("the Clonk starts GOLD dig attempt {dig_attempt}"),
+                    40,
+                    |engine| {
+                        engine
+                            .object_snapshot(clonk)
+                            .is_some_and(|object| object.action.name == "Dig")
+                    },
+                )?;
+            }
+            // Dig remains buffered for single-click synthesis after the tap.
+            // Starting the diagonal segment must not flush that stale input
+            // before Down/Left or Down/Right updates the Dig direction.
+            player.reset_input_ledger_with_control_style(true)?;
+            player.press(COM_DOWN)?;
+            let dig_segment = player.hold_until(
+                horizontal,
+                format!("the Clonk advances through GOLD dig attempt {dig_attempt}"),
+                180,
+                |engine| {
+                    clonk_carries(engine, clonk, "GOLD")
+                        || engine.object_snapshot(clonk).is_some_and(|object| {
+                            if horizontal == COM_LEFT {
+                                object.position.x <= segment_goal_x
+                            } else {
+                                object.position.x >= segment_goal_x
+                            }
+                        })
+                },
+            );
+            player.release(COM_DOWN)?;
+            dig_segment?;
+        }
+        player.assert_milestone(
             "the Clonk frees and collects another GOLD chunk",
-            180,
             |engine| clonk_carries(engine, clonk, "GOLD"),
-        );
-        player.release(COM_DOWN)?;
-        collected_gold?;
+        )?;
     }
     Ok(())
 }

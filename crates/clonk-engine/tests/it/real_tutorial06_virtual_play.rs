@@ -1068,32 +1068,60 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
             .object_snapshot(builder)
             .is_some_and(|object| object.action.name == "Swim")
     })?;
-    player.hold_until(
-        COM_DOWN,
-        "the builder dives to the CRYS transfer depth",
-        80,
-        |engine| {
-            engine
-                .object_snapshot(builder)
-                .is_some_and(|object| object.position.y >= 325)
-        },
-    )?;
-    player.hold_until(
-        COM_LEFT,
-        "the builder reaches the CRYS transfer point or its wall",
-        180,
-        |engine| {
-            engine.object_snapshot(builder).is_some_and(|object| {
-                object.position.x <= 280
-                    || (object.position.x <= 283 && object.action.name == "Scale")
-                    || (object.position.x <= 283
-                        && matches!(object.action.name.as_str(), "Walk" | "Swim")
+    // Swim buoyancy can lift the builder onto the submerged ledge at x=302.
+    // Treat that stable contact as a route decision point, dive again, and
+    // continue west instead of assuming one uninterrupted Left hold crosses
+    // both sections of the drain.
+    for crossing in 1..=2 {
+        player.hold_until(
+            COM_DOWN,
+            format!("the builder dives to CRYS transfer depth for crossing {crossing}"),
+            80,
+            |engine| {
+                engine.object_snapshot(builder).is_some_and(|object| {
+                    object.position.y >= 316
                         && object.velocity.x == 0
                         && object.velocity.y == 0
-                        && object.fixed_velocity.is_none())
-            })
-        },
-    )?;
+                        && object.fixed_velocity.is_none()
+                })
+            },
+        )?;
+        let start_x = player
+            .engine()
+            .object_snapshot(builder)
+            .expect("the builder survives the CRYS transfer dive")
+            .position
+            .x;
+        player.hold_until(
+            COM_LEFT,
+            format!("the builder crosses drain section {crossing} toward CRYS"),
+            180,
+            |engine| {
+                engine.object_snapshot(builder).is_some_and(|object| {
+                    object.position.x <= 280
+                        || (object.position.x <= 283 && object.action.name == "Scale")
+                        || (object.position.x <= 283
+                            && matches!(object.action.name.as_str(), "Walk" | "Swim")
+                            && object.velocity.x == 0
+                            && object.velocity.y == 0
+                            && object.fixed_velocity.is_none())
+                        || (object.position.x <= start_x - 20
+                            && object.position.y <= 310
+                            && object.action.name == "Swim"
+                            && object.velocity.x == 0
+                            && object.velocity.y == 0
+                            && object.fixed_velocity.is_none())
+                })
+            },
+        )?;
+        if player
+            .engine()
+            .object_snapshot(builder)
+            .is_some_and(|object| object.position.x <= 283)
+        {
+            break;
+        }
+    }
     if player
         .engine()
         .object_snapshot(builder)
@@ -1135,22 +1163,60 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.assert_milestone("CursorRight returns to the CRYS carrier", |engine| {
         engine.crew_cursor(owner) == Some(first_clonk)
     })?;
-    // Drop at rest so ObjectComDrop uses no directional throw force. The
-    // nearby builder can collect CRYS without it flying past the transfer
-    // point (C4ObjectCom.cpp:640-671).
+    // Drop at rest so ObjectComDrop uses no directional throw force
+    // (C4ObjectCom.cpp:640-671).
     player.tap(COM_THROW)?;
     player.wait_until(
         "the escaped CLNK drops CRYS beside its rescuer",
         60,
         |engine| !clonk_carries(engine, first_clonk, "CRYS"),
     )?;
-    player.wait_until("the builder collects the transferred CRYS", 80, |engine| {
-        clonk_carries(engine, builder, "CRYS")
-    })?;
     player.tap(COM_CURSOR_RIGHT)?;
-    player.assert_milestone("CursorRight selects the CRYS-carrying builder", |engine| {
+    player.assert_milestone("CursorRight selects the builder beside CRYS", |engine| {
         engine.crew_cursor(owner) == Some(builder)
     })?;
+    // Depending on the preceding drain contact, the builder can rest eleven
+    // pixels above the carrier. Follow the dropped object instead of assuming
+    // their collection rectangles already overlap.
+    player.hold_until(
+        COM_DOWN,
+        "the builder dives toward the transferred CRYS",
+        80,
+        |engine| {
+            clonk_carries(engine, builder, "CRYS")
+                || engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.y >= 321)
+        },
+    )?;
+    if !clonk_carries(player.engine(), builder, "CRYS") {
+        let builder_x = player
+            .engine()
+            .object_snapshot(builder)
+            .expect("the builder survives the CRYS transfer")
+            .position
+            .x;
+        let crystal_x = player
+            .engine()
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "CRYS" && object.container.is_none())
+            .expect("the dropped CRYS remains in the drain")
+            .position
+            .x;
+        let toward_crystal = if crystal_x < builder_x {
+            COM_LEFT
+        } else {
+            COM_RIGHT
+        };
+        player.hold_until(
+            toward_crystal,
+            "the builder swims into the transferred CRYS",
+            80,
+            |engine| clonk_carries(engine, builder, "CRYS"),
+        )?;
+    }
     let elevator_x = player
         .engine()
         .object_snapshot(elevator_case)
@@ -1162,53 +1228,149 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     // directly over ELEC so the physical fall lands on its solid mask
     // (C4Object.cpp:3743-3755,4332-4379,4823-4855,4967-4974;
     // C4ObjectCom.cpp:220-235,280-307).
-    player.hold_until(
-        COM_RIGHT,
-        "the CRYS-carrying builder reaches the eastern pool wall",
-        160,
-        |engine| {
-            engine.object_snapshot(builder).is_some_and(|object| {
-                object.action.name == "Scale" && object.position.x > elevator_x
+    for climb_attempt in 1..=3 {
+        if player
+            .engine()
+            .object_snapshot(builder)
+            .is_some_and(|object| {
+                (object.action.name == "Walk" && !object.in_liquid)
+                    || object.action.name == "Hangle"
             })
-        },
-    )?;
-    player.hold_until(
-        COM_UP,
-        "the CRYS-carrying builder climbs out at the eastern pool wall",
-        120,
-        |engine| {
-            engine
-                .object_snapshot(builder)
-                .is_some_and(|object| object.action.name == "Walk" && !object.in_liquid)
-        },
-    )?;
-    player.press(COM_LEFT)?;
-    let crossed_lip = player.hold_until(
-        COM_UP,
-        "the CRYS-carrying builder jumps back over ELEC",
-        160,
-        |engine| {
-            engine
-                .object_snapshot(builder)
-                .is_some_and(|object| object.position.x <= elevator_x + 3)
-        },
-    );
-    player.release(COM_LEFT)?;
-    crossed_lip?;
-    player.wait_until("the CRYS carrier lands on ELEC", 120, |engine| {
-        engine.object_snapshot(builder).is_some_and(|object| {
-            object.action.name == "Walk"
-                && ((elevator_x - 3)..=(elevator_x + 3)).contains(&object.position.x)
-                && object.velocity.x == 0
-                && object.velocity.y == 0
-                && object.fixed_velocity.is_none()
-        })
-    })?;
-    player.wait_out_double_click()?;
-    // Walk Down runs ObjectComDownDouble and grabs the nearby ELEC in C++
-    // (C4Object.cpp:3582-3586; C4ObjectCom.cpp:573-589).
-    player.double_tap(COM_DOWN)?;
-    player.wait_until("the CRYS-carrying builder grabs ELEC", 100, |engine| {
+        {
+            break;
+        }
+        if player
+            .engine()
+            .object_snapshot(builder)
+            .is_none_or(|object| object.action.name != "Scale")
+        {
+            player.hold_until(
+                COM_RIGHT,
+                format!(
+                    "the CRYS-carrying builder reaches the eastern wall on attempt {climb_attempt}"
+                ),
+                160,
+                |engine| {
+                    engine.object_snapshot(builder).is_some_and(|object| {
+                        object.action.name == "Scale" && object.position.x > elevator_x
+                    })
+                },
+            )?;
+        }
+        // Right remains buffered for single-click synthesis after key-up.
+        // At a Scale checkpoint, the next Up press would first flush that
+        // stale RightSingle and make the builder let go of the wall.
+        player.reset_input_ledger_with_control_style(true)?;
+        player.hold_until(
+            COM_UP,
+            format!("the CRYS-carrying builder climbs or slips on attempt {climb_attempt}"),
+            120,
+            |engine| {
+                engine.object_snapshot(builder).is_some_and(|object| {
+                    (object.action.name == "Walk" && !object.in_liquid)
+                        || object.action.name == "Hangle"
+                        || object.action.name != "Scale"
+                })
+            },
+        )?;
+    }
+    let exit_action = player
+        .engine()
+        .object_snapshot(builder)
+        .expect("the CRYS-carrying builder survives the pool climb")
+        .action
+        .name;
+    if exit_action == "Hangle" {
+        // Up can reach the underside of the eastern lip before it reaches a
+        // Walk surface. Keep steering west through the resulting Hangle/Swim
+        // transition; if the attachment persists to ELEC, use C++'s ordinary
+        // let-go control (C4Object.cpp:3602-3605).
+        player.reset_input_ledger_with_control_style(true)?;
+        player.hold_until(
+            COM_LEFT,
+            "the CRYS-carrying builder hangs back over ELEC",
+            160,
+            |engine| {
+                engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x <= elevator_x + 3)
+            },
+        )?;
+        if player
+            .engine()
+            .object_snapshot(builder)
+            .is_some_and(|object| object.action.name == "Hangle")
+        {
+            player.reset_input_ledger_with_control_style(true)?;
+            player.tap(COM_DOWN)?;
+        }
+    } else {
+        player.assert_milestone(
+            "the CRYS-carrying builder climbs out at the eastern pool wall",
+            |engine| {
+                engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk" && !object.in_liquid)
+            },
+        )?;
+        player.press(COM_LEFT)?;
+        let crossed_lip = player.hold_until(
+            COM_UP,
+            "the CRYS-carrying builder jumps back over ELEC",
+            160,
+            |engine| {
+                engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x <= elevator_x + 3)
+            },
+        );
+        player.release(COM_LEFT)?;
+        crossed_lip?;
+    }
+    for grab_attempt in 1..=4 {
+        if player
+            .engine()
+            .object_snapshot(builder)
+            .is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            })
+        {
+            break;
+        }
+        player.hold_until(
+            COM_DOWN,
+            format!("the CRYS carrier lands on ELEC for grab attempt {grab_attempt}"),
+            120,
+            |engine| {
+                engine.object_snapshot(builder).is_some_and(|object| {
+                    (object.action.name == "Push" && object.action.target == Some(elevator_case))
+                        || (object.action.name == "Walk"
+                            && object.action.target == Some(elevator_case)
+                            && object.velocity.x == 0
+                            && object.velocity.y == 0
+                            && object.fixed_velocity.is_none())
+                })
+            },
+        )?;
+        if player
+            .engine()
+            .object_snapshot(builder)
+            .is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            })
+        {
+            break;
+        }
+        // Pool buoyancy can turn the transient Walk-on-ELEC contact back into
+        // Swim on the command-execution tick. Re-establish that real contact
+        // and repeat DownDouble instead of waiting in the failed Swim state.
+        player.reset_input_ledger_with_control_style(true)?;
+        // Walk Down runs ObjectComDownDouble and grabs the nearby ELEC in C++
+        // (C4Object.cpp:3582-3586; C4ObjectCom.cpp:573-589).
+        player.double_tap(COM_DOWN)?;
+        player.ticks(1)?;
+    }
+    player.assert_milestone("the CRYS-carrying builder grabs ELEC", |engine| {
         engine.object_snapshot(builder).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(elevator_case)
         })

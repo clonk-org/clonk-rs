@@ -622,6 +622,11 @@ fn collect_one_gold_in_tunnel(
             .object_snapshot(clonk)
             .is_some_and(|object| !object.contents.is_empty())
         {
+            let incidental_debris = player
+                .engine()
+                .object_snapshot(clonk)
+                .and_then(|object| object.contents.first().copied())
+                .expect("the Clonk carries incidental blast debris");
             // Blast debris is collectible too, and this Clonk has one
             // inventory slot. Drop incidental ROCK before approaching GOLD.
             let start_x = player
@@ -670,12 +675,12 @@ fn collect_one_gold_in_tunnel(
             )?;
             player.tap(COM_THROW)?;
             player.wait_until(
-                "the empty Clonk throws incidental blast debris away",
+                "the Clonk throws the selected incidental blast debris away",
                 30,
                 |engine| {
                     engine
                         .object_snapshot(clonk)
-                        .is_some_and(|object| object.contents.is_empty())
+                        .is_some_and(|object| !object.contents.contains(&incidental_debris))
                 },
             )?;
             player.hold_until(
