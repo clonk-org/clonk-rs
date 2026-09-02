@@ -454,22 +454,23 @@ jobs:
 
       # Restore the dependency cache produced from trusted main. Merge-queue
       # refs are short-lived and must not consume the repository's 10 GiB cache
-      # quota with immutable copies that no later candidate can restore. This
-      # path list deliberately matches rust-cache's archive version; keep the
-      # restore prefix aligned with the pinned Rust toolchain above.
+      # quota with immutable copies that no later candidate can restore, so this
+      # must stay restore-only, which is what the `save-if` below enforces.
+      #
+      # It derives the key rather than naming one. The hand-written prefix this
+      # replaced asked for `e8b3ee54`, which the producer stopped writing on
+      # 2026-08-31; every row here restored an 08-27 cache, reported 801 MB and
+      # a clean hit, and then rebuilt anyway because the fingerprints belonged
+      # to a superseded toolchain generation. `presentation captures` cold-built
+      # 589 crates for 511s directly after that "successful" restore. A literal
+      # key hash cannot be kept correct by asking the next reader to keep it
+      # aligned, which is exactly what the comment here used to do.
       - name: Restore Rust build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          path: |
-            /home/runner/.cargo/bin
-            /home/runner/.cargo/.crates.toml
-            /home/runner/.cargo/.crates2.json
-            /home/runner/.cargo/registry
-            /home/runner/.cargo/git
-            ${{ github.workspace }}/target
-          key: landing-full-parity-consumer-${{ github.run_id }}
-          restore-keys: |
-            v0-rust-full-parity-Linux-x64-e8b3ee54-
+          workspaces: . -> target
+          shared-key: full-parity
+          save-if: false
 
       - name: Run ${{ matrix.name }}
         env:
