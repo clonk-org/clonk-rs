@@ -3197,6 +3197,16 @@ impl Engine {
         flags: i32,
         preserve_ids: Vec<ObjectId>,
     ) -> Result<bool, EngineError> {
+        self.perform_scenario_section_switch(name, flags, preserve_ids)
+    }
+
+    /// `C4Game::LoadScenarioSection` proper (C4Game.cpp:4084-4237).
+    fn perform_scenario_section_switch(
+        &mut self,
+        name: &str,
+        flags: i32,
+        preserve_ids: Vec<ObjectId>,
+    ) -> Result<bool, EngineError> {
         if !self.scenario_section_state.current_registered {
             // C4Game::LoadScenarioSection creates the implicit current/root
             // node before it even looks up the requested target. Its
