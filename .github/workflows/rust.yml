@@ -229,6 +229,25 @@ jobs:
         if: steps.linux-cache.outputs.cache-hit != 'true'
         run: cargo nextest run --workspace --features xtask/engine-tools --no-run --locked
 
+      # `presentation captures` restores this same cache and then builds the
+      # shipped `release` profile, which the test-profile compile above never
+      # produces. That row cold-built 589 crates for 511s of its 953s in queue
+      # run 33582557701 -- the longest job in the queue, on the critical path of
+      # every merge, restoring a cache that could not cover it. Warm the exact
+      # argv `rust_current_build_recipe` runs, under its environment, so the
+      # fingerprints match and the restore hits. Cache warming is this job's
+      # stated purpose and it blocks neither the next merge nor a release, so
+      # the compile moves off the critical path rather than being removed.
+      # `test_acquire_presentation_oracle.py` pins this to the recipe.
+      - name: Warm the release-profile presentation capture build
+        if: steps.linux-cache.outputs.cache-hit != 'true'
+        env:
+          CARGO_INCREMENTAL: '0'
+          LANG: C
+          LC_ALL: C
+          TZ: UTC
+        run: cargo build --locked --release -p clonk-app --features presentation-capture
+
   # Usually the Linux cache producer is preempted by an active merge group. If
   # it finishes during the small gap before the next candidate, check again
   # before admitting the expensive diagnostic fan-out. The shared concurrency

@@ -3,6 +3,7 @@ import functools
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import stat
 import struct
@@ -3644,6 +3645,47 @@ class ProvenanceAndAcceptanceTests(unittest.TestCase):
                 "--features",
                 "presentation-capture",
             ],
+        )
+
+
+class LandingCacheWarmTests(unittest.TestCase):
+    """The landing cache must cover the profile the capture row actually builds."""
+
+    MAIN_WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
+    LANDING_WORKFLOW = REPOSITORY / ".github" / "workflows" / "landing.yml"
+
+    def warm_step(self):
+        workflow = self.MAIN_WORKFLOW.read_text(encoding="utf-8")
+        start = workflow.index("      - name: Warm the release-profile presentation capture build")
+        end = workflow.index("\n\n", start)
+        return workflow[start:end]
+
+    def test_producer_warms_the_exact_current_build_recipe(self):
+        recipe = MODULE.rust_current_build_recipe(Path("/checkout"), "release")
+        self.assertEqual(len(recipe["commands"]), 1)
+        command = recipe["commands"][0]
+        step = self.warm_step()
+
+        # A hand-copied cargo line drifts from the recipe silently, and the
+        # only symptom is the capture row quietly compiling from scratch again.
+        self.assertIn(" ".join(command["argv"]), step)
+        for name, value in command["environment"].items():
+            self.assertRegex(step, rf"(?m)^          {name}: '?{re.escape(value)}'?$")
+
+    def test_capture_row_and_producer_share_one_cache_scope(self):
+        landing = self.LANDING_WORKFLOW.read_text(encoding="utf-8")
+        main = self.MAIN_WORKFLOW.read_text(encoding="utf-8")
+
+        # The warm is worthless if the row that needs it reads another scope.
+        self.assertIn("shared-key: full-parity", landing)
+        self.assertIn("shared-key: full-parity", main)
+        self.assertIn(
+            "cargo xtask presentation verify-current --profile release",
+            landing,
+        )
+        self.assertIn(
+            "if: steps.linux-cache.outputs.cache-hit != 'true'",
+            self.warm_step(),
         )
 
 
