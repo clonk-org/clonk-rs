@@ -992,6 +992,13 @@ fn apply_gamma(color: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// Rgba8Unorm conversion is not a byte-rounding contract across backends.
+// Resolve the LUT's 16-bit sample with the same round-to-nearest rule as
+// GammaRamp::encode_channel before handing it to the attachment conversion.
+fn quantize8(color: vec3<f32>) -> vec3<f32> {
+    return round(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0;
+}
+
 @fragment
 fn fs_linear(input: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(image, image_sampler, input.uv);
@@ -1006,13 +1013,13 @@ fn fs_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
 @fragment
 fn fs_monitor_linear(input: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(image, image_sampler, input.uv);
-    return vec4<f32>(apply_gamma(color.rgb), color.a);
+    return vec4<f32>(quantize8(apply_gamma(color.rgb)), color.a);
 }
 
 @fragment
 fn fs_monitor_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(image, image_sampler, input.uv);
-    return vec4<f32>(srgb_to_linear(apply_gamma(color.rgb)), color.a);
+    return vec4<f32>(srgb_to_linear(quantize8(apply_gamma(color.rgb))), color.a);
 }
 
 // The fused entry points below replace a monitor-gamma pass plus a
@@ -1020,15 +1027,11 @@ fn fs_monitor_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
 // than replacing the two above because the two-pass path is still taken
 // whenever a readback needs the intermediate target.
 //
-// `quantize8` is what makes the fused result byte-identical to the two passes.
+// `quantize8` makes the fused result byte-identical to the two passes.
 // The intermediate is `Rgba8Unorm`, so the old path rounded the gamma-mapped
 // colour to 8 bits *before* the surface conversion read it back. Sampling the
 // composition directly skips that rounding, and on an sRGB surface the
 // difference survives to the stored pixel.
-fn quantize8(color: vec3<f32>) -> vec3<f32> {
-    return round(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0;
-}
-
 @fragment
 fn fs_monitor_linear_fused(input: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(image, image_sampler, input.uv);
@@ -13643,10 +13646,13 @@ mod tests {
             "initial device frame reported wgpu validation error: {validation:?}"
         );
         let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        assert_eq!(
-            initial.rgba,
-            expected_frame(LOGICAL, initial_mutable, &scene.gamma),
-            "initial retained GPU frame must match the local CPU oracle"
+        let expected_initial = expected_frame(LOGICAL, initial_mutable, &scene.gamma);
+        assert_rgba_frame_eq(
+            &initial.rgba,
+            &expected_initial,
+            LOGICAL,
+            "initial Fragment composition",
+            &adapter_info,
         );
         assert_eq!(renderer.last_stats().created_source_textures, 10);
         assert_eq!(renderer.last_stats().full_upload_calls, 10);
@@ -13681,9 +13687,12 @@ mod tests {
         monitor_scene.gamma_mode = GpuGammaMode::Monitor;
         let monitor = render_identity_readback(&mut renderer, &device, &queue, &monitor_scene);
         assert_ne!(monitor.rgba, raw.rgba);
-        assert_eq!(
-            monitor.rgba, expected_monitor,
-            "monitor gamma must resolve the complete composition before readback",
+        assert_rgba_frame_eq(
+            &monitor.rgba,
+            &expected_monitor,
+            LOGICAL,
+            "monitor-gamma resolve after complete composition",
+            &adapter_info,
         );
         assert_eq!(
             renderer.last_stats().total_draw_calls,
@@ -14143,10 +14152,13 @@ mod tests {
         let resize_generation = renderer.generation();
         let resized =
             render_extent_readback(&mut renderer, &device, &queue, &scene, resized_extent);
-        assert_eq!(
-            resized.rgba,
-            expected_frame(resized_extent, initial_mutable, &scene.gamma),
-            "physical resize must preserve scene coordinates and content"
+        let expected_resized = expected_frame(resized_extent, initial_mutable, &scene.gamma);
+        assert_rgba_frame_eq(
+            &resized.rgba,
+            &expected_resized,
+            resized_extent,
+            "resized Fragment composition",
+            &adapter_info,
         );
         assert_eq!(renderer.last_stats().created_source_textures, 0);
         assert_eq!(renderer.last_stats().full_upload_calls, 0);
@@ -14178,10 +14190,13 @@ mod tests {
         mutable.dirty = vec![Rect::new(0, 0, 1, 1)];
 
         let dirty = render_extent_readback(&mut renderer, &device, &queue, &scene, resized_extent);
-        assert_eq!(
-            dirty.rgba,
-            expected_frame(resized_extent, updated_mutable, &scene.gamma),
-            "one dirty texel must update every use without a full upload"
+        let expected_dirty = expected_frame(resized_extent, updated_mutable, &scene.gamma);
+        assert_rgba_frame_eq(
+            &dirty.rgba,
+            &expected_dirty,
+            resized_extent,
+            "dirty-texture Fragment composition",
+            &adapter_info,
         );
         assert_eq!(renderer.last_stats().created_source_textures, 0);
         assert_eq!(renderer.last_stats().full_upload_calls, 0);
@@ -14196,9 +14211,10 @@ mod tests {
             "first device reported wgpu validation error: {validation:?}"
         );
 
-        let (_replacement_adapter, replacement_device, replacement_queue) =
+        let (replacement_adapter, replacement_device, replacement_queue) =
             request_test_device(&runtime, &instance, "lc_gpu_replacement_test_device", true)
                 .expect("request a fresh adapter and replacement wgpu device");
+        let replacement_adapter_info = replacement_adapter.get_info();
         let replacement_validation_scope =
             replacement_device.push_error_scope(wgpu::ErrorFilter::Validation);
         let previous_generation = renderer.generation();
@@ -14217,10 +14233,13 @@ mod tests {
             &scene,
             resized_extent,
         );
-        assert_eq!(
-            recreated.rgba,
-            expected_frame(resized_extent, updated_mutable, &scene.gamma),
-            "device recreation must regenerate every retained source from complete backing"
+        let expected_recreated = expected_frame(resized_extent, updated_mutable, &scene.gamma);
+        assert_rgba_frame_eq(
+            &recreated.rgba,
+            &expected_recreated,
+            resized_extent,
+            "device-recreated Fragment composition",
+            &replacement_adapter_info,
         );
         assert_eq!(renderer.last_stats().created_source_textures, 10);
         assert_eq!(renderer.last_stats().full_upload_calls, 10);
@@ -15322,6 +15341,42 @@ mod tests {
         fill(&mut frame, extent, 4, 4, 6, 6, SOLID);
         fill(&mut frame, extent, 6, 4, 7, 5, POINT);
         frame
+    }
+
+    fn assert_rgba_frame_eq(
+        actual: &[u8],
+        expected: &[u8],
+        extent: [u32; 2],
+        path: &str,
+        adapter: &wgpu::AdapterInfo,
+    ) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{path} byte length on {} ({:?}, {:?})",
+            adapter.name,
+            adapter.backend,
+            adapter.device_type,
+        );
+        let Some(byte) = actual
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| actual != expected)
+        else {
+            return;
+        };
+        let pixel = byte / 4;
+        let x = pixel % extent[0] as usize;
+        let y = pixel / extent[0] as usize;
+        let channel = ["red", "green", "blue", "alpha"][byte % 4];
+        panic!(
+            "{path} first mismatch at pixel ({x}, {y}) {channel} channel: expected {}, actual {}; adapter {} ({:?}, {:?})",
+            expected[byte],
+            actual[byte],
+            adapter.name,
+            adapter.backend,
+            adapter.device_type,
+        );
     }
 
     fn readback_pixel(frame: &GpuReadbackFrame, x: u32, y: u32) -> [u8; 4] {
