@@ -6,6 +6,7 @@ mod manifest;
 use anyhow::{anyhow, bail, Context, Result};
 use clonk_engine::fixtures::SNAPSHOT_SCENARIOS;
 use clonk_engine::{Playback, Recording};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -1433,7 +1434,10 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     copy_tracked_directory(&paths.repo_root, Path::new("planet"), &planet_dst)?;
 
     let content_dst = package_dir.join("content");
-    copy_tracked_directory(&content_src, Path::new(""), &content_dst)?;
+    match content_manifest_roots(&content_src)? {
+        Some(roots) => copy_listed_packs(&content_src, &roots, &content_dst)?,
+        None => copy_tracked_directory(&content_src, Path::new(""), &content_dst)?,
+    }
 
     for pack in CONTENT_GAME_PACKS {
         let destination = content_dst.join(pack);
@@ -1988,6 +1992,161 @@ fn copy_tracked_directory(repository: &Path, directory: &Path, dst: &Path) -> Re
     } else {
         directory
     };
+    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
+    for repository_relative in tracked_files(repository, pathspec)? {
+        let relative = if directory.as_os_str().is_empty() {
+            repository_relative.as_path()
+        } else {
+            repository_relative
+                .strip_prefix(directory)
+                .with_context(|| {
+                    format!(
+                        "tracked path {} is outside {}",
+                        repository_relative.display(),
+                        src.display()
+                    )
+                })?
+        };
+        if !is_safe_relative_path(relative)
+            || !is_runtime_package_path(relative)
+            || starts_with_non_runtime_root(relative)
+        {
+            continue;
+        }
+
+        let source = repository.join(&repository_relative);
+        let metadata = fs::symlink_metadata(&source)
+            .with_context(|| format!("failed to inspect tracked file {}", source.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        copy_file(&source, &dst.join(relative))?;
+    }
+    Ok(())
+}
+
+/// Where the content repository keeps its pack manifest; the first match wins.
+///
+/// The root is where it lives now. `.github/` is where the content repository
+/// kept it before its own packer read it, and a pin from that window must
+/// still package the same way.
+const CONTENT_MANIFEST_LOCATIONS: [&str; 2] = ["packs.toml", ".github/packs.toml"];
+
+/// The data-root entries the content repository's `packs.toml` lists, when
+/// the pinned content carries one.
+///
+/// This is the list `pack-content` in the content repository builds
+/// `content.zip` from, read from the same file, so an installer and an
+/// in-place update cannot disagree about which files exist. `None` is a pin
+/// from before the manifest existed, which `copy_tracked_directory` still
+/// packages by the deny list in `is_runtime_package_path` and
+/// `NON_RUNTIME_ROOT_ENTRIES`.
+fn content_manifest_roots(content_src: &Path) -> Result<Option<BTreeSet<String>>> {
+    CONTENT_MANIFEST_LOCATIONS
+        .iter()
+        .map(|name| content_src.join(name))
+        .find(|path| path.is_file())
+        .map(|path| {
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            let document: toml::Table = text
+                .parse()
+                .with_context(|| format!("{} is not valid TOML", path.display()))?;
+            let roots: BTreeSet<String> = document
+                .get("packs")
+                .and_then(toml::Value::as_table)
+                .map(|packs| {
+                    packs
+                        .keys()
+                        .filter(|key| !key.contains('/'))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if roots.is_empty() {
+                bail!("{} lists no packs", path.display());
+            }
+            Ok(roots)
+        })
+        .transpose()
+}
+
+/// Copies the listed packs out of the content checkout: every regular file
+/// whose data-root entry the manifest names — tracked files only where Git
+/// metadata exists — and nothing else, whatever it is called.
+///
+/// A listed pack that contributes nothing is refused: it is a typo or a
+/// deletion the manifest has not caught up with, and either would otherwise
+/// build an installer silently missing a pack.
+fn copy_listed_packs(repository: &Path, roots: &BTreeSet<String>, dst: &Path) -> Result<()> {
+    let candidates = if repository.join(".git").exists() {
+        tracked_files(repository, Path::new("."))?
+    } else {
+        walked_files(repository)?
+    };
+    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
+
+    let mut reached = BTreeSet::new();
+    for relative in candidates {
+        let Some(root) = relative
+            .components()
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .filter(|root| roots.contains(*root))
+        else {
+            continue;
+        };
+        if !is_safe_relative_path(&relative) {
+            continue;
+        }
+        let source = repository.join(&relative);
+        let metadata = fs::symlink_metadata(&source)
+            .with_context(|| format!("failed to inspect {}", source.display()))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        copy_file(&source, &dst.join(&relative))?;
+        reached.insert(root.to_string());
+    }
+
+    let missing: Vec<String> = roots
+        .difference(&reached)
+        .map(|entry| format!("`{entry}`"))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "packs.toml lists {} but nothing lies under {} in {}",
+            missing.join(", "),
+            if missing.len() == 1 { "it" } else { "them" },
+            repository.display()
+        );
+    }
+    Ok(())
+}
+
+/// Every path beneath `root`, relative to it, without following symlinks.
+fn walked_files(root: &Path) -> Result<Vec<PathBuf>> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|entry| !entry.file_type().is_symlink())
+        .map(|entry| Ok(entry?.path().strip_prefix(root)?.to_path_buf()))
+        .filter(|relative| {
+            relative
+                .as_ref()
+                .map_or(true, |relative| !relative.as_os_str().is_empty())
+        })
+        .collect()
+}
+
+/// The files Git tracks under `pathspec`, repository-relative.
+///
+/// Refuses a tree whose tracked files differ from the index: a package built
+/// from modified working-tree bytes would describe no commit.
+fn tracked_files(repository: &Path, pathspec: &Path) -> Result<Vec<PathBuf>> {
+    let src = repository.join(pathspec);
     let diff_status = Command::new("git")
         .arg("-C")
         .arg(repository)
@@ -2022,47 +2181,18 @@ fn copy_tracked_directory(repository: &Path, directory: &Path, dst: &Path) -> Re
             output.status.code()
         );
     }
-
-    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
-    for raw_path in output.stdout.split(|byte| *byte == 0) {
-        if raw_path.is_empty() {
-            continue;
-        }
-        let repository_relative_text = std::str::from_utf8(raw_path)
-            .with_context(|| format!("tracked path under {} is not UTF-8", repository.display()))?;
-        let repository_relative = Path::new(repository_relative_text);
-        let relative = if directory.as_os_str().is_empty() {
-            repository_relative
-        } else {
-            repository_relative
-                .strip_prefix(directory)
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            std::str::from_utf8(raw)
+                .map(PathBuf::from)
                 .with_context(|| {
-                    format!(
-                        "tracked path {} is outside {}",
-                        repository_relative.display(),
-                        src.display()
-                    )
-                })?
-        };
-        if !is_safe_relative_path(relative)
-            || !is_runtime_package_path(relative)
-            || starts_with_non_runtime_root(relative)
-        {
-            continue;
-        }
-
-        let source = repository.join(repository_relative);
-        let metadata = fs::symlink_metadata(&source)
-            .with_context(|| format!("failed to inspect tracked file {}", source.display()))?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if !metadata.is_file() {
-            continue;
-        }
-        copy_file(&source, &dst.join(relative))?;
-    }
-    Ok(())
+                    format!("tracked path under {} is not UTF-8", repository.display())
+                })
+        })
+        .collect()
 }
 
 fn is_safe_relative_path(path: &Path) -> bool {
@@ -2093,10 +2223,11 @@ fn is_runtime_package_path(path: &Path) -> bool {
 
 /// Packaging infrastructure in a copied source root, matched **only there**.
 ///
-/// Mirrors `NON_CONTENT_ROOT_ENTRIES` in the content repository
-/// (`.github/pack-content/src/main.rs`), which keeps the same files out of
-/// `content.zip`. The two must agree, or a file ships in the installer and never
-/// reaches a client that updates in place — or the reverse.
+/// Only for a content pin from before `packs.toml` existed: with a manifest,
+/// `copy_listed_packs` copies what it lists and consults no deny list at all,
+/// which is also what the content repository's packer does. Until every pin
+/// this repository can build has a manifest, this copy of the old
+/// `NON_CONTENT_ROOT_ENTRIES` stays so those pins package as they did.
 ///
 /// Separate from `is_runtime_package_path` because these are ordinary names a
 /// game pack could legitimately contain: that function matches every component,
@@ -3338,11 +3469,8 @@ mod tests {
         }
     }
 
-    /// Mirrors `NON_CONTENT_ROOT_ENTRIES` in the content repository, which keeps
-    /// the same files out of `content.zip`. If this fails because the list
-    /// genuinely changed, change `.github/pack-content/src/main.rs` in the same
-    /// breath — a file excluded on one side only ships in the installer and never
-    /// reaches a client that updates in place, or the reverse.
+    /// The deny-list path, for a content pin with no `packs.toml`. With a
+    /// manifest, membership is what it lists; see the tests below.
     #[test]
     fn package_layout_excludes_content_packaging_infrastructure() {
         let (_temp, paths) = package_fixture();
@@ -3430,6 +3558,158 @@ mod tests {
                 .exists(),
             "untracked Eke Reloaded content leaked into the package"
         );
+    }
+
+    fn write_content_manifest(paths: &WorkspacePaths, relative: &str) {
+        write_fixture(
+            &paths.repo_root.join("content").join(relative),
+            br#"
+[origins.legacyclonk]
+terms = "CC BY-NC"
+
+[packs."Objects.c4d"]
+origin = "legacyclonk"
+
+[packs."Worlds.c4f"]
+origin = "legacyclonk"
+
+[packs."EkeReloaded.c4d"]
+origin = "eke"
+
+[packs."EkeReloaded.c4f"]
+origin = "eke"
+
+[packs."ClonkMars.c4d"]
+origin = "clonkmars"
+
+[packs."ClonkMars.c4f"]
+origin = "clonkmars"
+
+# Reaches inside a pack: policy for a nested tree, not a data-root entry.
+[packs."ClonkMars.c4f/Test.c4s"]
+origin = "clonkmars"
+bytes = "preserve"
+"#,
+        );
+    }
+
+    /// With a manifest present, the content repository's own list decides what
+    /// ships and the deny list is not consulted: infrastructure at the content
+    /// root stays out whatever it is called, and deny-list names inside a
+    /// listed pack are game data.
+    #[test]
+    fn package_layout_copies_only_the_packs_the_content_manifest_lists() {
+        let (_temp, paths) = package_fixture();
+        write_content_manifest(&paths, "packs.toml");
+        let content = paths.repo_root.join("content");
+        write_fixture(&content.join("CONTRIBUTING.md"), b"how to");
+        write_fixture(&content.join("tools/packs.py"), b"reader");
+        write_fixture(&content.join("tests/check.py"), b"test");
+        write_fixture(&content.join("Stray.c4d/DefCore.txt"), b"unlisted");
+        write_fixture(&content.join("Objects.c4d/README.md"), b"definition readme");
+
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        for relative in [
+            "content/Objects.c4d/DefCore.txt",
+            "content/Objects.c4d/README.md",
+            "content/Worlds.c4f/Test.c4s/Scenario.txt",
+            "content/ClonkMars.c4f/Test.c4s/Scenario.txt",
+        ] {
+            assert!(
+                package_dir.join(relative).is_file(),
+                "package is missing {relative}"
+            );
+        }
+        for relative in [
+            "content/packs.toml",
+            "content/CONTRIBUTING.md",
+            "content/tools",
+            "content/tests",
+            "content/Stray.c4d",
+            "content/THIRD_PARTY_GAME_CONTENT.md",
+        ] {
+            assert!(
+                !package_dir.join(relative).exists(),
+                "unlisted path leaked into package: {relative}"
+            );
+        }
+    }
+
+    /// The content repository kept its manifest under `.github/` before its own
+    /// packer read it; a pin from that window packages the same way.
+    #[test]
+    fn package_layout_reads_the_content_manifest_from_dot_github_too() {
+        let (_temp, paths) = package_fixture();
+        write_content_manifest(&paths, ".github/packs.toml");
+        write_fixture(
+            &paths.repo_root.join("content/Stray.c4d/DefCore.txt"),
+            b"unlisted",
+        );
+
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        assert!(package_dir
+            .join("content/Objects.c4d/DefCore.txt")
+            .is_file());
+        assert!(!package_dir.join("content/Stray.c4d").exists());
+        assert!(!package_dir.join("content/.github").exists());
+    }
+
+    /// A listed pack that contributes nothing is a typo or a deletion the
+    /// manifest has not caught up with; either would otherwise build an
+    /// installer silently missing a pack.
+    #[test]
+    fn package_layout_refuses_a_listed_pack_with_nothing_under_it() {
+        let (_temp, paths) = package_fixture();
+        write_fixture(
+            &paths.repo_root.join("content/packs.toml"),
+            b"[packs.\"Objects.c4d\"]\norigin = \"x\"\n[packs.\"Ghost.c4d\"]\norigin = \"x\"\n",
+        );
+
+        let error = assemble_package_layout(&paths)
+            .expect_err("a listed pack with nothing under it must be refused");
+
+        assert!(error.to_string().contains("Ghost.c4d"), "{error}");
+    }
+
+    #[test]
+    fn package_layout_copies_only_tracked_files_of_listed_packs_from_a_checkout() {
+        let (_temp, paths) = package_fixture();
+        write_content_manifest(&paths, "packs.toml");
+        let content = paths.repo_root.join("content");
+        write_fixture(
+            &content.join("Stray.c4d/DefCore.txt"),
+            b"tracked but unlisted",
+        );
+        for arguments in [&["init", "--quiet"][..], &["add", "-A"][..]] {
+            let status = Command::new("git")
+                .args(arguments)
+                .current_dir(&content)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {} failed", arguments.join(" "));
+        }
+        write_fixture(
+            &content.join("EkeReloaded.c4f/Secret.txt"),
+            b"untracked private content",
+        );
+
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        assert!(package_dir
+            .join("content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt")
+            .is_file());
+        for relative in [
+            "content/EkeReloaded.c4f/Secret.txt",
+            "content/Stray.c4d",
+            "content/packs.toml",
+        ] {
+            assert!(
+                !package_dir.join(relative).exists(),
+                "leaked into package: {relative}"
+            );
+        }
     }
 
     #[test]
