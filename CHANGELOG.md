@@ -4,6 +4,31 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.6] - 2026-09-02
+
+### Bug fixes
+
+- Derive the landing cache key instead of naming a stale one (#1458)
+- Quantize monitor gamma before GPU readback (#1449)
+- Retain lobby preload state across host transport swap (#1446)
+- Attribute only the dependencies a shipped binary compiles in (#1445)
+- Leave the slot untouched for an uninitialized var declaration (#1442)
+- Preserve Clonk Rust branding in presentation captures (#1440)
+- Fail closed on mismatched player resources (#1433)
+
+### Continuous integration
+
+- Regenerate the dependency license corpus on Renovate branches (#1443)
+
+### Performance
+
+- Warm the release profile the presentation capture row builds (#1454)
+
+### Testing
+
+- Drive the tutorial throw and gold dig from observed state (#1450)
+- Compare live weather in the shadow diff (#1441)
+
 ## [0.21.5] - 2026-08-31
 
 ### Bug fixes
