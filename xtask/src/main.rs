@@ -1988,6 +1988,48 @@ fn copy_tracked_directory(repository: &Path, directory: &Path, dst: &Path) -> Re
     } else {
         directory
     };
+    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
+    for repository_relative in tracked_files(repository, pathspec)? {
+        let relative = if directory.as_os_str().is_empty() {
+            repository_relative.as_path()
+        } else {
+            repository_relative
+                .strip_prefix(directory)
+                .with_context(|| {
+                    format!(
+                        "tracked path {} is outside {}",
+                        repository_relative.display(),
+                        src.display()
+                    )
+                })?
+        };
+        if !is_safe_relative_path(relative)
+            || !is_runtime_package_path(relative)
+            || starts_with_non_runtime_root(relative)
+        {
+            continue;
+        }
+
+        let source = repository.join(&repository_relative);
+        let metadata = fs::symlink_metadata(&source)
+            .with_context(|| format!("failed to inspect tracked file {}", source.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        copy_file(&source, &dst.join(relative))?;
+    }
+    Ok(())
+}
+
+/// The files Git tracks under `pathspec`, repository-relative.
+///
+/// Refuses a tree whose tracked files differ from the index: a package built
+/// from modified working-tree bytes would describe no commit.
+fn tracked_files(repository: &Path, pathspec: &Path) -> Result<Vec<PathBuf>> {
+    let src = repository.join(pathspec);
     let diff_status = Command::new("git")
         .arg("-C")
         .arg(repository)
@@ -2022,47 +2064,18 @@ fn copy_tracked_directory(repository: &Path, directory: &Path, dst: &Path) -> Re
             output.status.code()
         );
     }
-
-    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
-    for raw_path in output.stdout.split(|byte| *byte == 0) {
-        if raw_path.is_empty() {
-            continue;
-        }
-        let repository_relative_text = std::str::from_utf8(raw_path)
-            .with_context(|| format!("tracked path under {} is not UTF-8", repository.display()))?;
-        let repository_relative = Path::new(repository_relative_text);
-        let relative = if directory.as_os_str().is_empty() {
-            repository_relative
-        } else {
-            repository_relative
-                .strip_prefix(directory)
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            std::str::from_utf8(raw)
+                .map(PathBuf::from)
                 .with_context(|| {
-                    format!(
-                        "tracked path {} is outside {}",
-                        repository_relative.display(),
-                        src.display()
-                    )
-                })?
-        };
-        if !is_safe_relative_path(relative)
-            || !is_runtime_package_path(relative)
-            || starts_with_non_runtime_root(relative)
-        {
-            continue;
-        }
-
-        let source = repository.join(repository_relative);
-        let metadata = fs::symlink_metadata(&source)
-            .with_context(|| format!("failed to inspect tracked file {}", source.display()))?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if !metadata.is_file() {
-            continue;
-        }
-        copy_file(&source, &dst.join(relative))?;
-    }
-    Ok(())
+                    format!("tracked path under {} is not UTF-8", repository.display())
+                })
+        })
+        .collect()
 }
 
 fn is_safe_relative_path(path: &Path) -> bool {
