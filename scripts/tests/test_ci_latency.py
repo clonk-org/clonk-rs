@@ -116,7 +116,9 @@ class CiLatencyTests(unittest.TestCase):
 
         scopes = set(re.findall(r"shared-key: ([a-z0-9-]+)", landing))
         self.assertEqual(scopes, {"full-parity", "windows-runtime-msvc-v2"})
-        self.assertEqual(landing.count("save-if: false"), 2)
+        # Three restore-only consumers: pull-request quality, the Linux
+        # matrix rows, and the Windows runtime row.
+        self.assertEqual(landing.count("save-if: false"), 3)
         self.assertNotIn(
             "save-if: ${{ github.event_name == 'workflow_dispatch' }}",
             landing,
@@ -439,7 +441,7 @@ class CiLatencyTests(unittest.TestCase):
         self.assertNotIn("      - name: Install native dependencies", linux)
         self.assertNotIn("      - name: Verify pinned content checkout", linux)
 
-    def test_linux_restores_the_producer_archive_without_a_metadata_scan(self):
+    def test_linux_restores_the_producer_archive_without_naming_its_key(self):
         landing = LANDING.read_text(encoding="utf-8")
         linux = landing[landing.index("  linux:") : landing.index("  windows-smoke:")]
         cache = linux[
@@ -447,25 +449,25 @@ class CiLatencyTests(unittest.TestCase):
                 "      - name: Run ${{ matrix.name }}"
             )
         ]
-        paths = [
-            "/home/runner/.cargo/bin",
-            "/home/runner/.cargo/.crates.toml",
-            "/home/runner/.cargo/.crates2.json",
-            "/home/runner/.cargo/registry",
-            "/home/runner/.cargo/git",
-            "${{ github.workspace }}/target",
-        ]
 
-        self.assertIn(
-            "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-            cache,
+        # Restore-only is the constraint: merge-queue refs must not spend the
+        # repository's 10 GiB quota on copies no later candidate can restore.
+        self.assertIn("Swatinem/rust-cache@", cache)
+        self.assertIn("shared-key: full-parity", cache)
+        self.assertIn("save-if: false", cache)
+
+    def test_no_landing_row_names_a_rust_cache_key_by_hand(self):
+        landing = LANDING.read_text(encoding="utf-8")
+        code = "\n".join(
+            line for line in landing.splitlines() if not line.lstrip().startswith("#")
         )
-        self.assertNotIn("Swatinem/rust-cache@", cache)
-        self.assertEqual(sorted(paths, key=cache.index), paths)
-        self.assertIn(
-            "v0-rust-full-parity-Linux-x64-e8b3ee54-", cache
-        )
-        self.assertIn("restore-keys:", cache)
+
+        # A literal key hash cannot be kept correct by asking the next reader to
+        # keep it aligned. The prefix that used to sit here asked for a hash the
+        # producer stopped writing on 2026-08-31, and every Linux row restored a
+        # six-day-stale archive that reported a clean hit and rebuilt anyway.
+        self.assertNotIn("v0-rust-", code)
+        self.assertNotRegex(code, r"(?m)^\s*restore-keys:")
 
     def test_merge_group_rows_use_run_scoped_lanes(self):
         landing = LANDING.read_text(encoding="utf-8")

@@ -216,7 +216,9 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             " # v6.1.0"
         )
 
-        self.assertEqual(landing.count(restore), 3)
+        # The Linux matrix rows moved to the key-deriving restore; what
+        # is left here must still never save from a merge-queue ref.
+        self.assertEqual(landing.count(restore), 2)
         self.assertNotIn(save, landing)
         self.assertEqual(main.count(restore), 4)
         self.assertEqual(main.count(save), 2)
