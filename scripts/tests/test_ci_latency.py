@@ -66,8 +66,49 @@ class CiLatencyTests(unittest.TestCase):
         self.assertNotIn("apt_install()", workflows)
         self.assertTrue(APT_INSTALLER.stat().st_mode & 0o111)
         self.assertLess(installer.index("apt_install"), installer.index("apt_refresh"))
-        self.assertIn("timeout 240 sudo apt-get install", installer)
-        self.assertIn("timeout 180 sudo apt-get update", installer)
+        self.assertIn("timeout \"$budget\" sudo apt-get", installer)
+
+        # A stalled mirror that accepts the connection and then stops sending
+        # is bounded by apt itself rather than by the wall-clock timeout, which
+        # would otherwise spend its whole budget transferring nothing.
+        self.assertIn("-o Acquire::http::Timeout=15", installer)
+        self.assertIn("-o Acquire::https::Timeout=15", installer)
+
+    def test_native_dependency_retries_move_off_the_mirror_that_failed(self):
+        installer = APT_INSTALLER.read_text(encoding="utf-8")
+
+        # Every apt-get invocation re-reads the runner mirror list and picks the
+        # same head entry, so a retry that does not rotate is the request that
+        # just failed, sent again.
+        self.assertIn("rotate_mirror()", installer)
+        self.assertEqual(installer.count("\n    rotate_mirror\n"), 2)
+        self.assertIn("http://archive.ubuntu.com/ubuntu/", installer)
+
+        retry = installer.index("for attempt in")
+        for call in re.finditer(r"^    if apt_install", installer[retry:], re.M):
+            following = installer[retry + call.start() :]
+            self.assertIn("rotate_mirror", following.split("exit 0", 1)[1])
+
+    def test_native_dependency_ladder_fits_every_step_that_runs_it(self):
+        installer = APT_INSTALLER.read_text(encoding="utf-8")
+        budget = int(
+            re.search(r"readonly LADDER_BUDGET_SECONDS=(\d+)", installer).group(1)
+        )
+
+        # The ladder is killed mid-attempt, reporting neither package nor
+        # mirror, whenever it can outlast the step that runs it.
+        steps = []
+        for path in WORKFLOWS.glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            for step in STEP.findall(workflow):
+                if "scripts/install-apt-packages.sh" not in step:
+                    continue
+                minutes = re.search(r"timeout-minutes: (\d+)", step)
+                self.assertIsNotNone(minutes, f"{path.name} bounds no apt step")
+                steps.append(int(minutes.group(1)) * 60)
+
+        self.assertEqual(len(steps), 6)
+        self.assertLess(budget, min(steps))
 
     def test_restore_only_landing_caches_have_trusted_main_producers(self):
         landing = LANDING.read_text(encoding="utf-8")
