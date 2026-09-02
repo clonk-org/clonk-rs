@@ -103,10 +103,9 @@ fn expected_up_position(tick: u32) -> i32 {
 
 #[test]
 fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
-    // Surface8 after C4Landscape::Init for Tutorial07 with LC_PIN_SEED=0.
-    // This covers all 680x480 pixels, not selected terrain samples
-    // (C4Landscape.cpp:554-580). Hashed under stored-name byte order of the
-    // unpacked Material.c4g (clonk-org/clonk-rs#1455).
+    // Oracle: the C++ engine's Surface8 after C4Landscape::Init for
+    // Tutorial07 with LC_PIN_SEED=0. This covers all 680x480 pixels, not
+    // selected terrain samples (C4Landscape.cpp:554-580).
     let engine = load_tutorial(7, 0);
     let grid = crate::support::TestValueExt::test_value(
         engine.landscape().and_then(Landscape::pixel_grid),
@@ -115,7 +114,7 @@ fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
     assert_eq!(surface8_hash(grid), 0xaf6f_d88e_4220_9f06);
 }
 
-/// Surface8 for every tutorial at two seeds.
+/// Oracle: the pinned C++ engine's Surface8 for every tutorial at two seeds.
 ///
 /// Taken at `C4Game::Execute()` entry rather than at the end of
 /// `C4Landscape::Init`, because that is the first moment the plane is final:
@@ -127,12 +126,16 @@ fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
 /// `Control.Prepare()`/`HaltCount` so that a joined player's `PlaceReadyBase`
 /// digging has not run either, matching this player-less load.
 ///
-/// Hashed under stored-name byte order of unpacked Material.c4g, so the plane
-/// is host-independent (clonk-org/clonk-rs#1455). Five distinct landscape
-/// extents are covered, where the single Tutorial07/seed-0 oracle covered one.
+/// Recorded on the pinned oracle (`7d43b47b7d789b533f32d005e64596e0a07019cd`)
+/// with `LC_PIN_SEED` and a Surface8 dump hook, driven through the
+/// `USE_CONSOLE` build. `Material.c4g` is packed with that tree's `c4group`
+/// first, so C++ reads the `C4FLS_Material` order this port enumerates the
+/// unpacked folder in rather than the recording host's `readdir`
+/// (clonk-org/clonk-rs#1455). Five distinct landscape extents are covered,
+/// where the single Tutorial07/seed-0 oracle covered one.
 #[test]
 fn tutorial_landscapes_match_cpp_surface8_across_scenarios_and_seeds() {
-    // (tutorial, seed, width, height, Surface8 hash)
+    // (tutorial, seed, width, height, C++ Surface8 hash)
     const ORACLE: [(u8, u64, u32, u32, u64); 20] = [
         (1, 0, 640, 480, 0x1612_f7c9_58ce_2f71),
         (1, 1, 640, 480, 0xe417_2d93_afd4_6760),

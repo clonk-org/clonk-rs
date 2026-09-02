@@ -9,10 +9,10 @@ WORKFLOW = REPOSITORY / ".github" / "workflows" / "exact-sha-qualification.yml"
 ORACLE_REASON = (
     "recording-host material order; required macOS CI job"
 )
-# These oracles used to be macOS-only because unpacked Material.c4g followed
-# host readdir order. Folder groups now enumerate in stored-name byte order
-# (clonk-org/clonk-rs#1455), so they must run everywhere; the macOS job still
-# executes them as a cross-host check.
+# Folder groups enumerate in their packed sort order rather than host readdir
+# order (clonk-org/clonk-rs#1455), so these material-order oracles are
+# host-independent and must not be platform-gated. The macOS job still runs
+# them, as a cross-host check that the order really is host-independent.
 MATERIAL_ORACLES = {
     "alchemy_real_scenario_subcases_batch_4",
     "app_virtual_keyboard_completes_real_tutorial02_route",

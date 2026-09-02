@@ -1,15 +1,17 @@
 """The dev-replay goldens are recorded against one content commit.
 
 `testdata/dev-replays/*.json` stores frame checkpoints whose values depend on
-material indices. Folder-backed groups enumerate in stored-name byte order
+material indices. Folder-backed groups enumerate in their packed sort order
 (clonk-org/clonk-rs#1455), so the goldens are host-independent; a content bump
 that changes `Material.c4g` can still invalidate them.
 
-This check fails the bump instead. It is deliberately cheap: it compares a
-recorded pin against the submodule gitlink and never runs a replay, so it
-belongs in the landing gate. A bump that leaves material files untouched needs
-no new hashes; check the content diff for `Material.c4g` before recording
-anything.
+A stale golden used to surface only in the post-landing macOS material-order
+job, which does not gate the queue, so the bump landed green and the
+diagnostic went red afterwards (clonk-org/clonk-rs#1152). This check fails the
+bump instead. It is deliberately cheap: it compares a recorded pin against the
+submodule gitlink and never runs a replay, so it belongs in the landing gate.
+A bump that leaves material files untouched needs no new hashes; check the
+content diff for `Material.c4g` before recording anything.
 
 `compat/profile.json` protects its own content claims the same way, via
 `pinned.content_commit`.
@@ -52,8 +54,8 @@ class DevReplayContentPinTest(unittest.TestCase):
             "The content submodule moved without re-recording the dev-replay "
             "goldens. Material indices follow folder-group entry order, so the "
             "committed checkpoints in testdata/dev-replays may now be stale. "
-            "Re-record them and update testdata/dev-replays/content-pin.txt in "
-            "the same change.",
+            "Re-record them on any host and update "
+            "testdata/dev-replays/content-pin.txt in the same change.",
         )
 
 
