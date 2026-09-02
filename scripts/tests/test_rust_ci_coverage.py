@@ -32,7 +32,7 @@ class RustCoverageGateTests(unittest.TestCase):
         )
 
         self.assertIn("name: Rust coverage / ${{ matrix.name }}", collectors)
-        self.assertIn("timeout-minutes: 15", collectors)
+        self.assertIn("timeout-minutes: ${{ matrix.timeout || 15 }}", collectors)
         self.assertIn("cargo llvm-cov clean --workspace", collectors)
         self.assertIn("cargo llvm-cov --no-report nextest", collectors)
         self.assertIn("--no-fail-fast", collectors)
@@ -102,6 +102,23 @@ class RustCoverageGateTests(unittest.TestCase):
                 expected_packages
                 - {"clonk-app", "clonk-engine-integration-tests"}
             ),
+        )
+
+    def test_every_collector_row_declares_its_own_measured_budget(self):
+        collectors = job_block("coverage-fragments")
+
+        rows = re.findall(
+            r"(?m)^          - name: (.+)\n            timeout: (\d+)$", collectors
+        )
+        self.assertEqual(len(rows), 12)
+
+        budgets = dict(rows)
+        # A single job-level number is sized for the shortest row and leaves the
+        # longest a coin flip; `app 5/12` lost it and evicted a release entry.
+        self.assertEqual(budgets["app 5/12"], "25")
+        self.assertEqual(
+            {name for name, minutes in rows if minutes != "15"},
+            {"app 5/12"},
         )
 
     def test_named_coverage_job_merges_fragments_before_enforcing_the_floor(self):
