@@ -1185,25 +1185,31 @@ mod tests {
     }
 
     #[test]
-    fn folder_material_group_assigns_indices_independent_of_readdir_order() {
+    fn folder_material_group_assigns_indices_in_packed_sort_order() {
         // C4MaterialMap::Load takes slots from C4Group entry order
-        // (C4Material.cpp:263-299). A folder-backed Material.c4g must not
-        // inherit host readdir order, or every generated landscape becomes a
-        // function of the filesystem.
+        // (C4Material.cpp:263-299), so a folder-backed Material.c4g must
+        // assign the slots its packed image would. ASHES/Acid is the pair
+        // shipped content/Material.c4g has where stricmp and raw bytes
+        // disagree.
         let files = [
-            ("Z.c4m", b"[Material]\nName=Last\nDensity=2\n".as_slice()),
-            ("A.c4m", b"[Material]\nName=First\nDensity=1\n".as_slice()),
+            (
+                "ASHES.c4m",
+                b"[Material]\nName=Ashes\nDensity=2\n".as_slice(),
+            ),
+            ("Acid.c4m", b"[Material]\nName=Acid\nDensity=1\n".as_slice()),
         ];
 
         let load = |created: &[(&str, &[u8])]| {
-            let dir = tempfile::Builder::new()
+            let parent = tempfile::Builder::new()
                 .prefix("lc-mat-")
                 .tempdir()
-                .expect("temp material group");
+                .expect("temp material parent");
+            let root = parent.path().join("Material.c4g");
+            std::fs::create_dir(&root).expect("create material group");
             for (name, bytes) in created {
-                std::fs::write(dir.path().join(name), bytes).expect("write material");
+                std::fs::write(root.join(name), bytes).expect("write material");
             }
-            let group = crate::Group::open(dir.path()).expect("open material folder");
+            let group = crate::Group::open(&root).expect("open material folder");
             let library = MaterialLibrary::from_group(&group).expect("load material folder");
             library
                 .iter()
@@ -1211,7 +1217,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let expected = vec!["First".to_owned(), "Last".to_owned()];
+        let expected = vec!["Acid".to_owned(), "Ashes".to_owned()];
         assert_eq!(load(&files), expected);
         assert_eq!(
             load(&files.iter().copied().rev().collect::<Vec<_>>()),
