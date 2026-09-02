@@ -18,7 +18,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
     },
     "trigger": {"id": "direct-startup-dialog"},
-    "scenario": {"path": null, "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": null, "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "startup-main/fade-complete", "number": 2},
     "runtime_resources": {
       "cpp": {
@@ -48,7 +48,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
     },
     "trigger": {"id": "direct-startup-dialog"},
-    "scenario": {"path": null, "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": null, "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "startup-scenario-selection/fade-complete", "number": 2},
     "runtime_resources": {
       "cpp": {
@@ -78,7 +78,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
     },
     "trigger": {"id": "direct-startup-dialog"},
-    "scenario": {"path": null, "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": null, "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "startup-network-browser/fade-complete", "number": 2},
     "runtime_resources": {
       "cpp": {
@@ -108,7 +108,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
     },
     "trigger": {"id": "direct-startup-dialog"},
-    "scenario": {"path": null, "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": null, "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "startup-player-selection/fade-complete", "number": 2},
     "runtime_resources": {
       "cpp": {
@@ -138,7 +138,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
     },
     "trigger": {"id": "direct-startup-dialog"},
-    "scenario": {"path": null, "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": null, "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "startup-options/fade-complete", "number": 2},
     "runtime_resources": {
       "cpp": {
@@ -168,7 +168,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 0, "trace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
     },
     "trigger": {"id": "direct-startup-dialog"},
-    "scenario": {"path": null, "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": null, "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "startup-about/fade-complete", "number": 2},
     "runtime_resources": {
       "cpp": {
@@ -196,7 +196,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 3, "trace_sha256": "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"}
     },
     "trigger": {"id": "network-host-lobby-v1"},
-    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "lobby-notice-acknowledged/render-ordinal-2", "number": 2},
     "runtime_resources": {
       "cpp": {
@@ -224,7 +224,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 3, "trace_sha256": "052a4b19a91537982f7319b7bb6cd66ce0c00245d8e583c13b90355c7cff49e0"}
     },
     "trigger": {"id": "scenario-loader-v1"},
-    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "loader-progress-60-fixed-log/render-ordinal-2", "number": 2},
     "runtime_resources": {
       "cpp": {
@@ -254,7 +254,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 1, "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}
     },
     "trigger": {"id": "tutorial01-frame-v1"},
-    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "state-frame-90/render-ordinal-1", "number": 90},
     "runtime_resources": {
       "cpp": {
@@ -284,7 +284,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 1, "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}
     },
     "trigger": {"id": "tutorial01-activate-menu-main-v1"},
-    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "state-frame-90/render-ordinal-2", "number": 90},
     "runtime_resources": {
       "cpp": {
@@ -314,7 +314,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 7, "trace_sha256": "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6"}
     },
     "trigger": {"id": "tutorial03-object-menu-input-v1"},
-    "scenario": {"path": "Tutorial.c4f/Tutorial03.c4s", "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial03.c4s", "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "state-frame-410/tooltip-render-ordinal-90", "number": 410},
     "runtime_resources": {
       "cpp": {
@@ -344,7 +344,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 1, "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}
     },
     "trigger": {"id": "tutorial02-frame-v1"},
-    "scenario": {"path": "Tutorial.c4f/Tutorial02.c4s", "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial02.c4s", "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "state-frame-180/render-ordinal-1", "number": 180},
     "runtime_resources": {
       "cpp": {
@@ -374,7 +374,7 @@
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 1, "trace_sha256": "190bdc4eb42013ce38e48c7295c2a6119142cc0af03172a9e393e49131fddcda"}
     },
     "trigger": {"id": "tutorial01-game-over-v1"},
-    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "092a7dd9a43f0d87e8d6dd9957325c44668776b9"},
+    "scenario": {"path": "Tutorial.c4f/Tutorial01.c4s", "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"},
     "frame": {"checkpoint": "state-frame-90/evaluation-open/render-ordinal-2", "number": 90},
     "runtime_resources": {
       "cpp": {

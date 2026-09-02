@@ -5,7 +5,7 @@
   },
   "case_id": "object-menu",
   "comparator": {
-    "binary_sha256": "28a623b549f29e926505bbad5355f2b39e7c3d7c2f56dfa4b9a22126286f6139",
+    "binary_sha256": "beaa4a299708a838cc1921350d9ed76c1a6a390c0777a70aa707e09127387bb5",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",
