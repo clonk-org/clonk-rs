@@ -8820,10 +8820,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "recording-host material order; required macOS CI job"
-    )]
     fn real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence() {
         // Tutorial07 fixes rain at 77 and wind at 50 and selects AcidRain
         // (Scenario.txt:70-75). FXP1's Process action calls Precipitation

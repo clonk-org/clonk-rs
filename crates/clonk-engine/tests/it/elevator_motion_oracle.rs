@@ -102,23 +102,20 @@ fn expected_up_position(tick: u32) -> i32 {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "recording-host material order; required macOS CI job"
-)]
 fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
-    // Oracle: the C++ engine's Surface8 after C4Landscape::Init for
-    // Tutorial07 with LC_PIN_SEED=0. This covers all 680x480 pixels, not
-    // selected terrain samples (C4Landscape.cpp:554-580).
+    // Surface8 after C4Landscape::Init for Tutorial07 with LC_PIN_SEED=0.
+    // This covers all 680x480 pixels, not selected terrain samples
+    // (C4Landscape.cpp:554-580). Hashed under stored-name byte order of the
+    // unpacked Material.c4g (clonk-org/clonk-rs#1455).
     let engine = load_tutorial(7, 0);
     let grid = crate::support::TestValueExt::test_value(
         engine.landscape().and_then(Landscape::pixel_grid),
     );
     assert_eq!((grid.width(), grid.height()), (680, 480));
-    assert_eq!(surface8_hash(grid), 0x2310_7266_3100_b0cd);
+    assert_eq!(surface8_hash(grid), 0xaf6f_d88e_4220_9f06);
 }
 
-/// Oracle: the pinned C++ engine's Surface8 for every tutorial at two seeds.
+/// Surface8 for every tutorial at two seeds.
 ///
 /// Taken at `C4Game::Execute()` entry rather than at the end of
 /// `C4Landscape::Init`, because that is the first moment the plane is final:
@@ -130,32 +127,27 @@ fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
 /// `Control.Prepare()`/`HaltCount` so that a joined player's `PlaceReadyBase`
 /// digging has not run either, matching this player-less load.
 ///
-/// Recorded on the pinned oracle (`7d43b47b7d789b533f32d005e64596e0a07019cd`)
-/// with `LC_PIN_SEED` and an instrumentation hook, driven through the
-/// `USE_CONSOLE` build. Five distinct landscape extents are covered, where the
-/// single Tutorial07/seed-0 oracle covered one.
+/// Hashed under stored-name byte order of unpacked Material.c4g, so the plane
+/// is host-independent (clonk-org/clonk-rs#1455). Five distinct landscape
+/// extents are covered, where the single Tutorial07/seed-0 oracle covered one.
 #[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "recording-host material order; required macOS CI job"
-)]
 fn tutorial_landscapes_match_cpp_surface8_across_scenarios_and_seeds() {
-    // (tutorial, seed, width, height, C++ Surface8 hash)
+    // (tutorial, seed, width, height, Surface8 hash)
     const ORACLE: [(u8, u64, u32, u32, u64); 20] = [
-        (1, 0, 640, 480, 0x41c9_17aa_9e08_89d6),
-        (1, 1, 640, 480, 0x5761_e42e_0119_040d),
+        (1, 0, 640, 480, 0x1612_f7c9_58ce_2f71),
+        (1, 1, 640, 480, 0xe417_2d93_afd4_6760),
         (2, 0, 640, 480, 0xf3ba_f81b_00b3_511e),
         (2, 1, 640, 480, 0x2413_0d99_a8aa_1f87),
         (3, 0, 640, 470, 0x24f0_39cd_2683_e3c4),
         (3, 1, 640, 470, 0xf030_ceeb_127f_3f34),
-        (4, 0, 640, 480, 0xbddc_7efb_2f16_83b8),
-        (4, 1, 640, 480, 0x5a19_94a9_c752_7012),
+        (4, 0, 640, 480, 0xc630_12f5_07ac_aa6e),
+        (4, 1, 640, 480, 0xa9db_a0de_25e1_c88e),
         (5, 0, 640, 480, 0x3144_f3ef_319e_13e2),
         (5, 1, 640, 480, 0x3132_55ed_a402_3fe1),
         (6, 0, 680, 480, 0x935b_a004_4dc7_cdfd),
         (6, 1, 680, 480, 0xe0d3_5406_8f3c_c354),
-        (7, 0, 680, 480, 0x2310_7266_3100_b0cd),
-        (7, 1, 680, 480, 0xf31b_106d_9a4e_9066),
+        (7, 0, 680, 480, 0xaf6f_d88e_4220_9f06),
+        (7, 1, 680, 480, 0xc100_b530_881f_8931),
         (8, 0, 800, 800, 0xb16a_da4c_5c16_fc50),
         (8, 1, 800, 800, 0x3c5a_39f1_43d1_8cee),
         (9, 0, 640, 400, 0x6cce_5e58_0e0f_6708),

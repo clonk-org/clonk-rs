@@ -107,11 +107,13 @@ clonk-org/clonk-rs#1240.
   differ solely by case, which the port cannot hold distinctly in any event
   because it keys sections by lowercase name.
 
-  This is the opposite call from material slots, which deliberately follow
-  `WalkDir` order because C++'s `readdir` order *is* the authoritative thing
-  being mirrored there — material indices exist on both sides and reach
-  synchronized state. Here the order decides port-only string IDs, so
-  normalizing costs no fidelity.
+  Material slots used to be the opposite call: they followed `WalkDir` order
+  because C++'s `readdir` order is what `C4MaterialMap::Load` consumes
+  (C4Material.cpp:263-299). That made unpacked `Material.c4g` host-dependent
+  — two peers with the same content revision generated different worlds.
+  Folder-backed groups now enumerate in stored-name byte order so material
+  indices are content-determined (clonk-org/clonk-rs#1455). Packed groups
+  still keep their stored entry order, which is what C++ Close/Save writes.
 
 ## How the oracle stays honest
 

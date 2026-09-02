@@ -846,10 +846,6 @@ fn alchemy_real_scenario_subcases_batch_3() {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "recording-host material order; required macOS CI job"
-)]
 fn alchemy_real_scenario_subcases_batch_4() {
     run_alchemy_batch(&[
         (

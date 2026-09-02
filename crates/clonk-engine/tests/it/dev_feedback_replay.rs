@@ -135,10 +135,6 @@ fn snapshot_diff_has_stable_structured_paths() {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "recording-host material order; required macOS CI job"
-)]
 fn committed_real_scenario_replays_are_deterministic() -> Result<(), Box<dyn Error>> {
     let _guard = env_lock();
     for name in [

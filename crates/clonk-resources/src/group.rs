@@ -1223,12 +1223,16 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
             stored_crc: 0,
         });
     }
+    // C++ leaves folder groups in host readdir order, which assigns material
+    // slots from the filesystem (C4Material.cpp:263-299). Byte order keeps
+    // unpacked content lockstep-identical across hosts.
+    entries.sort_unstable_by(|left, right| left.name_bytes.cmp(&right.name_bytes));
     Ok(entries)
 }
 
 /// Resolves a folder-backed group entry using the same observable name scan
-/// as C4Group's `GRPF_Folder` search: native directory order, ignored entries
-/// removed, and ASCII-case-insensitive matching against the actual basename.
+/// as folder enumeration: ignored entries removed, ASCII-case-insensitive
+/// matching against the actual basename, first match in stored-name byte order.
 ///
 /// Rust callers may pass a nested convenience path, so resolve each group
 /// level separately. Reject non-relative components instead of allowing a
@@ -1243,27 +1247,22 @@ fn resolve_directory_entry(root: &Path, relative: &Path) -> Result<PathBuf, Grou
             return Err(missing());
         };
         let requested = crate::path_to_legacy_bytes(Path::new(requested));
-        let entries = fs::read_dir(&current).map_err(|error| {
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) {
+        let entries = directory_entries(&current).map_err(|error| match error {
+            GroupError::Io(io_error)
+                if matches!(
+                    io_error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
                 missing()
-            } else {
-                GroupError::Io(error)
             }
+            other => other,
         })?;
-        let mut matched = None;
-        for entry in entries {
-            let entry = entry?;
-            let name = crate::path_to_legacy_bytes(Path::new(&entry.file_name()));
-            if name.eq_ignore_ascii_case(&requested) && !ignored_group_entry_bytes(&name) {
-                matched = Some(entry);
-                break;
-            }
-        }
-        let entry = matched.ok_or_else(&missing)?;
-        current = entry.path();
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.name_bytes.eq_ignore_ascii_case(&requested))
+            .ok_or_else(&missing)?;
+        current = current.join(entry.relative_path);
         resolved_any = true;
     }
 
@@ -1272,28 +1271,26 @@ fn resolve_directory_entry(root: &Path, relative: &Path) -> Result<PathBuf, Grou
 
 /// Resolves one `OpenAsChild` component. Unlike the generic concrete-path
 /// resolver, classic child opening admits `?` as exactly one native byte and
-/// selects the first matching directory entry without sorting.
+/// selects the first matching directory entry in stored-name byte order.
 fn resolve_directory_child_entry(root: &Path, relative: &Path) -> Result<PathBuf, GroupError> {
     let missing = || GroupError::EntryNotFound(relative.to_path_buf());
     let pattern = crate::path_to_legacy_bytes(relative);
-    let entries = fs::read_dir(root).map_err(|error| {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-        ) {
+    let entries = directory_entries(root).map_err(|error| match error {
+        GroupError::Io(io_error)
+            if matches!(
+                io_error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
             missing()
-        } else {
-            GroupError::Io(error)
         }
+        other => other,
     })?;
-    for entry in entries {
-        let entry = entry?;
-        let name = crate::path_to_legacy_bytes(Path::new(&entry.file_name()));
-        if group_name_wildcard_match(&pattern, &name) && !ignored_group_entry_bytes(&name) {
-            return Ok(entry.path());
-        }
-    }
-    Err(missing())
+    entries
+        .into_iter()
+        .find(|entry| group_name_wildcard_match(&pattern, &entry.name_bytes))
+        .map(|entry| root.join(entry.relative_path))
+        .ok_or_else(missing)
 }
 
 fn ignored_group_entry_bytes(name: &[u8]) -> bool {
@@ -1809,26 +1806,61 @@ mod tests {
         let second = packed_group_image_with_entry("marker.txt", false, b"second");
         fs::write(dir.path().join("ChoiceA.c4g"), &first).unwrap();
         fs::write(dir.path().join("ChoiceB.c4g"), &second).unwrap();
-        let expected = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap())
-            .find(|entry| {
-                matches!(
-                    entry.file_name().as_encoded_bytes(),
-                    b"ChoiceA.c4g" | b"ChoiceB.c4g"
-                )
-            })
-            .unwrap();
-        let expected_marker = if expected.file_name().as_encoded_bytes() == b"ChoiceA.c4g" {
-            &b"first"[..]
-        } else {
-            &b"second"[..]
-        };
 
         let indexed = Group::open_indexed(dir.path()).unwrap();
         assert_eq!(indexed.read_file("TeAmS.TxT").unwrap(), b"teams");
         let selected = indexed.open_child("cHOICE?.C4G").unwrap();
-        assert_eq!(selected.read_file("marker.txt").unwrap(), expected_marker);
+        assert_eq!(
+            selected.read_file("marker.txt").unwrap(),
+            b"first",
+            "byte order selects ChoiceA.c4g before ChoiceB.c4g"
+        );
+        let live = Group::open(dir.path())
+            .unwrap()
+            .open_child("cHOICE?.C4G")
+            .unwrap();
+        assert_eq!(live.read_file("marker.txt").unwrap(), b"first");
+    }
+
+    #[test]
+    fn folder_group_entries_are_independent_of_host_readdir_order() {
+        // C++ C4Group's GRPF_Folder scan is unsorted readdir
+        // (C4Group.cpp:1177-1188,1980-2002; StdFile.cpp:824-836). Two
+        // materialisations of the same names therefore enumerate differently,
+        // and C4MaterialMap::Load assigns slots from that scan
+        // (C4Material.cpp:263-299). The port enumerates in stored-name byte
+        // order so unpacked content is lockstep-identical across hosts.
+        let names = ["zulu.txt", "alpha.txt", "mike.txt"];
+        let expected = {
+            let mut sorted = names;
+            sorted.sort_unstable_by_key(|name| name.as_bytes());
+            sorted
+        };
+        assert_ne!(
+            names, expected,
+            "the creation sequence must not already be byte order"
+        );
+
+        let listed = |created: &[&str]| {
+            let dir = tempdir().unwrap();
+            for name in created {
+                fs::write(dir.path().join(name), name.as_bytes()).unwrap();
+            }
+            Group::open(dir.path())
+                .unwrap()
+                .entries()
+                .unwrap()
+                .into_iter()
+                .map(|entry| {
+                    String::from_utf8(entry.name_bytes.clone()).expect("test names are utf-8")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let forward = listed(&names);
+        let reversed = listed(&names.iter().copied().rev().collect::<Vec<_>>());
+        assert_eq!(forward, expected);
+        assert_eq!(reversed, expected);
     }
 
     #[test]
@@ -2628,28 +2660,17 @@ mod tests {
         fs::write(directory_root.path().join("ChoiceAA.c4g"), &long).unwrap();
         fs::write(directory_root.path().join("ChoiceA.c4g"), &first).unwrap();
         fs::write(directory_root.path().join("ChoiceB.c4g"), &second).unwrap();
-        let expected = fs::read_dir(directory_root.path())
-            .unwrap()
-            .map(|entry| entry.unwrap())
-            .find(|entry| {
-                let name = entry.file_name();
-                name.as_encoded_bytes() == b"ChoiceA.c4g"
-                    || name.as_encoded_bytes() == b"ChoiceB.c4g"
-            })
-            .expect("one matching physical child");
-        let expected_name = expected.file_name();
-        let expected_marker = if expected_name.as_encoded_bytes() == b"ChoiceA.c4g" {
-            &b"packed-first"[..]
-        } else {
-            &b"packed-second"[..]
-        };
         let directory = Group::open(directory_root.path()).expect("open directory mother");
 
         let selected = directory
             .open_child("cHOICE?.C4G")
-            .expect("question wildcard opens first native directory match");
-        assert_eq!(selected.read_file("marker.txt").unwrap(), expected_marker);
-        assert_eq!(selected.root(), directory_root.path().join(expected_name));
+            .expect("question wildcard opens first byte-order directory match");
+        assert_eq!(selected.read_file("marker.txt").unwrap(), b"packed-first");
+        assert_eq!(
+            selected.root(),
+            directory_root.path().join("ChoiceA.c4g"),
+            "folder groups select ChoiceA.c4g before ChoiceB.c4g"
+        );
     }
 
     #[test]

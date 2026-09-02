@@ -1185,6 +1185,41 @@ mod tests {
     }
 
     #[test]
+    fn folder_material_group_assigns_indices_independent_of_readdir_order() {
+        // C4MaterialMap::Load takes slots from C4Group entry order
+        // (C4Material.cpp:263-299). A folder-backed Material.c4g must not
+        // inherit host readdir order, or every generated landscape becomes a
+        // function of the filesystem.
+        let files = [
+            ("Z.c4m", b"[Material]\nName=Last\nDensity=2\n".as_slice()),
+            ("A.c4m", b"[Material]\nName=First\nDensity=1\n".as_slice()),
+        ];
+
+        let load = |created: &[(&str, &[u8])]| {
+            let dir = tempfile::Builder::new()
+                .prefix("lc-mat-")
+                .tempdir()
+                .expect("temp material group");
+            for (name, bytes) in created {
+                std::fs::write(dir.path().join(name), bytes).expect("write material");
+            }
+            let group = crate::Group::open(dir.path()).expect("open material folder");
+            let library = MaterialLibrary::from_group(&group).expect("load material folder");
+            library
+                .iter()
+                .map(|material| material.name().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let expected = vec!["First".to_owned(), "Last".to_owned()];
+        assert_eq!(load(&files), expected);
+        assert_eq!(
+            load(&files.iter().copied().rev().collect::<Vec<_>>()),
+            expected
+        );
+    }
+
+    #[test]
     fn group_loads_only_top_level_c4m_first_material_and_keeps_duplicates() {
         let mut child = crate::MutableGroup::new("Child.c4g");
         child

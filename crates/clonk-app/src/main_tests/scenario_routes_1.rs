@@ -1945,10 +1945,6 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "recording-host material order; required macOS CI job"
-)]
 fn app_virtual_keyboard_completes_real_tutorial02_route() {
     // The real window path maps keyboard-set-one X/X to Grab and S to Up.
     // While the Clonk pushes BALN, Jump'n'Run ControlUpdate follows held
@@ -2367,7 +2363,12 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     let first_bridge_step = app.engine.test_object_snapshot(clonk);
     main_assert_eq!(first_bridge_step.action.name => "Bridge");
     main_assert_eq!(first_bridge_step.action.time => 6);
-    main_assert_eq!(first_bridge_step.action.data => 0x0064_0110, "LOAM must request C++'s moving, non-wall Earth bridge");
+    let earth = app.engine.materials().id_of("Earth").test_value();
+    main_assert_eq!(
+        first_bridge_step.action.data =>
+        0x0064_0100 | i32::try_from(earth.index()).test_value(),
+        "LOAM must request C++'s moving, non-wall Earth bridge"
+    );
     main_assert_eq!(first_bridge_step.position => Vector2::new(bridge_start.x - 1, bridge_start.y - 1));
     advance_app_until(&mut app, "first UpLeft bridge completes", 114, |app| {
         app.engine

@@ -17,10 +17,6 @@ fn load_tutorial02() -> (Engine, i32) {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "recording-host material order; required macOS CI job"
-)]
 fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial02();
@@ -367,8 +363,11 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     let first_bridge_step = player.engine().test_object_snapshot(clonk);
     assert_eq!(first_bridge_step.action.name, "Bridge");
     assert_eq!(first_bridge_step.action.time, 6);
+    let earth =
+        crate::support::TestValueExt::test_value(player.engine().materials().id_of("Earth"));
     assert_eq!(
-        first_bridge_step.action.data, 0x0064_0110,
+        first_bridge_step.action.data,
+        0x0064_0100 | i32::try_from(earth.index()).expect("Earth material index"),
         "real LOAM must request the C++ moving, non-wall Earth bridge"
     );
     assert_eq!(
