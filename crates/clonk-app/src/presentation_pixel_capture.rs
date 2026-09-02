@@ -451,7 +451,12 @@ fn build_engine_receipt(
     anyhow::ensure!(
         checkpoint.simulation_seed == spec.seeds.simulation.seed
             && checkpoint.random_count == spec.seeds.simulation.calls,
-        "observed simulation seed/RandomCount does not match the trusted case spec"
+        "observed simulation seed/RandomCount {}/{} does not match the trusted case spec {}/{} for {}",
+        checkpoint.simulation_seed,
+        checkpoint.random_count,
+        spec.seeds.simulation.seed,
+        spec.seeds.simulation.calls,
+        spec.id
     );
     anyhow::ensure!(
         spec.seeds.presentation.algorithm == PRESENTATION_RNG_ALGORITHM
