@@ -39,8 +39,12 @@ jobs:
       - name: Install build dependencies
         run: |
           set -euo pipefail
-          brew install ninja fmt openssl@3 sdl2 libpng jpeg freetype
+          # Everything the pinned CMakeLists find_package()s for a non-console
+          # macOS build: GTK3, miniupnpc and X11 are gated off.
+          brew install ninja fmt openssl@3 curl sdl2 sdl2_mixer libpng jpeg \
+            freetype glew
           ls -d /opt/homebrew/opt/fmt/lib/cmake/fmt
+          ls -d /opt/homebrew/opt/glew/lib
 
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
 
