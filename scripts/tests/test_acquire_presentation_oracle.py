@@ -1565,8 +1565,11 @@ def _stage_packed_runtime_content(candidate: Path) -> dict:
         content[group] = MODULE.runtime_resource_identity(source)
         target = candidate / retained_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"packed " + group.encode("ascii"))
-        packed[group] = MODULE._sha256_file(target)
+        if group in MODULE.PACKED_CPP_RUNTIME_CONTENT_GROUPS:
+            target.write_bytes(b"packed " + group.encode("ascii"))
+            packed[group] = MODULE._sha256_file(target)
+        else:
+            shutil.copytree(source, target)
     shutil.rmtree(candidate / MODULE.CPP_RUNTIME_CONTENT_STAGING)
     MODULE._write_json_new(candidate / MODULE.PACKED_CONTENT_MANIFEST_PATH, packed)
     return content
@@ -1707,15 +1710,23 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
             recorded = json.loads(
                 (candidate / MODULE.PACKED_CONTENT_MANIFEST_PATH).read_text()
             )
+            self.assertEqual(
+                set(recorded), set(MODULE.PACKED_CPP_RUNTIME_CONTENT_GROUPS)
+            )
+            packed_path = None
             for group, (_, retained_path) in MODULE.CPP_RUNTIME_CONTENT_GROUPS.items():
                 target = candidate / retained_path
-                self.assertTrue(target.is_file(), retained_path)
-                self.assertEqual(target.read_bytes(), b"a.txt|b.txt")
-                self.assertEqual(recorded[group], MODULE._sha256_file(target))
+                if group in MODULE.PACKED_CPP_RUNTIME_CONTENT_GROUPS:
+                    self.assertTrue(target.is_file(), retained_path)
+                    self.assertEqual(target.read_bytes(), b"a.txt|b.txt")
+                    self.assertEqual(recorded[group], MODULE._sha256_file(target))
+                    packed_path = target
+                else:
+                    self.assertTrue(target.is_dir(), retained_path)
 
             MODULE._validate_packed_cpp_runtime_content(candidate, expected)
 
-            tampered = candidate / next(iter(MODULE.CPP_RUNTIME_CONTENT_GROUPS.values()))[1]
+            tampered = packed_path
             tampered.write_bytes(b"tampered")
             with self.assertRaisesRegex(
                 MODULE.AcquisitionFailure, "packed runtime content digest mismatch"

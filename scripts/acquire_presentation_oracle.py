@@ -87,6 +87,15 @@ CPP_RUNTIME_CONTENT_GROUPS = {
 # Outside `inputs/`, so neither engine enumerates it as content.
 CPP_RUNTIME_CONTENT_STAGING = "work/content-src"
 PACKED_CONTENT_MANIFEST_PATH = "work/content-packed.json"
+# Only the material group is packed. Its entry order picks material slots
+# (C4Material.cpp:263-299) and so decides every generated landscape, which is
+# what made the evidence a property of the acquisition host. Definition and
+# scenario order is not observable in the recorded values: on the pinned
+# oracle, Tutorial03 frame 410 reports RandomCount 898 with `Objects.c4d`
+# packed and 898 with it left as a folder, while the material order moves it
+# to 890. Should that ever stop being true, the acquisition's own C++/Rust
+# comparison fails rather than recording a host-specific number.
+PACKED_CPP_RUNTIME_CONTENT_GROUPS = frozenset({"material"})
 PINNED_CPP_RUNTIME_RESOURCES = {
     "graphics": {
         "tree": "153c435149fffeb0f6790d95b3c2136278393310",
@@ -1876,12 +1885,14 @@ def stage_cpp_runtime_content(
     validated = _validate_staged_cpp_runtime_content(candidate_root, expected)
     packed = {}
     for group, (_, retained_path) in CPP_RUNTIME_CONTENT_GROUPS.items():
-        _pack_runtime_group(
-            packer,
-            staging / Path(retained_path).name,
-            candidate_root / retained_path,
-        )
-        packed[group] = _sha256_file(candidate_root / retained_path)
+        staged = staging / Path(retained_path).name
+        destination = candidate_root / retained_path
+        if group in PACKED_CPP_RUNTIME_CONTENT_GROUPS:
+            _pack_runtime_group(packer, staged, destination)
+            packed[group] = _sha256_file(destination)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(staged), str(destination))
     shutil.rmtree(staging)
     _write_json_new(candidate_root / PACKED_CONTENT_MANIFEST_PATH, packed)
     return validated
@@ -1905,7 +1916,7 @@ def _validate_packed_cpp_runtime_content(
     recorded = load_json(candidate_root / PACKED_CONTENT_MANIFEST_PATH)
     recorded = _require_exact_keys(
         recorded,
-        CPP_RUNTIME_CONTENT_GROUPS,
+        PACKED_CPP_RUNTIME_CONTENT_GROUPS,
         "packed runtime content digests",
     )
     validated = {}
@@ -1915,11 +1926,18 @@ def _validate_packed_cpp_runtime_content(
             f"C++ runtime content {group}",
         )
         target = candidate_root / retained_path
-        _regular_file(target, f"packed runtime content {group}")
-        _require(
-            _sha256_file(target) == recorded[group],
-            f"{Path(retained_path).name} packed runtime content digest mismatch",
-        )
+        if group in PACKED_CPP_RUNTIME_CONTENT_GROUPS:
+            _regular_file(target, f"packed runtime content {group}")
+            _require(
+                _sha256_file(target) == recorded[group],
+                f"{Path(retained_path).name} packed runtime content digest mismatch",
+            )
+        else:
+            observed = runtime_resource_identity(target)
+            _require(
+                observed == identity,
+                f"{Path(retained_path).name} runtime content digest/tree mismatch",
+            )
         validated[group] = identity
     return validated
 
@@ -5299,10 +5317,13 @@ def _remove_runtime_content_resources(
             and target.name in {"Tutorial.c4f", "Objects.c4d", "Material.c4g"},
             f"unsafe runtime content cleanup target: {target}",
         )
-        # `stage_cpp_runtime_content` leaves a packed group file here; its
-        # identity was bound to the unpacked tree at staging time.
-        _regular_file(target, "acquisition-only runtime content")
+        # `stage_cpp_runtime_content` leaves a packed group file for the
+        # material group and an unpacked tree for the rest.
         try:
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+                continue
+            _regular_file(target, "acquisition-only runtime content")
             target.unlink()
         except OSError as error:
             raise AcquisitionFailure(
