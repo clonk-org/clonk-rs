@@ -1549,6 +1549,29 @@ class InventoryAndPngTests(unittest.TestCase):
                 MODULE.validate_layout_trace(path, "startup-main")
 
 
+def _stage_packed_runtime_content(candidate: Path) -> dict:
+    """Stage the runtime content groups in the packed form staging produces.
+
+    `stage_cpp_runtime_content` binds each unpacked tree to its Git identity,
+    packs it, and records the packed digest, so a candidate carries group files
+    plus the manifest rather than directories.
+    """
+    content = {}
+    packed = {}
+    for group, (_, retained_path) in MODULE.CPP_RUNTIME_CONTENT_GROUPS.items():
+        source = candidate / MODULE.CPP_RUNTIME_CONTENT_STAGING / Path(retained_path).name
+        source.mkdir(parents=True)
+        (source / "content.bin").write_bytes(group.encode("ascii"))
+        content[group] = MODULE.runtime_resource_identity(source)
+        target = candidate / retained_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"packed " + group.encode("ascii"))
+        packed[group] = MODULE._sha256_file(target)
+    shutil.rmtree(candidate / MODULE.CPP_RUNTIME_CONTENT_STAGING)
+    MODULE._write_json_new(candidate / MODULE.PACKED_CONTENT_MANIFEST_PATH, packed)
+    return content
+
+
 class AcquisitionOrchestrationTests(unittest.TestCase):
     def test_acquire_threads_staged_cpp_runtime_content_into_capture(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1635,6 +1658,70 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 staged["cpp_runtime_scenario_resources"],
             )
 
+    def test_staging_packs_runtime_content_and_binds_the_unpacked_tree(self):
+        # Both engines read a folder group in host readdir order
+        # (C4Group.cpp:1177-1207), and C4MaterialMap::Load takes material slots
+        # from that scan (C4Material.cpp:263-299), so an unpacked staged group
+        # would pin the evidence to the acquisition host's filesystem.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            candidate.mkdir()
+            packer = root / "packer"
+            packer.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, shutil, sys\n"
+                "target = pathlib.Path(sys.argv[1])\n"
+                "names = sorted(p.name for p in target.iterdir())\n"
+                "shutil.rmtree(target)\n"
+                "target.write_bytes(('|'.join(names)).encode())\n",
+                encoding="utf-8",
+            )
+            packer.chmod(0o755)
+
+            content_repository = root / "content"
+            expected = {}
+            for group, (source_path, _) in MODULE.CPP_RUNTIME_CONTENT_GROUPS.items():
+                directory = content_repository / source_path
+                directory.mkdir(parents=True)
+                (directory / "b.txt").write_bytes(b"b")
+                (directory / "a.txt").write_bytes(b"a")
+                expected[group] = MODULE.runtime_resource_identity(directory)
+
+            with mock.patch.object(
+                MODULE,
+                "materialize_runtime_resource_tree",
+                side_effect=lambda repo, revision, relative, destination: shutil.copytree(
+                    repo / relative, destination
+                ),
+            ):
+                validated = MODULE.stage_cpp_runtime_content(
+                    content_repository,
+                    candidate,
+                    packer,
+                    expected,
+                )
+
+            self.assertEqual(validated, expected)
+            self.assertFalse((candidate / MODULE.CPP_RUNTIME_CONTENT_STAGING).exists())
+            recorded = json.loads(
+                (candidate / MODULE.PACKED_CONTENT_MANIFEST_PATH).read_text()
+            )
+            for group, (_, retained_path) in MODULE.CPP_RUNTIME_CONTENT_GROUPS.items():
+                target = candidate / retained_path
+                self.assertTrue(target.is_file(), retained_path)
+                self.assertEqual(target.read_bytes(), b"a.txt|b.txt")
+                self.assertEqual(recorded[group], MODULE._sha256_file(target))
+
+            MODULE._validate_packed_cpp_runtime_content(candidate, expected)
+
+            tampered = candidate / next(iter(MODULE.CPP_RUNTIME_CONTENT_GROUPS.values()))[1]
+            tampered.write_bytes(b"tampered")
+            with self.assertRaisesRegex(
+                MODULE.AcquisitionFailure, "packed runtime content digest mismatch"
+            ):
+                MODULE._validate_packed_cpp_runtime_content(candidate, expected)
+
     def test_cpp_runtime_cleanup_removes_only_bound_acquisition_resources_and_log(self):
         with tempfile.TemporaryDirectory() as temporary:
             candidate = Path(temporary) / "candidate"
@@ -1645,12 +1732,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 directory.mkdir(parents=True)
                 (directory / "resource.bin").write_bytes(group.encode("ascii"))
                 runtime_resources[group] = MODULE.runtime_resource_identity(directory)
-            runtime_content = {}
-            for group, (_, retained_path) in MODULE.CPP_RUNTIME_CONTENT_GROUPS.items():
-                directory = candidate / retained_path
-                directory.mkdir(parents=True)
-                (directory / "content.bin").write_bytes(group.encode("ascii"))
-                runtime_content[group] = MODULE.runtime_resource_identity(directory)
+            runtime_content = _stage_packed_runtime_content(candidate)
             (inputs / "Clonk.log").write_text("capture log\n", encoding="utf-8")
             retained = inputs / "cpp.config"
             retained.write_text("retained\n", encoding="utf-8")
@@ -2014,7 +2096,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(MODULE, "_validate_staged_cpp_runtime_resources"),
-                mock.patch.object(MODULE, "_validate_staged_cpp_runtime_content"),
+                mock.patch.object(MODULE, "_validate_packed_cpp_runtime_content"),
             ):
                 with self.assertRaisesRegex(
                     MODULE.AcquisitionFailure, "gameplay scenario.*mismatch"
@@ -2032,7 +2114,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                         scenario_resources=scenario_resources,
                     )
 
-    def test_cpp_runtime_launch_accepts_a_hash_bound_directory_group(self):
+    def test_cpp_runtime_launch_accepts_a_hash_bound_packed_group(self):
         with tempfile.TemporaryDirectory() as temporary:
             candidate = Path(temporary) / "candidate"
             scenario_resources = {}
@@ -2049,7 +2131,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(MODULE, "_validate_staged_cpp_runtime_resources"),
-                mock.patch.object(MODULE, "_validate_staged_cpp_runtime_content"),
+                mock.patch.object(MODULE, "_validate_packed_cpp_runtime_content"),
             ):
                 command, cwd = MODULE._capture_command(
                     candidate,
@@ -2167,7 +2249,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
         with (
             mock.patch.object(MODULE, "_validate_staged_rust_runtime_resources"),
             mock.patch.object(
-                MODULE, "_validate_staged_cpp_runtime_content"
+                MODULE, "_validate_packed_cpp_runtime_content"
             ) as validate_content,
         ):
             rust, rust_cwd = MODULE._capture_command(
@@ -2208,7 +2290,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
         }
         with (
             mock.patch.object(MODULE, "_validate_staged_cpp_runtime_resources"),
-            mock.patch.object(MODULE, "_validate_staged_cpp_runtime_content"),
+            mock.patch.object(MODULE, "_validate_packed_cpp_runtime_content"),
             mock.patch.object(MODULE, "_validate_staged_cpp_runtime_scenario"),
             mock.patch.object(MODULE, "_regular_file"),
         ):
@@ -2251,7 +2333,7 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
         rust_source = candidate / "work/rust-source"
         with (
             mock.patch.object(MODULE, "_validate_staged_rust_runtime_resources"),
-            mock.patch.object(MODULE, "_validate_staged_cpp_runtime_content"),
+            mock.patch.object(MODULE, "_validate_packed_cpp_runtime_content"),
         ):
             with self.assertRaisesRegex(
                 MODULE.AcquisitionFailure,
