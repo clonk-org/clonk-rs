@@ -1936,7 +1936,7 @@ index 9542728ef..353b03214 100644
 +		}
 +
 +		std::filesystem::path ValidateRuntimeInputs(const RuntimeCaseSpec &spec)
-+		{
++		{ extern int iC4GroupRewindFilePtrNoWarn; iC4GroupRewindFilePtrNoWarn = 1; // a packed group rewinds its shared file pointer; the debug-only log has no port counterpart
 +			RequireCanonicalLocaleAndGeometry();
 +			const auto configArgument = CommandLineValue("/config:");
 +			if (!configArgument) CaptureFailure("runtime presentation capture requires an explicit /config:<absolute-path> argument");
