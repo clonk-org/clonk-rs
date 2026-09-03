@@ -46,6 +46,22 @@ jobs:
           ls -d /opt/homebrew/opt/fmt/lib/cmake/fmt
           ls -d /opt/homebrew/opt/glew/lib
 
+      - name: Widen the virtual display
+        # The captures open a real 1280x720 window. A runner's default display
+        # leaves only 642 rows once window chrome is subtracted, which the
+        # capture rejects as a geometry mismatch rather than recording a
+        # short frame.
+        run: |
+          set -euo pipefail
+          brew install displayplacer
+          echo "--- before ---"
+          displayplacer list | sed -n '1,40p'
+          screen_id="$(displayplacer list | awk '/Persistent screen id:/{print $4; exit}')"
+          echo "screen id: $screen_id"
+          displayplacer "id:${screen_id} res:1920x1080 scaling:off origin:(0,0) degree:0"
+          echo "--- after ---"
+          displayplacer list | grep -iE "resolution|current mode" | head
+
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
 
       - name: Acquire
