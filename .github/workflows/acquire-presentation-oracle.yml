@@ -91,6 +91,12 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v5.0.0
         with:
           name: presentation-acquire-debug
-          path: ${{ runner.temp }}/presentation-acquire
+          # Just the captured frames and their attestations: the full working
+          # tree is ~2.8 GB of build output.
+          path: |
+            ${{ runner.temp }}/presentation-acquire/run-*/cpp/artifacts
+            ${{ runner.temp }}/presentation-acquire/run-*/rust/artifacts
+            ${{ runner.temp }}/presentation-acquire/run-*/comparisons
+            ${{ runner.temp }}/presentation-acquire/run-*/*/receipts
           if-no-files-found: warn
           retention-days: 7
