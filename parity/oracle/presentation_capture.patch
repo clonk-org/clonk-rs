@@ -1968,7 +1968,7 @@ index 9542728ef..353b03214 100644
 +				CaptureFailure("oracle System.c4g manifest differs from the pinned source tree");
 +			if (DirectoryManifestSha256(inputDirectory / "Tutorial.c4f", "content Tutorial.c4f") != TutorialManifestSha256 ||
 +				DirectoryManifestSha256(inputDirectory / "Objects.c4d", "content Objects.c4d") != ObjectsManifestSha256 ||
-+				DirectoryManifestSha256(inputDirectory / "Material.c4g", "content Material.c4g") != MaterialManifestSha256)
++				DirectoryManifestSha256(candidateRoot / "work" / "content-src" / "Material.c4g", "content Material.c4g") != MaterialManifestSha256 || RequireRegularFile(inputDirectory / "Material.c4g", "packed content Material.c4g").empty())
 +				CaptureFailure("runtime content group manifests differ from the pinned content tree");
 +
 +			const auto fixtureRoot = RequireDirectory(candidateRoot / "work" / "fixture-content", "pinned fixture content root");

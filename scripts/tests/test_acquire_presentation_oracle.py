@@ -1569,8 +1569,7 @@ def _stage_packed_runtime_content(candidate: Path) -> dict:
             target.write_bytes(b"packed " + group.encode("ascii"))
             packed[group] = MODULE._sha256_file(target)
         else:
-            shutil.copytree(source, target)
-    shutil.rmtree(candidate / MODULE.CPP_RUNTIME_CONTENT_STAGING)
+            shutil.move(str(source), str(target))
     MODULE._write_json_new(candidate / MODULE.PACKED_CONTENT_MANIFEST_PATH, packed)
     return content
 
@@ -1706,7 +1705,18 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
                 )
 
             self.assertEqual(validated, expected)
-            self.assertFalse((candidate / MODULE.CPP_RUNTIME_CONTENT_STAGING).exists())
+            # The capture patch manifest-binds the unpacked tree, so it stays.
+            for group, (_, retained_path) in MODULE.CPP_RUNTIME_CONTENT_GROUPS.items():
+                staged = (
+                    candidate
+                    / MODULE.CPP_RUNTIME_CONTENT_STAGING
+                    / Path(retained_path).name
+                )
+                self.assertEqual(
+                    staged.is_dir(),
+                    group in MODULE.PACKED_CPP_RUNTIME_CONTENT_GROUPS,
+                    retained_path,
+                )
             recorded = json.loads(
                 (candidate / MODULE.PACKED_CONTENT_MANIFEST_PATH).read_text()
             )

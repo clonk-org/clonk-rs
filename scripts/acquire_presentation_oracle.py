@@ -1839,9 +1839,14 @@ def _port_group_packer(source_root: Path, build_profile: str = "release") -> Pat
 
 
 def _pack_runtime_group(packer: Path, staged: Path, destination: Path) -> None:
+    """Pack a copy, so the unpacked tree the capture patch binds survives."""
     _require(staged.is_dir(), f"staged runtime group is not a directory: {staged}")
     _require(not destination.exists(), f"runtime group destination exists: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    work = staged.with_name(f"{staged.name}.pack")
+    _require(not work.exists(), f"pack workspace exists: {work}")
+    shutil.copytree(staged, work, symlinks=True)
+    staged = work
     try:
         completed = subprocess.run(
             [str(packer), str(staged), "-p"],
@@ -1893,7 +1898,9 @@ def stage_cpp_runtime_content(
         else:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(staged), str(destination))
-    shutil.rmtree(staging)
+    # The unpacked tree a packed group was built from stays in the staging
+    # area: the capture patch manifest-binds it, because a packed group's bytes
+    # carry a wall-clock creation stamp and so are not a stable digest.
     _write_json_new(candidate_root / PACKED_CONTENT_MANIFEST_PATH, packed)
     return validated
 
