@@ -1153,7 +1153,11 @@ class PinAndGitTests(unittest.TestCase):
                 ),
             },
         )
-        self.assertEqual(by_id["object-menu"]["seeds"]["simulation"]["calls"], 890)
+        # Tutorial03 frame 410 with Material.c4g in the order `c4group -p`
+        # stores it. The pinned oracle reports 898 there and 890 with the
+        # group's entries reversed, so the old value recorded the acquisition
+        # host's readdir order (clonk-org/clonk-rs#1466).
+        self.assertEqual(by_id["object-menu"]["seeds"]["simulation"]["calls"], 898)
         self.assertEqual(
             by_id["object-menu"]["seeds"]["presentation"]["trace_sha256"],
             "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6",
