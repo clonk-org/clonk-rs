@@ -4,6 +4,17 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-09-04
+
+### Bug fixes
+
+- Ignore a scenario section switch its own callbacks request (#1461)
+- Enumerate folder groups in their packed sort order (#1463)
+
+### Features
+
+- Package the content packs packs.toml lists (#1464)
+
 ## [0.21.6] - 2026-09-02
 
 ### Bug fixes
