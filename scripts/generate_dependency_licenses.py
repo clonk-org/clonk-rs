@@ -42,6 +42,9 @@ SHIPPED_BINARIES = frozenset(
 
 # What crates conventionally name the file carrying their terms.
 LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|UNLICENSE)", re.IGNORECASE)
+TREE_PACKAGE = re.compile(
+    r"(?P<name>[A-Za-z0-9][A-Za-z0-9_.+-]*) v(?P<version>[^\s(]+)(?: \(.+\))?"
+)
 
 HEADER = """\
 Third-party licenses
@@ -154,6 +157,83 @@ def release_graph(metadata: dict) -> list[dict]:
     )
 
 
+def cargo_tree_packages(binary: str) -> set[tuple[str, str]]:
+    """Return the package names and versions in one shipped binary's graph.
+
+    `cargo metadata` resolves features for every workspace member, including
+    test-only members. `cargo tree -p` asks Cargo for the selected binary's
+    graph instead; `--target all` keeps dependencies for every shipped
+    platform in the corpus. Explicit color and charset options keep Cargo's
+    human-oriented tree prefixes parseable and stable across environments.
+    """
+    result = subprocess.run(
+        [
+            "cargo",
+            "tree",
+            "-p",
+            binary,
+            "--target",
+            "all",
+            "--edges",
+            "normal,build",
+            "--format",
+            "{p}",
+            "--no-dedupe",
+            "--color",
+            "never",
+            "--charset",
+            "utf8",
+            "--locked",
+        ],
+        cwd=REPOSITORY,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    packages = set()
+    for line in result.stdout.splitlines():
+        # Cargo's default tree prefix is made up of these characters. The
+        # package format itself is stable and includes a source path for
+        # workspace packages, which the regex intentionally ignores.
+        line = line.lstrip(" │├└─")
+        match = TREE_PACKAGE.fullmatch(line)
+        if match:
+            packages.add((match["name"], match["version"]))
+    if not packages:
+        raise SystemExit(f"cargo tree returned no packages for {binary}")
+    return packages
+
+
+def release_packages(metadata: dict) -> list[dict]:
+    """Every external package selected by the shipped binaries' Cargo trees."""
+    candidates: dict[tuple[str, str], list[dict]] = {}
+    for package in metadata["packages"]:
+        candidates.setdefault((package["name"], package["version"]), []).append(package)
+
+    selected = set()
+    for binary in sorted(SHIPPED_BINARIES):
+        selected.update(cargo_tree_packages(binary))
+
+    missing = sorted(key for key in selected if key not in candidates)
+    if missing:
+        names = ", ".join(f"{name} {version}" for name, version in missing)
+        raise SystemExit(f"cargo tree returned packages missing from metadata: {names}")
+
+    workspace = set(metadata["workspace_members"])
+    packages = []
+    for key in selected:
+        matches = candidates[key]
+        if len(matches) != 1:
+            raise SystemExit(
+                "cargo tree package is ambiguous in metadata: "
+                f"{key[0]} {key[1]}"
+            )
+        package = matches[0]
+        if package["id"] not in workspace:
+            packages.append(package)
+    return sorted(packages, key=lambda package: (package["name"], package["version"]))
+
+
 def license_texts(package: dict) -> list[tuple[str, str]]:
     """The (filename, text) pairs a package distributes, in a stable order."""
     source = pathlib.Path(package["manifest_path"]).parent
@@ -258,7 +338,7 @@ def main() -> int:
             check=True,
         ).stdout
     )
-    packages = release_graph(metadata)
+    packages = release_packages(metadata)
     corpus = render(packages)
     index = manifest(packages)
     index_path = CORPUS.with_suffix(".index")

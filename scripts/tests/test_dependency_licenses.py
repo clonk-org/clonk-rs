@@ -15,6 +15,7 @@ import pathlib
 import re
 import tomllib
 import unittest
+from unittest import mock
 
 from _repo import REPOSITORY
 
@@ -151,6 +152,26 @@ class DependencyLicenseCorpusTests(unittest.TestCase):
             "regenerate with scripts/generate_dependency_licenses.py",
         )
 
+    def test_workspace_test_features_do_not_enter_the_shipped_corpus(self):
+        # cargo metadata resolves features as the union over every workspace
+        # member, so clonk-engine's test-only `test-graph` feature can make
+        # proptest and its subtree look compiled into a release binary. The
+        # corpus follows only the four shipped roots, not workspace tests.
+        test_only_packages = {
+            ("ppv-lite86", "0.2.21"),
+            ("proptest", "1.11.0"),
+            ("rand", "0.9.5"),
+            ("rand_chacha", "0.9.0"),
+            ("rand_core", "0.9.5"),
+            ("rand_xorshift", "0.4.0"),
+            ("termcolor", "1.4.1"),
+            ("unarray", "0.1.4"),
+        }
+        attributed = {(name, version) for name, version, _ in index_entries()}
+        for package in sorted(test_only_packages):
+            with self.subTest(package=package):
+                self.assertNotIn(package, attributed)
+
     def test_the_index_is_sorted_and_free_of_duplicates(self):
         entries = [(name, version) for name, version, _ in index_entries()]
         self.assertEqual(entries, sorted(entries), "the index must be generated sorted")
@@ -192,6 +213,39 @@ class DependencyLicenseCorpusTests(unittest.TestCase):
         generator = GENERATOR.read_text(encoding="utf-8")
         self.assertIn("python3 scripts/generate_dependency_licenses.py", generator)
         self.assertIn("--check", generator)
+
+
+class CargoTreeTests(unittest.TestCase):
+    def test_tree_selection_keeps_all_targets_and_non_dev_edges(self):
+        output = """\
+clonk-app v1.0.0 (/workspace)
+├── normal-dependency v1.0.0
+└── build-dependency v2.0.0 (*)
+"""
+        with mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            return_value=mock.Mock(stdout=output),
+        ) as run:
+            self.assertEqual(
+                MODULE.cargo_tree_packages("clonk-app"),
+                {
+                    ("clonk-app", "1.0.0"),
+                    ("normal-dependency", "1.0.0"),
+                    ("build-dependency", "2.0.0"),
+                },
+            )
+
+        command = run.call_args.args[0]
+        self.assertIn("--target", command)
+        self.assertEqual(command[command.index("--target") + 1], "all")
+        self.assertIn("--edges", command)
+        self.assertEqual(command[command.index("--edges") + 1], "normal,build")
+        self.assertIn("--color", command)
+        self.assertEqual(command[command.index("--color") + 1], "never")
+        self.assertIn("--charset", command)
+        self.assertEqual(command[command.index("--charset") + 1], "utf8")
+        self.assertIn("--locked", command)
 
 
 class ReleaseGraphTests(unittest.TestCase):
