@@ -3197,6 +3197,24 @@ impl Engine {
         flags: i32,
         preserve_ids: Vec<ObjectId>,
     ) -> Result<bool, EngineError> {
+        // Native runs the whole switch inside `FnLoadScenarioSection`, so the
+        // callbacks below are reached with the requesting script frame still
+        // suspended on the stack. Mark that window for the host function; the
+        // marker is restored rather than cleared so nothing here depends on
+        // the switch being the outermost one.
+        let outer = std::mem::replace(&mut self.scenario_section_state.switch_in_flight, true);
+        let switched = self.perform_scenario_section_switch(name, flags, preserve_ids);
+        self.scenario_section_state.switch_in_flight = outer;
+        switched
+    }
+
+    /// `C4Game::LoadScenarioSection` proper (C4Game.cpp:4084-4237).
+    fn perform_scenario_section_switch(
+        &mut self,
+        name: &str,
+        flags: i32,
+        preserve_ids: Vec<ObjectId>,
+    ) -> Result<bool, EngineError> {
         if !self.scenario_section_state.current_registered {
             // C4Game::LoadScenarioSection creates the implicit current/root
             // node before it even looks up the requested target. Its

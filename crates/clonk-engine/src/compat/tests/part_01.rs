@@ -819,6 +819,27 @@ fn load_scenario_section_defaults_flags_to_zero() {
 }
 
 #[test]
+fn load_scenario_section_refuses_a_request_from_the_running_switch_own_callbacks() {
+    // Native reaches the switch's AssignRemoval and global ClearAll callbacks
+    // from inside FnLoadScenarioSection, so a section-switching pack's own
+    // re-entry guard is still set when they run. Here the switch is a deferred
+    // player command, so the guard is already clear and each callback would
+    // queue another switch (clonk-org/clonk-rs#1388).
+    let world = HostWorldContext::default()
+        .with_scenario_sections(["Main", "Mountains"])
+        .with_scenario_section_switch_in_flight(true);
+    let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+        load_scenario_section(&[Value::String("Mountains".into()), Value::Int(3)])
+    });
+
+    assert_eq!(
+        result.expect("a refused section request is not a script error"),
+        Value::Int(0)
+    );
+    assert!(outcome.player_commands.is_empty());
+}
+
+#[test]
 fn create_script_player_maps_the_exact_cpp_player_info_request() {
     assert_eq!(
         script_player_extra_data(Some(&Value::C4Id("ABCDE".to_string())))

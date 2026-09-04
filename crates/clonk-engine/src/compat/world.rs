@@ -2204,6 +2204,10 @@ pub struct HostWorldContext {
     /// the same VM invocation must already read the target dimensions.
     scenario_section_landscape_extents: Rc<HashMap<String, Option<(i32, i32)>>>,
     scenario_section_landscape_extent: Option<(i32, i32)>,
+    /// Whether the engine is already inside a section switch, i.e. whether
+    /// this callback is one native would have dispatched from within
+    /// `FnLoadScenarioSection` (`ScenarioSectionState::switch_in_flight`).
+    scenario_section_switch_in_flight: bool,
     /// C4SolidMask pixels not already baked into the landscape plane.
     /// Grid worlds bake MCVehic directly; column fixtures retain the same
     /// overlay used by movement/contact checks.
@@ -2499,6 +2503,7 @@ impl Default for HostWorldContext {
             scenario_sections: Rc::new(HashSet::new()),
             scenario_section_landscape_extents: Rc::new(HashMap::new()),
             scenario_section_landscape_extent: None,
+            scenario_section_switch_in_flight: false,
             movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -2955,6 +2960,7 @@ impl HostWorldContext {
             scenario_sections: Rc::new(HashSet::new()),
             scenario_section_landscape_extents: Rc::new(HashMap::new()),
             scenario_section_landscape_extent: None,
+            scenario_section_switch_in_flight: false,
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -4810,9 +4816,18 @@ impl HostWorldContext {
         }
     }
 
+    pub(crate) fn with_scenario_section_switch_in_flight(mut self, in_flight: bool) -> Self {
+        self.scenario_section_switch_in_flight = in_flight;
+        self
+    }
+
     pub(crate) fn scenario_section_known(&self, name: &str) -> bool {
         self.scenario_sections
             .contains(name.to_ascii_lowercase().as_str())
+    }
+
+    pub(crate) fn scenario_section_switch_in_flight(&self) -> bool {
+        self.scenario_section_switch_in_flight
     }
 
     pub(crate) fn scenario_value(
@@ -5978,6 +5993,25 @@ pub(crate) fn load_scenario_section(args: &[Value]) -> Result<Value, RuntimeErro
 
     with_host_context_mut(Ok(Value::Int(0)), |context| {
         if !context.world.scenario_section_known(&name) {
+            return Ok(Value::Int(0));
+        }
+        // Native performs the switch inline, so the AssignRemoval and global
+        // `ClearAll` callbacks it runs (C4Game.cpp:4190-4208) still observe
+        // the requesting script's own re-entry guard — S2Tower's
+        // `g_sect_is_loading` is the shipped example, and every section-
+        // switching pack carries one, because without it native recurses
+        // through `C4Game::LoadScenarioSection` until the process dies.
+        // Here the switch is a player command that runs after the requesting
+        // frame returned and cleared that guard, so those same callbacks ask
+        // for another switch and each one asks again. Refuse the re-entrant
+        // request: for guarded content this reproduces the native outcome,
+        // where the call is never reached at all.
+        if context.world.scenario_section_switch_in_flight() {
+            tracing::warn!(
+                section = name.as_str(),
+                flags,
+                "LoadScenarioSection from a scenario-section callback ignored"
+            );
             return Ok(Value::Int(0));
         }
         let preserve_ids = context
