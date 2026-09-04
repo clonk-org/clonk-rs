@@ -31,13 +31,11 @@ jobs:
   coverage-fragments:
     name: Rust coverage / ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    # The twelve rows span 322s to 830s of measured work, so one job-level
-    # number is sized for the shortest and leaves the longest a coin flip:
-    # `app 5/12` was cancelled at 15m16s with every test passing, evicting the
-    # 0.21.6 release entry (run 33573694787). `landing.yml` already carries a
-    # per-entry `timeout:`; this matches it. The 25 on `app 5/12` is a stopgap,
-    # not a budget -- clonk-org/clonk-rs#1453 removes the 51 redundant
-    # application boots that put it there, and brings this back to 15.
+    # The twelve rows use their measured budgets rather than one number sized
+    # for the shortest row. The presentation capture cases share one booted
+    # application fixture, so `app 5/12` remains within the common 15-minute
+    # qualification budget instead of paying for 51 redundant application
+    # boots. `landing.yml` carries the same per-entry timeout contract.
     timeout-minutes: ${{ matrix.timeout || 15 }}
     concurrency:
       group: "main-coverage-${{ matrix.artifact }}-${{ inputs.concurrency-suffix }}"
@@ -74,7 +72,7 @@ jobs:
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
           - name: app 5/12
-            timeout: 25
+            timeout: 15
             artifact: app-5
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-5 --no-fail-fast --locked

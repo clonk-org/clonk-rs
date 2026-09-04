@@ -4019,6 +4019,7 @@ fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
         offline_startup_players: None,
         offline_savegame: None,
         offline_random_seed: None,
+        worker: None,
     });
 
     app.prepare_network_savegame_recreation(false).test_value();

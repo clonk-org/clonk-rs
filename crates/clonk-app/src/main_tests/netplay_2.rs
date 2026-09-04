@@ -15126,6 +15126,7 @@ fn test_loading_state(
         offline_startup_players: None,
         offline_savegame: None,
         offline_random_seed: None,
+        worker: None,
     }
 }
 

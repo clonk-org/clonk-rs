@@ -4878,6 +4878,7 @@ impl GameApp {
     }
 
     pub(crate) fn return_to_menu(&mut self) {
+        self.stop_scenario_loading_worker();
         if std::mem::take(&mut self.abort_restart_pending) {
             if let Err(error) = self.restart_current_scenario() {
                 tracing::error!(%error, "failed to consume scheduled abort-dialog restart");
@@ -4889,6 +4890,7 @@ impl GameApp {
     }
 
     pub(crate) fn return_to_menu_for_relaunch(&mut self) {
+        self.stop_scenario_loading_worker();
         self.return_to_menu_with_dialog_restore(false, NetworkSessionTeardown::Clear);
     }
 
@@ -4899,7 +4901,19 @@ impl GameApp {
     /// the retained session into a lobby immediately afterwards, because this
     /// leaves it attached to a round that no longer exists.
     pub(crate) fn return_to_menu_retaining_network_session(&mut self) {
+        self.stop_scenario_loading_worker();
         self.return_to_menu_with_dialog_restore(false, NetworkSessionTeardown::Retain);
+    }
+
+    fn stop_scenario_loading_worker(&mut self) {
+        if let Some(loading) = self.loading_state.as_mut() {
+            loading.stop_worker();
+        }
+        // A load stopped before its Finished event (for example, the
+        // presentation checkpoint at 60%) never reaches poll_loading's normal
+        // loader-log teardown. Clear that process-global buffer only after the
+        // worker has stopped so no late report can repopulate the next case.
+        clonk_logging::deactivate_loader_log();
     }
 
     fn return_to_menu_with_dialog_restore(

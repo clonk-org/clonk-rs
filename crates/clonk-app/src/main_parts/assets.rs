@@ -1002,6 +1002,7 @@ pub(crate) const SCENARIO_LOADING_LOG_CAPACITY: usize = 1_000;
 pub(crate) struct ScenarioLoadingReporter {
     sender: mpsc::Sender<ScenarioLoadingEvent>,
     last_progress: i32,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl ScenarioLoadingReporter {
@@ -1009,11 +1010,25 @@ impl ScenarioLoadingReporter {
     /// loader a startup buffer before the round loads
     /// (`src/C4MessageBoard.cpp:223-251`).
     pub(crate) fn new(sender: mpsc::Sender<ScenarioLoadingEvent>) -> Self {
+        Self::new_with_cancel(sender, None)
+    }
+
+    pub(crate) fn new_with_cancel(
+        sender: mpsc::Sender<ScenarioLoadingEvent>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Self {
         clonk_logging::activate_loader_log();
         Self {
             sender,
             last_progress: 0,
+            cancel,
         }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(AtomicOrdering::Relaxed))
     }
 
     /// Records a phase milestone. The line goes into the same buffer the GUI
@@ -1021,6 +1036,9 @@ impl ScenarioLoadingReporter {
     /// milestones keeps its position instead of either source replacing the
     /// other (`src/C4Log.cpp:208-243`).
     pub(crate) fn report(&mut self, progress: i32, line: &str) {
+        if self.is_cancelled() {
+            return;
+        }
         self.last_progress = self.last_progress.max(progress.clamp(0, 99));
         clonk_logging::push_loader_log_line(line);
         let _ = self.sender.send(ScenarioLoadingEvent::LoaderFrame {
@@ -1030,6 +1048,9 @@ impl ScenarioLoadingReporter {
     }
 
     pub(crate) fn send(&self, event: ScenarioLoadingEvent) {
+        if self.is_cancelled() {
+            return;
+        }
         let _ = self.sender.send(event);
     }
 }
@@ -1109,6 +1130,36 @@ pub(crate) struct ScenarioLoadingState {
     /// Fresh local-round Parameters.RandomSeed, frozen before the async
     /// loader creates the dynamic landscape and reused for Engine creation.
     pub(crate) offline_random_seed: Option<u64>,
+    pub(crate) worker: Option<ScenarioLoadingWorker>,
+}
+
+pub(crate) struct ScenarioLoadingWorker {
+    cancel: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl ScenarioLoadingWorker {
+    pub(crate) fn new(cancel: Arc<AtomicBool>, join: thread::JoinHandle<()>) -> Self {
+        Self {
+            cancel,
+            join: Some(join),
+        }
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.cancel.store(true, AtomicOrdering::Relaxed);
+        if let Some(join) = self.join.take() {
+            if join.join().is_err() {
+                tracing::error!("scenario loading worker panicked");
+            }
+        }
+    }
+}
+
+impl Drop for ScenarioLoadingWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl ScenarioLoadingState {
@@ -1135,6 +1186,7 @@ impl ScenarioLoadingState {
             offline_startup_players: None,
             offline_savegame: None,
             offline_random_seed: None,
+            worker: None,
         }
     }
 
@@ -1190,6 +1242,13 @@ impl ScenarioLoadingState {
             offline_startup_players: None,
             offline_savegame: None,
             offline_random_seed: None,
+            worker: None,
+        }
+    }
+
+    pub(crate) fn stop_worker(&mut self) {
+        if let Some(worker) = self.worker.as_mut() {
+            worker.stop();
         }
     }
 
