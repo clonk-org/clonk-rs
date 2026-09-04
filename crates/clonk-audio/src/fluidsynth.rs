@@ -2,7 +2,7 @@ use std::ffi::{c_char, c_int, c_void, CString, OsStr};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use libloading::Library;
 
@@ -21,6 +21,11 @@ const MAX_EAGER_DECODE_SECONDS: u64 = 15 * 60;
 // forever by reporting an active voice that never releases.
 const MAX_VOICE_RELEASE_SECONDS: u64 = 15 * 60;
 const SDL_MIXER_FALLBACK_SOUNDFONT: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
+
+// FluidSynth's settings constructor initializes optional process-global audio
+// backends, including PortAudio. Those backends are not safe to initialize or
+// tear down concurrently, even though each synth can render independently.
+static FLUID_SYNTH_SETUP_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) struct MidiStream {
     timeline: MidiTimeline,
@@ -292,6 +297,13 @@ impl FluidSynth {
             return Err(midi_error("MIDI output sample rate is zero"));
         }
 
+        // Keep setup and its error-path cleanup together: new_fluid_settings
+        // reaches PortAudio's process-global initialization, while completed
+        // synth instances only touch their own state during rendering.
+        let _setup_guard = FLUID_SYNTH_SETUP_LOCK
+            .lock()
+            .map_err(|_| midi_error("FluidSynth setup lock poisoned"))?;
+
         let settings = unsafe { (api.new_fluid_settings)() };
         if settings.is_null() {
             return Err(midi_error("FluidSynth could not create settings"));
@@ -329,6 +341,10 @@ impl FluidSynth {
         }
         unsafe { (api.fluid_synth_set_gain)(synth, 1.0) };
 
+        // Raw setup is complete and all error paths above clean up directly.
+        // Release the guard before loading SoundFonts so a failed load can
+        // drop the instance and reacquire it for teardown without deadlocking.
+        drop(_setup_guard);
         let instance = Self {
             api,
             settings,
@@ -531,6 +547,12 @@ impl MidiSynth for FluidSynth {
 
 impl Drop for FluidSynth {
     fn drop(&mut self) {
+        // Keep teardown serialized with construction: FluidSynth's settings
+        // lifecycle reaches process-global audio backends as well, and a
+        // concurrent delete can race the next new_fluid_settings call.
+        let _setup_guard = FLUID_SYNTH_SETUP_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             (self.api.delete_fluid_synth)(self.synth);
             (self.api.delete_fluid_settings)(self.settings);

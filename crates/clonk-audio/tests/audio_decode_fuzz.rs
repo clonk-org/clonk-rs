@@ -229,6 +229,43 @@ fn every_audio_seed_decodes_or_reports_a_typed_error() {
     );
 }
 
+#[test]
+fn concurrent_midi_decodes_complete_without_backend_liveness_failure() {
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
+
+    let corpus = seeds();
+    let workers = 2;
+    let barrier = Arc::new(Barrier::new(workers));
+    let (sender, receiver) = mpsc::channel();
+    let mut worker_threads = Vec::new();
+    for worker in 0..workers {
+        let seed = corpus[14 + worker % 2].clone();
+        let barrier = Arc::clone(&barrier);
+        let sender = sender.clone();
+        worker_threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            let completed = decode_audio(&seed).is_ok();
+            sender
+                .send(completed)
+                .expect("completion receiver remains live");
+        }));
+    }
+    drop(sender);
+
+    for _ in 0..workers {
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(15))
+                .expect("concurrent MIDI decode must complete within 15 seconds"),
+            "concurrent MIDI decode must return a successful decode"
+        );
+    }
+    for worker in worker_threads {
+        worker.join().expect("MIDI decode worker must not panic");
+    }
+}
+
 /// The `fuzz/corpus/audio_decode/` seeds the libFuzzer target starts from.
 ///
 /// This deliberately does NOT decode them: twelve of the twenty-two are MIDI,
