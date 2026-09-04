@@ -1475,7 +1475,7 @@ pub(crate) async fn run_client_loop_with_routes(
                         request,
                         completion,
                     } => {
-                        let result = resource_state.publish_player_resource(request);
+                        let result = resource_state.publish_player_resource_with_path(request);
                         let _ = completion.send(result);
                     }
                     ClientCommand::BeginResourceDerive {

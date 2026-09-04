@@ -166,8 +166,9 @@ pub(crate) async fn handle_client_message(
                         if matches!(&packet, ResourcePacket::Derive(_)) {
                             let _ = state.resource_catalog.on_packet(client_id as i32, &packet);
                         }
-                        update_derived_resource_sources(
+                        update_derived_resource_sources_with_paths(
                             &mut state.published_player_sources,
+                            Some(&mut state.published_player_local_paths),
                             &events,
                         );
                         dispatch_host_resource_events(events, false, state).await;
@@ -1515,7 +1516,15 @@ async fn dispatch_packet(
                         })
                         .await;
                 }
-                state.published_player_sources.extend(loaded.local_sources);
+                state
+                    .published_player_sources
+                    .extend(loaded.local_sources.iter().cloned());
+                state.published_player_local_paths.extend(
+                    loaded
+                        .local_sources
+                        .iter()
+                        .map(|(path, _)| (path.clone(), path.clone())),
+                );
                 if relay_to_clients
                     && state.status_barrier.status.state == NETWORK_STATE_LOBBY
                     && resource_owner != HOST_CLIENT_ID as i32

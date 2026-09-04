@@ -26,6 +26,15 @@ pub struct ClientPlayerResourceRequest {
     pub group_maker: LegacyCString,
 }
 
+/// The resource core and the path the publishing process must use for its
+/// local `JoinPlayer` load. Directory player profiles use the packed
+/// standalone here, matching C++'s `GetStandalone` rewrite of `szFile`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedPlayerResource {
+    pub core: NetworkResourceCore,
+    pub local_path: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClientPlayerResourcePublication {
     pub core: NetworkResourceCore,

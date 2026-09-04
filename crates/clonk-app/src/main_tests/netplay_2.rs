@@ -6952,6 +6952,123 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
 }
 
 #[test]
+fn active_network_client_directory_runtime_join_uses_published_standalone_for_local_admission() {
+    // C4Network2Res::GetStandalone replaces a directory player's szFile with
+    // the packed standalone before C4Network2Players queues the resource-backed
+    // JoinPlayer, so the publishing process must join the same bytes as peers
+    // (src/C4Network2Res.cpp:589-629; src/C4Network2Players.cpp:353-382).
+    let fixture = tempdir();
+    let player_path = fixture.path().join("Runtime.c4p");
+    fs::create_dir(&player_path).test_value();
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=Runtime\n[Preferences]\nColorDw=6636321\n",
+    )
+    .test_value();
+    let standalone_path = fixture.path().join("Network").join("Runtime.c4p");
+    fs::create_dir_all(standalone_path.parent().test_value()).test_value();
+    let mut standalone_group = clonk_resources::MutableGroup::new("Runtime.c4p");
+    standalone_group
+        .add_file(
+            "Player.txt",
+            b"[Player]\nName=Runtime\n[Preferences]\nColorDw=6636321\n".to_vec(),
+        )
+        .test_value();
+    fs::write(&standalone_path, standalone_group.pack().test_value()).test_value();
+
+    let mut app = new_running_sandbox_app();
+    let (manager, _event_tx, commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
+    app.control_clients.register(7, true, false);
+
+    let wire_name = clonk_engine::LegacyCString::from_bytes(
+        player_path.as_os_str().as_encoded_bytes().to_vec(),
+    )
+    .test_value();
+    let resource = n2_fixture!(player_resource: 7 << 16, wire_name);
+    let publication = clonk_network::PublishedPlayerResource {
+        core: resource.clone(),
+        local_path: standalone_path.clone(),
+    };
+    let command_observer = thread::spawn(move || {
+        commands.complete_initial_client_join_with_publications(vec![publication])
+    });
+
+    n2_join_runtime_player(&mut app, &player_path);
+    main_assert_eq!(
+        app.admission_resources.complete_path(resource.id) =>
+        Some(standalone_path.as_path()),
+        "a directory player joins from the published standalone on its owning client"
+    );
+    drop(app.network.take());
+    command_observer.test_join();
+}
+
+#[test]
+fn active_network_host_directory_runtime_join_uses_published_standalone_for_local_admission() {
+    // The host's local JoinPlayer consumes the same resource path that it
+    // advertises to peers; C++ rewrites a directory source to its packed
+    // standalone before queuing the join (src/C4Network2Res.cpp:589-629;
+    // src/C4Network2Players.cpp:353-382).
+    let fixture = tempdir();
+    let player_path = fixture.path().join("Runtime.c4p");
+    fs::create_dir(&player_path).test_value();
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=Runtime\n[Preferences]\nColorDw=6636321\n",
+    )
+    .test_value();
+    let standalone_path = fixture.path().join("Network").join("Runtime.c4p");
+    fs::create_dir_all(standalone_path.parent().test_value()).test_value();
+    let mut standalone_group = clonk_resources::MutableGroup::new("Runtime.c4p");
+    standalone_group
+        .add_file(
+            "Player.txt",
+            b"[Player]\nName=Runtime\n[Preferences]\nColorDw=6636321\n".to_vec(),
+        )
+        .test_value();
+    fs::write(&standalone_path, standalone_group.pack().test_value()).test_value();
+
+    let mut app = new_running_sandbox_app();
+    app.players.local_name = "Exact host maker".to_string();
+    app.control_clients.register(0, true, false);
+    app.control_player_infos.replace_snapshot(40, []);
+    let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+
+    let wire_name = clonk_engine::LegacyCString::from_bytes(
+        player_path.as_os_str().as_encoded_bytes().to_vec(),
+    )
+    .test_value();
+    let resource = n2_fixture!(player_resource: 17, wire_name);
+    let publication = clonk_network::PublishedPlayerResource {
+        core: resource.clone(),
+        local_path: standalone_path.clone(),
+    };
+    let (direct_ready, direct_wait) = std::sync::mpsc::channel();
+    let command_observer = thread::spawn(move || {
+        commands.complete_runtime_host_join_with_publication(
+            publication,
+            event_tx,
+            direct_ready,
+        )
+    });
+
+    n2_join_runtime_player(&mut app, &player_path);
+    main_assert_eq!(
+        app.admission_resources.complete_path(resource.id) =>
+        Some(standalone_path.as_path()),
+        "the host must admit a directory player from its published standalone"
+    );
+    direct_wait.recv_timeout(Duration::from_secs(1)).test_value();
+    app.test_network_events();
+    drop(app.network.take());
+    command_observer.test_join();
+}
+
+#[test]
 fn deactivated_network_client_can_request_runtime_player_join() {
     // JoinLocalPlayer permits an inactive non-observer to send its
     // CIF_AddPlayers PID_PlayerInfoUpdReq, then requests activation

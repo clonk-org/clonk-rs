@@ -101,7 +101,7 @@ pub use client_mesh::{
 pub use client_player_resource::{
     publish_client_player_resource, ClientPlayerResourcePublication,
     ClientPlayerResourcePublicationError, ClientPlayerResourcePublicationSpec,
-    ClientPlayerResourceRequest,
+    ClientPlayerResourceRequest, PublishedPlayerResource,
 };
 pub use connection_handshake::{
     run_client_connection_handshake, run_host_connection_handshake, ClientConnectionHandshake,

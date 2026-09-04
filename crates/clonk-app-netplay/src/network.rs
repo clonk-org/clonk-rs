@@ -2013,8 +2013,24 @@ impl TestNetworkCommands {
     }
 
     pub fn complete_runtime_host_join(
-        mut self,
+        self,
         published_core: clonk_engine::NetworkResourceCore,
+        event_tx: NetworkEventSender,
+        direct_ready: Sender<()>,
+    ) -> RuntimeHostJoinResult {
+        self.complete_runtime_host_join_with_publication(
+            clonk_network::PublishedPlayerResource {
+                core: published_core,
+                local_path: PathBuf::new(),
+            },
+            event_tx,
+            direct_ready,
+        )
+    }
+
+    pub fn complete_runtime_host_join_with_publication(
+        mut self,
+        published: clonk_network::PublishedPlayerResource,
         event_tx: NetworkEventSender,
         direct_ready: Sender<()>,
     ) -> RuntimeHostJoinResult {
@@ -2030,8 +2046,16 @@ impl TestNetworkCommands {
                     completion,
                 }) => {
                     order.push("publish");
+                    let local_path = if published.local_path.as_os_str().is_empty() {
+                        request.source_path.clone()
+                    } else {
+                        published.local_path.clone()
+                    };
                     publications.push(request);
-                    let _ = completion.send(Ok(published_core.clone()));
+                    let _ = completion.send(Ok(clonk_network::PublishedPlayerResource {
+                        core: published.core.clone(),
+                        local_path,
+                    }));
                 }
                 Ok(NetworkCommand::BroadcastPlayerInfo(info)) => {
                     order.push("player-info");
@@ -2091,10 +2115,65 @@ impl TestNetworkCommands {
                     completion,
                 }) => {
                     order.push("publish");
+                    let local_path = request.source_path.clone();
                     let result = published_cores
                         .get(publications.len())
                         .cloned()
+                        .map(|core| clonk_network::PublishedPlayerResource { core, local_path })
                         .ok_or_else(|| "test did not provide a publication core".to_string());
+                    publications.push(request);
+                    let _ = completion.send(result);
+                }
+                Ok(NetworkCommand::SubmitJoinPlayerInfoUpdate(request)) => {
+                    order.push("player-info");
+                    player_infos.push(request);
+                }
+                Ok(NetworkCommand::AcknowledgeRequestedStatus {
+                    mut status,
+                    current_control_tick,
+                    ..
+                }) => {
+                    order.push("status-ack");
+                    status.target_tick = current_control_tick;
+                    acknowledgements.push(status);
+                    break;
+                }
+                Ok(NetworkCommand::Shutdown) => break,
+                Ok(command) => panic!("unexpected initial-client command: {command:?}"),
+                Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(tokio_mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        (order, publications, player_infos, acknowledgements)
+    }
+
+    pub fn complete_initial_client_join_with_publications(
+        mut self,
+        published: Vec<clonk_network::PublishedPlayerResource>,
+    ) -> (
+        Vec<&'static str>,
+        Vec<ClientPlayerResourceRequest>,
+        Vec<clonk_network::PlayerInfoUpdateRequest>,
+        Vec<NetworkStatus>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut order = Vec::new();
+        let mut publications = Vec::new();
+        let mut player_infos = Vec::new();
+        let mut acknowledgements = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match self.command_rx.try_recv() {
+                Ok(NetworkCommand::PublishPlayerResource {
+                    request,
+                    completion,
+                }) => {
+                    order.push("publish");
+                    let result = published
+                        .get(publications.len())
+                        .cloned()
+                        .ok_or_else(|| "test did not provide a publication".to_string());
                     publications.push(request);
                     let _ = completion.send(result);
                 }
@@ -2141,11 +2220,16 @@ impl TestNetworkCommands {
         let mut player_infos = Vec::new();
         while std::time::Instant::now() < deadline {
             match self.command_rx.try_recv() {
-                Ok(NetworkCommand::PublishPlayerResource { completion, .. }) => {
+                Ok(NetworkCommand::PublishPlayerResource {
+                    request,
+                    completion,
+                }) => {
                     order.push("publish");
+                    let local_path = request.source_path.clone();
                     let result = published_cores
                         .get(publications)
                         .cloned()
+                        .map(|core| clonk_network::PublishedPlayerResource { core, local_path })
                         .ok_or_else(|| "test did not provide a publication core".to_string());
                     publications += 1;
                     let _ = completion.send(result);
@@ -3067,7 +3151,7 @@ enum NetworkCommand {
     },
     PublishPlayerResource {
         request: ClientPlayerResourceRequest,
-        completion: Sender<std::result::Result<clonk_engine::NetworkResourceCore, String>>,
+        completion: Sender<std::result::Result<clonk_network::PublishedPlayerResource, String>>,
     },
     BeginResourceDerive {
         resource_id: i32,
@@ -4392,6 +4476,14 @@ impl NetworkManager {
         &self,
         request: ClientPlayerResourceRequest,
     ) -> Result<clonk_engine::NetworkResourceCore> {
+        self.publish_client_player_resource_with_path(request)
+            .map(|publication| publication.core)
+    }
+
+    pub fn publish_client_player_resource_with_path(
+        &self,
+        request: ClientPlayerResourceRequest,
+    ) -> Result<clonk_network::PublishedPlayerResource> {
         if self.role != NetworkRole::Client {
             return Err(anyhow!(
                 "only a network client may publish a client player resource"
@@ -4414,6 +4506,14 @@ impl NetworkManager {
         &self,
         request: ClientPlayerResourceRequest,
     ) -> Result<clonk_engine::NetworkResourceCore> {
+        self.publish_host_player_resource_with_path(request)
+            .map(|publication| publication.core)
+    }
+
+    pub fn publish_host_player_resource_with_path(
+        &self,
+        request: ClientPlayerResourceRequest,
+    ) -> Result<clonk_network::PublishedPlayerResource> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(
                 "only a network host may publish a host player resource"
@@ -6830,7 +6930,7 @@ async fn run_host_worker_with_voice_enabled(
                         completion,
                     } => {
                         let result = host
-                            .publish_player_resource(request)
+                            .publish_player_resource_with_path(request)
                             .await
                             .map_err(|error| error.to_string());
                         let _ = completion.send(result);
@@ -8542,7 +8642,7 @@ async fn run_client_worker_with_voice_enabled(
                         completion,
                     } => {
                         let result = client
-                            .publish_player_resource(request)
+                            .publish_player_resource_with_path(request)
                             .await
                             .map_err(|error| error.to_string());
                         let _ = completion.send(result);
@@ -13022,7 +13122,12 @@ Message=Server says Andr\xe9\r\n\
             loadable: true,
             ..Default::default()
         };
-        completion.send(Ok(core.clone())).test_value();
+        completion
+            .send(Ok(clonk_network::PublishedPlayerResource {
+                core: core.clone(),
+                local_path: request.source_path.clone(),
+            }))
+            .test_value();
 
         assert_eq!(
             caller.join().expect("publication caller exits").unwrap(),

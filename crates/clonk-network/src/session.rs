@@ -1213,6 +1213,7 @@ mod tests {
             resource_catalog: crate::ResourceCatalog::new(HOST_CLIENT_ID as i32),
             resource_backend: None,
             published_player_sources: BTreeMap::new(),
+            published_player_local_paths: BTreeMap::new(),
             resource_resolver,
             resource_epoch: Instant::now(),
             next_connection_id: 0,
@@ -8269,10 +8270,10 @@ mod tests {
         };
 
         let original = state
-            .publish_player_resource(request(b"First.c4p", b"First maker"))
+            .publish_player_resource_with_path(request(b"First.c4p", b"First maker"))
             .test_value();
         let reused = state
-            .publish_player_resource(request(b"Second.c4p", b"Second maker"))
+            .publish_player_resource_with_path(request(b"Second.c4p", b"Second maker"))
             .test_value();
 
         assert_eq!(reused, original);
@@ -8323,14 +8324,14 @@ mod tests {
         );
 
         let reused = state
-            .publish_player_resource(crate::ClientPlayerResourceRequest {
+            .publish_player_resource_with_path(crate::ClientPlayerResourceRequest {
                 source_path: player,
                 wire_name: c4(b"Renamed.c4p"),
                 group_maker: c4(b"Client maker"),
             })
             .test_value();
 
-        assert_eq!(reused, publication.core);
+        assert_eq!(reused.core, publication.core);
         assert_eq!(state.catalog.allocate_resource_id(), 7 << 16);
     }
 
@@ -8448,15 +8449,24 @@ mod tests {
         );
 
         let published = state
-            .publish_player_resource(crate::ClientPlayerResourceRequest {
-                source_path: player,
+            .publish_player_resource_with_path(crate::ClientPlayerResourceRequest {
+                source_path: player.clone(),
                 wire_name: c4(b"Shared.c4p"),
                 group_maker: c4(b"Client maker"),
             })
             .test_value();
 
-        assert_ne!(published, publication.core);
-        assert_eq!(published.id, 7 << 16);
+        assert_ne!(published.core, publication.core);
+        assert_eq!(published.core.id, 7 << 16);
+        let backend_path = state
+            .backend
+            .as_ref()
+            .test_value()
+            .path(published.core.id)
+            .test_value();
+        assert_eq!(published.local_path.as_path(), backend_path);
+        assert_ne!(published.local_path, player);
+        assert!(published.local_path.is_file());
     }
 
     #[test]
@@ -8504,14 +8514,14 @@ mod tests {
         assert_eq!(completed, vec![(player.clone(), publication.core.clone())]);
 
         let reused = state
-            .publish_player_resource(crate::ClientPlayerResourceRequest {
+            .publish_player_resource_with_path(crate::ClientPlayerResourceRequest {
                 source_path: player,
                 wire_name: c4(b"Renamed.c4p"),
                 group_maker: c4(b"Client maker"),
             })
             .test_value();
 
-        assert_eq!(reused, publication.core);
+        assert_eq!(reused.core, publication.core);
         assert_eq!(state.catalog.allocate_resource_id(), 7 << 16);
     }
 
@@ -8554,8 +8564,9 @@ mod tests {
         )
         .test_value();
         let direct_core = direct_state
-            .publish_player_resource(request.clone())
+            .publish_player_resource_with_path(request.clone())
             .test_value();
+        let direct_core = direct_core.core;
         assert_eq!(direct_core.id, 7 << 16);
         assert!(direct_state.catalog.contains_resource(direct_core.id));
         let direct_backend = direct_state.backend.as_ref().test_value();
@@ -8798,6 +8809,178 @@ mod tests {
         }
 
         host.shutdown().await.test_value();
+    }
+
+    #[test]
+    fn host_player_publication_returns_the_packed_path_for_a_directory_source() {
+        // C4Network2Res::GetStandalone replaces a directory player's szFile
+        // with the packed standalone before C4Network2Players queues the
+        // resource-backed JoinPlayer, so the host must retain that same path
+        // for its local load (src/C4Network2Res.cpp:589-629;
+        // src/C4Network2Players.cpp:353-382).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("HostRuntime.c4p");
+        fs::create_dir(&player).test_value();
+        fs::write(
+            player.join("Player.txt"),
+            b"[Player]\nName=Host Runtime\n[Preferences]\nColorDw=1193046\n",
+        )
+        .test_value();
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state.config.resource_directory = Some(directories.host.clone());
+        state.resource_backend = Some(
+            crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directories.host.clone())
+                .test_value(),
+        );
+        let request = crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: c4(b"HostRuntime.c4p"),
+            group_maker: c4(b"Host"),
+        };
+
+        let published =
+            publish_host_player_resource_with_path(request.clone(), &mut state).test_value();
+        let backend_path = state
+            .resource_backend
+            .as_ref()
+            .test_value()
+            .path(published.core.id)
+            .test_value();
+        assert_eq!(published.local_path.as_path(), backend_path);
+        assert_ne!(published.local_path, player);
+        assert!(published.local_path.is_file());
+
+        let reused = publish_host_player_resource_with_path(request, &mut state).test_value();
+        assert_eq!(reused, published);
+    }
+
+    #[test]
+    fn cached_host_directory_publication_keeps_packed_path_after_source_disappears() {
+        // A cached C4Network2Res keeps the standalone selected by GetStandalone
+        // even if the original directory is later renamed or removed
+        // (src/C4Network2Res.cpp:589-629).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("HostRuntime.c4p");
+        fs::create_dir(&player).test_value();
+        fs::write(
+            player.join("Player.txt"),
+            b"[Player]\nName=Host Runtime\n[Preferences]\nColorDw=1193046\n",
+        )
+        .test_value();
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state.config.resource_directory = Some(directories.host.clone());
+        state.resource_backend = Some(
+            crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directories.host.clone())
+                .test_value(),
+        );
+        let request = crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: c4(b"HostRuntime.c4p"),
+            group_maker: c4(b"Host"),
+        };
+
+        let published =
+            publish_host_player_resource_with_path(request.clone(), &mut state).test_value();
+        fs::remove_dir_all(&player).test_value();
+
+        let reused = publish_host_player_resource_with_path(request, &mut state).test_value();
+        assert_eq!(reused, published);
+        assert!(reused.local_path.is_file());
+    }
+
+    #[test]
+    fn cached_host_player_publication_uses_the_derived_standalone_path() {
+        // FinishDerive creates a new standalone for the rewritten player and
+        // rebinds the anonymous resource to that path
+        // (src/C4Network2Res.cpp:718-823). The host's source cache must move
+        // the effective local path along with the updated core.
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("HostRuntime.c4p");
+        fs::create_dir(&player).test_value();
+        fs::write(player.join("Player.txt"), b"player core").test_value();
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state.config.resource_directory = Some(directories.host.clone());
+        state.resource_backend = Some(
+            crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directories.host.clone())
+                .test_value(),
+        );
+        let request = crate::ClientPlayerResourceRequest {
+            source_path: player,
+            wire_name: c4(b"HostRuntime.c4p"),
+            group_maker: c4(b"Host"),
+        };
+
+        let published =
+            publish_host_player_resource_with_path(request.clone(), &mut state).test_value();
+        let previous_path = published.local_path.clone();
+        let derivation = begin_host_resource_derive(
+            published.core.id,
+            previous_path.clone(),
+            crate::ResourceFileOwnership::Persistent,
+            &mut state,
+        )
+        .test_value();
+        let (derived, _events) = finish_host_resource_derive(derivation, &mut state).test_value();
+        let derived_path = state
+            .resource_backend
+            .as_ref()
+            .test_value()
+            .path(derived.id)
+            .test_value()
+            .to_path_buf();
+        assert_ne!(derived_path, previous_path);
+
+        let reused = publish_host_player_resource_with_path(request, &mut state).test_value();
+        assert_eq!(reused.core, derived);
+        assert_eq!(reused.local_path, derived_path);
+        assert!(reused.local_path.is_file());
+    }
+
+    #[test]
+    fn cached_host_player_publication_keeps_the_original_path_for_a_file_source() {
+        // GetStandalone leaves a regular player's szFile unchanged; only a
+        // directory source is rewritten to its packed standalone before the
+        // resource-backed JoinPlayer (src/C4Network2Res.cpp:589-629;
+        // src/C4Network2Players.cpp:353-382).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("HostRuntime.c4p");
+        let mut group = MutableGroup::new("HostRuntime.c4p");
+        group
+            .add_file(
+                "Player.txt",
+                b"[Player]\nName=Host Runtime\n[Preferences]\nColorDw=1193046\n".to_vec(),
+            )
+            .test_value();
+        fs::write(&player, group.pack().test_value()).test_value();
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state.config.resource_directory = Some(directories.host.clone());
+        state.resource_backend = Some(
+            crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directories.host.clone())
+                .test_value(),
+        );
+        let request = crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: c4(b"HostRuntime.c4p"),
+            group_maker: c4(b"Host"),
+        };
+
+        let published =
+            publish_host_player_resource_with_path(request.clone(), &mut state).test_value();
+        let backend_path = state
+            .resource_backend
+            .as_ref()
+            .test_value()
+            .path(published.core.id)
+            .test_value();
+        assert_eq!(published.local_path, player);
+        assert_ne!(backend_path, player);
+
+        let reused = publish_host_player_resource_with_path(request, &mut state).test_value();
+        assert_eq!(reused.local_path, player);
     }
 
     #[tokio::test(flavor = "current_thread")]
