@@ -64,6 +64,7 @@ shard_modules!(
     environment_placement_profile,
     far_worlds_arctic_harpoon_drop,
     gamma,
+    gidl_race_probe,
     get_inventory,
     get_material_color,
     get_material_val,

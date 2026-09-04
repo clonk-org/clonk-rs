@@ -3066,8 +3066,31 @@ impl Engine {
     /// cleared without recursively running another destruction lifecycle.
     fn remove_active_objects_for_scenario_section(
         &mut self,
-        _preserved: &HashSet<ObjectId>,
+        preserve_order: &[ObjectId],
     ) -> Result<(), EngineError> {
+        // A nested SetObjectStatus(STATUS_Inactive) is folded after the
+        // deferred LoadScenarioSection command. Materialize that status before
+        // teardown so the same objects survive DeleteObjects(false), as they
+        // do in C4Object::StatusDeactivate (C4Object.cpp:5987-6007) before
+        // C4Game::LoadScenarioSection removes the active list
+        // (C4Game.cpp:4190-4201).
+        for object_id in preserve_order {
+            let Some(index) = self.find_object_index(*object_id) else {
+                continue;
+            };
+            if self.objects[index].destroyed
+                || self.objects[index].state.status != ObjectStatus::Normal
+            {
+                continue;
+            }
+            self.objects[index].state.status = ObjectStatus::Inactive;
+            self.update_inactive_list_for_status_change(
+                *object_id,
+                ObjectStatus::Normal,
+                ObjectStatus::Inactive,
+            );
+        }
+
         // `Objects.First` is the reverse of Rust's execution order. Native
         // follows the live Next link after each AssignRemoval: callbacks may
         // unlink a future object by deactivating it or insert a new object on
@@ -3246,7 +3269,7 @@ impl Engine {
             return Ok(false);
         }
 
-        let preserved = preserve_ids.into_iter().collect::<HashSet<_>>();
+        let preserved = preserve_ids.iter().copied().collect::<HashSet<_>>();
         let departing_pxs = self.pxs_system.clone();
         let departing_mass_movers = self.mass_movers.clone();
         let departing_key = self.scenario_section_state.current.to_ascii_lowercase();
@@ -3402,7 +3425,7 @@ impl Engine {
         // also clears effect command targets, so global Stop callbacks cannot
         // dispatch through or enumerate a departing object
         // (C4Game.cpp:4190-4208).
-        self.remove_active_objects_for_scenario_section(&preserved)?;
+        self.remove_active_objects_for_scenario_section(&preserve_ids)?;
 
         // ClearAll runs every original Stop callback tail-first and leaves its
         // nodes linked dead. Capture the complete post-callback engine state:
