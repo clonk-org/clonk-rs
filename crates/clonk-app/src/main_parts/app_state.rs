@@ -7021,6 +7021,10 @@ impl MenuState {
         }
     }
 
+    pub(crate) fn includes_back(&self) -> bool {
+        self.include_back
+    }
+
     /// The scenario behind the menu's selected row, if any.
     pub(crate) fn selected_scenario(&self) -> Option<&FrontendScenario> {
         if let Some(map) = self.current_map() {

@@ -2690,6 +2690,9 @@ mod tests {
         app: crate::GameApp,
         _environment: ScopedCaptureEnvironment,
         _user_data: tempfile::TempDir,
+        baseline_menu_stack: Vec<crate::MenuLayer>,
+        baseline_include_back: bool,
+        baseline_startup_dialog: crate::StartupDialog,
         case_started: bool,
     }
 
@@ -2698,10 +2701,16 @@ mod tests {
     impl SharedCaptureFixture {
         fn new() -> Result<Self> {
             let (environment, user_data, app) = real_capture_app()?;
+            let baseline_menu_stack = app.menu_state.stack.clone();
+            let baseline_include_back = app.menu_state.includes_back();
+            let baseline_startup_dialog = app.last_startup_dialog;
             Ok(Self {
                 app,
                 _environment: environment,
                 _user_data: user_data,
+                baseline_menu_stack,
+                baseline_include_back,
+                baseline_startup_dialog,
                 case_started: false,
             })
         }
@@ -2714,7 +2723,21 @@ mod tests {
         }
 
         fn reset(&mut self) {
+            // Every live case starts from the first boot's remembered dialog;
+            // otherwise return_to_menu would reopen whichever startup screen
+            // the previous case last selected.
+            self.app.last_startup_dialog = self.baseline_startup_dialog;
             self.app.return_to_menu();
+            self.app.cancel_scenario_selector_discovery();
+            self.app.menu_state.stack = self.baseline_menu_stack.clone();
+            self.app.menu_state.clear_search();
+            self.app
+                .menu_state
+                .set_include_back(self.baseline_include_back);
+            self.app.menu_state.refresh_menu_entries();
+            self.app.menu_backdrop_cache = crate::StartupBackdropCache::default();
+            crate::seed_classic_safe_random(1);
+            clonk_engine::particles::clear_presentation_safe_random_seed();
         }
 
         fn app(&mut self) -> &mut crate::GameApp {
@@ -2732,13 +2755,25 @@ mod tests {
         case: impl FnOnce(&mut SharedCaptureFixture) -> Result<()>,
         failures: &mut Vec<String>,
     ) {
-        fixture.prepare_case();
-        eprintln!("running presentation capture subcase `{name}`");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| case(fixture)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fixture.prepare_case();
+            eprintln!("running presentation capture subcase `{name}`");
+            case(fixture)
+        }));
         match result {
             Ok(Ok(())) => {}
             Ok(Err(error)) => failures.push(format!("{name}: {error:#}")),
             Err(_) => failures.push(format!("{name}: panicked")),
+        }
+
+        let teardown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if fixture.case_started {
+                fixture.reset();
+            }
+        }));
+        match teardown {
+            Ok(()) => fixture.case_started = false,
+            Err(_) => failures.push(format!("{name}: teardown panicked")),
         }
     }
 

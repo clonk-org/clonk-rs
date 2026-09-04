@@ -222,6 +222,9 @@ pub fn install_presentation_safe_random_seed(seed: u32) {
 #[cfg(any(test, feature = "presentation-capture"))]
 pub fn clear_presentation_safe_random_seed() {
     PRESENTATION_SAFE_RANDOM_SEED_ACTIVE.store(false, Ordering::SeqCst);
+    // The capture seed also resets the thread-local script SafeRandom stream;
+    // dropping a capture guard must leave the ordinary default stream behind.
+    crate::compat::seed_script_safe_random(1);
 }
 
 /// Start one process-wide presentation `SafeRandom` call-structure capture.
@@ -2980,6 +2983,15 @@ mod tests {
         assert_eq!(capture_default.random(10_000), expected.random(10_000));
 
         clear_presentation_safe_random_seed();
+    }
+
+    #[test]
+    fn clearing_capture_seed_restores_the_default_script_stream() {
+        install_presentation_safe_random_seed(587);
+        clear_presentation_safe_random_seed();
+
+        let mut expected = SafeRng::new(1);
+        assert_eq!(crate::compat::script_safe_random(7), expected.random(7));
     }
 
     #[test]

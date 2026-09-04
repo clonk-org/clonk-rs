@@ -1278,8 +1278,11 @@ impl GameApp {
             .flatten();
         let global_system_scripts = self.global_scripts_for_session();
 
-        thread::spawn(move || {
-            let mut reporter = ScenarioLoadingReporter::new(sender);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker = thread::spawn(move || {
+            let mut reporter =
+                ScenarioLoadingReporter::new_with_cancel(sender, Some(worker_cancel));
             let resolver = InstallDefinitionResolver::new(resolver_paths);
             let scenario_data = if let Some(preloaded_scenario) = preloaded_scenario {
                 reporter.report(93, "Scenario preload ready");
@@ -1373,6 +1376,7 @@ impl GameApp {
         loading_state.offline_startup_players = offline_startup_players;
         loading_state.offline_savegame = offline_savegame;
         loading_state.offline_random_seed = offline_random_seed;
+        loading_state.worker = Some(ScenarioLoadingWorker::new(cancel, worker));
         // C4Game::Init re-arms the loader gate as a load *begins*
         // (C4Game.cpp:351-352); `Finished` alone leaves it saturated at 100 and
         // swallows the next load's 4%..93% (clonk-org/clonk-rs#1115).
