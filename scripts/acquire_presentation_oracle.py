@@ -5681,6 +5681,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"copy only complete validated evidence to {ACCEPTED_DESTINATION}",
     )
+    acquire.add_argument(
+        "--accepted-destination",
+        type=Path,
+        default=None,
+        help=(
+            "accept into this directory instead of "
+            f"{ACCEPTED_DESTINATION}. Acquisition requires a clean source "
+            "revision, so the tracked bundle cannot be removed first to make "
+            "room for a re-record; write elsewhere and replace it in a commit."
+        ),
+    )
 
     validate = subparsers.add_parser("validate", help="validate two complete instrumented runs")
     validate.add_argument("--oracle-root", required=True, type=Path)
@@ -5745,6 +5756,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 options.oracle_root,
                 options.output_dir,
                 accept=options.accept,
+                accepted_destination=options.accepted_destination,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
