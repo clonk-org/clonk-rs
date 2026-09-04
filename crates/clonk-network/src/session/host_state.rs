@@ -140,6 +140,7 @@ pub(crate) struct HostState {
     pub(crate) resource_catalog: crate::ResourceCatalog,
     pub(crate) resource_backend: Option<crate::ResourceTransferBackend>,
     pub(crate) published_player_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    pub(crate) published_player_local_paths: BTreeMap<PathBuf, PathBuf>,
     pub(crate) resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
     pub(crate) resource_epoch: Instant,
     pub(crate) next_connection_id: u32,
@@ -265,9 +266,26 @@ pub(crate) struct PreparedHostRoundConfig {
     resource_catalog: crate::ResourceCatalog,
     resource_backend: Option<crate::ResourceTransferBackend>,
     published_player_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    published_player_local_paths: BTreeMap<PathBuf, PathBuf>,
     resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
     join_snapshot: Option<HostJoinSnapshot>,
     client_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+}
+
+pub(crate) fn configured_player_resource_local_path(
+    source_path: &Path,
+    core: &clonk_engine::NetworkResourceCore,
+    resource_files: &[crate::HostedResourceFile],
+) -> PathBuf {
+    if source_path.is_dir() || !source_path.exists() {
+        resource_files
+            .iter()
+            .find(|resource| resource.core.id == core.id)
+            .map(|resource| resource.path.clone())
+            .unwrap_or_else(|| source_path.to_path_buf())
+    } else {
+        source_path.to_path_buf()
+    }
 }
 
 pub(crate) fn prepare_host_round_config(
@@ -411,6 +429,22 @@ pub(crate) fn prepare_host_round_config(
             .filter(|(_, core)| retained_resource_ids.contains(&core.id))
             .cloned(),
     );
+    let mut published_player_local_paths = state.published_player_local_paths.clone();
+    published_player_local_paths.retain(|source_path, _| {
+        published_player_sources
+            .get(source_path)
+            .is_some_and(|core| retained_resource_ids.contains(&core.id))
+    });
+    for (source_path, core) in config
+        .player_resource_sources
+        .iter()
+        .filter(|(_, core)| retained_resource_ids.contains(&core.id))
+    {
+        published_player_local_paths.insert(
+            source_path.clone(),
+            configured_player_resource_local_path(source_path, core, &config.resource_files),
+        );
+    }
     let join_snapshot = config.initial_join_snapshot.clone();
 
     let mut coordinator =
@@ -429,6 +463,7 @@ pub(crate) fn prepare_host_round_config(
         resource_catalog,
         resource_backend,
         published_player_sources,
+        published_player_local_paths,
         resource_resolver,
         join_snapshot,
         client_cores,
@@ -449,6 +484,7 @@ pub(crate) fn install_prepared_host_round_config(
     state.resource_backend = prepared.resource_backend.take();
     state.resource_catalog = prepared.resource_catalog;
     state.published_player_sources = prepared.published_player_sources;
+    state.published_player_local_paths = prepared.published_player_local_paths;
     state.resource_resolver = prepared.resource_resolver;
     state.join_snapshot = prepared.join_snapshot;
     state.dynamic_required_clients.clear();
@@ -1319,17 +1355,16 @@ pub(crate) fn publish_host_player_resource_with_path(
     // before AddByFile, so selecting the same local file reuses its core.
     if let Some(core) = state.published_player_sources.get(&request.source_path) {
         let local_path = state
-            .resource_backend
-            .as_ref()
-            .and_then(|backend| {
-                request
-                    .source_path
-                    .is_dir()
-                    .then(|| backend.path(core.id))
-                    .flatten()
-            })
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| request.source_path.clone());
+            .published_player_local_paths
+            .get(&request.source_path)
+            .filter(|path| path.is_file())
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "cached player resource {} has no loadable local path",
+                    request.source_path.display()
+                )
+            })?;
         return Ok(crate::PublishedPlayerResource {
             core: core.clone(),
             local_path,
@@ -1401,7 +1436,10 @@ pub(crate) fn publish_host_player_resource_with_path(
     }
     state
         .published_player_sources
-        .insert(source_path, core.clone());
+        .insert(source_path.clone(), core.clone());
+    state
+        .published_player_local_paths
+        .insert(source_path, local_path.clone());
     Ok(crate::PublishedPlayerResource { core, local_path })
 }
 

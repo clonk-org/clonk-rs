@@ -1515,7 +1515,15 @@ async fn dispatch_packet(
                         })
                         .await;
                 }
-                state.published_player_sources.extend(loaded.local_sources);
+                state
+                    .published_player_sources
+                    .extend(loaded.local_sources.iter().cloned());
+                state.published_player_local_paths.extend(
+                    loaded
+                        .local_sources
+                        .iter()
+                        .map(|(path, _)| (path.clone(), path.clone())),
+                );
                 if relay_to_clients
                     && state.status_barrier.status.state == NETWORK_STATE_LOBBY
                     && resource_owner != HOST_CLIENT_ID as i32

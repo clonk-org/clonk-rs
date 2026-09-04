@@ -1213,6 +1213,7 @@ mod tests {
             resource_catalog: crate::ResourceCatalog::new(HOST_CLIENT_ID as i32),
             resource_backend: None,
             published_player_sources: BTreeMap::new(),
+            published_player_local_paths: BTreeMap::new(),
             resource_resolver,
             resource_epoch: Instant::now(),
             next_connection_id: 0,
@@ -8852,6 +8853,41 @@ mod tests {
 
         let reused = publish_host_player_resource_with_path(request, &mut state).test_value();
         assert_eq!(reused, published);
+    }
+
+    #[test]
+    fn cached_host_directory_publication_keeps_packed_path_after_source_disappears() {
+        // A cached C4Network2Res keeps the standalone selected by GetStandalone
+        // even if the original directory is later renamed or removed
+        // (src/C4Network2Res.cpp:589-629).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("HostRuntime.c4p");
+        fs::create_dir(&player).test_value();
+        fs::write(
+            player.join("Player.txt"),
+            b"[Player]\nName=Host Runtime\n[Preferences]\nColorDw=1193046\n",
+        )
+        .test_value();
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state.config.resource_directory = Some(directories.host.clone());
+        state.resource_backend = Some(
+            crate::ResourceTransferBackend::new(HOST_CLIENT_ID as i32, directories.host.clone())
+                .test_value(),
+        );
+        let request = crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: c4(b"HostRuntime.c4p"),
+            group_maker: c4(b"Host"),
+        };
+
+        let published =
+            publish_host_player_resource_with_path(request.clone(), &mut state).test_value();
+        fs::remove_dir_all(&player).test_value();
+
+        let reused = publish_host_player_resource_with_path(request, &mut state).test_value();
+        assert_eq!(reused, published);
+        assert!(reused.local_path.is_file());
     }
 
     #[test]

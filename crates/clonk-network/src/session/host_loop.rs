@@ -418,6 +418,20 @@ pub(crate) async fn run_host(
         config.group_maker.clone(),
     );
     let published_player_sources = config.player_resource_sources.iter().cloned().collect();
+    let published_player_local_paths = config
+        .player_resource_sources
+        .iter()
+        .map(|(source_path, core)| {
+            (
+                source_path.clone(),
+                super::host_state::configured_player_resource_local_path(
+                    source_path,
+                    core,
+                    &config.resource_files,
+                ),
+            )
+        })
+        .collect();
     let mut state = HostState {
         coordinator,
         game_control_tick: config.start_tick,
@@ -455,6 +469,7 @@ pub(crate) async fn run_host(
         resource_catalog,
         resource_backend,
         published_player_sources,
+        published_player_local_paths,
         resource_resolver,
         resource_epoch: Instant::now(),
         next_connection_id: 0,
