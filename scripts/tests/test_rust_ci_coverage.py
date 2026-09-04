@@ -113,13 +113,10 @@ class RustCoverageGateTests(unittest.TestCase):
         self.assertEqual(len(rows), 12)
 
         budgets = dict(rows)
-        # A single job-level number is sized for the shortest row and leaves the
-        # longest a coin flip; `app 5/12` lost it and evicted a release entry.
-        self.assertEqual(budgets["app 5/12"], "25")
-        self.assertEqual(
-            {name for name, minutes in rows if minutes != "15"},
-            {"app 5/12"},
-        )
+        # The presentation capture cases share one booted application fixture,
+        # so every qualification row fits the common 15-minute budget.
+        self.assertEqual(budgets["app 5/12"], "15")
+        self.assertEqual({minutes for _, minutes in rows}, {"15"})
 
     def test_named_coverage_job_merges_fragments_before_enforcing_the_floor(self):
         coverage = job_block("coverage")

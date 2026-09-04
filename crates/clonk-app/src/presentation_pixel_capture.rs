@@ -2564,7 +2564,11 @@ mod tests {
 
     impl ScopedCaptureEnvironment {
         fn install(repository: &Path, user_data: &Path) -> Self {
-            Self::install_for_roots(repository, &repository.join("content"), user_data)
+            let content_root = repository.join("content");
+            // Worktrees symlink `content/`; the capture provenance check
+            // deliberately accepts only the resolved regular directory.
+            let content_root = std::fs::canonicalize(&content_root).unwrap_or(content_root);
+            Self::install_for_roots(repository, &content_root, user_data)
         }
 
         fn install_for_roots(install_root: &Path, content_root: &Path, user_data: &Path) -> Self {
@@ -2673,6 +2677,71 @@ mod tests {
         Ok((environment, user_data, app))
     }
 
+    /// The capture tests all exercise the same startup installation. Keep one
+    /// booted application alive while the live cases run as a batch: nextest
+    /// isolates individual tests in separate processes, so a process-local
+    /// `OnceLock` cannot share this expensive startup across those tests.
+    /// `return_to_menu` is the production teardown/reinitialization boundary,
+    /// which gives every case a clean engine and startup presentation while
+    /// retaining the immutable boot resources.
+    struct SharedCaptureFixture {
+        // Keep the application before its environment/tempdir fields so Rust
+        // drops it before those fields restore variables and remove files.
+        app: crate::GameApp,
+        _environment: ScopedCaptureEnvironment,
+        _user_data: tempfile::TempDir,
+        case_started: bool,
+    }
+
+    type CaptureSubcase = fn(&mut SharedCaptureFixture) -> Result<()>;
+
+    impl SharedCaptureFixture {
+        fn new() -> Result<Self> {
+            let (environment, user_data, app) = real_capture_app()?;
+            Ok(Self {
+                app,
+                _environment: environment,
+                _user_data: user_data,
+                case_started: false,
+            })
+        }
+
+        fn prepare_case(&mut self) {
+            if self.case_started {
+                self.reset();
+            }
+            self.case_started = true;
+        }
+
+        fn reset(&mut self) {
+            self.app.return_to_menu();
+        }
+
+        fn app(&mut self) -> &mut crate::GameApp {
+            &mut self.app
+        }
+
+        fn user_data(&self) -> &Path {
+            self._user_data.path()
+        }
+    }
+
+    fn run_shared_capture_case(
+        fixture: &mut SharedCaptureFixture,
+        name: &'static str,
+        case: impl FnOnce(&mut SharedCaptureFixture) -> Result<()>,
+        failures: &mut Vec<String>,
+    ) {
+        fixture.prepare_case();
+        eprintln!("running presentation capture subcase `{name}`");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| case(fixture)));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => failures.push(format!("{name}: {error:#}")),
+            Err(_) => failures.push(format!("{name}: panicked")),
+        }
+    }
+
     fn canonical_install_root_capture_app(
     ) -> Result<(IsolatedCaptureAppEnvironment, crate::GameApp)> {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2762,18 +2831,17 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn capture_boot_preserves_the_canonical_config_bytes() -> Result<()> {
+    fn capture_boot_preserves_the_canonical_config_bytes(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // The capture fork suppresses both native Config.Save sites so the
         // audited input stays byte-exact (src/C4Application.cpp:95-98,364-367).
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
             .expect("clonk-app belongs to the workspace");
-        let (_environment, user_data, _app) = real_capture_app()?;
-
         assert_eq!(
-            std::fs::read(user_data.path().join("rust.config"))?,
+            std::fs::read(fixture.user_data().join("rust.config"))?,
             std::fs::read(repository.join("compat/presentation/rust.config"))?,
         );
         Ok(())
@@ -2818,13 +2886,14 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn live_startup_main_capture_emits_png_and_semantic_layout() -> Result<()> {
+    fn live_startup_main_capture_emits_png_and_semantic_layout(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4StartupMainDlg paints the live logo, version, buttons, participant
         // label and footer in this exact screen (src/C4StartupMainDlg.cpp:42-74,111-121).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
 
-        let output = capture_layout_case_with_app(&mut app, LayoutCaptureCase::Main, &[])?;
+        let output = capture_layout_case_with_app(app, LayoutCaptureCase::Main, &[])?;
 
         let (width, height, _) = decode_capture_png("startup-main", &output.png)?;
         let trace: crate::presentation_layout::LayoutTrace =
@@ -2836,17 +2905,18 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn capture_reroutes_ambient_pointer_input_to_the_canonical_position() -> Result<()> {
+    fn capture_reroutes_ambient_pointer_input_to_the_canonical_position(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4GraphicsSystem::MouseMove routes one physical pointer position
         // through C4GUI before C4MouseControl draws it (src/C4GraphicsSystem.cpp:445-473).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
-        stage_layout_checkpoint(&mut app, LayoutCaptureCase::Main, b"")?;
+        let app = fixture.app();
+        stage_layout_checkpoint(app, LayoutCaptureCase::Main, b"")?;
 
         app.handle_cursor_moved(winit::dpi::PhysicalPosition::new(900.0, 650.0))?;
-        let (first, _) = render_layout_capture(&mut app, LayoutCaptureCase::Main)?;
+        let (first, _) = render_layout_capture(app, LayoutCaptureCase::Main)?;
         app.handle_cursor_moved(winit::dpi::PhysicalPosition::new(700.0, 500.0))?;
-        let (second, _) = render_layout_capture(&mut app, LayoutCaptureCase::Main)?;
+        let (second, _) = render_layout_capture(app, LayoutCaptureCase::Main)?;
 
         assert_eq!(
             sha256_bytes(&first)?,
@@ -2860,8 +2930,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn live_startup_dialog_captures_emit_png_and_semantic_layout() -> Result<()> {
+    fn live_startup_dialog_captures_emit_png_and_semantic_layout(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // These are the real initial controller states mirrored from
         // C4StartupScenSelDlg.cpp:1302-1382, C4StartupNetDlg.cpp:631-728,
         // C4StartupPlrSelDlg.cpp:545-583, C4StartupOptionsDlg.cpp:609-792,
@@ -2878,9 +2949,10 @@ mod tests {
             LayoutCaptureCase::Options,
             LayoutCaptureCase::About,
         ] {
-            let (_environment, _user_data, mut app) = real_capture_app()?;
+            fixture.reset();
+            let app = fixture.app();
 
-            let output = capture_layout_case_with_app(&mut app, case, &network_references)?;
+            let output = capture_layout_case_with_app(app, case, &network_references)?;
 
             let (width, height, _) = decode_capture_png(case.id(), &output.png)?;
             let trace: crate::presentation_layout::LayoutTrace =
@@ -2893,14 +2965,15 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn player_selection_rejects_noncanonical_install_root_rows() -> Result<()> {
+    fn player_selection_rejects_noncanonical_install_root_rows(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4StartupPlrSelDlg::UpdatePlayerList discovers every ExePath player,
         // applies Config.General.Participants, then selects the first active row
         // (src/C4StartupPlrSelDlg.cpp:662-729).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
 
-        let error = stage_layout_checkpoint(&mut app, LayoutCaptureCase::PlayerSelection, b"")
+        let error = stage_layout_checkpoint(app, LayoutCaptureCase::PlayerSelection, b"")
             .expect_err("capture must reject ambient install-root player rows");
 
         assert!(error.to_string().contains("canonical Presentation player"));
@@ -3241,18 +3314,19 @@ mod tests {
         assert!(error.to_string().contains("unknown field"));
     }
 
-    #[test]
-    fn gameplay_checkpoint_runs_the_real_tutorial_to_frame_180() -> Result<()> {
+    fn gameplay_checkpoint_runs_the_real_tutorial_to_frame_180(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // Pinned C++ oracle: src/C4Game.cpp:776-858 executes one real game
         // frame, while src/C4Game.cpp:1902 advances Game.FrameCounter.
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::Gameplay.scenario(),
         )
         .expect("tracked Tutorial02 scenario");
 
-        let checkpoint = stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Gameplay)?;
+        let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Gameplay)?;
 
         assert_eq!(app.engine.frame(), 180);
         assert_eq!(checkpoint.simulation_seed, 587);
@@ -3260,21 +3334,22 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn gameplay_layout_capture_contains_the_live_tutorial_message() -> Result<()> {
+    fn gameplay_layout_capture_contains_the_live_tutorial_message(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4Viewport::DrawOverlay unconditionally visits Game.Messages, and
         // C4GameMessage::Draw lays out the portrait-backed tutorial message
         // (src/C4Viewport.cpp:836-854; src/C4GameMessage.cpp:99-170,348-353).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::Gameplay.scenario(),
         )
         .expect("tracked Tutorial02 scenario");
-        let checkpoint = stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Gameplay)?;
+        let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Gameplay)?;
 
         let rendered = render_runtime_layout_capture(
-            &mut app,
+            app,
             PixelCaptureCase::Gameplay,
             checkpoint.render_ordinal,
         )?;
@@ -3323,19 +3398,20 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn hud_checkpoint_ages_message_board_during_native_intermediate_renders() -> Result<()> {
+    fn hud_checkpoint_ages_message_board_during_native_intermediate_renders(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // Pinned C++ oracle: src/C4Application.cpp:455-478 executes graphics
         // after each game pass, where src/C4GraphicsSystem.cpp:130 advances
         // C4MessageBoard before composing the running frame.
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::Hud.scenario(),
         )
         .expect("tracked Tutorial01 scenario");
 
-        stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Hud)?;
+        stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Hud)?;
 
         assert_eq!(
             app.message_board.current_line(),
@@ -3345,43 +3421,42 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence() -> Result<()> {
+    fn hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // Pinned C++ oracle: C4Game::Ticks arms TimeGo after every simulation
         // frame and C4Game::Sec1Timer consumes it once per scheduler second
         // (src/C4Game.cpp:1755-1759,1902-1917).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::Hud.scenario(),
         )
         .expect("tracked Tutorial01 scenario");
 
-        stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Hud)?;
+        stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Hud)?;
 
         assert_eq!(app.engine.game_time(), 2);
         assert_eq!(app.snapshot.game_time, 2);
         Ok(())
     }
 
-    #[test]
-    fn hud_layout_capture_retains_the_text_commands_from_its_presented_frame() -> Result<()> {
+    fn hud_layout_capture_retains_the_text_commands_from_its_presented_frame(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4GraphicsSystem::Execute paints the viewport overlays and both
         // fullscreen boards into the captured back buffer in one ordered pass
         // (src/C4GraphicsSystem.cpp:130-199,352-365).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::Hud.scenario(),
         )
         .expect("tracked Tutorial01 scenario");
-        let checkpoint = stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Hud)?;
+        let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Hud)?;
 
-        let rendered = render_runtime_layout_capture(
-            &mut app,
-            PixelCaptureCase::Hud,
-            checkpoint.render_ordinal,
-        )?;
+        let rendered =
+            render_runtime_layout_capture(app, PixelCaptureCase::Hud, checkpoint.render_ordinal)?;
         let (width, height, _) = decode_capture_png("hud", &rendered.png)?;
         let layout: crate::presentation_layout::LayoutTrace =
             serde_json::from_slice(&rendered.layout)?;
@@ -3430,22 +3505,22 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn ingame_menu_layout_capture_contains_every_visible_menu_cell() -> Result<()> {
+    fn ingame_menu_layout_capture_contains_every_visible_menu_cell(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4Menu::InitLocation lays out the title, ScrollWindow client, visible
         // item rows and optional command strip consumed by C4Menu::Draw
         // (src/C4Menu.cpp:642-783,796-880).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::IngameMenu.scenario(),
         )
         .expect("tracked Tutorial01 scenario");
-        let checkpoint =
-            stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::IngameMenu)?;
+        let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::IngameMenu)?;
 
         let rendered = render_runtime_layout_capture(
-            &mut app,
+            app,
             PixelCaptureCase::IngameMenu,
             checkpoint.render_ordinal,
         )?;
@@ -3488,22 +3563,22 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn object_menu_layout_capture_contains_menu_and_game_message_topology() -> Result<()> {
+    fn object_menu_layout_capture_contains_menu_and_game_message_topology(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4Menu::DrawElement projects the active cursor menu and
         // C4GameMessage::Draw appends its portrait-backed tutorial message
         // (src/C4Menu.cpp:796-880; src/C4GameMessage.cpp:159-292).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::ObjectMenu.scenario(),
         )
         .expect("tracked Tutorial03 scenario");
-        let checkpoint =
-            stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::ObjectMenu)?;
+        let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::ObjectMenu)?;
 
         let rendered = render_runtime_layout_capture(
-            &mut app,
+            app,
             PixelCaptureCase::ObjectMenu,
             checkpoint.render_ordinal,
         )?;
@@ -3540,23 +3615,23 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn evaluation_layout_capture_contains_the_live_dialog_topology() -> Result<()> {
+    fn evaluation_layout_capture_contains_the_live_dialog_topology(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4GameOverDlg constructs the caption, goal display, player list,
         // player row and visible action buttons as live GUI children
         // (src/C4GameOverDlg.cpp:115-258;
         // src/C4PlayerInfoListBox.cpp:79-154,184-231).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::Evaluation.scenario(),
         )
         .expect("tracked Tutorial01 scenario");
-        let checkpoint =
-            stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Evaluation)?;
+        let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Evaluation)?;
 
         let rendered = render_runtime_layout_capture(
-            &mut app,
+            app,
             PixelCaptureCase::Evaluation,
             checkpoint.render_ordinal,
         )?;
@@ -3627,34 +3702,36 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn gameplay_checkpoint_renders_through_the_production_cpu_surface() -> Result<()> {
+    fn gameplay_checkpoint_renders_through_the_production_cpu_surface(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // Pinned C++ oracle: src/C4Game.cpp:776-858 fixes the state consumed
         // by C4Viewport::Draw; the capture takes that real presented frame.
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::Gameplay.scenario(),
         )
         .expect("tracked Tutorial02 scenario");
-        let checkpoint = stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Gameplay)?;
+        let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Gameplay)?;
 
-        let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
+        let png = render_checkpoint_png(app, checkpoint.render_ordinal)?;
         let (width, height, _) = decode_capture_png("rendered", &png)?;
 
         assert_eq!((width, height), (1280, 720));
         Ok(())
     }
 
-    #[test]
-    fn pixel_capture_png_omits_the_native_framebuffer_alpha_channel() -> Result<()> {
+    fn pixel_capture_png_omits_the_native_framebuffer_alpha_channel(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4Startup::SaveScreenshot requests fSaveAlpha=false, so
         // C4Surface::SavePNG reads GL_BGR into a 24-bit PNG
         // (src/C4Startup.cpp:711-719; src/C4Surface.cpp:411-458).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
-        let checkpoint = stage_pixel_checkpoint(&mut app, PixelCaptureCase::Loader)?;
+        let app = fixture.app();
+        let checkpoint = stage_pixel_checkpoint(app, PixelCaptureCase::Loader)?;
 
-        let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
+        let png = render_checkpoint_png(app, checkpoint.render_ordinal)?;
         let reader = png::Decoder::new(Cursor::new(png)).read_info()?;
 
         assert_eq!(reader.info().color_type, png::ColorType::Rgb);
@@ -3662,14 +3739,15 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn network_lobby_capture_paints_the_tab_background_after_its_frame() -> Result<()> {
+    fn network_lobby_capture_paints_the_tab_background_after_its_frame(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4GUI::Tabular::DrawElement draws the 3D frame before painting the
         // translucent sheet background over it (src/C4GuiTabular.cpp:370-377).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
-        let checkpoint = stage_pixel_checkpoint(&mut app, PixelCaptureCase::NetworkLobby)?;
+        let app = fixture.app();
+        let checkpoint = stage_pixel_checkpoint(app, PixelCaptureCase::NetworkLobby)?;
 
-        let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
+        let png = render_checkpoint_png(app, checkpoint.render_ordinal)?;
         let (width, _, pixels) = decode_capture_png("network-lobby", &png)?;
         let start = ((99 * width + 850) * 4) as usize;
 
@@ -3677,23 +3755,23 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn loader_capture_encodes_the_final_ordinal_two_render_frame() -> Result<()> {
+    fn loader_capture_encodes_the_final_ordinal_two_render_frame(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4LoaderScreen::Draw draws the current progress/log into lpBack,
         // and the oracle saves that completed second frame
         // (src/C4LoaderScreen.cpp:281-324;
         // parity/oracle/presentation_capture.patch:2035).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::Loader.scenario(),
         )
         .expect("tracked Tutorial01 loader scenario");
-        let checkpoint =
-            crate::presentation_pixel_startup::stage_loader_checkpoint(&mut app, scenario)?;
+        let checkpoint = crate::presentation_pixel_startup::stage_loader_checkpoint(app, scenario)?;
         let stale_surface = crate::encode_surface_to_png(app.graphics.surface())?;
 
-        let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
+        let png = render_checkpoint_png(app, checkpoint.render_ordinal)?;
 
         assert_ne!(
             png, stale_surface,
@@ -3702,20 +3780,20 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn object_menu_checkpoint_uses_the_real_auto_context_menu_route() -> Result<()> {
+    fn object_menu_checkpoint_uses_the_real_auto_context_menu_route(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // Player AutoContextMenu is loaded by C4InfoCore.cpp:171 and object
         // definitions bind their automatic context-menu mode at C4Def.cpp:416.
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
             PixelCaptureCase::ObjectMenu.scenario(),
         )
         .expect("tracked Tutorial03 scenario");
 
-        let checkpoint =
-            stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::ObjectMenu)?;
-        let png = render_checkpoint_png(&mut app, checkpoint.render_ordinal)?;
+        let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::ObjectMenu)?;
+        let png = render_checkpoint_png(app, checkpoint.render_ordinal)?;
         let (width, height, _) = decode_capture_png("object-menu", &png)?;
 
         assert_eq!(app.engine.frame(), 410);
@@ -3728,13 +3806,14 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence() -> Result<()> {
+    fn object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4Game::OpenGame installs the 28 ms application timer before
         // C4SoundSystem::Execute ages muted one-shots (src/C4Game.cpp:63,443;
         // src/C4Application.cpp:495-496; src/C4SoundSystem.cpp:153-202,336).
         let random = PresentationRandomGuard::install();
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
         random.pin_runtime_streams();
         let scenario = crate::resolve_next_mission_scenario(
             &app.scensel.catalog,
@@ -3742,7 +3821,7 @@ mod tests {
         )
         .expect("tracked Tutorial03 scenario");
 
-        stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::ObjectMenu)?;
+        stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::ObjectMenu)?;
         let report = clonk_engine::particles::presentation_safe_random_capture_report();
 
         assert_eq!(report.calls, 7);
@@ -3917,20 +3996,19 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn discovery_runs_the_same_real_gameplay_checkpoint_without_files() -> Result<()> {
+    fn discovery_runs_the_same_real_gameplay_checkpoint_without_files(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4Game::InitGame plays scenario music before InitGameFinal invokes
         // Script.Initialize (C4Game.cpp:2544,2733). With Music=false, the
         // first post-FixRandom presentation draw is therefore the five-way
         // crew portrait selected at C4ObjectInfo.cpp:424.
-        clonk_engine::particles::install_presentation_safe_random_seed(587);
-        crate::seed_classic_safe_random(587);
-        clonk_engine::particles::begin_presentation_safe_random_capture();
+        let _random = PresentationRandomGuard::install();
         let result = (|| {
-            let (_environment, _user_data, mut app) = real_capture_app()?;
+            let app = fixture.app();
             let mut output = Vec::new();
 
-            discover_pixel_case_with_app(&mut app, PixelCaptureCase::Gameplay, &mut output)?;
+            discover_pixel_case_with_app(app, PixelCaptureCase::Gameplay, &mut output)?;
 
             let value: serde_json::Value = serde_json::from_slice(&output)?;
             assert_eq!(value["case"], "gameplay");
@@ -3947,20 +4025,19 @@ mod tests {
             assert_eq!(value["direct_rand_calls"], 0);
             Ok(())
         })();
-        clonk_engine::particles::end_presentation_safe_random_capture();
-        clonk_engine::particles::clear_presentation_safe_random_seed();
         result
     }
 
-    #[test]
-    fn layout_png_contains_the_second_render_native_presentation() -> Result<()> {
+    fn layout_png_contains_the_second_render_native_presentation(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // The oracle writes lpBack only after the stable capture render has
         // completed (parity/oracle/presentation_capture.patch:2035).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
-        let checkpoint = stage_layout_checkpoint(&mut app, LayoutCaptureCase::Main, b"")?;
+        let app = fixture.app();
+        let checkpoint = stage_layout_checkpoint(app, LayoutCaptureCase::Main, b"")?;
         assert_eq!(checkpoint.render_ordinal, 2);
 
-        let (png, _layout) = render_layout_capture(&mut app, LayoutCaptureCase::Main)?;
+        let (png, _layout) = render_layout_capture(app, LayoutCaptureCase::Main)?;
         let uncomposed = crate::encode_surface_to_png(app.graphics.surface())?;
         let (_, _, presented_pixels) = decode_capture_png("presented", &png)?;
         let (_, _, uncomposed_pixels) = decode_capture_png("uncomposed", &uncomposed)?;
@@ -3972,15 +4049,16 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn layout_capture_png_omits_the_native_framebuffer_alpha_channel() -> Result<()> {
+    fn layout_capture_png_omits_the_native_framebuffer_alpha_channel(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // The instrumented startup capture passes fSaveAlpha=false to
         // C4Surface::SavePNG (parity/oracle/presentation_capture.patch:2047;
         // src/graphics/C4Surface.cpp:411-458).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
-        stage_layout_checkpoint(&mut app, LayoutCaptureCase::Main, b"")?;
+        let app = fixture.app();
+        stage_layout_checkpoint(app, LayoutCaptureCase::Main, b"")?;
 
-        let (png, _layout) = render_layout_capture(&mut app, LayoutCaptureCase::Main)?;
+        let (png, _layout) = render_layout_capture(app, LayoutCaptureCase::Main)?;
         let reader = png::Decoder::new(Cursor::new(png)).read_info()?;
 
         assert_eq!(reader.info().color_type, png::ColorType::Rgb);
@@ -3988,14 +4066,15 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam() -> Result<()> {
+    fn startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // The instrumented C4Startup::Execute pins RandomHold/RandomCount and
         // SafeRandom before each stable render (src/C4Startup.cpp:370-378).
         let _random = PresentationRandomGuard::install();
-        let (_environment, _user_data, mut app) = real_capture_app()?;
+        let app = fixture.app();
 
-        let checkpoint = stage_layout_checkpoint(&mut app, LayoutCaptureCase::Main, b"")?;
+        let checkpoint = stage_layout_checkpoint(app, LayoutCaptureCase::Main, b"")?;
         let report = clonk_engine::particles::presentation_safe_random_capture_report();
 
         assert_eq!(checkpoint.simulation_seed, 587);
@@ -4006,13 +4085,14 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn runtime_capture_discards_rust_only_startup_random_draws() -> Result<()> {
+    fn runtime_capture_discards_rust_only_startup_random_draws(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // A direct native scenario skips the startup loader before game init
         // (src/C4Application.cpp:239-248), so Rust's menu bootstrap must not
         // contribute to the runtime presentation stream.
         let random = PresentationRandomGuard::install();
-        let (_environment, _user_data, _app) = real_capture_app()?;
+        let _app = fixture.app();
         let _raw = clonk_engine::particles::presentation_safe_random_capture_raw_value()
             .expect("presentation raw-call audit is active");
 
@@ -4025,12 +4105,13 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn classic_capture_uses_the_native_sound_options_tab() -> Result<()> {
+    fn classic_capture_uses_the_native_sound_options_tab(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4StartupOptionsDlg constructs its third sheet from IDS_DLG_SOUND
         // (C4StartupOptionsDlg.cpp:686-700).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
-        stage_layout_checkpoint(&mut app, LayoutCaptureCase::Options, b"")?;
+        let app = fixture.app();
+        stage_layout_checkpoint(app, LayoutCaptureCase::Options, b"")?;
 
         let labels = app
             .startup
@@ -4043,14 +4124,15 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn one_row_scenario_selection_auto_hides_its_native_scrollbar() -> Result<()> {
+    fn one_row_scenario_selection_auto_hides_its_native_scrollbar(
+        fixture: &mut SharedCaptureFixture,
+    ) -> Result<()> {
         // C4GUI::ListBox::UpdateElementPositions updates its ScrollWindow
         // client height after ScenListItem insertion, and the auto scrollbar
         // hides when that one row does not overflow (src/gui/C4Gui.cpp:2280-2301,
         // src/gui/C4GuiContainers.cpp:493-541).
-        let (_environment, _user_data, mut app) = real_capture_app()?;
-        stage_layout_checkpoint(&mut app, LayoutCaptureCase::ScenarioSelection, b"")?;
+        let app = fixture.app();
+        stage_layout_checkpoint(app, LayoutCaptureCase::ScenarioSelection, b"")?;
         let row = app
             .menu_state
             .visible_entries()
@@ -4062,7 +4144,7 @@ mod tests {
         app.menu_state.set_include_back(false);
         app.menu_backdrop_cache = crate::StartupBackdropCache::default();
 
-        let (_png, layout) = render_layout_capture(&mut app, LayoutCaptureCase::ScenarioSelection)?;
+        let (_png, layout) = render_layout_capture(app, LayoutCaptureCase::ScenarioSelection)?;
         let trace: crate::presentation_layout::LayoutTrace = serde_json::from_slice(&layout)?;
         let scrollbar = trace
             .elements
@@ -4072,6 +4154,129 @@ mod tests {
 
         assert_eq!(app.menu_state.visible_entries().len(), 1);
         assert!(!scrollbar.visible);
+        Ok(())
+    }
+
+    #[test]
+    fn presentation_capture_live_cases_share_one_boot_fixture() -> Result<()> {
+        let mut fixture = SharedCaptureFixture::new()?;
+        let mut failures = Vec::new();
+
+        let cases: &[(&'static str, CaptureSubcase)] = &[
+            (
+                "capture_boot_preserves_the_canonical_config_bytes",
+                capture_boot_preserves_the_canonical_config_bytes,
+            ),
+            (
+                "live_startup_main_capture_emits_png_and_semantic_layout",
+                live_startup_main_capture_emits_png_and_semantic_layout,
+            ),
+            (
+                "capture_reroutes_ambient_pointer_input_to_the_canonical_position",
+                capture_reroutes_ambient_pointer_input_to_the_canonical_position,
+            ),
+            (
+                "live_startup_dialog_captures_emit_png_and_semantic_layout",
+                live_startup_dialog_captures_emit_png_and_semantic_layout,
+            ),
+            (
+                "player_selection_rejects_noncanonical_install_root_rows",
+                player_selection_rejects_noncanonical_install_root_rows,
+            ),
+            (
+                "gameplay_checkpoint_runs_the_real_tutorial_to_frame_180",
+                gameplay_checkpoint_runs_the_real_tutorial_to_frame_180,
+            ),
+            (
+                "gameplay_layout_capture_contains_the_live_tutorial_message",
+                gameplay_layout_capture_contains_the_live_tutorial_message,
+            ),
+            (
+                "hud_checkpoint_ages_message_board_during_native_intermediate_renders",
+                hud_checkpoint_ages_message_board_during_native_intermediate_renders,
+            ),
+            (
+                "hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence",
+                hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence,
+            ),
+            (
+                "hud_layout_capture_retains_the_text_commands_from_its_presented_frame",
+                hud_layout_capture_retains_the_text_commands_from_its_presented_frame,
+            ),
+            (
+                "ingame_menu_layout_capture_contains_every_visible_menu_cell",
+                ingame_menu_layout_capture_contains_every_visible_menu_cell,
+            ),
+            (
+                "object_menu_layout_capture_contains_menu_and_game_message_topology",
+                object_menu_layout_capture_contains_menu_and_game_message_topology,
+            ),
+            (
+                "evaluation_layout_capture_contains_the_live_dialog_topology",
+                evaluation_layout_capture_contains_the_live_dialog_topology,
+            ),
+            (
+                "gameplay_checkpoint_renders_through_the_production_cpu_surface",
+                gameplay_checkpoint_renders_through_the_production_cpu_surface,
+            ),
+            (
+                "pixel_capture_png_omits_the_native_framebuffer_alpha_channel",
+                pixel_capture_png_omits_the_native_framebuffer_alpha_channel,
+            ),
+            (
+                "network_lobby_capture_paints_the_tab_background_after_its_frame",
+                network_lobby_capture_paints_the_tab_background_after_its_frame,
+            ),
+            (
+                "loader_capture_encodes_the_final_ordinal_two_render_frame",
+                loader_capture_encodes_the_final_ordinal_two_render_frame,
+            ),
+            (
+                "object_menu_checkpoint_uses_the_real_auto_context_menu_route",
+                object_menu_checkpoint_uses_the_real_auto_context_menu_route,
+            ),
+            (
+                "object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence",
+                object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence,
+            ),
+            (
+                "discovery_runs_the_same_real_gameplay_checkpoint_without_files",
+                discovery_runs_the_same_real_gameplay_checkpoint_without_files,
+            ),
+            (
+                "layout_png_contains_the_second_render_native_presentation",
+                layout_png_contains_the_second_render_native_presentation,
+            ),
+            (
+                "layout_capture_png_omits_the_native_framebuffer_alpha_channel",
+                layout_capture_png_omits_the_native_framebuffer_alpha_channel,
+            ),
+            (
+                "startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam",
+                startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam,
+            ),
+            (
+                "runtime_capture_discards_rust_only_startup_random_draws",
+                runtime_capture_discards_rust_only_startup_random_draws,
+            ),
+            (
+                "classic_capture_uses_the_native_sound_options_tab",
+                classic_capture_uses_the_native_sound_options_tab,
+            ),
+            (
+                "one_row_scenario_selection_auto_hides_its_native_scrollbar",
+                one_row_scenario_selection_auto_hides_its_native_scrollbar,
+            ),
+        ];
+        for &(name, case) in cases {
+            run_shared_capture_case(&mut fixture, name, case, &mut failures);
+        }
+
+        assert!(
+            failures.is_empty(),
+            "presentation capture subcase(s) failed: {}",
+            failures.join(", ")
+        );
         Ok(())
     }
 
