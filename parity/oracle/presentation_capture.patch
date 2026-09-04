@@ -994,10 +994,11 @@ diff --git a/src/C4Startup.cpp b/src/C4Startup.cpp
 index 9542728ef..353b03214 100644
 --- a/src/C4Startup.cpp
 +++ b/src/C4Startup.cpp
-@@ -26,9 +26,1300 @@
+@@ -26,9 +26,1301 @@
  #include <C4StartupOptionsDlg.h>
  #include <C4StartupAboutDlg.h>
  #include <C4StartupPlrSelDlg.h>
++#include <C4Group.h>
 +#include <C4GameLobby.h>
 +#include <C4GameOverDlg.h>
 +#include <C4GameMessage.h>
@@ -1936,7 +1937,7 @@ index 9542728ef..353b03214 100644
 +		}
 +
 +		std::filesystem::path ValidateRuntimeInputs(const RuntimeCaseSpec &spec)
-+		{ extern int iC4GroupRewindFilePtrNoWarn; iC4GroupRewindFilePtrNoWarn = 1; // a packed group rewinds its shared file pointer; the debug-only log has no port counterpart
++		{ C4GRP_DISABLE_REWINDWARN // a packed group rewinds its shared file pointer; the debug-only log has no port counterpart
 +			RequireCanonicalLocaleAndGeometry();
 +			const auto configArgument = CommandLineValue("/config:");
 +			if (!configArgument) CaptureFailure("runtime presentation capture requires an explicit /config:<absolute-path> argument");
