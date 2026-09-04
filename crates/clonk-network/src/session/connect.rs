@@ -1332,6 +1332,21 @@ where
             primary_peer_is_port,
         );
     }
+    if primary_peer_is_port {
+        // The port capability is an extension queued on the retained route;
+        // flush it before local probing can fail and retire that route. The
+        // accepted transport stays registered throughout C++ HandleJoinData
+        // resource probing (oracle-src-pinned src/C4Network2.cpp:1590-1639;
+        // src/C4Network2IO.cpp:117-197).
+        routes
+            .flush_route(primary_local_connection_id)
+            .await
+            .map_err(|error| {
+                ClientAttemptError::Retryable(ClientError::Handshake(format!(
+                    "failed to flush host route before resource bootstrap: {error}"
+                )))
+            })?;
+    }
     #[cfg(test)]
     wait_at_client_post_join_bootstrap_pause(assigned_local_core.name.as_bytes()).await;
     let resource_config = ClientPostJoinResourceConfig {

@@ -2022,12 +2022,16 @@ impl ClientRouteManager {
         let senders = self
             .routes
             .values()
-            .map(|route| route.outbound.clone())
+            .map(|route| (route.peer_addr, route.outbound.clone()))
             .collect::<Vec<_>>();
         self.routes.clear();
         self.control_send_time_dirty = true;
-        for outbound in senders {
+        for (peer_addr, outbound) in senders {
             outbound.retire();
+            #[cfg(test)]
+            notify_client_route_retired(peer_addr);
+            #[cfg(not(test))]
+            let _ = peer_addr;
         }
         for (_, task) in std::mem::take(&mut self.tasks) {
             let _ = task.await;
