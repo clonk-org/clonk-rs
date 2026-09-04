@@ -12542,6 +12542,7 @@ mod tests {
         ));
         snapshot.dynamic = nonloadable_core(2, 7, b"Dynamic.c4d");
         let (address, server) = start_client_bootstrap_probe(snapshot).await;
+        let (mut probe_reached, resume_probe) = pause_client_resource_bootstrap_probe(b"Alice");
         let (writer_paused, resume_writer, mut route_retired) = pause_client_route_writer(address);
 
         let connect = tokio::spawn(connect_client(
@@ -12557,7 +12558,15 @@ mod tests {
             route_retired.try_recv().is_err(),
             "resource failure retired the route before its queued port capability flushed"
         );
+        assert!(
+            timeout(Duration::from_millis(100), &mut probe_reached)
+                .await
+                .is_err(),
+            "resource probing started before the queued port capability flushed"
+        );
         resume_writer.send(()).test_value();
+        probe_reached.await.test_value();
+        resume_probe.send(()).test_value();
         let result = connect.await.test_value();
         route_retired.await.test_value();
         let probe = server.await.test_value();

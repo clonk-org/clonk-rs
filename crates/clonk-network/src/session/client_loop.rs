@@ -67,7 +67,10 @@ pub(crate) fn notify_client_route_retired(peer_addr: Option<SocketAddr>) {
 }
 
 #[cfg(test)]
-async fn wait_at_client_route_writer_pause(peer_addr: Option<SocketAddr>) {
+async fn wait_at_client_route_writer_pause(
+    peer_addr: Option<SocketAddr>,
+    cancel_rx: &mut watch::Receiver<bool>,
+) {
     let Some(peer_addr) = peer_addr else {
         return;
     };
@@ -79,7 +82,11 @@ async fn wait_at_client_route_writer_pause(peer_addr: Option<SocketAddr>) {
         return;
     };
     let _ = reached.send(());
-    let _ = resume.await;
+    tokio::select! {
+        biased;
+        _ = wait_for_route_retirement(cancel_rx) => {}
+        _ = resume => {}
+    }
 }
 
 struct ReceivedControlDeduplicator {
@@ -187,7 +194,7 @@ where
             Err(error) => break ClientRouteWriterExit::Failed(format!("send failed: {error}")),
         };
         #[cfg(test)]
-        wait_at_client_route_writer_pause(peer_addr).await;
+        wait_at_client_route_writer_pause(peer_addr, &mut cancel_rx).await;
         #[cfg(not(test))]
         let _ = peer_addr;
         let result = tokio::select! {
@@ -3171,5 +3178,34 @@ mod tests {
         completed
             .await
             .expect("flushed graceful part must complete before route retirement");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paused_client_writer_unblocks_when_route_retires() {
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 41_001));
+        let (paused, _resume, _retired) = pause_client_route_writer(peer_addr);
+        let (retire, retire_rx) = watch::channel(false);
+        let (client, _peer) = tokio::io::duplex(64);
+        let (outbound, outbound_rx) = mpsc::unbounded_channel();
+        outbound
+            .send(ClientRouteCommand::Message(ControlMessage::Status(
+                NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 7),
+            )))
+            .expect("queue paused message");
+        let mut task = tokio::spawn(run_client_route_writer(
+            crate::ControlTransport::new(client),
+            outbound_rx,
+            retire_rx,
+            Some(peer_addr),
+        ));
+
+        paused.await.expect("writer did not reach its pause");
+        retire.send_replace(true);
+        let exit = tokio::time::timeout(Duration::from_millis(100), &mut task)
+            .await
+            .expect("route retirement must release a paused writer")
+            .expect("paused writer task panicked");
+        assert!(matches!(exit, ClientRouteWriterExit::Cancelled));
+        notify_client_route_retired(Some(peer_addr));
     }
 }
