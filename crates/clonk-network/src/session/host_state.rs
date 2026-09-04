@@ -1074,17 +1074,34 @@ pub(crate) fn update_derived_resource_sources(
     sources: &mut BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
     events: &[crate::ResourceTransferEvent],
 ) {
+    update_derived_resource_sources_with_paths(sources, None, events);
+}
+
+pub(crate) fn update_derived_resource_sources_with_paths(
+    sources: &mut BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    mut local_paths: Option<&mut BTreeMap<PathBuf, PathBuf>>,
+    events: &[crate::ResourceTransferEvent],
+) {
     for event in events {
-        let crate::ResourceTransferEvent::Completed { core, .. } = event else {
+        let crate::ResourceTransferEvent::Completed { core, path, .. } = event else {
             continue;
         };
         if core.derived_id < 0 {
             continue;
         }
-        sources
-            .values_mut()
-            .filter(|source| source.id == core.derived_id)
-            .for_each(|source| *source = core.clone());
+        let matching_sources = sources
+            .iter()
+            .filter(|(_, source)| source.id == core.derived_id)
+            .map(|(source_path, _)| source_path.clone())
+            .collect::<Vec<_>>();
+        for source_path in matching_sources {
+            if let Some(local_paths) = local_paths.as_deref_mut() {
+                local_paths.insert(source_path.clone(), path.clone());
+            }
+            if let Some(source) = sources.get_mut(&source_path) {
+                *source = core.clone();
+            }
+        }
     }
 }
 
@@ -1497,10 +1514,10 @@ pub(crate) fn finish_host_resource_derive(
             "resource {parent_resource_id} has no session derivation"
         ));
     }
-    state
-        .published_player_sources
-        .values_mut()
-        .filter(|published| published.id == parent_resource_id)
-        .for_each(|published| *published = core.clone());
+    update_derived_resource_sources_with_paths(
+        &mut state.published_player_sources,
+        Some(&mut state.published_player_local_paths),
+        &events,
+    );
     Ok((core, events))
 }

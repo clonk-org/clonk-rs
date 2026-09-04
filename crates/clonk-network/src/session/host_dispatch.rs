@@ -166,8 +166,9 @@ pub(crate) async fn handle_client_message(
                         if matches!(&packet, ResourcePacket::Derive(_)) {
                             let _ = state.resource_catalog.on_packet(client_id as i32, &packet);
                         }
-                        update_derived_resource_sources(
+                        update_derived_resource_sources_with_paths(
                             &mut state.published_player_sources,
+                            Some(&mut state.published_player_local_paths),
                             &events,
                         );
                         dispatch_host_resource_events(events, false, state).await;
