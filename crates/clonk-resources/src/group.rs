@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -18,6 +18,10 @@ use crate::group_writer::{
 const GROUP_HEADER_SIZE: usize = 204;
 const GROUP_ENTRY_SIZE: usize = 316;
 const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
+/// A filesystem-backed group may be supplied by an untrusted pack command.
+/// Keep recursive materialization finite even when symlinks or an unusually
+/// deep tree would otherwise exhaust the call stack.
+const MAX_DIRECTORY_PACK_DEPTH: usize = 64;
 /// A child view may keep a modest parent allocation alive to avoid copying,
 /// but a small child must not pin an arbitrarily large decompressed archive.
 const MAX_SHARED_PACKED_PARENT_EXCESS_BYTES: usize = 8 * 1024 * 1024;
@@ -588,84 +592,155 @@ impl MutableGroup {
     /// `C4Group::AppendEntry2StdFile`. Directory children are cloned
     /// recursively so the resulting group has the same child hierarchy.
     pub fn from_group(group: &Group) -> Result<Self, MutableGroupError> {
-        let mut mutable = Self::new_bytes(crate::path_to_legacy_bytes(group.root()));
-        if let Some(header) = group.rewrite_header_template() {
-            mutable.set_rewrite_header_template(header);
-        }
+        let mut directory_stack = HashSet::new();
+        Self::from_group_inner(group, &mut directory_stack, 0, false)
+    }
 
-        let entries = group
-            .entries()
-            .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
-        for entry in entries {
-            if group.is_directory() && entry.is_directory {
-                let child = group
-                    .open_child(&entry.relative_path)
-                    .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
-                let child = Self::from_group(&child)?;
-                mutable.add_existing_child_bytes_with_metadata(
-                    entry.name_bytes,
-                    child,
-                    entry.time,
-                    entry.executable,
-                )?;
-                continue;
+    /// Creates a writable group by recursively packing an unpacked directory
+    /// tree, matching `C4Group_PackDirectoryTo`. Child directories are added
+    /// with the timestamp and executable bit of the temporary packed file,
+    /// rather than with the source directory's metadata.
+    pub fn from_directory(group: &Group) -> Result<Self, MutableGroupError> {
+        let mut directory_stack = HashSet::new();
+        Self::from_group_inner(group, &mut directory_stack, 0, true)
+    }
+
+    fn from_group_inner(
+        group: &Group,
+        directory_stack: &mut HashSet<PathBuf>,
+        depth: usize,
+        pack_directories: bool,
+    ) -> Result<Self, MutableGroupError> {
+        let canonical_directory = if group.is_directory() {
+            if depth >= MAX_DIRECTORY_PACK_DEPTH {
+                return Err(MutableGroupError::SourceGroup(format!(
+                    "directory nesting exceeds {MAX_DIRECTORY_PACK_DEPTH} levels"
+                )));
+            }
+            let canonical = std::fs::canonicalize(group.root()).map_err(|error| {
+                MutableGroupError::SourceGroup(format!(
+                    "cannot canonicalize directory '{}': {error}",
+                    group.root().display()
+                ))
+            })?;
+            if !directory_stack.insert(canonical.clone()) {
+                return Err(MutableGroupError::SourceGroup(format!(
+                    "directory cycle detected at '{}'",
+                    group.root().display()
+                )));
+            }
+            Some(canonical)
+        } else {
+            None
+        };
+
+        let result = (|| {
+            let mut mutable = Self::new_bytes(crate::path_to_legacy_bytes(group.root()));
+            if let Some(header) = group.rewrite_header_template() {
+                mutable.set_rewrite_header_template(header);
             }
 
-            // A top-level-openable C4Group file inside a folder group is a
-            // child too (C4Group_IsGroup/AddEntryOnDisk), but a raw unwrapped
-            // nested-group image remains an ordinary file. A recognized
-            // child's already-uncompressed image is copied opaquely; opening
-            // it eagerly would rewrite its own header.
-            if group.is_directory() {
-                let path = group.root().join(&entry.relative_path);
-                if let Ok(child) = Group::open(path) {
-                    let data = child
-                        .raw_image()
-                        .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
-                    let contents_crc = child.contents_crc_or_zero();
-                    mutable.add_packed_child_bytes_with_metadata(
+            let entries = group
+                .entries()
+                .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+            for entry in entries {
+                if group.is_directory() && entry.is_directory {
+                    let child = if pack_directories {
+                        // Packing follows the literal filesystem entry.
+                        // `OpenAsChild` treats `*` as a wildcard prohibition,
+                        // but C++'s directory packer accepts a literal `*` in
+                        // a basename.
+                        Group::open(group.root().join(&entry.relative_path))
+                    } else {
+                        group.open_child(&entry.relative_path)
+                    }
+                    .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+                    let child = Self::from_group_inner(
+                        &child,
+                        directory_stack,
+                        depth + 1,
+                        pack_directories,
+                    )?;
+                    if pack_directories {
+                        // C4Group_PackDirectoryTo first writes the child to a
+                        // new temporary file and then moves that file into the
+                        // parent. Consequently the parent core gets the
+                        // temporary file's current timestamp and
+                        // non-executable bit, not the source directory's
+                        // metadata.
+                        mutable.add_child_bytes(entry.name_bytes, child)?;
+                    } else {
+                        mutable.add_existing_child_bytes_with_metadata(
+                            entry.name_bytes,
+                            child,
+                            entry.time,
+                            entry.executable,
+                        )?;
+                    }
+                    continue;
+                }
+
+                // A top-level-openable C4Group file inside a folder group is a
+                // child too (C4Group_IsGroup/AddEntryOnDisk), but a raw unwrapped
+                // nested-group image remains an ordinary file. A recognized
+                // child's already-uncompressed image is copied opaquely; opening
+                // it eagerly would rewrite its own header.
+                if group.is_directory() {
+                    let path = group.root().join(&entry.relative_path);
+                    if let Ok(child) = Group::open(path) {
+                        let data = child
+                            .raw_image()
+                            .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+                        let contents_crc = child.contents_crc_or_zero();
+                        mutable.add_packed_child_bytes_with_metadata(
+                            entry.name_bytes,
+                            data,
+                            contents_crc,
+                            entry.time,
+                            entry.executable,
+                        )?;
+                        continue;
+                    }
+                }
+
+                let data = group
+                    .read_entry_bytes_exact(&entry)
+                    .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+                if entry.is_directory {
+                    // Preserve the original core even when this complete payload
+                    // cannot be opened. Close calculates CRCs in final entry
+                    // order, so the writer also retains the successful result for
+                    // use only if traversal actually reaches this entry.
+                    let child_contents_crc = group.direct_child_contents_crc(&entry, &data).ok();
+                    mutable.add_imported_packed_child_core_bytes_with_metadata(
                         entry.name_bytes,
                         data,
-                        contents_crc,
+                        ImportedPackedChildCoreMetadata {
+                            crc_state: entry.crc_state,
+                            stored_crc: entry.stored_crc,
+                            child_contents_crc,
+                            time: entry.time,
+                            executable: entry.executable,
+                        },
+                    )?;
+                } else {
+                    mutable.add_imported_file_core_bytes_with_metadata(
+                        entry.name_bytes,
+                        data,
+                        entry.crc_state,
+                        entry.stored_crc,
                         entry.time,
                         entry.executable,
                     )?;
-                    continue;
                 }
             }
+            Ok(mutable)
+        })();
 
-            let data = group
-                .read_entry_bytes_exact(&entry)
-                .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
-            if entry.is_directory {
-                // Preserve the original core even when this complete payload
-                // cannot be opened. Close calculates CRCs in final entry
-                // order, so the writer also retains the successful result for
-                // use only if traversal actually reaches this entry.
-                let child_contents_crc = group.direct_child_contents_crc(&entry, &data).ok();
-                mutable.add_imported_packed_child_core_bytes_with_metadata(
-                    entry.name_bytes,
-                    data,
-                    ImportedPackedChildCoreMetadata {
-                        crc_state: entry.crc_state,
-                        stored_crc: entry.stored_crc,
-                        child_contents_crc,
-                        time: entry.time,
-                        executable: entry.executable,
-                    },
-                )?;
-            } else {
-                mutable.add_imported_file_core_bytes_with_metadata(
-                    entry.name_bytes,
-                    data,
-                    entry.crc_state,
-                    entry.stored_crc,
-                    entry.time,
-                    entry.executable,
-                )?;
-            }
+        if let Some(canonical_directory) = canonical_directory {
+            directory_stack.remove(&canonical_directory);
         }
-        Ok(mutable)
+        result
     }
 
     /// Finds a child using C4Group's ASCII-case-insensitive entry matching.

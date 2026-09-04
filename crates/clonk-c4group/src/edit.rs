@@ -29,8 +29,13 @@ impl std::fmt::Display for EditError {
 }
 
 /// Loads `group` into a writable copy, preserving per-entry metadata and
-/// leaving nested groups packed.
+/// recursively materializing child directories as packed groups.
 pub fn to_mutable(group: &Group, filename: &str) -> Result<MutableGroup, EditError> {
+    if group.is_directory() {
+        return MutableGroup::from_directory(group)
+            .map_err(|error| EditError::Read(error.to_string()));
+    }
+
     let mut mutable = MutableGroup::new_bytes(filename.as_bytes().to_vec());
     if let Some(maker) = group.maker_bytes() {
         mutable.set_maker_bytes(maker);

@@ -6,10 +6,33 @@ mod group_writer;
 use clonk_resources::{Group, MutableGroup, MutableGroupChildMut, MutableGroupError};
 use group_writer::{c4group_entry_crc, c4group_file_crc, compress_c4group_for_test};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
+
+#[cfg(unix)]
+fn set_mtime(path: &Path, seconds: i64) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).expect("path has no NUL");
+    let times = [
+        libc::timespec {
+            tv_sec: seconds,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: seconds,
+            tv_nsec: 0,
+        },
+    ];
+    assert_eq!(
+        unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) },
+        0,
+        "set source directory mtime"
+    );
+}
 
 #[test]
 fn cpp_nonempty_file_crc_extends_data_crc_with_entry_filename() {
@@ -1441,6 +1464,36 @@ fn mutable_group_from_directory_keeps_raw_unwrapped_group_image_as_file() {
             .unwrap(),
         b"wrapped child sentinel"
     );
+}
+
+#[cfg(unix)]
+#[test]
+// `C4Group_PackDirectoryTo` packs a child to a temporary file and moves that
+// file into its parent, so the outer core receives the temporary file metadata
+// (`C4Group.cpp:281-307,1459-1495`).
+fn mutable_group_from_directory_uses_temporary_child_metadata() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("Objects.c4d");
+    let child = root.join("Child.c4d");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(child.join("Inner.txt"), b"inner").unwrap();
+    set_mtime(&child, 1);
+
+    let source = Group::open(&root).unwrap();
+    let before = unix_time_now();
+    let rewritten = MutableGroup::from_directory(&source).unwrap();
+    let image = rewritten.pack_raw().unwrap();
+    let after = unix_time_now();
+    let reopened = Group::from_memory(PathBuf::from("Objects.c4d"), image).unwrap();
+    let child = reopened
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.name_bytes == b"Child.c4d")
+        .unwrap();
+
+    assert!((before..=after).contains(&child.time));
+    assert!(!child.executable);
 }
 
 #[test]
