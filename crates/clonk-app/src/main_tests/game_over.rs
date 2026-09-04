@@ -1128,6 +1128,20 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
                         resource: Some(eliminated_resource.clone()),
                         ..Default::default()
                     },
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 10,
+                        name: LegacyCString::from_bytes(b"Removed Player".to_vec()).test_value(),
+                        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                            | clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+                        ..Default::default()
+                    },
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 11,
+                        name: LegacyCString::from_bytes(b"Prior Disconnect".to_vec()).test_value(),
+                        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                            | clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+                        ..Default::default()
+                    },
                 ],
                 by_client: 0,
             },
@@ -1159,10 +1173,21 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
     app.restart_current_network_scenario().test_value();
     let _commands = restart_completion.join().test_value();
 
-    main_assert_eq!(app.control_player_infos.client_info_ids(7) => vec![7]);
+    main_assert_eq!(
+        app.control_player_infos.client_info_ids(7) => vec![7, 11],
+        "a prior-round disconnected bit is lifecycle state, not a reason to discard a live client row"
+    );
     main_assert!(
         !app.control_player_infos.client_info_ids(7).contains(&8),
         "an eliminated PlayerInfo row must not be resurrected into the next lobby"
+    );
+    main_assert!(
+        !app.control_player_infos.client_info_ids(7).contains(&10),
+        "a removed PlayerInfo row must not be resurrected into the next lobby"
+    );
+    main_assert!(
+        app.control_player_infos.client_info_ids(7).contains(&11),
+        "a live remote row carrying only prior-round Disconnected must be retained"
     );
     main_assert!(
         app.control_player_infos.client_packet(9).is_none(),
@@ -1183,7 +1208,10 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
         .test_value();
     let rejoined_id = rejoined.players[0].id;
     app.control_player_infos.apply(rejoined);
-    main_assert_eq!(app.control_player_infos.client_info_ids(7) => vec![7, rejoined_id]);
+    main_assert_eq!(
+        app.control_player_infos.client_info_ids(7) => vec![7, 11, rejoined_id],
+        "retaining the disconnected-only row must not change new-ID allocation"
+    );
     main_assert!(
         app.control_player_infos.admit_request(rejoin, 3).is_none(),
         "a rejoined player resource must not append a duplicate row"
@@ -1420,9 +1448,12 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
         exact_loader_test_paths(client_user_data.path(), Some(content.path()));
     let (_joining_client_guard, joining_client_paths) =
         exact_loader_test_paths(joining_client_user_data.path(), Some(content.path()));
-    configure_test_startup_participant(&host_paths, host_user_data.path());
-    configure_test_startup_participant(&client_paths, client_user_data.path());
-    configure_test_startup_participant(&joining_client_paths, joining_client_user_data.path());
+    configure_test_startup_participant_with_crew(&host_paths, host_user_data.path());
+    configure_test_startup_participant_with_crew(&client_paths, client_user_data.path());
+    configure_test_startup_participant_with_crew(
+        &joining_client_paths,
+        joining_client_user_data.path(),
+    );
 
     let client_listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
     let client_port = client_listener.local_addr().test_value().port();

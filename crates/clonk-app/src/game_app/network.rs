@@ -6888,12 +6888,7 @@ impl GameApp {
             if !live_client_ids.contains(&client_id) {
                 continue;
             }
-            players.retain(|player| {
-                player.flags
-                    & (clonk_engine::PLAYER_INFO_FLAG_REMOVED
-                        | clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED)
-                    == 0
-            });
+            players.retain(|player| player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0);
             for player in &mut players {
                 // The fresh host row starts from the new lobby's team state.
                 // Remote rows follow it unless SetRestoreInfos explicitly kept
