@@ -1209,12 +1209,15 @@ impl ClientResourceState {
         self.resource_resolver = resolver;
     }
 
-    pub(crate) fn publish_player_resource(
+    pub(crate) fn publish_player_resource_with_path(
         &mut self,
         request: crate::ClientPlayerResourceRequest,
-    ) -> Result<clonk_engine::NetworkResourceCore, String> {
+    ) -> Result<crate::PublishedPlayerResource, String> {
         if let Some(core) = self.local_resource_sources.get(&request.source_path) {
-            return Ok(core.clone());
+            return Ok(crate::PublishedPlayerResource {
+                core: core.clone(),
+                local_path: request.source_path,
+            });
         }
         if self.backend.is_none() {
             return Err("client has no filesystem resource backend".to_string());
@@ -1266,8 +1269,11 @@ impl ClientResourceState {
             ));
         }
         self.local_resource_sources
-            .insert(effective_source_path, core.clone());
-        Ok(core)
+            .insert(effective_source_path.clone(), core.clone());
+        Ok(crate::PublishedPlayerResource {
+            core,
+            local_path: effective_source_path,
+        })
     }
 
     pub(crate) fn begin_resource_derive(

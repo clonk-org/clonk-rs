@@ -3266,16 +3266,17 @@ impl GameApp {
                 publish_initial_configured_client_players(client_id, &configured, |publication| {
                     let source_path = publication.source_path.clone();
                     network
-                        .publish_client_player_resource(
+                        .publish_client_player_resource_with_path(
                             clonk_network::ClientPlayerResourceRequest {
                                 source_path: publication.source_path,
                                 wire_name: publication.wire_name,
                                 group_maker: publication.group_maker,
                             },
                         )
-                        .inspect(|core| {
-                            completed_resources.push((core.clone(), source_path.clone()));
+                        .inspect(|published| {
+                            completed_resources.push(published.clone());
                         })
+                        .map(|published| published.core)
                         .inspect_err(|error| {
                             tracing::warn!(
                                 path = %source_path.display(),
@@ -3286,9 +3287,10 @@ impl GameApp {
                 })
             })
             .unwrap_or_else(empty_request);
-        for (core, path) in completed_resources {
-            self.admission_resources.ensure_by_core(&core);
-            self.admission_resources.mark_complete(core.id, path);
+        for published in completed_resources {
+            self.admission_resources.ensure_by_core(&published.core);
+            self.admission_resources
+                .mark_complete(published.core.id, published.local_path);
         }
         if authenticate_players {
             let continuation = LeaguePlayerAuthContinuation::InitialClient {
@@ -3481,20 +3483,15 @@ impl GameApp {
             wire_name,
             group_maker,
         };
-        let resource = if host {
-            network.publish_host_player_resource(publication)
+        let published = if host {
+            network.publish_host_player_resource_with_path(publication)
         } else {
-            network.publish_client_player_resource(publication)
+            network.publish_client_player_resource_with_path(publication)
         }
         .map_err(|error| error.to_string())?;
         let request = selected
-            .runtime_add_player_info_update(client_id, resource)
+            .runtime_add_player_info_update(client_id, published.core.clone())
             .map_err(|error| error.to_string())?;
-        // A locally published resource keeps its original file for this
-        // process's JoinPlayer while the backend serves the optimized
-        // standalone to peers
-        // (src/C4Network2Res.cpp:409-424,1168-1189;
-        // src/C4Network2Players.cpp:353-382).
         let resource_core = request
             .players
             .first()
@@ -3505,7 +3502,7 @@ impl GameApp {
         self.admission_resources
             .register_lobby_resource(&resource_core);
         self.admission_resources
-            .mark_complete(resource_core.id, source_path);
+            .mark_complete(resource_core.id, published.local_path);
         if self.network_is_league {
             if request.players.is_empty() {
                 return Err("runtime player request has no player".to_string());

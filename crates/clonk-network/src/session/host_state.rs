@@ -1311,14 +1311,29 @@ fn discard_unregistered_runtime_dynamic(
     }
 }
 
-pub(crate) fn publish_host_player_resource(
+pub(crate) fn publish_host_player_resource_with_path(
     request: crate::ClientPlayerResourceRequest,
     state: &mut HostState,
-) -> Result<clonk_engine::NetworkResourceCore, String> {
+) -> Result<crate::PublishedPlayerResource, String> {
     // C4PlayerInfo::LoadFromLocalFile asks getRefRes(source, local-only)
     // before AddByFile, so selecting the same local file reuses its core.
     if let Some(core) = state.published_player_sources.get(&request.source_path) {
-        return Ok(core.clone());
+        let local_path = state
+            .resource_backend
+            .as_ref()
+            .and_then(|backend| {
+                request
+                    .source_path
+                    .is_dir()
+                    .then(|| backend.path(core.id))
+                    .flatten()
+            })
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| request.source_path.clone());
+        return Ok(crate::PublishedPlayerResource {
+            core: core.clone(),
+            local_path,
+        });
     }
     let source_path = request.source_path.clone();
     let network_directory = state
@@ -1358,6 +1373,11 @@ pub(crate) fn publish_host_player_resource(
         registration,
         resource_file,
     } = publication;
+    let local_path = if source_path.is_dir() {
+        resource_file.path.clone()
+    } else {
+        source_path.clone()
+    };
     let backend = state
         .resource_backend
         .as_mut()
@@ -1382,7 +1402,7 @@ pub(crate) fn publish_host_player_resource(
     state
         .published_player_sources
         .insert(source_path, core.clone());
-    Ok(core)
+    Ok(crate::PublishedPlayerResource { core, local_path })
 }
 
 pub(crate) fn begin_host_resource_derive(

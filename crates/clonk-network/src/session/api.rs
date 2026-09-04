@@ -875,7 +875,7 @@ pub enum HostCommand {
     },
     PublishPlayerResource {
         request: crate::ClientPlayerResourceRequest,
-        completion: oneshot::Sender<Result<clonk_engine::NetworkResourceCore, String>>,
+        completion: oneshot::Sender<Result<crate::PublishedPlayerResource, String>>,
     },
     BeginResourceDerive {
         resource_id: i32,
@@ -1276,6 +1276,15 @@ impl HostHandle {
         &self,
         request: crate::ClientPlayerResourceRequest,
     ) -> Result<clonk_engine::NetworkResourceCore, HostError> {
+        self.publish_player_resource_with_path(request)
+            .await
+            .map(|publication| publication.core)
+    }
+
+    pub async fn publish_player_resource_with_path(
+        &self,
+        request: crate::ClientPlayerResourceRequest,
+    ) -> Result<crate::PublishedPlayerResource, HostError> {
         let (completion, published) = oneshot::channel();
         self.command_tx
             .send(HostCommand::PublishPlayerResource {
@@ -1646,7 +1655,7 @@ pub enum ClientCommand {
     },
     PublishPlayerResource {
         request: crate::ClientPlayerResourceRequest,
-        completion: oneshot::Sender<Result<clonk_engine::NetworkResourceCore, String>>,
+        completion: oneshot::Sender<Result<crate::PublishedPlayerResource, String>>,
     },
     BeginResourceDerive {
         resource_id: i32,
@@ -1810,6 +1819,15 @@ impl ClientHandle {
         &self,
         request: crate::ClientPlayerResourceRequest,
     ) -> Result<clonk_engine::NetworkResourceCore, ClientError> {
+        self.publish_player_resource_with_path(request)
+            .await
+            .map(|publication| publication.core)
+    }
+
+    pub async fn publish_player_resource_with_path(
+        &self,
+        request: crate::ClientPlayerResourceRequest,
+    ) -> Result<crate::PublishedPlayerResource, ClientError> {
         let (completion, published) = oneshot::channel();
         self.command_tx
             .send(ClientCommand::PublishPlayerResource {

@@ -911,7 +911,7 @@ pub(crate) async fn run_host(
                         request,
                         completion,
                     } => {
-                        let result = publish_host_player_resource(request, &mut state);
+                        let result = publish_host_player_resource_with_path(request, &mut state);
                         let _ = completion.send(result);
                     }
                     HostCommand::BeginResourceDerive {
