@@ -163,7 +163,8 @@ def cargo_tree_packages(binary: str) -> set[tuple[str, str]]:
     `cargo metadata` resolves features for every workspace member, including
     test-only members. `cargo tree -p` asks Cargo for the selected binary's
     graph instead; `--target all` keeps dependencies for every shipped
-    platform in the corpus.
+    platform in the corpus. Explicit color and charset options keep Cargo's
+    human-oriented tree prefixes parseable and stable across environments.
     """
     result = subprocess.run(
         [
@@ -178,6 +179,10 @@ def cargo_tree_packages(binary: str) -> set[tuple[str, str]]:
             "--format",
             "{p}",
             "--no-dedupe",
+            "--color",
+            "never",
+            "--charset",
+            "utf8",
             "--locked",
         ],
         cwd=REPOSITORY,

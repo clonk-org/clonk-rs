@@ -241,6 +241,10 @@ clonk-app v1.0.0 (/workspace)
         self.assertEqual(command[command.index("--target") + 1], "all")
         self.assertIn("--edges", command)
         self.assertEqual(command[command.index("--edges") + 1], "normal,build")
+        self.assertIn("--color", command)
+        self.assertEqual(command[command.index("--color") + 1], "never")
+        self.assertIn("--charset", command)
+        self.assertEqual(command[command.index("--charset") + 1], "utf8")
         self.assertIn("--locked", command)
 
 
