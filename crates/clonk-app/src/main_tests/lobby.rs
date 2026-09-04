@@ -6800,6 +6800,7 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
         &clonk_network::ReferenceQueryConfig::default(),
     )
     .test_value();
+    let elapsed = started.elapsed();
     main_assert_eq!(advertised.title => expected_title);
     main_assert!(
         !advertised.join_allowed,
@@ -6816,7 +6817,6 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
         matches!(master_request_rx.try_recv(), Err(TryRecvError::Empty)),
         "masterserver Start must retain the exact synchronized-response ordering"
     );
-    let elapsed = started.elapsed();
     eprintln!(
         "selected ClonkMars host staged in {staging_elapsed:?} and exposed its reference in {elapsed:?} before the first lobby render"
     );
