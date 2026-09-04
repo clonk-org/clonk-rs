@@ -5,6 +5,83 @@
 
 use super::*;
 
+#[cfg(test)]
+type ClientRouteWriterPause = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
+#[cfg(test)]
+fn client_route_writer_pauses() -> &'static Mutex<BTreeMap<SocketAddr, ClientRouteWriterPause>> {
+    static PAUSES: std::sync::OnceLock<Mutex<BTreeMap<SocketAddr, ClientRouteWriterPause>>> =
+        std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn client_route_writer_retirements() -> &'static Mutex<BTreeMap<SocketAddr, oneshot::Sender<()>>> {
+    static RETIREMENTS: std::sync::OnceLock<Mutex<BTreeMap<SocketAddr, oneshot::Sender<()>>>> =
+        std::sync::OnceLock::new();
+    RETIREMENTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn pause_client_route_writer(
+    peer_addr: SocketAddr,
+) -> (
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    oneshot::Receiver<()>,
+) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let (retired_tx, retired_rx) = oneshot::channel();
+    let replaced = client_route_writer_pauses()
+        .lock()
+        .expect("client route writer pause lock poisoned")
+        .insert(peer_addr, (reached_tx, resume_rx));
+    assert!(
+        replaced.is_none(),
+        "client route writer pause already installed for this peer"
+    );
+    let replaced = client_route_writer_retirements()
+        .lock()
+        .expect("client route writer retirement lock poisoned")
+        .insert(peer_addr, retired_tx);
+    assert!(
+        replaced.is_none(),
+        "client route writer retirement already installed for this peer"
+    );
+    (reached_rx, resume_tx, retired_rx)
+}
+
+#[cfg(test)]
+pub(crate) fn notify_client_route_retired(peer_addr: Option<SocketAddr>) {
+    let Some(peer_addr) = peer_addr else {
+        return;
+    };
+    let retired = client_route_writer_retirements()
+        .lock()
+        .expect("client route writer retirement lock poisoned")
+        .remove(&peer_addr);
+    if let Some(retired) = retired {
+        let _ = retired.send(());
+    }
+}
+
+#[cfg(test)]
+async fn wait_at_client_route_writer_pause(peer_addr: Option<SocketAddr>) {
+    let Some(peer_addr) = peer_addr else {
+        return;
+    };
+    let pause = client_route_writer_pauses()
+        .lock()
+        .expect("client route writer pause lock poisoned")
+        .remove(&peer_addr);
+    let Some((reached, resume)) = pause else {
+        return;
+    };
+    let _ = reached.send(());
+    let _ = resume.await;
+}
+
 struct ReceivedControlDeduplicator {
     entries: BTreeSet<(Tick, ClientId)>,
     highest_tick: Option<Tick>,
@@ -77,6 +154,7 @@ async fn run_client_route_writer<W>(
     mut transport: crate::ControlTransport<W>,
     mut outbound_rx: mpsc::UnboundedReceiver<ClientRouteCommand>,
     mut cancel_rx: watch::Receiver<bool>,
+    peer_addr: Option<SocketAddr>,
 ) -> ClientRouteWriterExit
 where
     W: AsyncWrite + Unpin,
@@ -108,6 +186,10 @@ where
             Ok(frame) => frame,
             Err(error) => break ClientRouteWriterExit::Failed(format!("send failed: {error}")),
         };
+        #[cfg(test)]
+        wait_at_client_route_writer_pause(peer_addr).await;
+        #[cfg(not(test))]
+        let _ = peer_addr;
         let result = tokio::select! {
             biased;
             _ = wait_for_route_retirement(&mut cancel_rx) => {
@@ -150,7 +232,12 @@ pub(crate) async fn run_client_route<S>(
 {
     let (mut transport, writer) = transport.into_split();
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let mut writer_task = tokio::spawn(run_client_route_writer(writer, outbound_rx, cancel_rx));
+    let mut writer_task = tokio::spawn(run_client_route_writer(
+        writer,
+        outbound_rx,
+        cancel_rx,
+        peer_addr,
+    ));
     let mut writer_finished = false;
     let mut publish_disconnect = true;
     let mut liveness_timer = new_liveness_timer(liveness.next_timer_at());
@@ -3076,6 +3163,7 @@ mod tests {
             crate::ControlTransport::new(RetireAfterFlushWriter { retire }),
             outbound_rx,
             retire_rx,
+            None,
         )
         .await;
 

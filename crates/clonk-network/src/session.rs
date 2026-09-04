@@ -12542,9 +12542,24 @@ mod tests {
         ));
         snapshot.dynamic = nonloadable_core(2, 7, b"Dynamic.c4d");
         let (address, server) = start_client_bootstrap_probe(snapshot).await;
+        let (writer_paused, resume_writer, mut route_retired) = pause_client_route_writer(address);
 
-        let result =
-            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
+        let connect = tokio::spawn(connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        ));
+        writer_paused.await.test_value();
+        assert!(
+            !connect.is_finished(),
+            "resource failure must wait for the queued port capability to flush"
+        );
+        assert!(
+            route_retired.try_recv().is_err(),
+            "resource failure retired the route before its queued port capability flushed"
+        );
+        resume_writer.send(()).test_value();
+        let result = connect.await.test_value();
+        route_retired.await.test_value();
         let probe = server.await.test_value();
         let messages = probe.messages;
 

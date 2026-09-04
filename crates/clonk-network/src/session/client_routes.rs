@@ -2024,6 +2024,10 @@ impl ClientRouteManager {
             .values()
             .map(|route| route.outbound.clone())
             .collect::<Vec<_>>();
+        #[cfg(test)]
+        for route in self.routes.values() {
+            notify_client_route_retired(route.peer_addr);
+        }
         self.routes.clear();
         self.control_send_time_dirty = true;
         for outbound in senders {
