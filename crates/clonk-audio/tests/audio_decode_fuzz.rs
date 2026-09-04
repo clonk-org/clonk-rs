@@ -235,6 +235,15 @@ fn concurrent_midi_decodes_complete_without_backend_liveness_failure() {
     use std::time::Duration;
 
     let corpus = seeds();
+    // FluidSynth and its SoundFont are optional runtime dependencies. Keep
+    // this native-concurrency probe active when they are available, while
+    // preserving the ordinary decoder contract on hosts that report a typed
+    // missing-runtime error instead of making MIDI mandatory for the suite.
+    match decode_audio(&corpus[14]) {
+        Ok(_) => {}
+        Err(error) if error.is_missing_optional_decoder() => return,
+        Err(error) => panic!("valid MIDI seed failed before concurrency probe: {error}"),
+    }
     let workers = 2;
     let barrier = Arc::new(Barrier::new(workers));
     let (sender, receiver) = mpsc::channel();
