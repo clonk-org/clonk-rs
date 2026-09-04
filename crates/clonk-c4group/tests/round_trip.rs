@@ -183,6 +183,62 @@ fn c4group_cli_round_trips_native_command_matrix() {
     assert!(!missing.status.success());
 }
 
+// `C4Group_PackDirectoryTo` recursively packs every child directory before
+// adding it to the parent (`C4Group.cpp:260-307`). A packed `Objects.c4d`
+// therefore has the same child-group entries as the pinned oracle, rather
+// than trying to read a child directory as a regular file.
+#[test]
+fn c4group_packs_nested_directory_groups_recursively() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().join("Objects.c4d");
+    let child = root.join("Child.c4d");
+    let grandchild = child.join("Grand.c4d");
+    std::fs::create_dir_all(&grandchild).expect("create nested groups");
+    std::fs::write(root.join("Alpha.txt"), b"alpha").expect("write root entry");
+    std::fs::write(child.join("Inner.txt"), b"inner").expect("write child entry");
+    std::fs::write(grandchild.join("Deep.txt"), b"deep").expect("write grandchild entry");
+
+    let packed = c4group(&[root.to_str().expect("utf-8 root path"), "-p"]);
+    assert!(
+        packed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&packed.stderr)
+    );
+    assert!(
+        root.is_file(),
+        "packing must replace the directory with a file"
+    );
+
+    let packed = clonk_resources::Group::open(&root).expect("open packed root");
+    let entries = packed.entries().expect("enumerate packed root");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| String::from_utf8_lossy(&entry.name_bytes).into_owned())
+            .collect::<Vec<_>>(),
+        vec!["Child.c4d", "Alpha.txt"]
+    );
+    assert!(
+        entries[0].is_directory,
+        "child group must be marked as a group"
+    );
+
+    let child = packed.open_child("Child.c4d").expect("open child group");
+    assert_eq!(
+        child.read_file("Inner.txt").expect("read child entry"),
+        b"inner"
+    );
+    let grandchild = child
+        .open_child("Grand.c4d")
+        .expect("open grandchild group");
+    assert_eq!(
+        grandchild
+            .read_file("Deep.txt")
+            .expect("read grandchild entry"),
+        b"deep"
+    );
+}
+
 // Pinned oracle `src/c4group_ng.cpp:139-145,349-388` — the command loop keeps
 // walking after `-g`/`-y`, reopening the generated group before the next command.
 #[test]
