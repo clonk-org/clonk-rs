@@ -667,8 +667,9 @@ jobs:
           shared-key: recording-host-oracles
           save-if: ${{ inputs.publish-recording-host-cache }}
 
-      # scripts/tests/test_rust_ci_recording_host_gate.py requires every test
-      # carrying the recording-host marker to appear here.
+      # scripts/tests/test_rust_ci_recording_host_gate.py requires these
+      # material-order oracles to appear here even though they now run on
+      # every host (clonk-org/clonk-rs#1455).
       - name: Run recording-host material-order oracles
         run: |
           cargo nextest run \

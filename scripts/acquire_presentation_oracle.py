@@ -83,6 +83,19 @@ CPP_RUNTIME_CONTENT_GROUPS = {
     "objects": ("Objects.c4d", "inputs/Objects.c4d"),
     "material": ("Material.c4g", "inputs/Material.c4g"),
 }
+# Where the unpacked groups are bound to their Git identity before packing.
+# Outside `inputs/`, so neither engine enumerates it as content.
+CPP_RUNTIME_CONTENT_STAGING = "work/content-src"
+PACKED_CONTENT_MANIFEST_PATH = "work/content-packed.json"
+# Only the material group is packed. Its entry order picks material slots
+# (C4Material.cpp:263-299) and so decides every generated landscape, which is
+# what made the evidence a property of the acquisition host. Definition and
+# scenario order is not observable in the recorded values: on the pinned
+# oracle, Tutorial03 frame 410 reports RandomCount 898 with `Objects.c4d`
+# packed and 898 with it left as a folder, while the material order moves it
+# to 890. Should that ever stop being true, the acquisition's own C++/Rust
+# comparison fails rather than recording a host-specific number.
+PACKED_CPP_RUNTIME_CONTENT_GROUPS = frozenset({"material"})
 PINNED_CPP_RUNTIME_RESOURCES = {
     "graphics": {
         "tree": "153c435149fffeb0f6790d95b3c2136278393310",
@@ -1756,10 +1769,162 @@ def _validate_staged_cpp_runtime_content(
     candidate_root: Path,
     expected: Any,
 ) -> dict[str, Any]:
+    """Bind each unpacked runtime group in the staging area to its Git identity.
+
+    The groups the engines read are packed (`stage_cpp_runtime_content`), whose
+    bytes carry entry offsets and mtimes and so are not a stable digest. The
+    identity is therefore taken from the unpacked tree the pack is built from.
+    """
     resources = _require_exact_keys(
         expected,
         CPP_RUNTIME_CONTENT_GROUPS,
         "C++ runtime content resources",
+    )
+    staging = candidate_root / CPP_RUNTIME_CONTENT_STAGING
+    validated = {}
+    for group, (_, retained_path) in CPP_RUNTIME_CONTENT_GROUPS.items():
+        identity = _validate_runtime_resource_identity(
+            resources[group],
+            f"C++ runtime content {group}",
+        )
+        observed = runtime_resource_identity(staging / Path(retained_path).name)
+        _require(
+            observed == identity,
+            f"{Path(retained_path).name} runtime content digest/tree mismatch",
+        )
+        validated[group] = identity
+    return validated
+
+
+def _port_group_packer(source_root: Path, build_profile: str = "release") -> Path:
+    """Build the port's `c4group` so staging can pack the runtime groups.
+
+    This is build tooling rather than an engine under test, so it is not bound
+    into the recipe provenance: what the evidence depends on is the packed
+    group's entry order, and both engines read that same group.
+    """
+    _require(
+        build_profile in {"release", "test"},
+        f"unsupported group packer profile: {build_profile}",
+    )
+    profile_arguments = ["--release"] if build_profile == "release" else ["--profile", "test"]
+    try:
+        completed = subprocess.run(
+            [
+                "cargo",
+                "build",
+                "--locked",
+                *profile_arguments,
+                "-p",
+                "clonk-c4group",
+                "--bin",
+                "c4group",
+            ],
+            cwd=str(source_root),
+            capture_output=True,
+            check=False,
+            env=_build_process_environment(BUILD_ENVIRONMENT),
+        )
+    except OSError as error:
+        raise AcquisitionFailure(f"could not build the group packer: {error}") from error
+    _require(
+        completed.returncode == 0,
+        "building the group packer failed: "
+        f"{completed.stderr.decode('utf-8', 'replace').strip()}",
+    )
+    target_profile = "release" if build_profile == "release" else "debug"
+    packer = source_root / "target" / target_profile / ("c4group.exe" if os.name == "nt" else "c4group")
+    _regular_file(packer, "group packer")
+    return packer
+
+
+def _pack_runtime_group(packer: Path, staged: Path, destination: Path) -> None:
+    """Pack a copy, so the unpacked tree the capture patch binds survives."""
+    _require(staged.is_dir(), f"staged runtime group is not a directory: {staged}")
+    _require(not destination.exists(), f"runtime group destination exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    work = staged.with_name(f"{staged.name}.pack")
+    _require(not work.exists(), f"pack workspace exists: {work}")
+    shutil.copytree(staged, work, symlinks=True)
+    staged = work
+    try:
+        completed = subprocess.run(
+            [str(packer), str(staged), "-p"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise AcquisitionFailure(f"could not run the group packer {packer}: {error}") from error
+    _require(
+        completed.returncode == 0,
+        f"packing {staged.name} failed: {completed.stderr.decode('utf-8', 'replace').strip()}",
+    )
+    _require(staged.is_file(), f"packer did not replace {staged.name} with a group file")
+    shutil.move(str(staged), str(destination))
+
+
+def stage_cpp_runtime_content(
+    content_repository: Path,
+    candidate_root: Path,
+    packer: Path,
+    expected: Any,
+) -> dict[str, Any]:
+    """Stage the runtime content groups both engines read, in packed form.
+
+    A `GRPF_Folder` scan is host `readdir` order (C4Group.cpp:1177-1207;
+    StdFile.cpp:823-836) and `C4MaterialMap::Load` takes material slots straight
+    from it (C4Material.cpp:263-299), so staging these groups unpacked makes the
+    recorded evidence a property of the acquisition host's filesystem rather
+    than of the content. Shipped LegacyClonk content is packed, and a packed
+    group is read in stored order, which `C4Group::Sort` derives from the
+    group's `C4FLS_*` list (C4Group.cpp:2300-2336).
+    """
+    staging = candidate_root / CPP_RUNTIME_CONTENT_STAGING
+    for _, (source_path, retained_path) in CPP_RUNTIME_CONTENT_GROUPS.items():
+        materialize_runtime_resource_tree(
+            content_repository,
+            FIXTURE_CONTENT_COMMIT,
+            source_path,
+            staging / Path(retained_path).name,
+        )
+    validated = _validate_staged_cpp_runtime_content(candidate_root, expected)
+    packed = {}
+    for group, (_, retained_path) in CPP_RUNTIME_CONTENT_GROUPS.items():
+        staged = staging / Path(retained_path).name
+        destination = candidate_root / retained_path
+        if group in PACKED_CPP_RUNTIME_CONTENT_GROUPS:
+            _pack_runtime_group(packer, staged, destination)
+            packed[group] = _sha256_file(destination)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(staged), str(destination))
+    # The unpacked tree a packed group was built from stays in the staging
+    # area: the capture patch manifest-binds it, because a packed group's bytes
+    # carry a wall-clock creation stamp and so are not a stable digest.
+    _write_json_new(candidate_root / PACKED_CONTENT_MANIFEST_PATH, packed)
+    return validated
+
+
+def _validate_packed_cpp_runtime_content(
+    candidate_root: Path,
+    expected: Any,
+) -> dict[str, Any]:
+    """Re-check the packed groups between captures.
+
+    The Git-tree binding happens once, in `stage_cpp_runtime_content`, against
+    the unpacked trees the packs are built from. What is left to guard is that
+    nothing mutated a group mid-run, so compare the digests recorded then.
+    """
+    resources = _require_exact_keys(
+        expected,
+        CPP_RUNTIME_CONTENT_GROUPS,
+        "C++ runtime content resources",
+    )
+    recorded = load_json(candidate_root / PACKED_CONTENT_MANIFEST_PATH)
+    recorded = _require_exact_keys(
+        recorded,
+        PACKED_CPP_RUNTIME_CONTENT_GROUPS,
+        "packed runtime content digests",
     )
     validated = {}
     for group, (_, retained_path) in CPP_RUNTIME_CONTENT_GROUPS.items():
@@ -1767,11 +1932,19 @@ def _validate_staged_cpp_runtime_content(
             resources[group],
             f"C++ runtime content {group}",
         )
-        observed = runtime_resource_identity(candidate_root / retained_path)
-        _require(
-            observed == identity,
-            f"{Path(retained_path).name} runtime content digest/tree mismatch",
-        )
+        target = candidate_root / retained_path
+        if group in PACKED_CPP_RUNTIME_CONTENT_GROUPS:
+            _regular_file(target, f"packed runtime content {group}")
+            _require(
+                _sha256_file(target) == recorded[group],
+                f"{Path(retained_path).name} packed runtime content digest mismatch",
+            )
+        else:
+            observed = runtime_resource_identity(target)
+            _require(
+                observed == identity,
+                f"{Path(retained_path).name} runtime content digest/tree mismatch",
+            )
         validated[group] = identity
     return validated
 
@@ -3716,15 +3889,10 @@ def verify_current_rust(
     runtime_content_resources = expected_cpp_runtime_content_resources(
         repository_root / "content"
     )
-    for _, (source_path, retained_path) in CPP_RUNTIME_CONTENT_GROUPS.items():
-        materialize_runtime_resource_tree(
-            repository_root / "content",
-            FIXTURE_CONTENT_COMMIT,
-            source_path,
-            output_directory / retained_path,
-        )
-    _validate_staged_cpp_runtime_content(
+    stage_cpp_runtime_content(
+        repository_root / "content",
         output_directory,
+        _port_group_packer(repository_root, build_profile),
         runtime_content_resources,
     )
     source_identity_path = output_directory / RUST_SOURCE_IDENTITY_RETAINED_PATH
@@ -4096,7 +4264,9 @@ def cpp_build_recipe() -> dict[str, Any]:
         "-DUSE_RUST_GUI_VALIDATION=OFF",
         "-DUSE_MINIUPNPC=OFF",
         "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3",
-        "-Dfmt_DIR=/opt/homebrew/Cellar/fmt/11.1.2/lib/cmake/fmt",
+        # The version-independent Homebrew `opt` link, so the recipe does not
+        # pin a Cellar version no current runner has installed.
+        "-Dfmt_DIR=/opt/homebrew/opt/fmt/lib/cmake/fmt",
         "-DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3",
         "-DOPENSSL_INCLUDE_DIR=/opt/homebrew/opt/openssl@3/include",
     ]
@@ -4390,20 +4560,15 @@ def _stage_acquisition(
         runtime_scenario_resources = expected_cpp_runtime_scenario_resources(
             workspace / "content"
         )
-        for _, (source_path, retained_path) in CPP_RUNTIME_CONTENT_GROUPS.items():
-            materialize_runtime_resource_tree(
-                workspace / "content",
-                FIXTURE_CONTENT_COMMIT,
-                source_path,
-                output_directory / retained_path,
-            )
+        stage_cpp_runtime_content(
+            workspace / "content",
+            output_directory,
+            _port_group_packer(rust_source),
+            runtime_content_resources,
+        )
         _validate_staged_cpp_runtime_resources(
             output_directory,
             runtime_resources["cpp"],
-        )
-        _validate_staged_cpp_runtime_content(
-            output_directory,
-            runtime_content_resources,
         )
         _write_json_new(
             output_directory / RUST_SOURCE_INVENTORY_RETAINED_PATH,
@@ -4554,7 +4719,7 @@ def _capture_command(
             runtime_content_resources is not None,
             "C++ runtime content identity is missing",
         )
-        _validate_staged_cpp_runtime_content(
+        _validate_packed_cpp_runtime_content(
             candidate_root,
             runtime_content_resources,
         )
@@ -4592,7 +4757,7 @@ def _capture_command(
         runtime_content_resources is not None,
         "Rust capture content identity is missing",
     )
-    _validate_staged_cpp_runtime_content(
+    _validate_packed_cpp_runtime_content(
         candidate_root,
         runtime_content_resources,
     )
@@ -5115,7 +5280,7 @@ def _remove_cpp_runtime_resources(
     expected_content: Any,
 ) -> None:
     _validate_staged_cpp_runtime_resources(candidate_root, expected)
-    _validate_staged_cpp_runtime_content(candidate_root, expected_content)
+    _validate_packed_cpp_runtime_content(candidate_root, expected_content)
     inputs = candidate_root / "inputs"
     for _, retained_path in RUNTIME_RESOURCE_GROUPS.values():
         target = candidate_root / retained_path
@@ -5146,7 +5311,11 @@ def _remove_runtime_content_resources(
     candidate_root: Path,
     expected_content: Any,
 ) -> None:
-    _validate_staged_cpp_runtime_content(candidate_root, expected_content)
+    _require_exact_keys(
+        expected_content,
+        CPP_RUNTIME_CONTENT_GROUPS,
+        "C++ runtime content resources",
+    )
     inputs = candidate_root / "inputs"
     for _, retained_path in CPP_RUNTIME_CONTENT_GROUPS.values():
         target = candidate_root / retained_path
@@ -5155,8 +5324,14 @@ def _remove_runtime_content_resources(
             and target.name in {"Tutorial.c4f", "Objects.c4d", "Material.c4g"},
             f"unsafe runtime content cleanup target: {target}",
         )
+        # `stage_cpp_runtime_content` leaves a packed group file for the
+        # material group and an unpacked tree for the rest.
         try:
-            shutil.rmtree(target)
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+                continue
+            _regular_file(target, "acquisition-only runtime content")
+            target.unlink()
         except OSError as error:
             raise AcquisitionFailure(
                 f"could not remove acquisition-only runtime content {target}: {error}"
@@ -5506,6 +5681,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"copy only complete validated evidence to {ACCEPTED_DESTINATION}",
     )
+    acquire.add_argument(
+        "--accepted-destination",
+        type=Path,
+        default=None,
+        help=(
+            "accept into this directory instead of "
+            f"{ACCEPTED_DESTINATION}. Acquisition requires a clean source "
+            "revision, so the tracked bundle cannot be removed first to make "
+            "room for a re-record; write elsewhere and replace it in a commit."
+        ),
+    )
 
     validate = subparsers.add_parser("validate", help="validate two complete instrumented runs")
     validate.add_argument("--oracle-root", required=True, type=Path)
@@ -5570,6 +5756,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 options.oracle_root,
                 options.output_dir,
                 accept=options.accept,
+                accepted_destination=options.accepted_destination,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0

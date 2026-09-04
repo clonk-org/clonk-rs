@@ -1,0 +1,105 @@
+# Temporary: re-records the presentation oracle on macOS, the platform the
+# accepted bundle was originally captured on, so the only variable that changes
+# is the staged runtime content order (clonk-org/clonk-rs#1466).
+#
+# Delete this workflow once the bundle it produces has landed.
+name: Acquire presentation oracle
+
+on:
+  push:
+    branches:
+      - acquire/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    name: Acquire presentation oracle (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The pinned oracle commit lives in this repository's history, so the
+          # clone cannot be shallow: `git worktree add` has to reach it.
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check out the pinned oracle
+        run: |
+          set -euo pipefail
+          revision="$(grep -oE '^ORACLE_SOURCE_COMMIT = "[0-9a-f]{40}"' \
+            scripts/acquire_presentation_oracle.py | grep -oE '[0-9a-f]{40}')"
+          echo "oracle revision: $revision"
+          git worktree add --detach "$RUNNER_TEMP/oracle" "$revision"
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          # Everything the pinned CMakeLists find_package()s for a non-console
+          # macOS build: GTK3, miniupnpc and X11 are gated off.
+          brew install ninja fmt openssl@3 curl sdl2 sdl2_mixer libpng jpeg \
+            freetype glew
+          ls -d /opt/homebrew/opt/fmt/lib/cmake/fmt
+          ls -d /opt/homebrew/opt/glew/lib
+
+      - name: Widen the virtual display
+        # The captures open a real 1280x720 window. A runner's default display
+        # leaves only 642 rows once window chrome is subtracted, which the
+        # capture rejects as a geometry mismatch rather than recording a
+        # short frame.
+        run: |
+          set -euo pipefail
+          brew install displayplacer
+          echo "--- before ---"
+          displayplacer list | sed -n '1,40p'
+          screen_id="$(displayplacer list | awk '/Persistent screen id:/{print $4; exit}')"
+          echo "screen id: $screen_id"
+          displayplacer "id:${screen_id} res:1920x1080 scaling:off origin:(0,0) degree:0"
+          echo "--- after ---"
+          displayplacer list | grep -iE "resolution|current mode" | head
+
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+
+      - name: Acquire
+        # Acquisition requires a clean source revision, so the tracked bundle
+        # cannot be deleted first to make room; accept into a temporary
+        # destination and replace the tracked one in a commit.
+        run: |
+          set -euo pipefail
+          python3 scripts/acquire_presentation_oracle.py acquire \
+            --oracle-root "$RUNNER_TEMP/oracle" \
+            --output-dir "$RUNNER_TEMP/presentation-acquire" \
+            --accept \
+            --accepted-destination "$RUNNER_TEMP/accepted/v1"
+
+      - name: Show what changed
+        if: always()
+        run: git status --porcelain -- compat/presentation | head -50
+
+      - name: Upload the acquired bundle
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v5.0.0
+        with:
+          name: presentation-oracle-bundle
+          path: ${{ runner.temp }}/accepted
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload the acquisition working tree on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v5.0.0
+        with:
+          name: presentation-acquire-debug
+          # Just the captured frames and their attestations: the full working
+          # tree is ~2.8 GB of build output.
+          path: |
+            ${{ runner.temp }}/presentation-acquire/run-*/cpp/artifacts
+            ${{ runner.temp }}/presentation-acquire/run-*/rust/artifacts
+            ${{ runner.temp }}/presentation-acquire/run-*/comparisons
+            ${{ runner.temp }}/presentation-acquire/run-*/*/receipts
+          if-no-files-found: warn
+          retention-days: 7

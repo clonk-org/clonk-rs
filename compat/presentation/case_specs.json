@@ -310,7 +310,7 @@
     "player_sha256": "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0",
     "locale": {"language": "US", "charset": "Windows-1252", "lang": "C", "lc_all": "C", "tz": "UTC"},
     "seeds": {
-      "simulation": {"seed": 587, "calls": 890},
+      "simulation": {"seed": 587, "calls": 898},
       "presentation": {"algorithm": "darwin-libc-rand-park-miller-v1", "seed": 587, "calls": 7, "trace_sha256": "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6"}
     },
     "trigger": {"id": "tutorial03-object-menu-input-v1"},

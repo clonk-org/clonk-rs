@@ -742,15 +742,8 @@ impl MutableGroup {
             return false;
         }
         let patterns = sort_list.split('|').collect::<Vec<_>>();
-        self.entries.sort_by(|left, right| {
-            let left_rank = sort_rank_bytes(&left.name_bytes, &patterns);
-            let right_rank = sort_rank_bytes(&right.name_bytes, &patterns);
-            right_rank.cmp(&left_rank).then_with(|| {
-                left.name_bytes
-                    .to_ascii_lowercase()
-                    .cmp(&right.name_bytes.to_ascii_lowercase())
-            })
-        });
+        self.entries
+            .sort_by(|left, right| entry_sort_order(left, right, &patterns));
         true
     }
 
@@ -1028,18 +1021,28 @@ fn sort_rank_bytes(name: &[u8], patterns: &[&str]) -> usize {
         .unwrap_or(0)
 }
 
+/// Orders two stored names the way `C4Group::Sort` orders a group carrying
+/// this sort list: rank by first matching pattern, then `stricmp`
+/// (`C4Group.cpp:2300-2336`). Names equal under `stricmp` compare equal, as
+/// the native bubble sort leaves such a pair in input order.
+pub(crate) fn standard_name_order(
+    left: &[u8],
+    right: &[u8],
+    patterns: &[&str],
+) -> std::cmp::Ordering {
+    let left_rank = sort_rank_bytes(left, patterns);
+    let right_rank = sort_rank_bytes(right, patterns);
+    right_rank
+        .cmp(&left_rank)
+        .then_with(|| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()))
+}
+
 fn entry_sort_order(
     left: &MutableGroupEntry,
     right: &MutableGroupEntry,
     patterns: &[&str],
 ) -> std::cmp::Ordering {
-    let left_rank = sort_rank_bytes(&left.name_bytes, patterns);
-    let right_rank = sort_rank_bytes(&right.name_bytes, patterns);
-    right_rank.cmp(&left_rank).then_with(|| {
-        left.name_bytes
-            .to_ascii_lowercase()
-            .cmp(&right.name_bytes.to_ascii_lowercase())
-    })
+    standard_name_order(&left.name_bytes, &right.name_bytes, patterns)
 }
 
 /// The stock sort list native `C4Group::Sort` selects for a group of this

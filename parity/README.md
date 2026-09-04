@@ -107,11 +107,21 @@ clonk-org/clonk-rs#1240.
   differ solely by case, which the port cannot hold distinctly in any event
   because it keys sections by lowercase name.
 
-  This is the opposite call from material slots, which deliberately follow
-  `WalkDir` order because C++'s `readdir` order *is* the authoritative thing
-  being mirrored there — material indices exist on both sides and reach
-  synchronized state. Here the order decides port-only string IDs, so
-  normalizing costs no fidelity.
+- **Folder-group entry order:** C++ leaves a `GRPF_Folder` scan in host
+  `readdir` order (C4Group.cpp:1177-1207; StdFile.cpp:823-836), and
+  `C4MaterialMap::Load` assigns material slots straight from that scan
+  (C4Material.cpp:263-299). Because the dynamic texture map is allocated in
+  material order, an unpacked `Material.c4g` makes every generated landscape a
+  function of the filesystem, so two peers on one content revision desync
+  (clonk-org/clonk-rs#1455). Rust instead enumerates a folder as
+  `C4Group::Sort` would order its packed image: rank by the group's `C4FLS_*`
+  list, then `stricmp`, with raw bytes breaking the remaining tie
+  (C4Group.cpp:2300-2336; C4Application.cpp:122 installs the list). That is
+  the order shipped packed content already has — `c4group -p` on
+  `content/Material.c4g` stores `Acid.c4m` before `ASHES.c4m` and `Oil.c4m`
+  before `ORE.c4m`, which raw byte order inverts — so an unpacked local load,
+  a packed network load and C++ reading either all assign the same slots.
+  Packed groups keep their stored entry order on both sides.
 
 ## How the oracle stays honest
 

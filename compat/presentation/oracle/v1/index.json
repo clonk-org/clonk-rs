@@ -3,10 +3,10 @@
     "cpp": {
       "binary": {
         "path": "builds/cpp/binary",
-        "sha256": "6884aabdfcb657d1a3dfd9aec36a07a821fec2dd6074f57960d750785a38dbc4",
-        "size_bytes": 17203592
+        "sha256": "64e67ec027f23d5fffdd5d7242f2868895f8bd80f2113916d4813556ec6e6ff9",
+        "size_bytes": 17159832
       },
-      "capture_patch_sha256": "84c80ae2400d04bfd7279b7feea4fce8ee1e3741ecb1b5831d8d8a9acf020111",
+      "capture_patch_sha256": "8230f305f82fda6fcaa9ea7ed5d90b9f264bf7c272912080beafb29267582d7b",
       "producer": "legacyclonk-capture-patch-v1",
       "profile": "oracle-native",
       "recipe": {
@@ -30,7 +30,7 @@
               "-DUSE_RUST_GUI_VALIDATION=OFF",
               "-DUSE_MINIUPNPC=OFF",
               "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3",
-              "-Dfmt_DIR=/opt/homebrew/Cellar/fmt/11.1.2/lib/cmake/fmt",
+              "-Dfmt_DIR=/opt/homebrew/opt/fmt/lib/cmake/fmt",
               "-DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3",
               "-DOPENSSL_INCLUDE_DIR=/opt/homebrew/opt/openssl@3/include"
             ],
@@ -61,15 +61,15 @@
             }
           }
         ],
-        "sha256": "3e96183be23cf5b0d2be15866a120d1e816e2960d429f6f999cebec8fdb0d53a"
+        "sha256": "15dfcdaee6085f0892cd882dc3c59ac3baa700cddf7c1071f3c4608dc62f8cf7"
       },
       "source_tree": "3859b3715b7f58d0c461cf45dc226593a2b0d687"
     },
     "rust": {
       "binary": {
         "path": "builds/rust/binary",
-        "sha256": "beaa4a299708a838cc1921350d9ed76c1a6a390c0777a70aa707e09127387bb5",
-        "size_bytes": 48046672
+        "sha256": "292ce0b53de096b190e24fee9a373664ad40c628553872eaf74ff9f800e7a54b",
+        "size_bytes": 48069360
       },
       "capture_patch_sha256": null,
       "producer": "clonk-rs-capture-driver-v1",
@@ -98,7 +98,7 @@
         ],
         "sha256": "5dd31be0efc425f25b94fa67ac7f908edf76c6d36213b4310c7bad49ac0f55a6"
       },
-      "source_tree": "78f6665e9b77db67029de02a52d7bcd9eb5d276f"
+      "source_tree": "1ccfb459343998fdbf8b2239dbc974456bfb52e8"
     }
   },
   "case_specs": [
@@ -796,7 +796,7 @@
           "trace_sha256": "b6a840dcfa7c6c07c133ce57e8fbf40dcb7780f95335a12b546d535f7b2179a6"
         },
         "simulation": {
-          "calls": 890,
+          "calls": 898,
           "seed": 587
         }
       },
@@ -946,7 +946,7 @@
           "id": "startup-main",
           "receipt": {
             "path": "run-1/comparisons/startup-main.json",
-            "sha256": "569098774df7db6d7fa80e62e2ebc0beb1ca6397902a02bc63d38cfe7085e403",
+            "sha256": "49e76ac24db4fe78910dbc5e9e4bd311fd34b5e96320a8b37ff6f6e9eee42ac7",
             "size_bytes": 776
           },
           "reference": {
@@ -965,7 +965,7 @@
           "id": "startup-scenario-selection",
           "receipt": {
             "path": "run-1/comparisons/startup-scenario-selection.json",
-            "sha256": "a97088ea49fc1629c2456c2e24d602ffe83f250d9f47aab0a6543b5bd8b51118",
+            "sha256": "7d5c46daea3ee462a4c5bfdd5c1ba962565a3e28b3b73fa55e1b76cd445df82a",
             "size_bytes": 832
           },
           "reference": {
@@ -984,7 +984,7 @@
           "id": "startup-network-browser",
           "receipt": {
             "path": "run-1/comparisons/startup-network-browser.json",
-            "sha256": "e4968b33e419422769cb4afa9399fd2db1896e870cbd204d7c664a0c43c1924e",
+            "sha256": "36a17cc32ec31c9ecd78f02acda69ff55cb0810d69adc559801788461f749674",
             "size_bytes": 820
           },
           "reference": {
@@ -1003,7 +1003,7 @@
           "id": "startup-player-selection",
           "receipt": {
             "path": "run-1/comparisons/startup-player-selection.json",
-            "sha256": "21cc88f0d577433e8d715c23ca6f79d4859224219282e25743d985662486345f",
+            "sha256": "3d68c5b7ec393e5341ae1b65df0b3d6e0969d846f03e915930005dabc4ba07d7",
             "size_bytes": 824
           },
           "reference": {
@@ -1022,7 +1022,7 @@
           "id": "startup-options",
           "receipt": {
             "path": "run-1/comparisons/startup-options.json",
-            "sha256": "61f9bda754c8cdbe62ca3c24d7d706a1293c9b97ab1045f9ddef9fc704fcffc5",
+            "sha256": "aa0884a1d6f64347ea6a4f3b4b3c36d33c6c284562db4ca7748d741543b83b1c",
             "size_bytes": 788
           },
           "reference": {
@@ -1041,7 +1041,7 @@
           "id": "startup-about",
           "receipt": {
             "path": "run-1/comparisons/startup-about.json",
-            "sha256": "39aa4885adc8cfdef4c82bb4dfb6fd1f84c22f4a891e8a5a5f9f02cd5d731721",
+            "sha256": "7f734f6b41ebbef7ae74075b546edf901bff3e58337baae6f012565d64e9095d",
             "size_bytes": 780
           },
           "reference": {
@@ -1060,13 +1060,13 @@
           "id": "network-lobby",
           "receipt": {
             "path": "run-1/comparisons/network-lobby.json",
-            "sha256": "330c644f46deeaed5003ed849cc05b18d65add8851b132ecfeb54584332530b6",
+            "sha256": "de179bf02a594d4b4eb681e54982355d6181d7d8998a54c62809347c31b6d7e3",
             "size_bytes": 762
           },
           "reference": {
             "path": "run-1/cpp/artifacts/network-lobby.png",
-            "sha256": "b706758453274ec5d7fd110d319c3dfd144e5e21fc37d4b37a7e3ae6b96fb3c7",
-            "size_bytes": 1245117
+            "sha256": "df7a2cfd7e72541b5299236e0e137298cba6403543b8a247be60a3619bb59529",
+            "size_bytes": 1245120
           }
         },
         {
@@ -1079,13 +1079,13 @@
           "id": "loader",
           "receipt": {
             "path": "run-1/comparisons/loader.json",
-            "sha256": "d5fa408621943375b96f7bbebaaaba2b603e937df3668cb1be01d282ac7b3bbd",
+            "sha256": "da2a149266812b852c8437d7f4d0891a91f0c975c7976684532adfc72fa91a0c",
             "size_bytes": 734
           },
           "reference": {
             "path": "run-1/cpp/artifacts/loader.png",
-            "sha256": "c595a4f535533e78bed2971d871e68c62702809cb2cf20b8df07b452d721ccd7",
-            "size_bytes": 1470719
+            "sha256": "bde5094fac6266176adab2edd454aba5dd388d794c776232814de16d9d5e0dee",
+            "size_bytes": 1470632
           }
         },
         {
@@ -1098,7 +1098,7 @@
           "id": "hud",
           "receipt": {
             "path": "run-1/comparisons/hud.json",
-            "sha256": "714634a60cc13642f049958a326ba366653707385745e0335b199d7d58c4afc7",
+            "sha256": "801f202a15f3a09ca6ac0fc3e62e64bc3f7fd2f83bfa321a59b055d6da09cd2a",
             "size_bytes": 740
           },
           "reference": {
@@ -1117,7 +1117,7 @@
           "id": "ingame-menu",
           "receipt": {
             "path": "run-1/comparisons/ingame-menu.json",
-            "sha256": "efa715f4182f7226622abaa0fcd5e0dc2d5a9841058d8decfb30a077fe644532",
+            "sha256": "85043525666423f793b4f34a308b918f19f39fc36f0dc7f64750ce43c5d014c9",
             "size_bytes": 772
           },
           "reference": {
@@ -1136,7 +1136,7 @@
           "id": "object-menu",
           "receipt": {
             "path": "run-1/comparisons/object-menu.json",
-            "sha256": "e4b9ca55480a27ae1e389c07f02201e6cc885c7afccbe325473c44c78d93b1d9",
+            "sha256": "8cf9bcd93da8a6ee0d7ae548dd0cb5711d6f13b3d161e2637bcf22eec8f35463",
             "size_bytes": 772
           },
           "reference": {
@@ -1155,7 +1155,7 @@
           "id": "gameplay",
           "receipt": {
             "path": "run-1/comparisons/gameplay.json",
-            "sha256": "db1c69f06f1ff981a89e934e7a41cd575a159930e0a4dd072203da588159bf47",
+            "sha256": "129eefd4ffd9a79e35705604a0d9ef9d7e7443534abf9e7c66a30f07928403be",
             "size_bytes": 760
           },
           "reference": {
@@ -1174,7 +1174,7 @@
           "id": "evaluation",
           "receipt": {
             "path": "run-1/comparisons/evaluation.json",
-            "sha256": "7849cd397323790bf31dad781e65537d547c6235572dc99c831aa630728b5ac3",
+            "sha256": "bfa3c09bbf2e2337436703d6ecbd08195121d743d4dd0e25baee9b7420291d23",
             "size_bytes": 768
           },
           "reference": {
@@ -1198,7 +1198,7 @@
           "id": "startup-main",
           "receipt": {
             "path": "run-2/comparisons/startup-main.json",
-            "sha256": "dafb262172e6178ba681f851482877c9f4667941545ce7d3ba1b22837a5a9791",
+            "sha256": "374c1c3f36e5da5671aad0f06fa93c953fea800b09ebaec2f5992214a151add6",
             "size_bytes": 776
           },
           "reference": {
@@ -1217,7 +1217,7 @@
           "id": "startup-scenario-selection",
           "receipt": {
             "path": "run-2/comparisons/startup-scenario-selection.json",
-            "sha256": "52ed049f36092d056063e54b1a1e928f0946c4c404aab0567419cbc5d9f94d13",
+            "sha256": "46e373f5b95bdc182d1e02f98399ef48c0f7622361426e064ebef681bf99d8a1",
             "size_bytes": 832
           },
           "reference": {
@@ -1236,7 +1236,7 @@
           "id": "startup-network-browser",
           "receipt": {
             "path": "run-2/comparisons/startup-network-browser.json",
-            "sha256": "9bedc851cc8bec979ba98839c677d801ccb032f9ebe0efeed0d2c282e5fe396a",
+            "sha256": "5589c9a498942503c0028aa03109caf96219ba6e9f470e3e5148d18b01222d49",
             "size_bytes": 820
           },
           "reference": {
@@ -1255,7 +1255,7 @@
           "id": "startup-player-selection",
           "receipt": {
             "path": "run-2/comparisons/startup-player-selection.json",
-            "sha256": "f610118a38025c1a4c547ddcd8b52212f90e0cd41e1c3b5e18b3763ff0ba443b",
+            "sha256": "8b6081e91a1395925c2f236aa6ced9b5cc3beefcea5b5fa219b0a183783f3093",
             "size_bytes": 824
           },
           "reference": {
@@ -1274,7 +1274,7 @@
           "id": "startup-options",
           "receipt": {
             "path": "run-2/comparisons/startup-options.json",
-            "sha256": "0edf43f412fe03592a8487385dacef74dc852d7ac19d153f0c2e1f129a0d9fa3",
+            "sha256": "60b4099b9319a06987b00146689fb25af85285a318e181a4376d522f8bdeaf08",
             "size_bytes": 788
           },
           "reference": {
@@ -1293,7 +1293,7 @@
           "id": "startup-about",
           "receipt": {
             "path": "run-2/comparisons/startup-about.json",
-            "sha256": "7a49f82018d915ea668ab6da146ca62004d3ec8fc19d1202aae01d2421a1203a",
+            "sha256": "cdc5d5c9cd39dee8807b923b6ba069bc8dd60c5c65b149e45ae567e2fe3f53bb",
             "size_bytes": 780
           },
           "reference": {
@@ -1312,13 +1312,13 @@
           "id": "network-lobby",
           "receipt": {
             "path": "run-2/comparisons/network-lobby.json",
-            "sha256": "20cb307c852fe4dcff752d8841bc713332bdce99d8b693a94229d1f349ad0575",
+            "sha256": "e63d9f42ce8d91bb20a592c3f76fee6be46032ca770121cd5b25af89f048d5eb",
             "size_bytes": 762
           },
           "reference": {
             "path": "run-2/cpp/artifacts/network-lobby.png",
-            "sha256": "b706758453274ec5d7fd110d319c3dfd144e5e21fc37d4b37a7e3ae6b96fb3c7",
-            "size_bytes": 1245117
+            "sha256": "df7a2cfd7e72541b5299236e0e137298cba6403543b8a247be60a3619bb59529",
+            "size_bytes": 1245120
           }
         },
         {
@@ -1331,13 +1331,13 @@
           "id": "loader",
           "receipt": {
             "path": "run-2/comparisons/loader.json",
-            "sha256": "7ff79eb52cad80e92b59197217d9e84072007390fca6277b187c57a5ef7a95ed",
+            "sha256": "ff6a2c4a4fd677869120202c94a5d538bb7874d827377d56c8edf34a86d347d1",
             "size_bytes": 734
           },
           "reference": {
             "path": "run-2/cpp/artifacts/loader.png",
-            "sha256": "c595a4f535533e78bed2971d871e68c62702809cb2cf20b8df07b452d721ccd7",
-            "size_bytes": 1470719
+            "sha256": "bde5094fac6266176adab2edd454aba5dd388d794c776232814de16d9d5e0dee",
+            "size_bytes": 1470632
           }
         },
         {
@@ -1350,7 +1350,7 @@
           "id": "hud",
           "receipt": {
             "path": "run-2/comparisons/hud.json",
-            "sha256": "60ce6f96eaeb720646de22367ea96264820db8ca1cc5e8d403d4e763eb65073a",
+            "sha256": "ec333239d19444a00dc25405c7bf25374aafc2a7d03279fab034b31c1cee680a",
             "size_bytes": 740
           },
           "reference": {
@@ -1369,7 +1369,7 @@
           "id": "ingame-menu",
           "receipt": {
             "path": "run-2/comparisons/ingame-menu.json",
-            "sha256": "cdf96ce9e64a0c847f078e73e73fdee95cb28e0db61ca3a283b0ccf5ef29733c",
+            "sha256": "b58ae496abb84075a763db79f2edd6ffc67b476ed8aa525c6adc2b74b143df29",
             "size_bytes": 772
           },
           "reference": {
@@ -1388,7 +1388,7 @@
           "id": "object-menu",
           "receipt": {
             "path": "run-2/comparisons/object-menu.json",
-            "sha256": "0a64ca3531e6cb976b7f3e047e2dd6f0392829ed8a977e1af710dc1811b1bc7c",
+            "sha256": "0e6b592aac8c7fedd29f58aedacd5a83c76e14bd774b91b0f9784e63bf9b678c",
             "size_bytes": 772
           },
           "reference": {
@@ -1407,7 +1407,7 @@
           "id": "gameplay",
           "receipt": {
             "path": "run-2/comparisons/gameplay.json",
-            "sha256": "2597dbb0847c5b5dd361fb9f3b6ddf132742b95716a2879ca2a6a4792a414783",
+            "sha256": "6e103f8b4595298a3cb3ad3118ab3ac1356a7a34a809cebceaa3792f6220a81a",
             "size_bytes": 760
           },
           "reference": {
@@ -1426,7 +1426,7 @@
           "id": "evaluation",
           "receipt": {
             "path": "run-2/comparisons/evaluation.json",
-            "sha256": "a2125b6058bfef1edd5c1b5996e916ddb4168cb8896a569d428d34d0bada7817",
+            "sha256": "b1f07c647723711737f366410c12117589d820232f152ca9e11007596b3abd1c",
             "size_bytes": 768
           },
           "reference": {
@@ -1446,7 +1446,7 @@
     },
     "case_specs": {
       "path": "compat/presentation/case_specs.json",
-      "sha256": "bb9715e7895166d60451e8e80e5ee54cdda2e87d9791d8144ce3a9fd786c8555"
+      "sha256": "6b3e3b33301bed8e9bc96b321108f19d157cd2ed6a44e02e9d7a6c7a53bb05e0"
     },
     "compat_profile": {
       "contract_sha256": "54c36c0abdb7bd397867b05ed2096e2d194de149c4419c658a7916fd5ea2a355",
@@ -1459,7 +1459,7 @@
     },
     "launcher": {
       "retained_path": "launcher/acquire_presentation_oracle.py",
-      "sha256": "96d2313d3cb345f28ca659bde2c0b40e20c329545df454442bf9ebf65ae0b663",
+      "sha256": "be3c32a9c1e93b159a093d35b8dc1087da4eb3d773c224af23e83731fae6ff06",
       "source_path": "scripts/acquire_presentation_oracle.py"
     },
     "normalization": {
@@ -1504,14 +1504,14 @@
     },
     "rust_source_inventory": {
       "path": "inputs/rust-source-inputs.json",
-      "sha256": "377a981fd986440e63c1b72be1ab5cac203e5d8a2535c54c196ca1203cdc8a89",
+      "sha256": "abc4e47df413d6c783273e9c8288838bbbcc2a927a765a4f51ae7d920b2e0ffe",
       "size_bytes": 298313
     }
   },
   "patch": {
     "base_commit": "7d43b47b7d789b533f32d005e64596e0a07019cd",
     "retained_path": "inputs/cpp-capture.patch",
-    "sha256": "84c80ae2400d04bfd7279b7feea4fce8ee1e3741ecb1b5831d8d8a9acf020111",
+    "sha256": "8230f305f82fda6fcaa9ea7ed5d90b9f264bf7c272912080beafb29267582d7b",
     "source_path": "parity/oracle/presentation_capture.patch"
   },
   "runs": [
@@ -1523,24 +1523,24 @@
               "id": "startup-main",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:main",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/startup-main",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/startup-main",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1557,7 +1557,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-main.json",
-                "sha256": "f94985cb38935ed24eb64a18664dea4924f2b4e3f7f747031ee0ffc966b31b2c",
+                "sha256": "e63a60f91ed1cffba6bdbc3d7659749f479007b05488e2466e4e6d53b31bc898",
                 "size_bytes": 1846
               }
             },
@@ -1565,24 +1565,24 @@
               "id": "startup-scenario-selection",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:scen",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/startup-scenario-selection",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/startup-scenario-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1599,7 +1599,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-scenario-selection.json",
-                "sha256": "0992fba898113b273561688b6d1cef33502b82cfa49a08eb4c76230d6e9ba97d",
+                "sha256": "e7467a1a45c8fee0238235e116f5fe67d48c9d641a699870bcbbff78bc50f37c",
                 "size_bytes": 1902
               }
             },
@@ -1607,24 +1607,24 @@
               "id": "startup-network-browser",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:net",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/startup-network-browser",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/startup-network-browser",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1641,7 +1641,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-network-browser.json",
-                "sha256": "5ee6e72e25d02f9b3d68066ec889196630cceb558b33d359ee2b0898b8f68df5",
+                "sha256": "7e72946e4ef0ae71d3ef10384d39208aaf007ac14e4b7187a8e99858fc5f7192",
                 "size_bytes": 1889
               }
             },
@@ -1649,24 +1649,24 @@
               "id": "startup-player-selection",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:plrsel",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/startup-player-selection",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/startup-player-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1683,7 +1683,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-player-selection.json",
-                "sha256": "f5e95b6b2c84404097b03f6ed6d60248c93283a30f1407eb02bceff60d49a89f",
+                "sha256": "a1e39a24e66dbcab475a13785a6b234cd765b213bf9f62ccfc7fff420188d846",
                 "size_bytes": 1893
               }
             },
@@ -1691,24 +1691,24 @@
               "id": "startup-options",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:options",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/startup-options",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/startup-options",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1725,7 +1725,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options.json",
-                "sha256": "daa12e1640e742603471f1245f7600b22837f5b9782a6947c0bd9dc8dd56a451",
+                "sha256": "8af6e1d1a2c5ba26b793f721f22512a505d50641c4739e9a7e0af16c26877010",
                 "size_bytes": 1858
               }
             },
@@ -1733,24 +1733,24 @@
               "id": "startup-about",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:about",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/startup-about",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/startup-about",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1767,7 +1767,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-about.json",
-                "sha256": "eaa1f31bd82c55040eb9b8f8730e2f8b512591be2a614590349e7dd413fd61d9",
+                "sha256": "8e8c66c8a8eac4d4cb1421c7b4efdd88bf5ea04f57b99c1eaf724b37955e97fc",
                 "size_bytes": 1851
               }
             },
@@ -1775,26 +1775,26 @@
               "id": "network-lobby",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
                   "/network",
                   "/lobby",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/network-lobby",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/network-lobby",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1811,7 +1811,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/network-lobby.json",
-                "sha256": "a82fabc2484d67e75ffe0bbb1968ab956e6ce2f84e1c31cc30428b7d8c47d291",
+                "sha256": "41dd98e98a344b77a4e32d8bede88044f8835ec09708824360e3c0399cfeb35b",
                 "size_bytes": 1730
               }
             },
@@ -1819,24 +1819,24 @@
               "id": "loader",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/loader.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/loader",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/loader",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1853,7 +1853,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/loader.json",
-                "sha256": "516af1ced0b9f29788fc0904c30e81d2db38623ed2bd61bbd7f0a2b59de938f7",
+                "sha256": "59304d46ce304cbcd47c8a940740149f9900e2c2b6b9fc3099a6f0d0371a0cb5",
                 "size_bytes": 1716
               }
             },
@@ -1861,24 +1861,24 @@
               "id": "hud",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/hud.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/hud",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/hud",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1895,7 +1895,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/hud.json",
-                "sha256": "559614caef147937b61eab5cdc34ca33a9b10d265fea67f9735da3129a097f5d",
+                "sha256": "5ffec7e5ba72d877423dbd11ad68d703cb8d1be7f392529175fcd5adc516e616",
                 "size_bytes": 1849
               }
             },
@@ -1903,24 +1903,24 @@
               "id": "ingame-menu",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/ingame-menu",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/ingame-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1937,7 +1937,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/ingame-menu.json",
-                "sha256": "608b4645e6e8d29e385981727defa35d1cebd6703206debce8999775547b7529",
+                "sha256": "6ae55e1470219cb4f46f7139fe3f4f3a77ba3bd7c85169f68fe3ea5cc11b67b3",
                 "size_bytes": 1886
               }
             },
@@ -1945,24 +1945,24 @@
               "id": "object-menu",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/object-menu",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/object-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -1979,7 +1979,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/object-menu.json",
-                "sha256": "dd5c8ba06429e6833371886d1b7f8fb572bb311e49e1313ae54d5c08396257c4",
+                "sha256": "b53cdd8e8eddb8f609dc98d76cff6fb991fa70f0ad556368a0539fd4007fe23b",
                 "size_bytes": 1896
               }
             },
@@ -1987,24 +1987,24 @@
               "id": "gameplay",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/gameplay",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/gameplay",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2021,7 +2021,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/gameplay.json",
-                "sha256": "7976fc870f184676af1f9ba30c0a106443d91a635e3ee63605be63df9e55f8b7",
+                "sha256": "92f02681ea85aecebea1746e5bff19e6d20321aca5305bd18901678e0e25e6f7",
                 "size_bytes": 1866
               }
             },
@@ -2029,24 +2029,24 @@
               "id": "evaluation",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/cpp/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/cpp/evaluation",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/cpp/evaluation",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2063,7 +2063,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/evaluation.json",
-                "sha256": "20d07833df544fb8098a3c70d5f39b69932989310eeee58c8adf71106031fbbc",
+                "sha256": "a28f6f45f60e875b0e09cc6321b386b6cc5e7b49f7b3f6d32a0e4807513d60e1",
                 "size_bytes": 1890
               }
             }
@@ -2075,27 +2075,27 @@
               "id": "startup-main",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/startup-main",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/startup-main",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2112,7 +2112,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-main.json",
-                "sha256": "1533e9c114642ef01038e8c3137449aed7ebdc73510488a7eac4797a33c7b7bb",
+                "sha256": "90b9f31a8155b2dd44a67b7db3a28dad08d33f6746e7f24f580b9e48cebae2c4",
                 "size_bytes": 1847
               }
             },
@@ -2120,27 +2120,27 @@
               "id": "startup-scenario-selection",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/startup-scenario-selection",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/startup-scenario-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2157,7 +2157,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-scenario-selection.json",
-                "sha256": "6af44cc8f119d0a606c5779402019a9c66b43afc63950b7381aed9894e398407",
+                "sha256": "c372d79e48a4a2842d42f609ac7d6e24b55f14cff6335ffa3ca755a5505ed900",
                 "size_bytes": 1903
               }
             },
@@ -2165,27 +2165,27 @@
               "id": "startup-network-browser",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/startup-network-browser",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/startup-network-browser",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2202,7 +2202,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-network-browser.json",
-                "sha256": "86fe9baee43b3559aa9f03878f645e9b0dbf970ca427af5876ee373ccf58f723",
+                "sha256": "f3365d023cab88582573d6007df8ee15db9696de02fc49f2db33b1713dcecac2",
                 "size_bytes": 1890
               }
             },
@@ -2210,27 +2210,27 @@
               "id": "startup-player-selection",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/startup-player-selection",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/startup-player-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2247,7 +2247,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-player-selection.json",
-                "sha256": "099b89e8dc14ba4cfcd5ff263a3d81115dbf1f855e884b3b7c7707990e1cc4ff",
+                "sha256": "d7f5c019e89e5dd16fd46ef053835cc71ca5cc83618f7cad39c3784f317f0233",
                 "size_bytes": 1895
               }
             },
@@ -2255,27 +2255,27 @@
               "id": "startup-options",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/startup-options",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/startup-options",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2292,7 +2292,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options.json",
-                "sha256": "3b46ff2758a23a30473740d9a149b241ed6e738cbf24c43abac27d7337430703",
+                "sha256": "7cc8a31e5327499e16d5f352b40a8b172d52d52d084b00908bbfdc9f57240adb",
                 "size_bytes": 1859
               }
             },
@@ -2300,27 +2300,27 @@
               "id": "startup-about",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/startup-about",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/startup-about",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2337,7 +2337,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-about.json",
-                "sha256": "a9a63ce74f11bb88c089958d0e82e285884ad0a3b09372d393d8e0dde83dcbbb",
+                "sha256": "829030c992398ac2b521fa8b7c3822ddd9713e7b41074059632f683664fba1ca",
                 "size_bytes": 1852
               }
             },
@@ -2345,27 +2345,27 @@
               "id": "network-lobby",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/network-lobby",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/network-lobby",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2382,7 +2382,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/network-lobby.json",
-                "sha256": "68501cce609b3f67afd80050e7a782e5ebe3898e9563021f4fb19528bd36b2a5",
+                "sha256": "7501dc961c0bff211a65c67d9be70eea2bbfff99f1bea66339de7a8cf835a4b6",
                 "size_bytes": 1730
               }
             },
@@ -2390,27 +2390,27 @@
               "id": "loader",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/loader.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/loader",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/loader",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2427,7 +2427,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/loader.json",
-                "sha256": "03843a519d3eca2e0b9ab142ccef307f74d54d09e124ad18d93c11edb82e26c2",
+                "sha256": "d122f6b3350230e405a7e5fffc6295e960d4126a8988ed45e831510f48a218f0",
                 "size_bytes": 1716
               }
             },
@@ -2435,27 +2435,27 @@
               "id": "hud",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/hud.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/hud",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/hud",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2472,7 +2472,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/hud.json",
-                "sha256": "54d8e285954984fd9c715aa66540d7776fd7fef559ed2e65e169eb33103cd339",
+                "sha256": "2f0bbc1eee46b5600ef97cb277fb63e44737ab03648cc34448499882095267f0",
                 "size_bytes": 1851
               }
             },
@@ -2480,27 +2480,27 @@
               "id": "ingame-menu",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/ingame-menu",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/ingame-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2517,7 +2517,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/ingame-menu.json",
-                "sha256": "331b203b5e3e42200bb15a6f362e126874d288ade8d0991e7417f3ed96300e4b",
+                "sha256": "cfbd7be553f2d4f22ac5899237dc0f78270ee24f0b5317bb073abbae72406247",
                 "size_bytes": 1888
               }
             },
@@ -2525,27 +2525,27 @@
               "id": "object-menu",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/object-menu",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/object-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2562,7 +2562,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/object-menu.json",
-                "sha256": "def13bf11aeff35929141ddce832f48c40db425422291107d8da9619cc45c695",
+                "sha256": "88f82d1de135bddd4bd77fa5f390b28b5e400bf06d517ee06e8383ab95b0792c",
                 "size_bytes": 1898
               }
             },
@@ -2570,27 +2570,27 @@
               "id": "gameplay",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/gameplay",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/gameplay",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2607,7 +2607,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/gameplay.json",
-                "sha256": "6a3284459b604522cde2df35780978c336166b7f09e9962e878ff7c322bf21d6",
+                "sha256": "3b2e30b68e3fa3b4b958714256d08e607ceccca02b8a9a868d23a8fa742db67c",
                 "size_bytes": 1868
               }
             },
@@ -2615,27 +2615,27 @@
               "id": "evaluation",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-1/rust/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_NONCE": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-1/rust/evaluation",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-1/rust/evaluation",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2652,7 +2652,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/evaluation.json",
-                "sha256": "e76848250c15d99b8e98a148e91ba208b24dabeaac29a57c523e71be210b26e8",
+                "sha256": "fe4e2b08c965fce2c6d98c7d01f40089cd70b4e66ee6f9918fd24420120115ac",
                 "size_bytes": 1892
               }
             }
@@ -2662,10 +2662,10 @@
       "id": "run-1",
       "launcher_receipt": {
         "path": "run-1/launcher-receipt.json",
-        "sha256": "87e80a56417cbd9e02ed9a5553464338db15579919e2d3258e3ef9f22912086c",
+        "sha256": "ef9e457fba8f29b2054970cdd696b0586b5b4b53bb65df363817b3f41f5cee28",
         "size_bytes": 4095
       },
-      "nonce": "e57990e2d0152608bf946552b9de070d412e8da55fb5b53d95edd36ff04bbd93"
+      "nonce": "0a258e3aede4d8ac4fcc064b64b6a4ecb2dfc9fda681a704f6d03857c0af6bc7"
     },
     {
       "engines": {
@@ -2675,24 +2675,24 @@
               "id": "startup-main",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:main",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/startup-main",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/startup-main",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2709,7 +2709,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-main.json",
-                "sha256": "7d6ec9b27bc012118972e0c15ca2d041c61614a7f5108de47490a0052d66fc1b",
+                "sha256": "e32bf49b2290b285d65e4a3288f2bb937526c4da764d9ac1fda7f2115b649832",
                 "size_bytes": 1846
               }
             },
@@ -2717,24 +2717,24 @@
               "id": "startup-scenario-selection",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:scen",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/startup-scenario-selection",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/startup-scenario-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2751,7 +2751,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-scenario-selection.json",
-                "sha256": "5db298a28c3bdc88bf0cef34c64b102df45c4e0b8ee917519ee096df6f56eaae",
+                "sha256": "dfe599c0b1a85a7704638012853ebc63119a361a4353cd54a26460c795e5aae4",
                 "size_bytes": 1902
               }
             },
@@ -2759,24 +2759,24 @@
               "id": "startup-network-browser",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:net",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/startup-network-browser",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/startup-network-browser",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2793,7 +2793,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-network-browser.json",
-                "sha256": "7b65e9570d85abdc2842ef248789726261c71be6cfc22d52d81d63b97fe0bde2",
+                "sha256": "4e0b0722e96e8b14bc83b2d344ac4948e1c44a35d7a5c8cc4d25810fa8dd3b6a",
                 "size_bytes": 1889
               }
             },
@@ -2801,24 +2801,24 @@
               "id": "startup-player-selection",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:plrsel",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/startup-player-selection",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/startup-player-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2835,7 +2835,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-player-selection.json",
-                "sha256": "a6ea7850b1bce8350ee5bc4fa75fc3a3c2b2ae278f420b2655af5c677865dbdf",
+                "sha256": "26cdc4dacf05efc2c32515b309067acf3b490ea2e69d7295394d4691a58f9752",
                 "size_bytes": 1893
               }
             },
@@ -2843,24 +2843,24 @@
               "id": "startup-options",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:options",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/startup-options",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/startup-options",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2877,7 +2877,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options.json",
-                "sha256": "9f9fed434606a74f76801b41e281b9a9564120e91b87916edb96f99fd963295b",
+                "sha256": "9664134191af0ccb897e2d9d0413fa4925ff3776aec3ca6d41f9c9fc6959a682",
                 "size_bytes": 1858
               }
             },
@@ -2885,24 +2885,24 @@
               "id": "startup-about",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
                   "/startup:about",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/startup-about",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/startup-about",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2919,7 +2919,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-about.json",
-                "sha256": "74726c258bc50b8d85b71701dfc9fb165ca9b11b0bd4f9d03d407a14bc146e7d",
+                "sha256": "016208b7cf2f9042233f7e8e73c270f95939e9934e2de47ccd538a46aab85762",
                 "size_bytes": 1851
               }
             },
@@ -2927,26 +2927,26 @@
               "id": "network-lobby",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
                   "/network",
                   "/lobby",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/network-lobby",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/network-lobby",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -2963,7 +2963,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/network-lobby.json",
-                "sha256": "882b6c03fd05c63f8886c310d9135f6a876ed7b10b3118e051bbcc7341e51785",
+                "sha256": "cfac4690fd12f17c616d31e6660210bb0111f146ad3a7101cb9de2252a0991fe",
                 "size_bytes": 1730
               }
             },
@@ -2971,24 +2971,24 @@
               "id": "loader",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/loader.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/loader",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/loader",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3005,7 +3005,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/loader.json",
-                "sha256": "4620c5022ebd4a21fe8393bf3bf5e821902070128ff863147a74c59ca66247ff",
+                "sha256": "c7da6a03a4c02195a699e07ee551b21eea23265bbeb8a6f1228dd6ab2291c30b",
                 "size_bytes": 1716
               }
             },
@@ -3013,24 +3013,24 @@
               "id": "hud",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/hud.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/hud",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/hud",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3047,7 +3047,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/hud.json",
-                "sha256": "005a6f9770a256ff988f6eece5ae4a933e1602fa36bfcce6826849b94cf3d798",
+                "sha256": "e2dada54d851812f600aa5cb16146cbcc48a1139a5ce720d2d3097f3da561be0",
                 "size_bytes": 1849
               }
             },
@@ -3055,24 +3055,24 @@
               "id": "ingame-menu",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/ingame-menu",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/ingame-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3089,7 +3089,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/ingame-menu.json",
-                "sha256": "7c93fa5a89971c5c6d9162239a2fe351e56575c2e728568a93648a735d95a853",
+                "sha256": "6b86ef281ff7899dffec7bc13a8def23d39f78b7ad834224938fc767a91c419b",
                 "size_bytes": 1886
               }
             },
@@ -3097,24 +3097,24 @@
               "id": "object-menu",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial03.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/object-menu",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/object-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3131,7 +3131,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/object-menu.json",
-                "sha256": "bcf828b4519965b5a3fbb0039e8ddb122a20879a9dc83f9d4ca51e0d4c4bf6a3",
+                "sha256": "3ea9f391a8d88daccba2a4ab425368bc431a425bd3d4071ac844077dd68dffbb",
                 "size_bytes": 1896
               }
             },
@@ -3139,24 +3139,24 @@
               "id": "gameplay",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial02.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/gameplay",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/gameplay",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3173,7 +3173,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/gameplay.json",
-                "sha256": "37c0afbe7cc3393e00a31f0221837158f614b7cee4b3b20b34ffa19d26f06fbb",
+                "sha256": "1274a5de6a453482dd0a26ae34c6e4b62baa68c4cfb6bc40925e700b7f91c8e3",
                 "size_bytes": 1866
               }
             },
@@ -3181,24 +3181,24 @@
               "id": "evaluation",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
-                  "/config:/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/cpp.config"
+                  "/Users/runner/work/_temp/presentation-acquire/work/oracle-source/build/clonk.app/Contents/MacOS/clonk",
+                  "/Users/runner/work/_temp/presentation-acquire/work/fixture-content/Tutorial.c4f/Tutorial01.c4s",
+                  "/config:/Users/runner/work/_temp/presentation-acquire/inputs/cpp.config"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/inputs",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/cpp/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/cpp/evaluation",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/cpp/evaluation",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3215,7 +3215,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/evaluation.json",
-                "sha256": "f024766a2b5120311a6be9b21e8f00ff5a1be0adf58165f4d4c403b7594dd0df",
+                "sha256": "9a83199f5ad64acbf28e549d630903773837af39064c065e075fa07c1ac68d79",
                 "size_bytes": 1890
               }
             }
@@ -3227,27 +3227,27 @@
               "id": "startup-main",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/startup-main.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/startup-main",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/startup-main",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3264,7 +3264,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-main.json",
-                "sha256": "55a1dab3806f55933a92d927180e4b7bcd916f36fd4186cb62cad377b0d45312",
+                "sha256": "dd74886d019cf3a53f01fc856f38c4ee6191fc656596d747a692c36851a7d0c8",
                 "size_bytes": 1847
               }
             },
@@ -3272,27 +3272,27 @@
               "id": "startup-scenario-selection",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/startup-scenario-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/startup-scenario-selection",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/startup-scenario-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3309,7 +3309,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-scenario-selection.json",
-                "sha256": "f8f07c7f749909b37b97dcda087967ea82733010528be8399aff529b8a1b6a83",
+                "sha256": "f84d48fbfca948e339d410a93f015bb20a7ec000977d8fa0c39786047be8f891",
                 "size_bytes": 1903
               }
             },
@@ -3317,27 +3317,27 @@
               "id": "startup-network-browser",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/startup-network-browser.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/startup-network-browser",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/startup-network-browser",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3354,7 +3354,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-network-browser.json",
-                "sha256": "0a45ed001fef10b88df1631294be2195e01b53833e5a60b7e1be0b8100451c0f",
+                "sha256": "cb20640120e7d9d47d5c35970d06984831bcec0d8fd36153400e5f519b3a2c39",
                 "size_bytes": 1890
               }
             },
@@ -3362,27 +3362,27 @@
               "id": "startup-player-selection",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/startup-player-selection.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/startup-player-selection",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/startup-player-selection",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3399,7 +3399,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-player-selection.json",
-                "sha256": "661e75c47720bee676fda193ec522eb737341c1f8500924077942b45884e4395",
+                "sha256": "65e53051500ff1b75d027c62d3f47128c6637684d0af4eb41781d8cf350ebdae",
                 "size_bytes": 1895
               }
             },
@@ -3407,27 +3407,27 @@
               "id": "startup-options",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/startup-options.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/startup-options",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/startup-options",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3444,7 +3444,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options.json",
-                "sha256": "880d5721580124d98d425dc5e87ab33a94b233de92d468a897d7401c90cf253e",
+                "sha256": "c7f5dc9dc8b79f806e0c7ae29bf9080e13e2d32ff2f41181cd5199ef8de955c8",
                 "size_bytes": 1859
               }
             },
@@ -3452,27 +3452,27 @@
               "id": "startup-about",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/startup-about.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/startup-about",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/startup-about",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3489,7 +3489,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-about.json",
-                "sha256": "9eb2934d6a56eac6fcf75211e9158bf943bf7262721772a63e3577871e411120",
+                "sha256": "d7b493adb52fde09b4a1ab1c369a552ec2438d493f18a3b3b2803b1d5ec204a6",
                 "size_bytes": 1852
               }
             },
@@ -3497,27 +3497,27 @@
               "id": "network-lobby",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/network-lobby.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/network-lobby",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/network-lobby",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3534,7 +3534,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/network-lobby.json",
-                "sha256": "ef88ba91e09f368c80cc8a349b6af4e4537ad1e601872a82ea1fc3c2fc2e1bce",
+                "sha256": "ce05bc746ad4397694ecaedf1e8a7b509441eac77a62b0d53813b016a4220e90",
                 "size_bytes": 1730
               }
             },
@@ -3542,27 +3542,27 @@
               "id": "loader",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/loader.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/loader",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/loader",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3579,7 +3579,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/loader.json",
-                "sha256": "f5f4cb1d4c436b05341ae72453c350c5ff9ee5ecdb45bf47a0cfd4cd1b4576a1",
+                "sha256": "ffbdfa76b85381331caa0f41ff2aa58a8141d606dfa3ab8f503a2587eef830c2",
                 "size_bytes": 1716
               }
             },
@@ -3587,27 +3587,27 @@
               "id": "hud",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/hud.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/hud",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/hud",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3624,7 +3624,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/hud.json",
-                "sha256": "437ed8db727f468e091737a8d48bf3f9dd9ed89d550d014f88668e3b3787991c",
+                "sha256": "ca0995146f624d14dfcde1729657abf2a5fa8e426417c91ca79f917e903caa43",
                 "size_bytes": 1851
               }
             },
@@ -3632,27 +3632,27 @@
               "id": "ingame-menu",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/ingame-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/ingame-menu",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/ingame-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3669,7 +3669,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/ingame-menu.json",
-                "sha256": "bfdd35b273b625450699687dde433c086df2b5deebec2e963a7b3bb37f9c7f88",
+                "sha256": "f509444a29397dd1990732d124e465bc6c7152486f3a02aa269bdb06934a25ff",
                 "size_bytes": 1888
               }
             },
@@ -3677,27 +3677,27 @@
               "id": "object-menu",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/object-menu.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/object-menu",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/object-menu",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3714,7 +3714,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/object-menu.json",
-                "sha256": "e97464ca45b55ddba73210147d358f3b3fed5e88e3be079a00c24e46575610ec",
+                "sha256": "902e6a28f0b6327e4cb51a761d989253df5dcd9571f0ca84d893649a263bfdd2",
                 "size_bytes": 1898
               }
             },
@@ -3722,27 +3722,27 @@
               "id": "gameplay",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/gameplay.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/gameplay",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/gameplay",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3759,7 +3759,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/gameplay.json",
-                "sha256": "89553b6d4e30b9274fa5673911500e31caf32b36e566790964ad1ef9356f9b0b",
+                "sha256": "50356b0ccebf6d58162bf80e7fa5fe878af7d3534ddb9fc92a296e55cd9f4453",
                 "size_bytes": 1868
               }
             },
@@ -3767,27 +3767,27 @@
               "id": "evaluation",
               "launch": {
                 "argv": [
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source/target/release/clonk-app",
+                  "/Users/runner/work/_temp/presentation-acquire/work/rust-source/target/release/clonk-app",
                   "--config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust.config",
-                  "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/Presentation.c4p",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/rust.config",
+                  "/Users/runner/work/_temp/presentation-acquire/inputs/Presentation.c4p",
                   "/compatprofile:legacy-clonk"
                 ],
-                "cwd": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/rust-source",
+                "cwd": "/Users/runner/work/_temp/presentation-acquire/work/rust-source",
                 "environment": {
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3",
-                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/artifacts",
-                  "CLONK_PRESENTATION_RECEIPT": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/run-2/rust/receipts/evaluation.json",
+                  "CLONK_PRESENTATION_NONCE": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575",
+                  "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
+                  "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
-                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs/rust-source-identity.json",
+                  "CLONK_PRESENTATION_SOURCE_IDENTITY": "/Users/runner/work/_temp/presentation-acquire/inputs/rust-source-identity.json",
                   "LANG": "C",
                   "LC_ALL": "C",
-                  "LC_CONTENT_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/inputs",
+                  "LC_CONTENT_DIR": "/Users/runner/work/_temp/presentation-acquire/inputs",
                   "LC_LANGUAGE": "US",
-                  "LC_USER_DATA_DIR": "/Users/tyler/Documents/code/vendor/presentation-candidate-9a01c8f5/work/user-data/run-2/rust/evaluation",
+                  "LC_USER_DATA_DIR": "/Users/runner/work/_temp/presentation-acquire/work/user-data/run-2/rust/evaluation",
                   "SDL_AUDIODRIVER": "dummy",
                   "TZ": "UTC"
                 },
@@ -3804,7 +3804,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/evaluation.json",
-                "sha256": "ac2cf55f73c7a40bfbb0cbbc17273a3f6cb66f4defa85ede46f204205906b2b6",
+                "sha256": "3be286383b2f46188966ff9da1e3baef5e1a46242b62035ee2c2596dec1410a9",
                 "size_bytes": 1892
               }
             }
@@ -3814,10 +3814,10 @@
       "id": "run-2",
       "launcher_receipt": {
         "path": "run-2/launcher-receipt.json",
-        "sha256": "20162602178809db8210ffea37ac680039c76977d2c789d6afc933c92928df63",
+        "sha256": "8f5377078ebb343d6c4e01637d4247cf1ae937f845c9c1810a884386eef43f1c",
         "size_bytes": 4095
       },
-      "nonce": "f3bf85054d531336868ea08769e01fad05393646fd08ab67e663c6aec558caf3"
+      "nonce": "9019f58e262ff1711f28b0244dc7579851272539dfb0a48eb572940ea962c575"
     }
   ],
   "schema": "clonk-rs/presentation-oracle/v2",
@@ -3857,10 +3857,10 @@
       }
     },
     "rust": {
-      "commit": "707fabcf83c36d6db3ef9e8501d4b44c59ca84c5",
+      "commit": "9120758bed048ea15bc948641f2bf48d367103af",
       "planet_tree": "8bac05fb1db56dec06c6dc3644b3170d81d4ef49",
       "system_tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2",
-      "tree": "78f6665e9b77db67029de02a52d7bcd9eb5d276f"
+      "tree": "1ccfb459343998fdbf8b2239dbc974456bfb52e8"
     }
   }
 }

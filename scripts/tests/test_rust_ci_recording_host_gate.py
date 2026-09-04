@@ -9,7 +9,11 @@ WORKFLOW = REPOSITORY / ".github" / "workflows" / "exact-sha-qualification.yml"
 ORACLE_REASON = (
     "recording-host material order; required macOS CI job"
 )
-EXPECTED_ORACLES = {
+# Folder groups enumerate in their packed sort order rather than host readdir
+# order (clonk-org/clonk-rs#1455), so these material-order oracles are
+# host-independent and must not be platform-gated. The macOS job still runs
+# them, as a cross-host check that the order really is host-independent.
+MATERIAL_ORACLES = {
     "alchemy_real_scenario_subcases_batch_4",
     "app_virtual_keyboard_completes_real_tutorial02_route",
     "committed_real_scenario_replays_are_deterministic",
@@ -59,10 +63,10 @@ def recording_host_oracles():
 
 
 class RecordingHostGateTests(unittest.TestCase):
-    def test_known_material_oracles_are_explicitly_platform_gated(self):
-        self.assertEqual(recording_host_oracles(), EXPECTED_ORACLES)
+    def test_material_oracles_are_not_platform_gated(self):
+        self.assertEqual(recording_host_oracles(), set())
 
-    def test_named_macos_job_runs_every_platform_gated_oracle(self):
+    def test_named_macos_job_runs_every_material_oracle(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         job = workflow.index("  recording-host-oracles:")
         next_job = re.search(r"(?m)^  [A-Za-z0-9_-]+:$", workflow[job + 1 :])
@@ -81,7 +85,7 @@ class RecordingHostGateTests(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertRegex(script, rf"(?:^|\s)-p\s+{re.escape(package)}\b")
         self.assertRegex(script, r"\s-E\s+")
-        for oracle in recording_host_oracles():
+        for oracle in MATERIAL_ORACLES:
             with self.subTest(oracle=oracle):
                 self.assertIn(oracle, script)
 
