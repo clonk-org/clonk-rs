@@ -533,34 +533,17 @@ impl GameApp {
     /// the profile for a later `ActivateNewPlayer`
     /// (src/C4PlayerList.cpp:219-267,398-409). The engine owns retirement, so
     /// mirror it into the synchronized registry once the tick has applied it.
-    /// Also repair an older Joined row whose one-frame removal edge was missed:
-    /// native cannot retain that state because `SetRemoved` runs inside the
-    /// same `C4PlayerList::Remove` call.
+    /// The caller captures the links before the simulation tick, so a player
+    /// that disappears during `C4PlayerList::Retire` is distinguishable from
+    /// a joined lobby row that has not entered this process's simulation yet.
+    /// Native only retires the former (src/C4PlayerList.cpp:398-409).
     pub(crate) fn mirror_retired_player_info(&mut self, players_before_tick: &[(i32, i32)]) {
-        let live_player_info_ids = self
-            .engine
-            .players()
-            .map(|player| player.player_info_id())
-            .collect::<Vec<_>>();
         let mut retired_player_infos = players_before_tick
             .iter()
             .filter(|(player, _)| self.engine.player(*player).is_none())
             .map(|(_, player_info)| *player_info)
             .filter(|player_info| *player_info != 0)
             .collect::<Vec<_>>();
-        retired_player_infos.extend(
-            self.control_player_infos
-                .retained_rows_snapshot()
-                .1
-                .into_iter()
-                .flat_map(|(_, _, players)| players)
-                .filter(|player| {
-                    player.id != 0
-                        && player.is_joined()
-                        && !live_player_info_ids.contains(&player.id)
-                })
-                .map(|player| player.id),
-        );
         retired_player_infos.sort_unstable();
         retired_player_infos.dedup();
         if retired_player_infos.is_empty() {

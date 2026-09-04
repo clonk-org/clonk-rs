@@ -2141,6 +2141,18 @@ fn exact_loader_test_paths(user_data: &Path, content_dir: Option<&Path>) -> (Env
 }
 
 fn configure_test_startup_participant(paths: &AppPaths, root: &Path) {
+    configure_test_startup_participant_with_options(paths, root, false);
+}
+
+fn configure_test_startup_participant_with_crew(paths: &AppPaths, root: &Path) {
+    configure_test_startup_participant_with_options(paths, root, true);
+}
+
+fn configure_test_startup_participant_with_options(
+    paths: &AppPaths,
+    root: &Path,
+    include_crew: bool,
+) {
     let player = root.join("Exact.c4p");
     let mut group = clonk_resources::MutableGroup::new("Exact.c4p");
     group
@@ -2159,6 +2171,15 @@ fn configure_test_startup_participant(paths: &AppPaths, root: &Path) {
             false,
         )
         .test_value();
+    if include_crew {
+        let mut crew = clonk_resources::MutableGroup::new("Exact.c4i");
+        crew.add_file(
+            "ObjectInfo.txt",
+            b"[ObjectInfo]\nid=GOOD\nName=Exact Crew\nParticipation=1\n".to_vec(),
+        )
+        .test_value();
+        group.add_child("Exact.c4i", crew).test_value();
+    }
     fs::write(&player, group.pack().test_value()).test_value();
     let packed = Group::open(&player).test_value();
     PlayerFile::load(&packed).test_value();

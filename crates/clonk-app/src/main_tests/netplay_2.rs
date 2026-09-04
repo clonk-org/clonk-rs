@@ -7394,15 +7394,15 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
         .test_value();
 
     main_assert!(app.engine.execute_eliminate_player_control(&n2_fixture!(eliminate: rejoined, 0)).expect("execute second host elimination"));
+    let players_before_second_retirement = app.player_info_ids_by_player();
     for _ in 0..60 {
         app.snapshot = app.engine.test_tick();
     }
-    // A retained Joined row can outlive the one frame where its runtime
-    // player disappears. Reconcile it from the current live roster, as C++'s
-    // C4PlayerList::Remove has already called SetRemoved by this point
+    // Capture the live links before the retirement tick, as the application
+    // loop does, so a joined lobby row that never entered this process's
+    // simulation cannot be mistaken for an eliminated player
     // (src/C4PlayerList.cpp:219-267,398-409).
-    let players_after_second_retirement = app.player_info_ids_by_player();
-    app.mirror_retired_player_info(&players_after_second_retirement);
+    app.mirror_retired_player_info(&players_before_second_retirement);
     main_assert!(app.engine.player(rejoined).is_none());
     main_assert_ne!(
         app.control_player_infos.get(42).test_value().flags
