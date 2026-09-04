@@ -790,6 +790,34 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
             ..Default::default()
         },
     ]);
+    let runtime_host_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 91,
+        filename: LegacyCString::from_bytes(b"Network/RuntimeHost.c4p".to_vec()).test_value(),
+        loadable: true,
+        file_size: 1,
+        chunk_size: 1,
+        ..Default::default()
+    };
+    app.control_player_infos.replace_snapshot(
+        17,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 17,
+                name: LegacyCString::from_bytes(b"Runtime Host".to_vec()).test_value(),
+                filename: runtime_host_resource.filename.clone(),
+                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                    | clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(runtime_host_resource.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+        }],
+    );
+    app.players.host_local_info_ids.insert(17);
+    app.players.host_local_alternate_colors.insert(91, 0x0012_3456);
     let restart_completion = thread::spawn(move || {
         let restart = commands.receive_host_round_lobby_restart();
         main_assert!(restart.complete(Ok(())));
@@ -801,6 +829,21 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
 
     main_assert!(app.network.is_some(), "the live session must survive restart");
     main_assert!(app.classic_host_lobby.is_some(), "the running scenario's effective definitions must rebuild its lobby");
+    // The retained round has already performed OpenScenario while staging, so
+    // the host-preparation handoff must consume that exact scenario instead
+    // of reopening it for a second full load (src/C4Game.cpp:421-440).
+    main_assert!(
+        app.staged_network_host_scenario
+            .test_ref()
+            .scenario
+            .is_none(),
+        "retained restart must consume the staged scenario during preparation"
+    );
+    main_assert_eq!(app.control_player_infos.client_info_ids(0) => vec![17], "a runtime-added host player must survive exactly once");
+    main_assert_eq!(app.control_player_infos.client_packet(0).test_value().players[0].resource => Some(runtime_host_resource.clone()), "the retained host row must keep its published resource identity");
+    main_assert_eq!(app.players.host_local_info_ids => HashSet::from([17]), "the host-local identity sidecar must follow the retained row");
+    main_assert_eq!(app.players.host_local_alternate_colors => HashMap::from([(91, 0x0012_3456)]), "the host-local alternate-color sidecar must follow the retained resource");
+    main_assert_eq!(app.admission_resources.resource_cores.get(&91) => Some(&runtime_host_resource), "the retained host resource must remain in the session catalog");
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     let hosted_resource_localities = app
         .admission_resources
@@ -1056,18 +1099,36 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
             ..Default::default()
         },
     ]);
+    let eliminated_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 92,
+        filename: LegacyCString::from_bytes(b"Network/Eliminated.c4p".to_vec()).test_value(),
+        loadable: true,
+        file_size: 1,
+        chunk_size: 1,
+        ..Default::default()
+    };
     app.control_player_infos.replace_snapshot(
         9,
         [
             clonk_engine::PlayerInfoControlData {
                 client_id: 7,
                 flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players: vec![clonk_engine::ControlPlayerInfoEntry {
-                    id: 7,
-                    name: LegacyCString::from_bytes(b"Connected Player".to_vec()).test_value(),
-                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
-                    ..Default::default()
-                }],
+                players: vec![
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 7,
+                        name: LegacyCString::from_bytes(b"Connected Player".to_vec()).test_value(),
+                        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                        ..Default::default()
+                    },
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 8,
+                        name: LegacyCString::from_bytes(b"Eliminated Player".to_vec()).test_value(),
+                        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                        resource: Some(eliminated_resource.clone()),
+                        ..Default::default()
+                    },
+                ],
                 by_client: 0,
             },
             clonk_engine::PlayerInfoControlData {
@@ -1085,6 +1146,10 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
             },
         ],
     );
+    // Retire marks the row as removed while preserving the elimination
+    // history that must not be replayed by the next lobby
+    // (src/C4PlayerList.cpp:219-267,398-409).
+    main_assert!(app.control_player_infos.mark_retired(8, 42));
     let restart_completion = thread::spawn(move || {
         let restart = commands.receive_host_round_lobby_restart();
         main_assert!(restart.complete(Ok(())));
@@ -1096,8 +1161,32 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
 
     main_assert_eq!(app.control_player_infos.client_info_ids(7) => vec![7]);
     main_assert!(
+        !app.control_player_infos.client_info_ids(7).contains(&8),
+        "an eliminated PlayerInfo row must not be resurrected into the next lobby"
+    );
+    main_assert!(
         app.control_player_infos.client_packet(9).is_none(),
         "a PlayerInfo row whose client socket is gone must not be revived in the next lobby"
+    );
+    let rejoin = clonk_network::PlayerInfoUpdateRequest::new(
+        7,
+        clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            resource: Some(eliminated_resource.clone()),
+            ..Default::default()
+        }],
+    );
+    let rejoined = app
+        .control_player_infos
+        .admit_request(rejoin.clone(), 3)
+        .test_value();
+    let rejoined_id = rejoined.players[0].id;
+    app.control_player_infos.apply(rejoined);
+    main_assert_eq!(app.control_player_infos.client_info_ids(7) => vec![7, rejoined_id]);
+    main_assert!(
+        app.control_player_infos.admit_request(rejoin, 3).is_none(),
+        "a rejoined player resource must not append a duplicate row"
     );
 }
 

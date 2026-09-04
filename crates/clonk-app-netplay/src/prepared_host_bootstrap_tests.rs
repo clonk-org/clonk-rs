@@ -734,6 +734,70 @@ fn retained_lobby_replacement_rejects_a_different_host_player_packet() {
 }
 
 #[test]
+fn retained_lobby_replacement_accepts_a_resource_backed_runtime_host_player() {
+    // HandlePlayerInfo replaces a client's packet, and JoinData carries that
+    // complete packet to every peer; a retained host may therefore append a
+    // runtime resource row after the configured local prefix
+    // (src/C4Network2Players.cpp:245-285; src/C4Network2.cpp:1820-1844).
+    let fixture = minimal_install(None);
+    let mut prepared = prepare(&fixture, &[]).expect("prepare the host scenario");
+    let snapshot = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .clone();
+    let clients = snapshot.parameters.clients.clone();
+    let mut player_infos = snapshot.parameters.player_infos.clone();
+    let runtime_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 77,
+        filename: clonk_engine::LegacyCString::from_bytes(b"Network/RuntimeHost.c4p".to_vec())
+            .expect("runtime resource filename is valid C4 text"),
+        loadable: true,
+        file_size: 1,
+        chunk_size: 1,
+        ..Default::default()
+    };
+    let host = player_infos
+        .clients
+        .iter_mut()
+        .find(|client| client.client_id == 0)
+        .expect("prepared host PlayerInfo packet");
+    host.players.push(clonk_engine::ControlPlayerInfoEntry {
+        id: 17,
+        filename: runtime_resource.filename.clone(),
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        resource: Some(runtime_resource.clone()),
+        ..Default::default()
+    });
+    let teams = prepared.runtime_team_metadata().clone();
+
+    prepared
+        .replace_initial_lobby_state(clients, player_infos, teams)
+        .expect("a valid runtime host row follows the configured prefix");
+
+    let retained = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("retained JoinData")
+        .parameters
+        .player_infos
+        .clients
+        .iter()
+        .find(|client| client.client_id == 0)
+        .expect("retained host packet");
+    assert_eq!(
+        retained
+            .players
+            .last()
+            .and_then(|player| player.resource.as_ref()),
+        Some(&runtime_resource)
+    );
+}
+
+#[test]
 fn prepared_clones_share_one_claim_of_the_loaded_scenario() {
     // C4Game owns one C4S member: OpenScenario loads it before InitNetworkHost,
     // and the same loaded value survives the lobby and is consumed by InitGame

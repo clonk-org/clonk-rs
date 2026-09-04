@@ -6770,6 +6770,13 @@ impl GameApp {
                 return Ok(false);
             }
         };
+        let Some(staged_scenario) = staged.scenario.take() else {
+            tracing::warn!(
+                "cannot prepare the next round on the live session: staged scenario was already claimed"
+            );
+            return Ok(false);
+        };
+        let preparation = preparation.with_staged_scenario(staged_scenario);
         let global_system_scripts = self.global_scripts_for_session();
         let mut prepared =
             match preparation.prepare_with_global_system_scripts(&global_system_scripts) {
@@ -6801,6 +6808,8 @@ impl GameApp {
             .iter()
             .map(|client| client.client_id)
             .collect::<HashSet<_>>();
+        let retained_host_alternate_colors = self.players.host_local_alternate_colors.clone();
+        let retained_host_info_ids = self.players.host_local_info_ids.clone();
         let (retained_last_player_id, retained_player_infos) =
             self.control_player_infos.retained_rows_snapshot();
         player_infos.last_player_id = player_infos.last_player_id.max(retained_last_player_id);
@@ -6814,10 +6823,77 @@ impl GameApp {
             | clonk_engine::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK;
         let restore_player_teams =
             self.engine.restart_restore_info_mask() & RESTART_RESTORE_PLAYER_TEAMS != 0;
+        let host_client_id = prepared.initial_host_player_info_control().client_id;
+        let Some(host_player_infos) = player_infos
+            .clients
+            .iter()
+            .find(|client| client.client_id == host_client_id)
+        else {
+            tracing::warn!("the restarted host bootstrap has no host PlayerInfo packet");
+            return Ok(false);
+        };
+        let mut retained_host_players = Vec::new();
+        let mut retained_host_player_ids = HashSet::new();
+        let mut host_player_ids = host_player_infos
+            .players
+            .iter()
+            .map(|player| player.id)
+            .collect::<HashSet<_>>();
+        let mut host_resource_ids = host_player_infos
+            .players
+            .iter()
+            .filter_map(|player| player.resource.as_ref().map(|resource| resource.id))
+            .collect::<HashSet<_>>();
         for (client_id, flags, mut players) in retained_player_infos {
-            if client_id == 0 || !live_client_ids.contains(&client_id) {
+            if client_id == host_client_id {
+                // The fresh host packet contains the configured local players.
+                // Runtime local players are process-owned rows and are only
+                // identified by the host-local sidecar; script rows are
+                // rejoined by C4Network2Players::Init below.
+                for mut player in players {
+                    if !retained_host_info_ids.contains(&player.id)
+                        || player.id <= 0
+                        || player.is_script_player()
+                        || player.flags
+                            & (clonk_engine::PLAYER_INFO_FLAG_REMOVED
+                                | clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED)
+                            != 0
+                        || player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+                    {
+                        continue;
+                    }
+                    let Some(resource) = player.resource.as_ref() else {
+                        continue;
+                    };
+                    if !host_player_ids.insert(player.id) || !host_resource_ids.insert(resource.id)
+                    {
+                        continue;
+                    }
+                    // C4Game::InitGame snapshots the surviving PlayerInfo rows
+                    // after OpenScenario; a completed round's lifecycle bits
+                    // must not be replayed into the next lobby
+                    // (src/C4Game.cpp:2384-2399).
+                    if !restore_player_teams {
+                        player.team = 0;
+                    }
+                    player.flags &= !FINISHED_ROUND_PLAYER_FLAGS;
+                    player.game_number = -1;
+                    player.game_join_frame = -1;
+                    player.game_part_frame = -1;
+                    retained_host_player_ids.insert(player.id);
+                    retained_host_players.push(player);
+                }
                 continue;
             }
+            if !live_client_ids.contains(&client_id) {
+                continue;
+            }
+            players.retain(|player| {
+                player.flags
+                    & (clonk_engine::PLAYER_INFO_FLAG_REMOVED
+                        | clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED)
+                    == 0
+            });
             for player in &mut players {
                 // The fresh host row starts from the new lobby's team state.
                 // Remote rows follow it unless SetRestoreInfos explicitly kept
@@ -6841,6 +6917,15 @@ impl GameApp {
                     players,
                 });
         }
+        let Some(host_player_infos) = player_infos
+            .clients
+            .iter_mut()
+            .find(|client| client.client_id == host_client_id)
+        else {
+            tracing::warn!("the restarted host bootstrap lost its host PlayerInfo packet");
+            return Ok(false);
+        };
+        host_player_infos.players.extend(retained_host_players);
 
         for client in &mut restarted_clients {
             client.lobby_ready = false;
@@ -6912,8 +6997,9 @@ impl GameApp {
         })));
         let fresh_max_players = prepared.host_config().max_players;
         let fresh_resource_files = prepared.host_config().resource_files.clone();
-        let fresh_alternate_colors = prepared.local_player_alternate_colors_by_resource().clone();
-        let fresh_local_player_ids = prepared
+        let mut fresh_alternate_colors =
+            prepared.local_player_alternate_colors_by_resource().clone();
+        let mut fresh_local_player_ids = prepared
             .initial_host_player_info_control()
             .players
             .iter()
@@ -6925,7 +7011,25 @@ impl GameApp {
                 })
             })
             .filter(|id| *id > 0)
-            .collect();
+            .collect::<HashSet<_>>();
+        if let Some(host_player_infos) = player_infos
+            .clients
+            .iter()
+            .find(|client| client.client_id == host_client_id)
+        {
+            for player in &host_player_infos.players {
+                if !retained_host_player_ids.contains(&player.id) {
+                    continue;
+                }
+                fresh_local_player_ids.insert(player.id);
+                if let Some(resource) = player.resource.as_ref() {
+                    if let Some(alternate_color) = retained_host_alternate_colors.get(&resource.id)
+                    {
+                        fresh_alternate_colors.insert(resource.id, *alternate_color);
+                    }
+                }
+            }
+        }
         let mut fresh_config = match prepared.claim_host_config() {
             Ok(config) => config,
             Err(error) => {

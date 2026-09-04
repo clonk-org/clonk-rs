@@ -5,7 +5,7 @@
 //! admission after control and the initial local player packet are ready
 //! (`src/C4Network2.cpp:222-278`; `src/C4Game.cpp:3847-3876`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::os::raw::c_int;
 use std::path::{Component, Path, PathBuf};
@@ -472,9 +472,10 @@ impl PreparedHostBootstrap {
     /// PlayerInfo registries outlive the scenario resources prepared here.
     /// Keep the fresh scenario/dynamic/restore state, but install those live
     /// registries into both the wire snapshot and the team-assignment state
-    /// that the next lobby continues to mutate. The caller may replace remote
-    /// PlayerInfo packets only: the host packet remains tied to this
-    /// bootstrap's local resource, alternate-color and identity sidecars.
+    /// that the next lobby continues to mutate. The host packet must retain
+    /// this bootstrap's configured-player prefix; validated resource-backed
+    /// runtime host rows may follow it, carrying the process-local identity
+    /// sidecars through the restart.
     pub fn replace_initial_lobby_state(
         &mut self,
         clients: JoinClientRegistrySnapshot,
@@ -491,13 +492,50 @@ impl PreparedHostBootstrap {
             .initial_join_snapshot
             .as_mut()
             .ok_or(PrepareHostBootstrapError::MissingJoinSnapshot)?;
-        let mut host_player_infos = player_infos
+        if player_infos
             .clients
             .iter()
-            .filter(|client| client.client_id == expected_host_player_info.client_id);
-        if host_player_infos.next() != Some(&expected_host_player_info)
-            || host_player_infos.next().is_some()
+            .filter(|client| client.client_id == expected_host_player_info.client_id)
+            .count()
+            != 1
         {
+            return Err(PrepareHostBootstrapError::RetainedHostPlayerInfoMismatch);
+        }
+        let Some(host_player_infos) = player_infos
+            .clients
+            .iter()
+            .find(|client| client.client_id == expected_host_player_info.client_id)
+        else {
+            return Err(PrepareHostBootstrapError::RetainedHostPlayerInfoMismatch);
+        };
+        let expected_player_count = expected_host_player_info.players.len();
+        if host_player_infos.flags != expected_host_player_info.flags
+            || host_player_infos.players.get(..expected_player_count)
+                != Some(expected_host_player_info.players.as_slice())
+            || host_player_infos.players[expected_player_count..]
+                .iter()
+                .any(|player| {
+                    player.id <= 0
+                        || player.is_script_player()
+                        || player.flags & PLAYER_INFO_FLAG_REMOVED != 0
+                        || player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+                        || player.resource.as_ref().is_none_or(|resource| {
+                            resource.resource_type != HostResourceType::Player as u8
+                                || !resource.loadable
+                        })
+                })
+        {
+            return Err(PrepareHostBootstrapError::RetainedHostPlayerInfoMismatch);
+        }
+        let mut player_ids = HashSet::new();
+        let mut resource_ids = HashSet::new();
+        if host_player_infos.players.iter().any(|player| {
+            !player_ids.insert(player.id)
+                || player
+                    .resource
+                    .as_ref()
+                    .is_some_and(|resource| !resource_ids.insert(resource.id))
+        }) {
             return Err(PrepareHostBootstrapError::RetainedHostPlayerInfoMismatch);
         }
         snapshot.parameters.clients = clients;

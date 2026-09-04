@@ -7672,9 +7672,10 @@ where
 
 /// Resource completions whose previous-round paths remain authoritative.
 ///
-/// Round-owned files and the host's player files are freshly materialized by
-/// the app. Only an unchanged remote PlayerInfo resource absent from the new
-/// publication keeps its backend file across the restart.
+/// Round-owned files and freshly selected host player files are materialized
+/// by the app. Any unchanged PlayerInfo resource absent from the new
+/// publication keeps its backend file across the restart, including a
+/// runtime-added host player.
 fn retained_host_round_player_resource_cores(
     config: &HostConfig,
 ) -> HashMap<i32, clonk_engine::NetworkResourceCore> {
@@ -7697,7 +7698,6 @@ fn retained_host_round_player_resource_cores(
         .player_infos
         .clients
         .iter()
-        .filter(|client| client.client_id != config.local_core.client_id)
         .flat_map(|client| &client.players)
         .filter(|player| {
             player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0
@@ -10410,6 +10410,10 @@ mod tests {
 
     #[tokio::test]
     async fn host_round_restart_releases_only_retained_player_completion_after_the_fence() {
+        // A retained PlayerInfo resource remains available after the host
+        // publishes the replacement JoinData, including when its owner is
+        // the host's local client (src/C4Network2.cpp:1820-1844;
+        // src/C4Network2Res.cpp:1168-1189).
         let mut host_config = HostConfig::default();
         let snapshot = host_config.initial_join_snapshot.as_mut().test_value();
         let scenario_core = snapshot.parameters.scenario.clone();
@@ -10421,6 +10425,11 @@ mod tests {
         };
         let retained_core = clonk_engine::NetworkResourceCore {
             id: 24,
+            resource_type: clonk_network::HostResourceType::Player as u8,
+            ..Default::default()
+        };
+        let retained_host_core = clonk_engine::NetworkResourceCore {
+            id: 26,
             resource_type: clonk_network::HostResourceType::Player as u8,
             ..Default::default()
         };
@@ -10438,17 +10447,32 @@ mod tests {
                     ..Default::default()
                 }],
             });
+        snapshot
+            .parameters
+            .player_infos
+            .clients
+            .push(clonk_network::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(retained_host_core.clone()),
+                    ..Default::default()
+                }],
+            });
         let stale_core = clonk_engine::NetworkResourceCore {
             id: 25,
             ..Default::default()
         };
         let retained_path = PathBuf::from("Network/Alice.c4p");
-        let (host_event_tx, mut host_events) = tokio_mpsc::channel(5);
+        let retained_host_path = PathBuf::from("Network/Host.c4p");
+        let (host_event_tx, mut host_events) = tokio_mpsc::channel(6);
         for (core, path) in [
             (scenario_core, PathBuf::from("Network/OldScenario.c4s")),
             (game_core, PathBuf::from("Network/OldDefinitions.c4d")),
             (dynamic_core, PathBuf::from("Network/OldDynamic.c4d")),
             (retained_core.clone(), retained_path.clone()),
+            (retained_host_core.clone(), retained_host_path.clone()),
             (stale_core, PathBuf::from("Network/Old.c4s")),
         ] {
             host_event_tx
@@ -10499,6 +10523,15 @@ mod tests {
                 resource_id: retained_core.id,
                 core: retained_core,
                 path: retained_path,
+                local: false,
+            }
+        );
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).test_value(),
+            NetworkEvent::ResourceComplete {
+                resource_id: retained_host_core.id,
+                core: retained_host_core,
+                path: retained_host_path,
                 local: false,
             }
         );
