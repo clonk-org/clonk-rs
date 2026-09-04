@@ -16,7 +16,9 @@ mod update_core;
 mod update_entries;
 mod wildcard;
 
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cli::{Command, CommandLine};
@@ -553,11 +555,20 @@ fn pack(group: &mut Option<clonk_resources::Group>, path: &str) -> bool {
         }
     };
     // Replace the directory with the packed file of the same name.
-    let staged = target.with_extension("c4group-packing");
-    if let Err(error) = std::fs::write(&staged, packed) {
+    let (staged, mut staged_file) = match create_pack_staging_file(target) {
+        Ok(staged) => staged,
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    if let Err(error) = staged_file.write_all(&packed) {
         eprintln!("Error: {}: {error}", staged.display());
+        drop(staged_file);
+        let _ = std::fs::remove_file(&staged);
         return false;
     }
+    drop(staged_file);
     if let Err(error) = std::fs::remove_dir_all(target) {
         eprintln!("Error: {path}: {error}");
         let _ = std::fs::remove_file(&staged);
@@ -565,10 +576,47 @@ fn pack(group: &mut Option<clonk_resources::Group>, path: &str) -> bool {
     }
     if let Err(error) = std::fs::rename(&staged, target) {
         eprintln!("Error: {path}: {error}");
+        let _ = std::fs::remove_file(&staged);
         return false;
     }
     reopen(group, path);
     true
+}
+
+/// Opens a sibling staging file without ever truncating an existing path.
+/// Native `MakeTempFilename` (`StdFile.cpp:296-305`) retries numbered names
+/// until it finds one that does not exist; `create_new` preserves that
+/// no-overwrite guarantee even when a stale path is a symlink.
+fn create_pack_staging_file(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let base = target.with_extension("c4group-packing");
+    let base_name = base.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "group path has no filename for staging",
+        )
+    })?;
+    for index in 0..1000 {
+        let candidate = if index == 0 {
+            base.clone()
+        } else {
+            let mut name = base_name.to_os_string();
+            name.push(format!("-{index:03}"));
+            base.with_file_name(name)
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique packing staging path",
+    ))
 }
 
 /// A repack that changes nothing, used when `-p` targets an already-packed

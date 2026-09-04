@@ -222,6 +222,10 @@ fn c4group_packs_nested_directory_groups_recursively() {
         entries[0].is_directory,
         "child group must be marked as a group"
     );
+    assert!(
+        !entries[0].executable,
+        "packed directory children inherit the temporary file's non-executable bit"
+    );
 
     let child = packed.open_child("Child.c4d").expect("open child group");
     assert_eq!(
@@ -236,6 +240,124 @@ fn c4group_packs_nested_directory_groups_recursively() {
             .read_file("Deep.txt")
             .expect("read grandchild entry"),
         b"deep"
+    );
+}
+
+#[test]
+// The native packer retries an existing staging name via `MakeTempFilename`
+// (`StdFile.cpp:296-305`) instead of truncating an unrelated sibling.
+fn c4group_pack_does_not_overwrite_an_existing_staging_file() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().join("Objects.c4d");
+    std::fs::create_dir(&root).expect("create root group");
+    std::fs::write(root.join("Inner.txt"), b"inner").expect("write root entry");
+    let staging = root.with_extension("c4group-packing");
+    std::fs::write(&staging, b"sentinel").expect("create stale staging path");
+
+    let packed = c4group(&[root.to_str().expect("utf-8 root path"), "-p"]);
+    assert!(
+        packed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&packed.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&staging).expect("read untouched staging path"),
+        b"sentinel"
+    );
+    assert!(
+        root.is_file(),
+        "packing must replace the directory with a file"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+// `C4Group_PackDirectoryTo` tests `DirectoryExists` on the literal path and
+// does not route it through `OpenAsChild`, so `*` is valid in a source basename
+// (`C4Group.cpp:281-307`).
+fn c4group_packs_literal_wildcard_named_directory_groups() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().join("Objects.c4d");
+    let child = root.join("Child*.c4d");
+    std::fs::create_dir_all(&child).expect("create wildcard-named child group");
+    std::fs::write(child.join("Inner.txt"), b"inner").expect("write child entry");
+
+    let packed = c4group(&[root.to_str().expect("utf-8 root path"), "-p"]);
+    assert!(
+        packed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&packed.stderr)
+    );
+
+    let packed = clonk_resources::Group::open(&root).expect("open packed root");
+    let entry = packed
+        .entries()
+        .expect("enumerate packed root")
+        .into_iter()
+        .find(|entry| entry.name_bytes == b"Child_.c4d")
+        .expect("wildcard-named child is retained after root-name validation");
+    assert!(entry.is_directory);
+    let child = clonk_resources::Group::from_raw_memory(
+        root.join("Child*.c4d"),
+        packed
+            .read_entry_bytes_exact(&entry)
+            .expect("read child group image"),
+    )
+    .expect("open wildcard-named child image");
+    assert_eq!(
+        child.read_file("Inner.txt").expect("read child entry"),
+        b"inner"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+// Rust bounds filesystem recursion so a symlink cycle cannot exhaust the
+// stack; native's unbounded recursive call is at `C4Group.cpp:281-307`.
+fn c4group_rejects_directory_symlink_cycles_without_removing_source() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().join("Objects.c4d");
+    std::fs::create_dir(&root).expect("create root group");
+    std::fs::write(root.join("Root.txt"), b"root").expect("write root entry");
+    symlink(".", root.join("Cycle.c4d")).expect("create cyclic child link");
+
+    let packed = c4group(&[root.to_str().expect("utf-8 root path"), "-p"]);
+    assert!(!packed.status.success(), "cyclic trees must be rejected");
+    assert!(
+        root.is_dir(),
+        "a rejected pack must leave the source tree intact"
+    );
+    assert!(
+        String::from_utf8_lossy(&packed.stderr).contains("directory cycle detected"),
+        "stderr: {}",
+        String::from_utf8_lossy(&packed.stderr)
+    );
+}
+
+#[test]
+// The bounded filesystem materializer rejects deeper trees before recursive
+// descent can exhaust the stack (`MutableGroup::from_directory`).
+fn c4group_rejects_excessive_directory_nesting() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().join("Objects.c4d");
+    let mut deepest = root.clone();
+    for _ in 0..65 {
+        deepest.push("d");
+    }
+    std::fs::create_dir_all(&deepest).expect("create deeply nested groups");
+    std::fs::write(deepest.join("Leaf.txt"), b"leaf").expect("write leaf entry");
+
+    let packed = c4group(&[root.to_str().expect("utf-8 root path"), "-p"]);
+    assert!(
+        !packed.status.success(),
+        "excessive nesting must be rejected"
+    );
+    assert!(
+        String::from_utf8_lossy(&packed.stderr).contains("directory nesting exceeds"),
+        "stderr: {}",
+        String::from_utf8_lossy(&packed.stderr)
     );
 }
 
