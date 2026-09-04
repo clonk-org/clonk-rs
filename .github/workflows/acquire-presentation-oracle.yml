@@ -65,12 +65,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
 
       - name: Acquire
+        # Acquisition requires a clean source revision, so the tracked bundle
+        # cannot be deleted first to make room; accept into a temporary
+        # destination and replace the tracked one in a commit.
         run: |
           set -euo pipefail
           python3 scripts/acquire_presentation_oracle.py acquire \
             --oracle-root "$RUNNER_TEMP/oracle" \
             --output-dir "$RUNNER_TEMP/presentation-acquire" \
-            --accept
+            --accept \
+            --accepted-destination "$RUNNER_TEMP/accepted/v1"
 
       - name: Show what changed
         if: always()
@@ -81,8 +85,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v5.0.0
         with:
           name: presentation-oracle-bundle
-          path: |
-            compat/presentation
+          path: ${{ runner.temp }}/accepted
           if-no-files-found: error
           retention-days: 7
 
