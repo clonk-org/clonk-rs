@@ -161,7 +161,11 @@ sandbox crew) and `busy_objects=256` (256 static synthetic `PRFB` objects);
 each metadata, state, and case line carries the workload count. Treat the
 output as a current measurement tied to its printed source/content/toolchain/
 machine fingerprints, and make any threshold decision from that run rather
-than from the older headless scenario table.
+than from the older headless scenario table. Each case also reports paired
+projection-share percentiles: the projection and elapsed duration are divided
+within each sample before the p50/p95/p99 calculation. For the tick cases this
+is the measured update or event-plus-update operation; the pointer-only cases
+are event latency measurements.
 
 ### Arso-Morf 1,000-Stippel simulation profile
 

@@ -275,6 +275,25 @@ fn percentile_u64(samples: &[u64], fraction: f64) -> u64 {
     sorted[index]
 }
 
+fn percentile_projection_share(samples: &[ProfileSample], fraction: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut shares = samples
+        .iter()
+        .map(|sample| {
+            if sample.elapsed.is_zero() {
+                0.0
+            } else {
+                sample.projection.as_secs_f64() / sample.elapsed.as_secs_f64() * 100.0
+            }
+        })
+        .collect::<Vec<_>>();
+    shares.sort_unstable_by(f64::total_cmp);
+    let index = ((shares.len() - 1) as f64 * fraction).round() as usize;
+    shares[index]
+}
+
 fn report_case(
     label: &str,
     samples: &[ProfileSample],
@@ -307,7 +326,7 @@ fn report_case(
         "{label} projection count must match the production-path baseline"
     );
     eprintln!(
-        "edge_scroll_snapshot_profile busy_objects={} case={label} samples={} expected_projection_count={} projection_count={} elapsed_p50_ms={:.6} elapsed_p95_ms={:.6} elapsed_p99_ms={:.6} projection_p50_ms={:.6} projection_p95_ms={:.6} projection_p99_ms={:.6} allocation_calls_total={} allocation_calls_p50={} allocation_calls_p95={} allocation_calls_p99={} allocation_bytes_total={} allocation_bytes_p50={} allocation_bytes_p95={} allocation_bytes_p99={}",
+        "edge_scroll_snapshot_profile busy_objects={} case={label} samples={} expected_projection_count={} projection_count={} elapsed_p50_ms={:.6} elapsed_p95_ms={:.6} elapsed_p99_ms={:.6} projection_p50_ms={:.6} projection_p95_ms={:.6} projection_p99_ms={:.6} projection_share_p50_pct={:.3} projection_share_p95_pct={:.3} projection_share_p99_pct={:.3} allocation_calls_total={} allocation_calls_p50={} allocation_calls_p95={} allocation_calls_p99={} allocation_bytes_total={} allocation_bytes_p50={} allocation_bytes_p95={} allocation_bytes_p99={}",
         busy_objects,
         samples.len(),
         expected_projection_count,
@@ -318,6 +337,9 @@ fn report_case(
         percentile_duration(&projection, 0.50).as_secs_f64() * 1_000.0,
         percentile_duration(&projection, 0.95).as_secs_f64() * 1_000.0,
         percentile_duration(&projection, 0.99).as_secs_f64() * 1_000.0,
+        percentile_projection_share(samples, 0.50),
+        percentile_projection_share(samples, 0.95),
+        percentile_projection_share(samples, 0.99),
         allocation_calls.iter().sum::<u64>(),
         percentile_u64(&allocation_calls, 0.50),
         percentile_u64(&allocation_calls, 0.95),
