@@ -211,8 +211,14 @@ jobs:
                 expected_artifacts+=("rust-coverage-fragment-${run_id}-${suffix}")
               done
               expected_inventory=$(printf '%s\tfalse\n' "${expected_artifacts[@]}" | LC_ALL=C sort)
-              actual_inventory=$(jq -r \
-                '.artifacts[] | [.name, (.expired | tostring)] | @tsv' \
+              # Failed-shard diagnostics use the same Landing run so they can
+              # be downloaded with the release qualification logs. They are
+              # deliberately outside the immutable release payload contract;
+              # filter only this run's diagnostic prefix before the exact
+              # payload/coverage comparison.
+              diagnostic_prefix="rust-test-diagnostics-${run_id}-"
+              actual_inventory=$(jq -r --arg diagnostic_prefix "$diagnostic_prefix" \
+                '.artifacts[] | select((.name | startswith($diagnostic_prefix)) == false) | [.name, (.expired | tostring)] | @tsv' \
                 <<<"$artifacts" | LC_ALL=C sort)
               if [[ "$actual_inventory" == "$expected_inventory" ]]; then
                 echo "resolved exact-SHA artifacts from Landing run $run_id"

@@ -18,6 +18,8 @@ pub const REPLAY_SCHEMA_VERSION: u32 = 1;
 pub const SNAPSHOT_HASH_VERSION: u32 = 2;
 const LEGACY_SNAPSHOT_HASH_VERSION: u32 = 1;
 const DEFAULT_DIFF_LIMIT: usize = 64;
+const MAX_RECORDED_INPUTS: usize = 4_096;
+const SNAPSHOT_SAMPLE_INTERVAL: u64 = 32;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
@@ -979,9 +981,10 @@ fn write_replay_bundle(
 }
 
 pub struct DevFeedbackCapture {
-    replay: ScenarioReplayV1,
+    replay: Option<ScenarioReplayV1>,
     label: String,
     recorded_inputs: Vec<ReplayInputV1>,
+    dropped_inputs: usize,
     next_ordinal: u64,
     first_snapshot: SimulationSnapshot,
     before_snapshot: SimulationSnapshot,
@@ -990,11 +993,44 @@ pub struct DevFeedbackCapture {
 
 impl DevFeedbackCapture {
     pub fn new(replay: ScenarioReplayV1, label: impl Into<String>, engine: &Engine) -> Self {
+        Self::new_inner(Some(replay), label, engine)
+    }
+
+    /// Build a bounded state/input capture for a virtual-player route that
+    /// does not have a committed replay fixture. The resulting artifact is a
+    /// divergence trace rather than a replay that claims to be runnable.
+    pub fn new_virtual_player(label: impl Into<String>, engine: &Engine) -> Self {
+        Self::new_inner(None, label, engine)
+    }
+
+    /// Enable route diagnostics only when CI explicitly requests them and has
+    /// supplied an artifact root. Ordinary local runs keep the allocation-free
+    /// `VirtualPlayer::new` path.
+    pub fn from_virtual_player_env(engine: &Engine, owner: i32) -> Option<Self> {
+        let enabled = std::env::var("LC_CAPTURE_VIRTUAL_PLAYER").is_ok_and(|value| {
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        });
+        (enabled && artifact_root().is_some())
+            .then(|| Self::new_virtual_player(format!("virtual-player-owner-{owner}"), engine))
+    }
+
+    fn new_inner(
+        replay: Option<ScenarioReplayV1>,
+        label: impl Into<String>,
+        engine: &Engine,
+    ) -> Self {
         let next_ordinal = replay
-            .joins
+            .as_ref()
             .iter()
+            .flat_map(|replay| replay.joins.iter())
             .map(|join| join.ordinal)
-            .chain(replay.inputs.iter().map(|input| input.ordinal))
+            .chain(
+                replay
+                    .as_ref()
+                    .iter()
+                    .flat_map(|replay| replay.inputs.iter())
+                    .map(|input| input.ordinal),
+            )
             .max()
             .map_or(0, |ordinal| ordinal + 1);
         let first_snapshot = engine.snapshot();
@@ -1002,6 +1038,7 @@ impl DevFeedbackCapture {
             replay,
             label: label.into(),
             recorded_inputs: Vec::new(),
+            dropped_inputs: 0,
             next_ordinal,
             before_snapshot: first_snapshot.clone(),
             first_snapshot,
@@ -1010,13 +1047,19 @@ impl DevFeedbackCapture {
     }
 
     pub fn record_input(&mut self, frame: u64, owner: i32, command: u8, data: i32) {
-        self.recorded_inputs.push(ReplayInputV1::new(
-            frame,
-            self.next_ordinal,
-            owner,
-            command,
-            data,
-        ));
+        // Committed replay diagnostics must preserve their complete tape;
+        // only the open-ended virtual-player trace uses the bound.
+        if self.replay.is_some() || self.recorded_inputs.len() < MAX_RECORDED_INPUTS {
+            self.recorded_inputs.push(ReplayInputV1::new(
+                frame,
+                self.next_ordinal,
+                owner,
+                command,
+                data,
+            ));
+        } else {
+            self.dropped_inputs += 1;
+        }
         self.next_ordinal += 1;
     }
 
@@ -1025,7 +1068,16 @@ impl DevFeedbackCapture {
     }
 
     pub fn before_tick(&mut self, engine: &Engine) {
-        self.before_snapshot = engine.snapshot();
+        // Keep one recent state sample rather than cloning the full snapshot
+        // on every open-ended route tick. Committed replay captures retain
+        // their historical per-tick boundary, while the failing snapshot is
+        // always captured at the failure boundary for either mode.
+        let sample_due = self.replay.is_some()
+            || engine.frame().saturating_sub(self.before_snapshot.frame)
+                >= SNAPSHOT_SAMPLE_INTERVAL;
+        if sample_due {
+            self.before_snapshot = engine.snapshot();
+        }
     }
 
     pub fn capture_timeout(
@@ -1035,16 +1087,30 @@ impl DevFeedbackCapture {
         max_ticks: u32,
         diagnostics: &str,
     ) -> Result<Option<PathBuf>, DevFeedbackError> {
+        self.capture_failure_artifact(engine, milestone, Some(max_ticks), diagnostics)
+    }
+
+    pub fn capture_milestone(
+        &self,
+        engine: &Engine,
+        milestone: &str,
+        diagnostics: &str,
+    ) -> Result<Option<PathBuf>, DevFeedbackError> {
+        self.capture_failure_artifact(engine, milestone, None, diagnostics)
+    }
+
+    fn capture_failure_artifact(
+        &self,
+        engine: &Engine,
+        milestone: &str,
+        max_ticks: Option<u32>,
+        diagnostics: &str,
+    ) -> Result<Option<PathBuf>, DevFeedbackError> {
         let Some(root) = artifact_root() else {
             return Ok(None);
         };
-        let mut replay = self.replay.clone();
-        replay.inputs.extend(self.recorded_inputs.clone());
-        replay.stop_frame = engine.frame().max(replay.stop_frame);
-        replay
-            .inputs
-            .sort_by_key(|input| (input.frame, input.ordinal));
-        replay.validate()?;
+        let failure_kind =
+            max_ticks.map_or("virtual_player_milestone", |_| "virtual_player_timeout");
         let failing = engine.snapshot();
         let diff = snapshot_diff(&self.before_snapshot, &failing, DEFAULT_DIFF_LIMIT).unwrap_or(
             SnapshotDiff {
@@ -1052,9 +1118,63 @@ impl DevFeedbackCapture {
                 truncated: false,
             },
         );
+        let Some(replay) = self.replay.as_ref() else {
+            return create_bundle(&root, &self.label, |directory| {
+                write_json(
+                    directory.join("divergence-trace.json"),
+                    &json!({
+                        "schema_version": REPLAY_SCHEMA_VERSION,
+                        "kind": failure_kind,
+                        "label": self.label,
+                        "seed": engine.random_seed(),
+                        "frame": failing.frame,
+                        "milestone": milestone,
+                        "max_ticks": max_ticks,
+                        "diagnostics": diagnostics,
+                        "inputs": self.recorded_inputs,
+                        "dropped_inputs": self.dropped_inputs,
+                    }),
+                )?;
+                write_json(directory.join("first.json"), &self.first_snapshot)?;
+                write_json(directory.join("before.json"), &self.before_snapshot)?;
+                write_json(directory.join("failing.json"), &failing)?;
+                write_json(directory.join("diff.json"), &diff)?;
+                write_json(
+                    directory.join("failure.json"),
+                    &json!({
+                        "schema_version": REPLAY_SCHEMA_VERSION,
+                        "kind": failure_kind,
+                        "frame": failing.frame,
+                        "milestone": milestone,
+                        "max_ticks": max_ticks,
+                        "diagnostics": diagnostics,
+                    }),
+                )?;
+                write_logs(
+                    directory,
+                    &json!({
+                        "frame": failing.frame,
+                        "level": "error",
+                        "target": "virtual_player",
+                        "message": diagnostics,
+                        "milestone": milestone,
+                    }),
+                )?;
+                write_route_readme(directory)?;
+                Ok(())
+            })
+            .map(Some);
+        };
+        let mut replay = replay.clone();
+        replay.inputs.extend(self.recorded_inputs.clone());
+        replay.stop_frame = engine.frame().max(replay.stop_frame);
+        replay
+            .inputs
+            .sort_by_key(|input| (input.frame, input.ordinal));
+        replay.validate()?;
         let metrics = ReplayMetricsFileV1 {
             schema_version: REPLAY_SCHEMA_VERSION,
-            snapshot_hash_version: self.replay.snapshot_hash_version,
+            snapshot_hash_version: replay.snapshot_hash_version,
             runs: vec![ReplayRunMetricsV1 {
                 schema_version: REPLAY_SCHEMA_VERSION,
                 load_micros: 0,
@@ -1071,7 +1191,7 @@ impl DevFeedbackCapture {
                     .saturating_sub(self.first_snapshot.frame)
                     .saturating_add(1) as usize,
                 ticks: failing.frame.saturating_sub(self.first_snapshot.frame),
-                final_snapshot_hash: snapshot_hash(&failing, self.replay.snapshot_hash_version),
+                final_snapshot_hash: snapshot_hash(&failing, replay.snapshot_hash_version),
                 final_summary: ReplaySnapshotSummaryV1::from_snapshot(&failing),
             }],
         };
@@ -1087,7 +1207,7 @@ impl DevFeedbackCapture {
                 directory.join("failure.json"),
                 &json!({
                     "schema_version": REPLAY_SCHEMA_VERSION,
-                    "kind": "virtual_player_timeout",
+                    "kind": failure_kind,
                     "frame": failing.frame,
                     "milestone": milestone,
                     "max_ticks": max_ticks,
@@ -1188,6 +1308,12 @@ fn write_readme(directory: &Path, scenario: &str) -> Result<(), DevFeedbackError
     let contents = format!(
         "Deterministic Clonk Rust replay artifact\n\nScenario: {scenario}\nReplay: replay.json\nMetrics: replay-metrics.json\n\nReproduce from the repository root:\n  LC_CONTENT_ROOT=/path/to/content LC_REPLAY_PATH=/path/to/artifact/replay.json cargo nextest run -p clonk-engine-integration-tests --test engine_it -- dev_feedback_replay::replay_artifact_from_env_repeats --ignored --exact\n"
     );
+    fs::write(directory.join("README.txt"), contents)
+        .map_err(|error| io_error("write README.txt", error))
+}
+
+fn write_route_readme(directory: &Path) -> Result<(), DevFeedbackError> {
+    let contents = "Virtual player divergence trace\n\nTrace: divergence-trace.json\nState snapshots: first.json, before.json, failing.json\nState diff: diff.json\nFailure metadata: failure.json\nLogs: logs.ndjson\n\nThe input tape is bounded and records the controls observed before the failure.\nThis trace is diagnostic evidence for a route failure; it is not a standalone replay.\n";
     fs::write(directory.join("README.txt"), contents)
         .map_err(|error| io_error("write README.txt", error))
 }

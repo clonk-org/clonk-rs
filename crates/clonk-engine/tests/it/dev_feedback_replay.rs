@@ -1,7 +1,7 @@
 use crate::support::dev_feedback::{
-    run_replay_twice, run_replay_twice_with_policy, snapshot_diff, ReplayCheckpointPolicy,
-    ReplayCheckpointV1, ReplayInputV1, ReplayJoinV1, ReplayRenderConfigV1, ScenarioReplayV1,
-    SNAPSHOT_HASH_VERSION,
+    run_replay_twice, run_replay_twice_with_policy, snapshot_diff, DevFeedbackCapture,
+    ReplayCheckpointPolicy, ReplayCheckpointV1, ReplayInputV1, ReplayJoinV1, ReplayRenderConfigV1,
+    ScenarioReplayV1, SNAPSHOT_HASH_VERSION,
 };
 use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 use clonk_engine::{Definition, Engine, PlayerConfig, SpawnConfig, COM_RIGHT};
@@ -272,6 +272,84 @@ fn virtual_player_timeout_writes_replay_bundle_after_held_key_release() -> Resul
     let replay_json = fs::read_to_string(bundle.join("replay.json"))?;
     assert!(replay_json.contains(&format!("\"command\": {}", COM_RIGHT + 16)));
     assert!(error.to_string().contains(&bundle.display().to_string()));
+    Ok(())
+}
+
+#[test]
+fn virtual_player_timeout_writes_a_bounded_divergence_trace_when_enabled(
+) -> Result<(), Box<dyn Error>> {
+    let _guard = env_lock();
+    let temp = tempfile::tempdir()?;
+    let _artifact_root = EnvRestore::set("LC_TEST_ARTIFACT_DIR", temp.path());
+    let _capture = EnvRestore::set("LC_CAPTURE_VIRTUAL_PLAYER", "1");
+    let mut engine = synthetic_player_fixture()?;
+    let mut player = VirtualPlayer::new(&mut engine, 1);
+
+    let error = player
+        .hold_until(COM_RIGHT, "never reached", 2, |_| false)
+        .expect_err("the synthetic milestone is impossible");
+    assert!(matches!(error, VirtualPlayerError::Timeout { .. }));
+
+    let bundle = crate::support::TestValueExt::test_value(error.artifact_dir());
+    let trace: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(bundle.join("divergence-trace.json"))?)?;
+    assert_eq!(trace["kind"], "virtual_player_timeout");
+    assert_eq!(trace["inputs"].as_array().map(Vec::len), Some(2));
+    assert!(bundle.join("first.json").is_file());
+    assert!(bundle.join("before.json").is_file());
+    assert!(bundle.join("failing.json").is_file());
+    assert!(bundle.join("failure.json").is_file());
+    assert!(bundle.join("logs.ndjson").is_file());
+    Ok(())
+}
+
+#[test]
+fn virtual_player_assertion_writes_a_divergence_trace_when_enabled() -> Result<(), Box<dyn Error>> {
+    let _guard = env_lock();
+    let temp = tempfile::tempdir()?;
+    let _artifact_root = EnvRestore::set("LC_TEST_ARTIFACT_DIR", temp.path());
+    let _capture = EnvRestore::set("LC_CAPTURE_VIRTUAL_PLAYER", "1");
+    let mut engine = synthetic_player_fixture()?;
+    let player = VirtualPlayer::new(&mut engine, 1);
+
+    let error = player
+        .assert_milestone("never reached", |_| false)
+        .expect_err("the synthetic milestone is impossible");
+    assert!(matches!(
+        error,
+        VirtualPlayerError::MilestoneNotReached { .. }
+    ));
+
+    let bundle = crate::support::TestValueExt::test_value(error.artifact_dir());
+    let trace: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(bundle.join("divergence-trace.json"))?)?;
+    assert_eq!(trace["kind"], "virtual_player_milestone");
+    assert_eq!(trace["inputs"].as_array().map(Vec::len), Some(0));
+    assert!(bundle.join("failure.json").is_file());
+    Ok(())
+}
+
+#[test]
+fn virtual_player_divergence_trace_bounds_recorded_inputs() -> Result<(), Box<dyn Error>> {
+    let _guard = env_lock();
+    let temp = tempfile::tempdir()?;
+    let _artifact_root = EnvRestore::set("LC_TEST_ARTIFACT_DIR", temp.path());
+    let engine = synthetic_player_fixture()?;
+    let mut capture = DevFeedbackCapture::new_virtual_player("bounded-inputs", &engine);
+    for frame in 0..4_097 {
+        capture.record_input(frame, 1, COM_RIGHT, 0);
+    }
+
+    let bundle = crate::support::TestValueExt::test_value(capture.capture_timeout(
+        &engine,
+        "bounded input probe",
+        4_097,
+        "input tape bound",
+    )?);
+    let trace: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(bundle.join("divergence-trace.json"))?)?;
+    assert_eq!(trace["inputs"].as_array().map(Vec::len), Some(4_096));
+    assert_eq!(trace["dropped_inputs"], 1);
     Ok(())
 }
 
