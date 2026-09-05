@@ -1174,7 +1174,9 @@ fn control_script_errors_are_non_fatal_like_cpp() {
     let script_error = EngineError::Script {
         definition: "CLNK".into(),
         function: "Control".to_string(),
-        source: ScriptError::parse("boom", 1, 1),
+        source: ScriptError::parse("boom", 1, 1)
+            .into_diagnostic()
+            .expect("parse diagnostics cannot carry a live continuation"),
         recovery: None,
     };
     let status = control_script_error_to_status(script_error).test_value();

@@ -462,17 +462,13 @@ pub(crate) fn global_call_context_hook(enter: bool) {
 /// object definition, definition, then Game.Script (C4Script.cpp:4501-4513).
 /// DirectExec creates a new frame whose Def is the object's current Def or
 /// null without an object (C4AulExec.cpp:1658-1706).
-pub(crate) fn eval_direct_exec_hook(
-    source: &str,
-    cells: &clonk_script::LocalCells,
-    this: Value,
-    strict_level: Option<u8>,
-    depth: usize,
-) -> Option<Result<Value, RuntimeError>> {
-    let (script, direct_object, direct_definition) = HOST_CONTEXT.with(|cell| {
+fn select_eval_direct_exec_target(
+    this: &Value,
+) -> Option<(Arc<ScriptEngine>, Option<ObjectId>, Option<DefinitionId>)> {
+    HOST_CONTEXT.with(|cell| {
         let context = cell.borrow();
         let context = context.as_ref()?;
-        if let Some(target) = object_id_from_value(&this) {
+        if let Some(target) = object_id_from_value(this) {
             return context
                 .object_effective_definition_id(target)
                 .and_then(|definition| {
@@ -495,11 +491,24 @@ pub(crate) fn eval_direct_exec_hook(
                 .cloned()
                 .map(|script| (script, None, None)),
         }
-    })?;
+    })
+}
+
+/// Run one DirectExec while temporarily selecting its C4Aul `Obj`/`Def`.
+/// Restore the embedding context even when the script or host callback
+/// panics; a stale TLS selection would retarget the next callback on the same
+/// thread (C4AulExec.cpp:1658-1706).
+fn with_eval_direct_exec_context<R>(
+    direct_object: Option<ObjectId>,
+    direct_definition: Option<DefinitionId>,
+    call: impl FnOnce() -> R,
+) -> R {
     let (previous_script_object, previous_script_definition, previous_definition) = HOST_CONTEXT
         .with(|cell| {
             let mut context = cell.borrow_mut();
-            let context = context.as_mut()?;
+            let context = context
+                .as_mut()
+                .expect("DirectExec requires an active host context");
             let previous_script_object = context.script_object_context.take();
             context.script_object_context = direct_object;
             let previous_script_definition = context
@@ -507,25 +516,76 @@ pub(crate) fn eval_direct_exec_hook(
                 .replace(direct_definition.clone());
             let previous_definition = context.definition_context.take();
             context.definition_context = direct_definition;
-            Some((
+            (
                 previous_script_object,
                 previous_script_definition,
                 previous_definition,
-            ))
-        })?;
-    let result = script.eval_direct_exec_with_cells_and_this_at_strict(
-        source,
-        cells,
-        this,
-        strict_level,
-        depth,
-    );
-    with_host_context_mut((), |context| {
+            )
+        });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .expect("DirectExec host context must remain installed");
         context.script_object_context = previous_script_object;
         context.script_definition_context = previous_script_definition;
         context.definition_context = previous_definition;
     });
-    Some(result)
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+pub(crate) fn eval_direct_exec_hook(
+    source: &str,
+    cells: &clonk_script::LocalCells,
+    this: Value,
+    strict_level: Option<u8>,
+    depth: usize,
+) -> Option<Result<Value, RuntimeError>> {
+    let (script, direct_object, direct_definition) = select_eval_direct_exec_target(&this)?;
+    Some(with_eval_direct_exec_context(
+        direct_object,
+        direct_definition,
+        || {
+            script.eval_direct_exec_with_cells_and_this_at_strict(
+                source,
+                cells,
+                this,
+                strict_level,
+                depth,
+            )
+        },
+    ))
+}
+
+/// Continuation-capable FnEval adapter. The nested DirectExec frame is owned
+/// by the VM's returned `ScriptCallOutcome`; this hook only selects the same
+/// receiver/definition as the synchronous adapter and restores TLS before the
+/// engine performs the requested host operation.
+pub(crate) fn eval_direct_exec_continuation_hook(
+    source: &str,
+    cells: &clonk_script::LocalCells,
+    this: Value,
+    strict_level: Option<u8>,
+    depth: usize,
+) -> Option<Result<clonk_script::ScriptCallOutcome, RuntimeError>> {
+    let (script, direct_object, direct_definition) = select_eval_direct_exec_target(&this)?;
+    Some(with_eval_direct_exec_context(
+        direct_object,
+        direct_definition,
+        || {
+            script.eval_direct_exec_with_cells_and_this_at_strict_with_continuation(
+                source,
+                cells,
+                this,
+                strict_level,
+                depth,
+            )
+        },
+    ))
 }
 
 /// `obj->Method(args)` / `obj->~Method(args)` — the AB_CALL/AB_CALLFS
@@ -1311,16 +1371,13 @@ pub(crate) fn draw_context_rnd3() -> Result<i32, RuntimeError> {
 
 pub(crate) fn enter_random_context(rng: LcgRng) -> RandomContextGuard {
     RANDOM_CONTEXT.with(|cell| {
-        assert!(
-            cell.borrow().is_none(),
-            "nested random contexts are not supported"
-        );
         let context = Rc::new(RandomContext {
             rng: RefCell::new(rng),
         });
-        *cell.borrow_mut() = Some(context.clone());
+        let previous = cell.replace(Some(context.clone()));
         RandomContextGuard {
             context: Some(context),
+            previous,
         }
     })
 }
@@ -1865,6 +1922,10 @@ impl PhysicsContext {
 
 pub(crate) struct PhysicsContextGuard {
     context: Option<Rc<PhysicsContext>>,
+    /// The cell is normally empty at entry. Keep the previous value anyway so
+    /// unwinding this guard cannot destroy an outer context if a caller is
+    /// added to a re-entrant path later.
+    previous: Option<Rc<PhysicsContext>>,
 }
 
 impl PhysicsContextGuard {
@@ -1873,16 +1934,24 @@ impl PhysicsContextGuard {
             .context
             .take()
             .expect("physics context already consumed");
+        let delta = context.pending.borrow().clone();
+        let settings = *context.settings.borrow();
         PHYSICS_CONTEXT.with(|cell| {
             let stored = cell
-                .borrow_mut()
-                .take()
+                .replace(self.previous.take())
                 .expect("physics context must be present");
             debug_assert!(Rc::ptr_eq(&stored, &context));
+            if let Some(previous) = cell.borrow().as_ref() {
+                *previous.settings.borrow_mut() = settings;
+                let mut pending = previous.pending.borrow_mut();
+                if delta.gravity.is_some() {
+                    pending.gravity = delta.gravity;
+                }
+            }
         });
         Rc::try_unwrap(context)
-            .expect("physics context still referenced")
-            .into_delta()
+            .map(|context| context.into_delta())
+            .unwrap_or(delta)
     }
 }
 
@@ -1890,7 +1959,7 @@ impl Drop for PhysicsContextGuard {
     fn drop(&mut self) {
         if self.context.is_some() {
             PHYSICS_CONTEXT.with(|cell| {
-                cell.borrow_mut().take();
+                cell.replace(self.previous.take());
             });
         }
     }
@@ -1898,14 +1967,11 @@ impl Drop for PhysicsContextGuard {
 
 pub(crate) fn enter_physics_context(settings: PhysicsSettings) -> PhysicsContextGuard {
     PHYSICS_CONTEXT.with(|cell| {
-        assert!(
-            cell.borrow().is_none(),
-            "nested physics contexts are not supported",
-        );
         let context = Rc::new(PhysicsContext::new(settings));
-        *cell.borrow_mut() = Some(context.clone());
+        let previous = cell.replace(Some(context.clone()));
         PhysicsContextGuard {
             context: Some(context),
+            previous,
         }
     })
 }
@@ -2044,6 +2110,7 @@ impl EnvironmentContext {
 
 pub(crate) struct EnvironmentContextGuard {
     context: Option<Rc<EnvironmentContext>>,
+    previous: Option<Rc<EnvironmentContext>>,
 }
 
 impl EnvironmentContextGuard {
@@ -2052,16 +2119,34 @@ impl EnvironmentContextGuard {
             .context
             .take()
             .expect("environment context already consumed");
+        let delta = context.pending.borrow().clone();
+        let settings = *context.settings.borrow();
         ENVIRONMENT_CONTEXT.with(|cell| {
             let stored = cell
-                .borrow_mut()
-                .take()
+                .replace(self.previous.take())
                 .expect("environment context must be present");
             debug_assert!(Rc::ptr_eq(&stored, &context));
+            if let Some(previous) = cell.borrow().as_ref() {
+                *previous.settings.borrow_mut() = settings;
+                let mut pending = previous.pending.borrow_mut();
+                if delta.wind.is_some() {
+                    pending.wind = delta.wind;
+                }
+                if delta.temperature.is_some() {
+                    pending.temperature = delta.temperature;
+                }
+                if delta.climate.is_some() {
+                    pending.climate = delta.climate;
+                }
+                if delta.season.is_some() {
+                    pending.season = delta.season;
+                }
+                pending.season_gamma_handled |= delta.season_gamma_handled;
+            }
         });
         Rc::try_unwrap(context)
-            .expect("environment context still referenced")
-            .into_delta()
+            .map(|context| context.into_delta())
+            .unwrap_or(delta)
     }
 }
 
@@ -2069,7 +2154,7 @@ impl Drop for EnvironmentContextGuard {
     fn drop(&mut self) {
         if self.context.is_some() {
             ENVIRONMENT_CONTEXT.with(|cell| {
-                cell.borrow_mut().take();
+                cell.replace(self.previous.take());
             });
         }
     }
@@ -2080,14 +2165,11 @@ pub(crate) fn enter_environment_context(
     frame: u64,
 ) -> EnvironmentContextGuard {
     ENVIRONMENT_CONTEXT.with(|cell| {
-        assert!(
-            cell.borrow().is_none(),
-            "nested environment contexts are not supported",
-        );
         let context = Rc::new(EnvironmentContext::new(settings, frame));
-        *cell.borrow_mut() = Some(context.clone());
+        let previous = cell.replace(Some(context.clone()));
         EnvironmentContextGuard {
             context: Some(context),
+            previous,
         }
     })
 }
@@ -2244,6 +2326,7 @@ where
 
 struct EffectHostContextTlsGuard<'a> {
     cell: &'a RefCell<Option<EffectHostContext>>,
+    previous: Option<EffectHostContext>,
     active: bool,
 }
 
@@ -2251,8 +2334,7 @@ impl EffectHostContextTlsGuard<'_> {
     fn finish(mut self) -> EffectHostContext {
         let context = self
             .cell
-            .borrow_mut()
-            .take()
+            .replace(self.previous.take())
             .expect("effect context must be present");
         self.active = false;
         context
@@ -2262,7 +2344,7 @@ impl EffectHostContextTlsGuard<'_> {
 impl Drop for EffectHostContextTlsGuard<'_> {
     fn drop(&mut self) {
         if self.active {
-            self.cell.borrow_mut().take();
+            self.cell.replace(self.previous.take());
         }
     }
 }
@@ -2282,15 +2364,15 @@ where
     F: FnOnce() -> Result<T, E>,
     E: From<RuntimeError>,
 {
+    // Keep the caller's registry installed while the host callback runs. A
+    // panic may unwind through this function before the outcome can publish
+    // its updated registry; taking the value here would then silently lose
+    // the caller's audio state and poison the next callback.
     let audio_state = AUDIO_CONTEXT
-        .with(|cell| cell.borrow_mut().take())
+        .with(|cell| cell.borrow().clone())
         .unwrap_or_default();
     HOST_CONTEXT.with(|cell| {
-        assert!(
-            cell.borrow().is_none(),
-            "nested effect contexts are not supported"
-        );
-        *cell.borrow_mut() = Some(EffectHostContext::new(
+        let context = EffectHostContext::new(
             object,
             definition_context,
             script_object_context,
@@ -2300,8 +2382,13 @@ where
             audio_state,
             game_over_triggered,
             publish_spawn_previews,
-        ));
-        let guard = EffectHostContextTlsGuard { cell, active: true };
+        );
+        let previous = cell.replace(Some(context));
+        let guard = EffectHostContextTlsGuard {
+            cell,
+            previous,
+            active: true,
+        };
         let result =
             clonk_script::with_diagnostic_object_formatter(diagnostic_object_data_string, func);
         let context = guard.finish();
@@ -2508,6 +2595,7 @@ impl RandomContext {
 
 pub(crate) struct RandomContextGuard {
     context: Option<Rc<RandomContext>>,
+    previous: Option<Rc<RandomContext>>,
 }
 
 impl RandomContextGuard {
@@ -2516,16 +2604,19 @@ impl RandomContextGuard {
             .context
             .take()
             .expect("random context already consumed");
+        let rng = context.rng.borrow().clone();
         RANDOM_CONTEXT.with(|cell| {
             let stored = cell
-                .borrow_mut()
-                .take()
+                .replace(self.previous.take())
                 .expect("random context must be present");
             debug_assert!(Rc::ptr_eq(&stored, &context));
+            if let Some(previous) = cell.borrow().as_ref() {
+                *previous.rng.borrow_mut() = rng.clone();
+            }
         });
         Rc::try_unwrap(context)
-            .expect("random context still referenced")
-            .into_rng()
+            .map(|context| context.into_rng())
+            .unwrap_or(rng)
     }
 }
 
@@ -2533,7 +2624,12 @@ impl Drop for RandomContextGuard {
     fn drop(&mut self) {
         if self.context.is_some() {
             RANDOM_CONTEXT.with(|cell| {
-                cell.borrow_mut().take();
+                let context = self.context.take().expect("random context already dropped");
+                let rng = context.rng.borrow().clone();
+                cell.replace(self.previous.take());
+                if let Some(previous) = cell.borrow().as_ref() {
+                    *previous.rng.borrow_mut() = rng;
+                }
             });
         }
     }
@@ -2749,6 +2845,78 @@ struct NestedCallPrep {
     origin: Option<NestedScopeOrigin>,
 }
 
+/// VM-owned bridge for a nested object callback. The child ScriptSuspension
+/// itself remains in the VM's host-continuation wrapper; this object owns the
+/// native suffix and knows how to rebuild the child object scope for each
+/// subsequent resume slice.
+struct NestedNativeContinuation {
+    target: ObjectId,
+    /// Immutable allocation identity. target_available is swept on actual
+    /// removal, while this token remains available to reject same-number
+    /// replacements.
+    target_instance_token: u64,
+    function: String,
+    /// The child frame's owning definition remains the script context after
+    /// AssignRemoval.  It is separate from `target`: the latter may be reused
+    /// by a destination object while this child still has work to resume.
+    definition: DefinitionId,
+    script: Arc<ScriptEngine>,
+    cells: clonk_script::LocalCells,
+    suffix: Box<dyn clonk_script::NativeContinuation>,
+    target_available: bool,
+}
+
+impl clonk_script::NativeContinuation for NestedNativeContinuation {
+    fn resume(
+        self: Box<Self>,
+        child_result: Result<Value, RuntimeError>,
+    ) -> Result<clonk_script::NativeCallOutcome, RuntimeError> {
+        // The child callback completed (or failed) and its host scope was
+        // restored before the VM called this suffix. CreateObject owns the
+        // next native phase, so pass the result through once.
+        self.suffix.resume(child_result)
+    }
+
+    fn resume_child(
+        &mut self,
+        child: clonk_script::ScriptSuspension,
+        value: Value,
+    ) -> Result<clonk_script::ScriptCallOutcome, RuntimeError> {
+        if !self.target_available {
+            return resume_detached_object_child(
+                self.definition.clone(),
+                self.script.clone(),
+                child,
+                value,
+            );
+        }
+        resume_nested_object_child(
+            self.target,
+            self.target_instance_token,
+            self.definition.clone(),
+            &self.function,
+            self.script.clone(),
+            self.cells.clone(),
+            child,
+            value,
+        )
+    }
+
+    fn clear_object_references(&mut self, object_id: u64) {
+        self.suffix.clear_object_references(object_id);
+        self.cells.clear_object_references(object_id);
+        if self.target.as_u64() == object_id {
+            // Keep target_instance_token intact: it is metadata for
+            // replacement rejection, not an object reference to be swept.
+            self.target_available = false;
+        }
+    }
+
+    fn value_stack_slots(&self) -> usize {
+        self.suffix.value_stack_slots()
+    }
+}
+
 /// Runs `function` on `target`'s definition script from inside a running VM
 /// call — the host→VM reentrancy seam (C4FindObjectFunc::Check,
 /// C4FindObject.cpp:653-662: `pCallFunc->Exec(pObj, Pars, true)`): the
@@ -2918,6 +3086,364 @@ pub(crate) fn call_world_object_own_function(
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
     call_world_object_function_with(target, function, args, false, false, None, false)
+}
+
+/// Continuation-aware twin of call_world_object_own_function for a native
+/// caller that has work to perform after the object callback returns.
+///
+/// The ordinary helper deliberately materializes only a Value. That is
+/// insufficient for NewObject: a child Initialize may suspend in
+/// LoadScenarioSection, and the native caller must resume its own remaining
+/// Construction/DoCon/Completion/Initialize phases after that child frame.
+/// This helper therefore folds the child scope at every slice and retains the
+/// native suffix in an owned VM continuation.
+pub(crate) fn call_world_object_own_function_with_native_continuation(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+    continuation: Box<dyn clonk_script::NativeContinuation>,
+) -> Result<clonk_script::NativeCallOutcome, RuntimeError> {
+    let prep = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut().as_mut().and_then(|context| {
+            context.prepare_nested_call(target, function, false, false, None, true, false)
+        })
+    });
+    let Some(NestedCallPrep {
+        script,
+        local_vars,
+        origin,
+    }) = prep
+    else {
+        // C4Object::Call silently misses an absent callback. Keep the native
+        // suffix running exactly once even when Construction/Completion or
+        // Initialize is not declared by the target definition.
+        return continuation.resume(Ok(Value::Nil));
+    };
+
+    // The allocation token is deliberately separate from every script Value.
+    // The latter may be swept by AssignRemoval while this continuation is
+    // detached; the token remains only for deciding whether a fresh context
+    // still denotes this C4Object allocation.
+    let (target_instance_token, target_definition) = with_host_context(None, |context| {
+        context
+            .object_instance_token(target)
+            .zip(context.object_effective_definition_id(target))
+            .map(|(token, definition)| (token, DefinitionId::from(definition)))
+    })
+    .ok_or_else(|| {
+        RuntimeError::new(format!(
+            "continuation callback target {} has no allocation token or definition",
+            target.as_u64()
+        ))
+    })?;
+
+    let entry_locals = local_vars.clone();
+    let (cells, previous_session) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        match borrow.as_mut() {
+            Some(context) => match context.session_local_cells.get(&target) {
+                Some(cells) => (cells.clone(), Some(cells.clone())),
+                None => {
+                    let cells = clonk_script::LocalCells::from_local_vars(&local_vars);
+                    context.session_local_cells.insert(target, cells.clone());
+                    (cells, None)
+                }
+            },
+            None => (clonk_script::LocalCells::from_local_vars(&local_vars), None),
+        }
+    });
+
+    let (previous_script_object, previous_script_definition) =
+        with_host_context_mut((None, None), |context| {
+            let definition = context.object_effective_definition_id(target);
+            (
+                context.script_object_context.replace(target),
+                context.script_definition_context.replace(definition),
+            )
+        });
+    let this = object_reference_value(target);
+    let mut context_guard = NestedCallbackContextGuard::new(
+        target,
+        cells.clone(),
+        entry_locals,
+        origin,
+        previous_session,
+        previous_script_object,
+        previous_script_definition,
+    );
+    let call = script.call_with_cells_and_this_with_continuation(function, args, &cells, this);
+
+    // No host-context borrow may survive the VM slice. In particular, the
+    // nested scope is returned to its parent before the continuation can be
+    // handed to the engine's section boundary. The guard also restores this
+    // state if the VM unwinds while running a host callback.
+    let _ = context_guard.restore();
+    let call = call.map_err(native_nested_script_error);
+
+    match call {
+        Ok(clonk_script::ScriptCallOutcome::Complete(value)) => continuation.resume(Ok(value)),
+        Ok(clonk_script::ScriptCallOutcome::Suspended(suspension)) => {
+            Ok(clonk_script::NativeCallOutcome::Suspended {
+                child: suspension,
+                continuation: Box::new(NestedNativeContinuation {
+                    target,
+                    target_instance_token,
+                    function: function.to_owned(),
+                    definition: target_definition,
+                    script,
+                    cells,
+                    suffix: continuation,
+                    target_available: true,
+                }),
+            })
+        }
+        Err(error) => continuation.resume(Err(error)),
+    }
+}
+
+/// Restores the embedding-side scope around one nested callback slice. The
+/// VM may unwind while running a host function, so this owns the restoration
+/// instead of relying on a straight-line `resume` return. `origin` is
+/// consumed only once; on a normal return it moves the callback scope back to
+/// the parent's dormant/completed location, and Drop performs the same fold on
+/// an unwind.
+struct NestedCallbackContextGuard {
+    target: ObjectId,
+    cells: clonk_script::LocalCells,
+    entry_locals: HashMap<String, Value>,
+    origin: Option<NestedScopeOrigin>,
+    previous_session: Option<clonk_script::LocalCells>,
+    previous_script_object: Option<ObjectId>,
+    previous_script_definition: Option<Option<DefinitionId>>,
+    active: bool,
+}
+
+impl NestedCallbackContextGuard {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        target: ObjectId,
+        cells: clonk_script::LocalCells,
+        entry_locals: HashMap<String, Value>,
+        origin: Option<NestedScopeOrigin>,
+        previous_session: Option<clonk_script::LocalCells>,
+        previous_script_object: Option<ObjectId>,
+        previous_script_definition: Option<Option<DefinitionId>>,
+    ) -> Self {
+        Self {
+            target,
+            cells,
+            entry_locals,
+            origin,
+            previous_session,
+            previous_script_object,
+            previous_script_definition,
+            active: true,
+        }
+    }
+
+    fn restore(&mut self) -> HashMap<String, Value> {
+        let stored_locals = self.cells.snapshot();
+        if !self.active {
+            return stored_locals;
+        }
+        let target = self.target;
+        let entry_locals = &self.entry_locals;
+        let mut folded_locals = stored_locals.clone();
+        let origin = self.origin.take();
+        let previous_session = self.previous_session.take();
+        let previous_script_object = self.previous_script_object.take();
+        let previous_script_definition = self.previous_script_definition.take();
+        self.active = false;
+        with_host_context_mut((), |context| {
+            context.script_object_context = previous_script_object;
+            context.script_definition_context = previous_script_definition;
+            if let Some(previous) = previous_session {
+                context.session_local_cells.insert(target, previous);
+            } else {
+                context.session_local_cells.remove(&target);
+            }
+            if let Some(origin) = origin {
+                for ((object, name), slot) in &context.foreign_local_cells {
+                    if *object != target {
+                        continue;
+                    }
+                    let outer_unchanged = entry_locals.get(name).unwrap_or(&Value::Nil)
+                        == folded_locals.get(name).unwrap_or(&Value::Nil);
+                    if outer_unchanged {
+                        folded_locals.insert(name.clone(), slot.borrow().clone());
+                    }
+                }
+                context.finish_nested_call(target, origin, folded_locals.clone());
+            } else {
+                for (name, value) in &folded_locals {
+                    let slot = context.foreign_local_cell(target, name);
+                    clonk_script::set_value_cell(&slot, value.clone());
+                }
+            }
+        });
+        stored_locals
+    }
+}
+
+impl Drop for NestedCallbackContextGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+/// Temporarily removes the caller's active object while a retained callback
+/// runs after that object was removed. `this=Nil` is only half of C++'s null
+/// receiver: host functions also read `cthr->Obj`/`cthr->Def` from this TLS
+/// frame. Keep the child definition installed, leave the parent scope in the
+/// dormant stack, and restore every context field before returning to it.
+struct DetachedObjectScopeGuard {
+    previous_script_object: Option<ObjectId>,
+    previous_script_definition: Option<Option<DefinitionId>>,
+    previous_definition: Option<DefinitionId>,
+    active: bool,
+}
+
+impl DetachedObjectScopeGuard {
+    fn enter(definition: DefinitionId) -> Result<Self, RuntimeError> {
+        try_with_host_context_mut(
+            "detached object callback requires an active host context",
+            |context| {
+                context.dormant_scopes.push(context.object.take());
+                let previous_script_object = context.script_object_context.take();
+                let previous_script_definition = context
+                    .script_definition_context
+                    .replace(Some(definition.clone()));
+                let previous_definition = context.definition_context.replace(definition);
+                Ok(Self {
+                    previous_script_object,
+                    previous_script_definition,
+                    previous_definition,
+                    active: true,
+                })
+            },
+        )
+    }
+
+    fn restore(&mut self) -> Result<(), RuntimeError> {
+        if !self.active {
+            return Ok(());
+        }
+        try_with_host_context_mut(
+            "host context disappeared while restoring detached object callback",
+            |context| {
+                context.object = context.dormant_scopes.pop().unwrap_or(None);
+                context.script_object_context = self.previous_script_object.take();
+                context.script_definition_context = self.previous_script_definition.take();
+                context.definition_context = self.previous_definition.take();
+                self.active = false;
+                Ok(())
+            },
+        )
+    }
+}
+
+impl Drop for DetachedObjectScopeGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn resume_detached_object_child(
+    definition: DefinitionId,
+    script: Arc<ScriptEngine>,
+    suspension: clonk_script::ScriptSuspension,
+    value: Value,
+) -> Result<clonk_script::ScriptCallOutcome, RuntimeError> {
+    let mut guard = DetachedObjectScopeGuard::enter(definition)?;
+    let call = script.resume_script_continuation_with_value_and_this(suspension, value, Value::Nil);
+    guard.restore()?;
+    call.map_err(native_nested_script_error)
+}
+
+/// Resume one retained object callback slice in a newly-created host context.
+/// The caller's host context owns the parent scope; this helper borrows it
+/// only while moving the target scope into the active slot and restoring it.
+fn resume_nested_object_child(
+    target: ObjectId,
+    target_instance_token: u64,
+    definition: DefinitionId,
+    function: &str,
+    script: Arc<ScriptEngine>,
+    cells: clonk_script::LocalCells,
+    suspension: clonk_script::ScriptSuspension,
+    value: Value,
+) -> Result<clonk_script::ScriptCallOutcome, RuntimeError> {
+    let target_available = with_host_context(false, |context| {
+        context.object_instance_token(target) == Some(target_instance_token)
+    });
+    let Some(NestedCallPrep {
+        origin,
+        local_vars: entry_locals,
+        ..
+    }) = target_available
+        .then(|| {
+            HOST_CONTEXT.with(|cell| {
+                cell.borrow_mut().as_mut().and_then(|context| {
+                    context.prepare_nested_call(
+                        target,
+                        function,
+                        false,
+                        false,
+                        Some(script.clone()),
+                        true,
+                        false,
+                    )
+                })
+            })
+        })
+        .flatten()
+    else {
+        // Successful section teardown removes the active child, and a
+        // destination object may reuse its numeric id. The retained frame
+        // still runs, but with C++'s null receiver and no replacement scope.
+        return resume_detached_object_child(definition, script, suspension, value);
+    };
+
+    let previous_session = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| context.session_local_cells.insert(target, cells.clone()))
+    });
+    let (previous_script_object, previous_script_definition) =
+        with_host_context_mut((None, None), |context| {
+            (
+                context.script_object_context.replace(target),
+                // Keep the original callback owner even if the object ran
+                // ChangeDef before yielding. C4Aul's cthr->Def is captured
+                // on frame entry and is independent of the live Obj->Def.
+                context
+                    .script_definition_context
+                    .replace(Some(definition.clone())),
+            )
+        });
+    let mut context_guard = NestedCallbackContextGuard::new(
+        target,
+        cells.clone(),
+        entry_locals,
+        origin,
+        previous_session,
+        previous_script_object,
+        previous_script_definition,
+    );
+    let call = script.resume_script_continuation_with_value_and_this(
+        suspension,
+        value,
+        object_reference_value(target),
+    );
+    let _stored_locals = context_guard.restore();
+    call.map_err(native_nested_script_error)
+}
+
+fn native_nested_script_error(error: clonk_script::ScriptError) -> RuntimeError {
+    match error {
+        clonk_script::ScriptError::Runtime(error) => error,
+        other => RuntimeError::new(other.to_string()),
+    }
 }
 
 /// ActMap callbacks carry the exact function retained during definition
@@ -3747,8 +4273,39 @@ impl EffectHostContext {
         id
     }
 
+    /// Return the allocation identity of a callback-visible object. The
+    /// implementation must come from the engine's stable object-token table;
+    /// hashing a HostWorldObject or retaining an Rc snapshot would make an
+    /// equal-number destination object look like the old C4Object.
+    ///
+    /// This is intentionally an engine/world seam rather than a script Value:
+    /// AssignRemoval sweeps Values while a native continuation retains this
+    /// token for replacement checks.
+    pub(crate) fn object_instance_token(&self, id: ObjectId) -> Option<u64> {
+        self.world.object_instance_token(id)
+    }
+
     pub(crate) fn register_spawn(&mut self, spawn: SpawnConfig, mut preview: HostWorldObject) {
         let id = preview.id;
+        // NewObject is linked before Construction/Initialize, even though
+        // this copy-out context materializes its SpawnConfig later. Reserve
+        // one allocation token at that link boundary and carry it through
+        // both projections so a same-number replacement cannot inherit the
+        // pending object's identity.
+        let instance_token = spawn
+            .instance_token
+            .or(preview.instance_token)
+            .or_else(|| {
+                self.pending_objects
+                    .get(&id)
+                    .and_then(|object| object.instance_token)
+            })
+            .unwrap_or_else(|| self.world.allocate_object_instance_token());
+        let mut spawn = spawn;
+        spawn.instance_token = Some(instance_token);
+        preview.instance_token = Some(instance_token);
+        self.world
+            .register_object_instance_token(id, instance_token);
         let status = preview.status();
         // C4Object::Init copies Def->SolidMask and checks it against the
         // already-selected base bitmap before Construction/Initialize can
@@ -5714,6 +6271,7 @@ impl EffectHostContext {
             }
             self.pending_order.retain(|id| *id != target);
             self.pending_objects.remove(&target);
+            self.world.remove_object_instance_token(target);
         }
         removed
     }
@@ -5790,7 +6348,7 @@ impl EffectHostContext {
         &mut self,
         target: ObjectId,
         last_position: Option<Vector2>,
-    ) {
+    ) -> Result<(), RuntimeError> {
         if let Some(position) = last_position
             .or_else(|| {
                 self.object_scope(target)
@@ -5802,6 +6360,11 @@ impl EffectHostContext {
                 self.audio.detach_object_sounds(target, position);
             }
         }
+        // Suspended frames are owned by the engine continuation driver rather
+        // than this copied host context. Clear them at the same native
+        // AssignRemoval boundary before the object store is detached.
+        self.world
+            .clear_suspended_script_references_for_removal(target)?;
         self.removed_object_references.insert(target);
         let mut reference_sweep = clonk_script::ObjectReferenceSweep::active(target.as_u64());
         // Bring untouched persistent holders into this callback's ordinary
@@ -5838,6 +6401,7 @@ impl EffectHostContext {
         // C4TransferZone.cpp:68-76).
         let command = TransferZoneCommand::clear(target);
         self.register_transfer_zone_command(command);
+        Ok(())
     }
 
     pub(crate) fn unlink_content_for_removal(&mut self, parent: ObjectId, child: ObjectId) {

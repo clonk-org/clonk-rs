@@ -102,11 +102,35 @@ thread_local! {
         RefCell::new(None)
     };
     static AUDIO_CONTEXT: RefCell<Option<AudioRegistry>> = const { RefCell::new(None) };
+    /// Marks the VM call whose caller owns a synchronous continuation driver.
+    /// The guard restores the previous value on every unwind; it carries no
+    /// engine pointer or borrowed state across the boundary.
+    static SYNCHRONOUS_SCRIPT_BOUNDARY: Cell<bool> = const { Cell::new(false) };
     // GetFairCrewPhysical runs while an object physical is being resolved.
     // Keep the definition-only GetID/GetPhysical surfaces available without
     // recursively borrowing the active object host context.
     static FAIR_CREW_DEFINITION_CONTEXT: RefCell<Option<(DefinitionId, PhysicalInfo)>> =
         const { RefCell::new(None) };
+}
+
+struct SynchronousScriptBoundaryGuard {
+    previous: bool,
+}
+
+impl Drop for SynchronousScriptBoundaryGuard {
+    fn drop(&mut self) {
+        SYNCHRONOUS_SCRIPT_BOUNDARY.with(|cell| cell.set(self.previous));
+    }
+}
+
+pub(crate) fn with_synchronous_script_boundary<R>(call: impl FnOnce() -> R) -> R {
+    let previous = SYNCHRONOUS_SCRIPT_BOUNDARY.with(|cell| cell.replace(true));
+    let _guard = SynchronousScriptBoundaryGuard { previous };
+    call()
+}
+
+pub(crate) fn synchronous_script_boundary_active() -> bool {
+    SYNCHRONOUS_SCRIPT_BOUNDARY.with(Cell::get)
 }
 
 #[cfg(any(test, feature = "presentation-capture"))]

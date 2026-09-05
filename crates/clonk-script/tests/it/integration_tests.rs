@@ -1,8 +1,902 @@
-use clonk_script::{DebuggerHooks, Engine, RuntimeError, Value};
+use clonk_script::{DebuggerHooks, Engine, RuntimeError, ScriptCallOutcome, Value};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn load_script(engine: &mut Engine, source: &str) {
     crate::support::load_script(engine, source);
+}
+
+#[derive(Debug)]
+struct PauseRequest;
+
+#[test]
+fn nested_compiled_call_keeps_the_original_host_target_after_relink() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        func Child() {
+            return Pause() + 1;
+        }
+        func Parent() {
+            return Child() + 1;
+        }
+        "#,
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Parent", &[])
+        .expect("Parent suspends through Child")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Parent completed before Pause"),
+    };
+
+    // A C++ AB_FUNC stores its selected function pointer in the bytecode. A
+    // section relink can therefore replace the name's registration while the
+    // suspended Child still resumes the exact call that yielded.
+    engine.register_host_reference_function("Pause", [0], |_| Ok(Value::Int(999)));
+
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Int(40))
+        .expect("the retained host target resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Child suspended again"),
+    };
+    assert_eq!(result, Value::Int(42));
+}
+
+#[test]
+fn nested_compiled_call_preserves_a_second_host_suspension() {
+    let mut engine = Engine::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_pause = Arc::clone(&calls);
+    engine.register_host_function("Pause", move |_| {
+        let call = calls_for_pause.fetch_add(1, Ordering::SeqCst);
+        assert!(call < 2, "the fixture should suspend exactly twice");
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        func Child() {
+            var first = Pause();
+            var second = Pause();
+            return first + second;
+        }
+        func Parent() {
+            return Child() + 1;
+        }
+        "#,
+    );
+
+    let first = match engine
+        .call_with_continuation("Parent", &[])
+        .expect("first Pause suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Parent completed before first Pause"),
+    };
+    let second = match engine
+        .resume_script_continuation_with_value(first, Value::Int(10))
+        .expect("first Pause resumes")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("second Pause must suspend"),
+    };
+    let result = match engine
+        .resume_script_continuation_with_value(second, Value::Int(20))
+        .expect("second Pause resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Child suspended after its second Pause"),
+    };
+    assert_eq!(result, Value::Int(31));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn nested_reference_return_keeps_the_caller_alias_after_suspension() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        func &Child(&slot) {
+            Pause();
+            return slot;
+        }
+        func Parent(&slot) {
+            Child(slot) = 3;
+            return slot;
+        }
+        "#,
+    );
+
+    let (suspension, cells) = match engine
+        .call_with_ref_args_with_continuation("Parent", &[Value::Int(0)])
+        .expect("Parent suspends through a reference-returning Child")
+    {
+        (ScriptCallOutcome::Suspended(suspension), cells) => (suspension, cells),
+        (ScriptCallOutcome::Complete(_), _) => panic!("Parent completed before Pause"),
+    };
+    let result = match engine
+        .resume_script_continuation(suspension)
+        .expect("reference-returning Child resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Child suspended twice"),
+    };
+    assert_eq!(result, Value::Int(3));
+    assert_eq!(*cells[0].borrow(), Value::Int(3));
+}
+
+#[test]
+fn resumes_a_compiled_call_after_a_host_boundary() {
+    let marks = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::new();
+    let mark_sink = Arc::clone(&marks);
+    engine.register_host_function("Mark", move |args| {
+        mark_sink.lock().unwrap().push(args.first().cloned());
+        Ok(Value::Nil)
+    });
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        #strict 3
+        func Probe() {
+            Mark(1);
+            Pause();
+            Mark(2);
+            return 7;
+        }
+        "#,
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("Probe suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    assert!(suspension.request::<PauseRequest>().is_some());
+    assert_eq!(
+        *marks.lock().unwrap(),
+        vec![Some(Value::Int(1))],
+        "the suffix waits for the host to commit the request"
+    );
+
+    let result = match engine
+        .resume_script_continuation(suspension)
+        .expect("Probe resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(7));
+    assert_eq!(
+        *marks.lock().unwrap(),
+        vec![Some(Value::Int(1)), Some(Value::Int(2))]
+    );
+}
+
+#[test]
+fn resumes_a_host_call_with_the_committed_return_value() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        func Probe() {
+            var result = Pause();
+            return result;
+        }
+        "#,
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("Probe suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Int(42))
+        .expect("Probe resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(42));
+}
+
+#[test]
+fn resumed_direct_this_call_keeps_the_object_receiver() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        #strict 3
+        func Probe() {
+            Pause();
+            return this();
+        }
+        "#,
+    );
+
+    let cells = clonk_script::LocalCells::default();
+    let suspension = match engine
+        .call_with_cells_and_this_with_continuation("Probe", &[], &cells, Value::Object(42))
+        .expect("Probe suspends before this()")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+
+    let result = match engine
+        .resume_script_continuation(suspension)
+        .expect("Probe resumes into this()")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Object(42));
+}
+
+#[test]
+fn resumes_an_interpreted_reference_call_without_breaking_the_alias() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        func Probe(&slot) {
+            slot = 1;
+            Pause();
+            slot = 2;
+            return slot;
+        }
+        "#,
+    );
+
+    let (suspension, cells) = match engine
+        .call_with_ref_args_with_continuation("Probe", &[Value::Int(0)])
+        .expect("Probe suspends")
+    {
+        (ScriptCallOutcome::Suspended(suspension), cells) => (suspension, cells),
+        (ScriptCallOutcome::Complete(_), _) => panic!("Probe completed before Pause"),
+    };
+    assert_eq!(*cells[0].borrow(), Value::Int(1));
+
+    let result = match engine
+        .resume_script_continuation(suspension)
+        .expect("Probe resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(2));
+    assert_eq!(*cells[0].borrow(), Value::Int(2));
+}
+
+#[test]
+fn clears_removed_objects_from_suspended_stack_and_alias_containers() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    engine.register_host_function("ObjectValue", |_| Ok(Value::Object(7)));
+    load_script(
+        &mut engine,
+        r#"
+        #strict 3
+        func Probe() {
+            var old = ObjectValue();
+            var values = [ObjectValue()];
+            var tail = 19;
+            Pause();
+            return [old, values[0], tail];
+        }
+        "#,
+    );
+
+    let cells = clonk_script::LocalCells::default();
+    let mut suspension = match engine
+        .call_with_cells_and_this_with_continuation("Probe", &[], &cells, Value::Object(7))
+        .expect("Probe suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+
+    // C++ AssignRemoval clears every C4Value in the suspended caller before
+    // the section switch; numeric locals survive the sweep (C4Object.cpp:312).
+    suspension.clear_object_references(7);
+    let result = match engine
+        .resume_script_continuation(suspension)
+        .expect("Probe resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(
+        result,
+        Value::Array(vec![Value::Nil, Value::Nil, Value::Int(19)])
+    );
+}
+
+#[test]
+fn interpreted_continuation_keeps_assignment_operands_and_short_circuit_state() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        #strict 2
+        func Probe() {
+            var value = 0;
+            value = 1 + Pause();
+            if (value && Pause()) {
+                value += 10;
+            }
+            return value + 1;
+            UnknownAfterReturn();
+        }
+        "#,
+    );
+
+    let first = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("first Pause suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before assignment Pause"),
+    };
+    let second = match engine
+        .resume_script_continuation_with_value(first, Value::Int(2))
+        .expect("assignment resumes")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("short-circuit RHS should suspend"),
+    };
+    let result = match engine
+        .resume_script_continuation_with_value(second, Value::Bool(true))
+        .expect("short-circuit resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended after its final call"),
+    };
+    assert_eq!(result, Value::Int(14));
+}
+
+#[test]
+fn resumes_an_interpreted_foreach_body_after_each_host_boundary() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut engine = Engine::new();
+    let calls_for_pause = Arc::clone(&calls);
+    engine.register_host_function("Pause", move |_| {
+        let call = calls_for_pause.fetch_add(1, Ordering::SeqCst);
+        assert!(call < 2);
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        r#"
+        #strict 3
+        func Probe() {
+            var total = 0;
+            for (var item in [1, 2]) {
+                total += Pause();
+            }
+            return total;
+        }
+        "#,
+    );
+
+    let first = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("first foreach body call suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before first Pause"),
+    };
+    let second = match engine
+        .resume_script_continuation_with_value(first, Value::Int(3))
+        .expect("first foreach body call resumes")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("second foreach body call must suspend"),
+    };
+    let result = match engine
+        .resume_script_continuation_with_value(second, Value::Int(4))
+        .expect("second foreach body call resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("foreach suspended after its final call"),
+    };
+    assert_eq!(result, Value::Int(7));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn interpreted_zero_argument_global_call_keeps_its_expression_suffix() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        "#strict 3\nfunc Probe() { return 1 + global->Pause(); }\n",
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("global call suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Int(2))
+        .expect("global call resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(3));
+}
+
+#[test]
+fn interpreted_safe_method_call_keeps_its_expression_suffix() {
+    let mut engine = Engine::new();
+    engine.register_method_dispatch(Arc::new(|_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    }));
+    load_script(
+        &mut engine,
+        "#strict 3\nfunc Probe(target) { return 1 + target?->Pause(); }\n",
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[Value::Object(7)])
+        .expect("safe method call suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before method callback"),
+    };
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Int(2))
+        .expect("safe method call resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(3));
+}
+
+#[test]
+fn interpreted_method_slot_target_can_suspend_before_reference_dispatch() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let slot = clonk_script::value_cell(Value::Nil);
+    let local_slot = Rc::clone(&slot);
+    engine.register_local_cell_hook(Rc::new(move |target, name| {
+        (*target == Value::Object(7) && name == "slot").then(|| Rc::clone(&local_slot))
+    }));
+    load_script(
+        &mut engine,
+        "#strict 3\nfunc Probe() { return (LocalN(\"slot\", Pause()) = 3); }\n",
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("method slot target suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Object(7))
+        .expect("method slot target resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(3));
+    assert_eq!(*slot.borrow(), Value::Int(3));
+}
+
+#[test]
+fn interpreted_call_retains_the_selected_host_target_across_argument_yield() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Target", 1, |_| Ok(Value::Int(1)));
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        "#strict 3\nfunc Probe() { return Target(Pause()); UnknownAfterReturn(); }\n",
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("argument call suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    engine.register_host_function_with_arity("Target", 1, |_| Ok(Value::Int(2)));
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Int(9))
+        .expect("argument call resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(1));
+}
+
+#[test]
+fn interpreted_call_uses_the_selected_host_arity_after_argument_yield() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Target", 1, |args| {
+        Ok(args.first().cloned().unwrap_or(Value::Nil))
+    });
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        // Parse_Params fixes the selected native signature before evaluating
+        // its operands; a relink during that evaluation cannot truncate the
+        // captured call's argument list (C4AulParse.cpp:2311-2344).
+        "#strict 3\nfunc Probe() { return Target(Pause()); }\n",
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("argument call suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    engine.register_host_function_with_arity("Target", 0, |_| Ok(Value::Int(2)));
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Int(9))
+        .expect("argument call resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(9));
+}
+
+#[test]
+fn interpreted_global_call_retains_the_selected_host_target_and_context() {
+    let mut engine = Engine::new();
+    let contexts = Arc::new(Mutex::new(Vec::new()));
+    let context_sink = Arc::clone(&contexts);
+    engine.register_global_call_context_hook(Arc::new(move |entered| {
+        context_sink.lock().expect("context log lock").push(entered);
+    }));
+    engine.register_host_function_with_arity("Target", 1, |_| Ok(Value::Int(1)));
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    load_script(
+        &mut engine,
+        "#strict 3\nfunc Probe() { return global->Target(Pause()); UnknownAfterReturn(); }\n",
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("global argument call suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    engine.register_host_function_with_arity("Target", 1, |_| Ok(Value::Int(2)));
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Int(9))
+        .expect("global argument call resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("Probe suspended twice"),
+    };
+    assert_eq!(result, Value::Int(1));
+    assert_eq!(
+        *contexts.lock().expect("context log lock"),
+        vec![true, false],
+        "the resumed global dispatch retains its C++ global-call context"
+    );
+}
+
+#[test]
+fn ast_continuation_restores_its_frame_budget_before_large_expression() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let values = std::iter::repeat_n("0", 1015).collect::<Vec<_>>().join(",");
+    load_script(
+        &mut engine,
+        &format!("#strict 3\nfunc Probe() {{ Pause(); return [{values}]; }}\n"),
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("AST Probe suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    let Err(error) = engine.resume_script_continuation(suspension) else {
+        panic!("the resumed AST frame must retain its ten parameter slots");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("internal error: value stack overflow!"),
+        "unexpected resume error: {error}"
+    );
+}
+
+#[test]
+fn compiled_continuation_restores_its_frame_budget_for_nested_large_calls() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let values = std::iter::repeat_n("0", 1005).collect::<Vec<_>>().join(",");
+    load_script(
+        &mut engine,
+        &format!(
+            "#strict 3\nfunc Child() {{ return [{values}]; }}\nfunc Probe() {{ Pause(); return Child(); }}\n"
+        ),
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("compiled Probe suspends")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    let Err(error) = engine.resume_script_continuation(suspension) else {
+        panic!("the compiled frame must remain live while Child runs");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("internal error: value stack overflow!"),
+        "unexpected resume error: {error}"
+    );
+}
+
+#[test]
+fn dropping_an_unused_suspension_releases_all_value_stack_reservations() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let values = std::iter::repeat_n("0", 1014).collect::<Vec<_>>().join(",");
+    load_script(
+        &mut engine,
+        &format!(
+            "#strict 3\nfunc Suspended() {{ return [1, Pause(), 2]; }}\nfunc Fits() {{ return [{values}]; }}\n"
+        ),
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Suspended", &[])
+        .expect("Suspended yields")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Suspended completed before Pause"),
+    };
+    assert!(matches!(
+        engine
+            .call("Fits", &[])
+            .expect("an unrelated call sees a clean stack while suspension is held"),
+        Value::Array(values) if values.len() == 1014
+    ));
+    drop(suspension);
+    assert!(matches!(
+        engine
+            .call("Fits", &[])
+            .expect("an unrelated call sees a clean stack after suspension drop"),
+        Value::Array(values) if values.len() == 1014
+    ));
+}
+
+#[test]
+fn inline_value_stack_context_counts_the_suspended_caller_then_restores_it() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let values = std::iter::repeat_n("0", 1014).collect::<Vec<_>>().join(",");
+    load_script(
+        &mut engine,
+        &format!(
+            "#strict 3\nfunc Suspended() {{ return [1, Pause(), 2]; }}\nfunc Fits() {{ return [{values}]; }}\n"
+        ),
+    );
+
+    let mut suspension = match engine
+        .call_with_continuation("Suspended", &[])
+        .expect("Suspended yields")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Suspended completed before Pause"),
+    };
+    let context = suspension
+        .attach_value_stack_context()
+        .expect("the inline context attaches without overflowing itself");
+    suspension.clear_object_references(999);
+    let nested = engine.call("Fits", &[]);
+    drop(context);
+    let Err(error) = nested else {
+        panic!("an inline nested call must include the suspended caller's slots");
+    };
+    assert!(error
+        .to_string()
+        .contains("internal error: value stack overflow!"));
+    assert!(matches!(
+        engine
+            .call("Fits", &[])
+            .expect("the context guard restores the detached budget"),
+        Value::Array(values) if values.len() == 1014
+    ));
+}
+
+#[test]
+fn inline_value_stack_context_counts_nested_suspended_frames() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let values = std::iter::repeat_n("0", 995).collect::<Vec<_>>().join(",");
+    load_script(
+        &mut engine,
+        &format!(
+            "#strict 3\nfunc Child() {{ Pause(); return 0; }}\nfunc Parent() {{ return Child(); }}\nfunc Fits() {{ return [{values}]; }}\n"
+        ),
+    );
+
+    let mut suspension = match engine
+        .call_with_continuation("Parent", &[])
+        .expect("Parent suspends through Child")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Parent completed before Pause"),
+    };
+    let context = suspension
+        .attach_value_stack_context()
+        .expect("the nested context attaches without overflowing itself");
+    // Section removal can clear references while inline host work is still
+    // running; the owned guard holds no borrow of the suspension.
+    suspension.clear_object_references(999);
+    let nested = engine.call("Fits", &[]);
+    drop(context);
+    let Err(error) = nested else {
+        panic!("an inline nested call must include both suspended frames");
+    };
+    assert!(error
+        .to_string()
+        .contains("internal error: value stack overflow!"));
+    assert!(matches!(
+        engine
+            .call("Fits", &[])
+            .expect("the nested context guard restores the detached budget"),
+        Value::Array(values) if values.len() == 995
+    ));
+}
+
+#[test]
+fn inline_value_stack_context_counts_suspended_native_host_frame() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 10, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let values = std::iter::repeat_n("0", 985).collect::<Vec<_>>().join(",");
+    load_script(
+        &mut engine,
+        &format!(
+            "#strict 3\nfunc Child() {{ Pause(); return 0; }}\nfunc Parent() {{ return Child(); }}\nfunc Fits() {{ return [{values}]; }}\n"
+        ),
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Parent", &[])
+        .expect("Parent suspends through the ten-slot host callback")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Parent completed before Pause"),
+    };
+    let context = suspension
+        .attach_value_stack_context()
+        .expect("the native callback context attaches");
+    let nested = engine.call("Fits", &[]);
+    drop(context);
+    let Err(error) = nested else {
+        panic!("inline work must include the suspended native callback frame");
+    };
+    assert!(error
+        .to_string()
+        .contains("internal error: value stack overflow!"));
+    assert!(matches!(
+        engine
+            .call("Fits", &[])
+            .expect("dropping the native context restores the baseline"),
+        Value::Array(values) if values.len() == 985
+    ));
+}
+
+#[test]
+fn inline_value_stack_context_counts_suspended_native_host_frame_in_ast() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 10, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    // Probe's expression is too large for the compiled path once its ten
+    // parameter slots are reserved, so this exercises AST host suspension.
+    let probe_values = std::iter::repeat_n("0", 1015).collect::<Vec<_>>().join(",");
+    let fits_values = std::iter::repeat_n("0", 995).collect::<Vec<_>>().join(",");
+    load_script(
+        &mut engine,
+        &format!(
+            "#strict 3\nfunc Probe() {{ Pause(); return [{probe_values}]; }}\nfunc Fits() {{ return [{fits_values}]; }}\n"
+        ),
+    );
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("the AST Probe suspends through the ten-slot host callback")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("Probe completed before Pause"),
+    };
+    let context = suspension
+        .attach_value_stack_context()
+        .expect("the AST native callback context attaches");
+    let nested = engine.call("Fits", &[]);
+    drop(context);
+    let Err(error) = nested else {
+        panic!("inline AST work must include the suspended native callback frame");
+    };
+    assert!(error
+        .to_string()
+        .contains("internal error: value stack overflow!"));
+    assert!(matches!(
+        engine
+            .call("Fits", &[])
+            .expect("dropping the AST native context restores the baseline"),
+        Value::Array(values) if values.len() == 995
+    ));
 }
 
 #[test]

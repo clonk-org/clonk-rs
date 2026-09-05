@@ -4,6 +4,7 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use crate::engine_state::{EffectEventContinuation, EffectEventRunResult};
 
 type SpawnSingleOutcome = (
     ObjectId,
@@ -34,6 +35,109 @@ impl Engine {
         if let Some(preview) = object_lists {
             world.install_effect_object_lists(preview.clone());
         }
+    }
+
+    /// Link a pending `NewObject` result long enough for callback-produced
+    /// children to observe it through the engine's authoritative object list.
+    /// C++ inserts the object before Construction and Initialize return
+    /// (C4Game.cpp:1100-1142); keeping this seam explicit avoids borrowing an
+    /// `Engine` through a suspended VM frame.
+    fn link_pending_spawn_object(
+        &mut self,
+        object: &mut Object,
+        exec_position: usize,
+    ) -> Option<u64> {
+        if let Some(index) = self.find_object_index(object.id) {
+            let instance_token = self.objects[index].instance_token;
+            if object.instance_token != 0 && object.instance_token != instance_token {
+                return None;
+            }
+            object.instance_token = instance_token;
+            self.objects[index] = object.clone();
+            self.note_objects_changed();
+        } else {
+            self.objects.push(object.clone());
+            self.note_objects_changed();
+            self.insert_exec_link(exec_position.min(self.execution.exec_list.len()), object.id);
+            let Some(instance_token) = self.object_instance_token(object.id) else {
+                return None;
+            };
+            object.instance_token = instance_token;
+        }
+        Some(object.instance_token)
+    }
+
+    /// Drain callback-created objects at the same synchronous boundary as
+    /// native `C4Game::NewObject`. The returned flag tells the caller that the
+    /// pending carrier was removed or replaced while a nested child ran.
+    #[allow(clippy::too_many_arguments)]
+    fn flush_pending_spawn_callbacks(
+        &mut self,
+        object: &mut Object,
+        exec_position: usize,
+        additional_spawns: &mut Vec<SpawnConfig>,
+        pending_nested_outcomes: &mut Vec<compat::NestedObjectOutcome>,
+        pending_effect_object_lists: &mut Option<compat::EffectObjectListPreview>,
+    ) -> Result<bool, EngineError> {
+        if additional_spawns.is_empty()
+            && pending_nested_outcomes.is_empty()
+            && pending_effect_object_lists.is_none()
+        {
+            return Ok(false);
+        }
+
+        let object_id = object.id;
+        let Some(instance_token) = self.link_pending_spawn_object(object, exec_position) else {
+            return Ok(true);
+        };
+        let queue = std::mem::take(additional_spawns);
+        let outcomes = std::mem::take(pending_nested_outcomes);
+        let object_lists = pending_effect_object_lists.take();
+        if queue.is_empty() {
+            *pending_nested_outcomes =
+                self.apply_nested_object_outcomes_retaining_missing(outcomes)?;
+            if let Some(preview) = object_lists {
+                if self.effect_object_lists_are_materialized(&preview) {
+                    self.install_effect_object_lists(preview);
+                } else {
+                    *pending_effect_object_lists = Some(preview);
+                }
+            }
+        } else {
+            // NewObject is synchronous: process each child, including its own
+            // Construction/Initialize/effect descendants, before resuming the
+            // carrier's callback (C4Game.cpp:1085-1142).
+            let _ = self.process_spawn_queue_with_outcomes_inner(
+                queue,
+                outcomes,
+                std::collections::VecDeque::new(),
+            )?;
+            // A nested child may itself switch sections and retire the
+            // carrier. In that case the old callback-final list belongs to the
+            // departing world and must not be replayed by numeric ID over a
+            // destination object that reused one of those numbers.
+            let carrier_live = self
+                .object_instance_token(object_id)
+                .is_some_and(|token| token == instance_token);
+            if carrier_live {
+                if let Some(preview) = object_lists {
+                    if self.effect_object_lists_are_materialized(&preview) {
+                        self.install_effect_object_lists(preview);
+                    } else {
+                        *pending_effect_object_lists = Some(preview);
+                    }
+                }
+            }
+        }
+
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(true);
+        };
+        if self.object_instance_token(object_id) != Some(instance_token) {
+            return Ok(true);
+        }
+        *object = self.objects[index].clone();
+        Ok(false)
     }
 
     pub(crate) fn spawn_single_inner(
@@ -117,6 +221,7 @@ impl Engine {
             native_compiled_object_defaults,
             solid_mask,
             solid_mask_instance_sequence,
+            instance_token,
             position_adjusted,
             initialized,
         } = config;
@@ -560,6 +665,8 @@ impl Engine {
             shape_template,
             own_shape_vertices,
         );
+        object.instance_token =
+            instance_token.unwrap_or_else(|| self.allocate_object_instance_token());
         if action_sound_dispatched {
             if let Some(selection) = action_sound_selection {
                 object.active_action_sound = selection;
@@ -740,11 +847,17 @@ impl Engine {
         // to later raw writes, so retain its final host-side value across the
         // deferred materialization refresh (C4Object.cpp:1428-1511).
         let mut initialize_ocf_override = None;
+        // The numeric object ID can be reused by the destination section. A
+        // token identifies the pending allocation that owns Construction /
+        // Initialize's suspended frame, including when StatusDeactivate keeps
+        // that allocation in InactiveObjects across the switch.
+        let mut pending_instance_token = None;
 
         // Call Construction() before Initialize()
         // Construction() initializes local variables that may be used in Initialize() or action callbacks
         // Loaded objects (Objects.txt / savegame) skip both: C4GameObjects::Load
         // (C4GameObjects.cpp:535-618) never fires construction callbacks.
+        let mut object_removed_during_switch = false;
         if !loaded
             && !initialized
             && self
@@ -753,204 +866,355 @@ impl Engine {
                 .map(|definition| definition.has_construction)
                 .unwrap_or(false)
         {
-            let rng_state = self.rng.clone();
-            let (
-                CommandBatch {
-                    delta,
-                    spawns,
-                    destroy,
-                    commands,
-                    command_ops,
-                    effects,
-                    other_objects,
-                    global_effects,
-                    environment,
-                    physics,
-                    landscape_ops,
-                    solid_mask_operations: construction_solid_mask_operations,
-                    host_raster_preview: construction_host_raster_preview,
-                    particles,
-                    transfer_zones,
-                    audio,
-                    messages,
-                    player_commands,
-                    object_order_commands,
-                    next_mission_commands,
-                    object_lists: construction_object_lists,
-                    trigger_game_over,
-                    script_go,
-                    script_counter,
-                },
-                audio_state,
-                new_rng,
-                next_object_id,
-                construction_error,
-            ) = {
-                let world =
-                    self.host_world_context_for_pending_object(&object, initial_exec_position);
-                // The publish channel is shared with every clone, so the
-                // retained handle collects whatever the callback created
-                // synchronously for the phases that follow it.
-                let published = world.clone();
-                let definition = self
-                    .definitions
-                    .get(&definition_id)
-                    .expect("definition must exist");
-                let outcome = definition.call_construction(
-                    &object.state,
-                    id,
-                    rng_state,
-                    &self.global_effects,
-                    self.physics,
-                    self.environment,
-                    self.frame,
-                    world,
-                    self.game_over_triggered,
-                    self.audio_registry.clone(),
-                )?;
-                creation_spawn_previews.extend(published.take_effect_spawn_previews());
-                outcome
-            };
-            self.stage_host_solid_mask_operations(
-                construction_solid_mask_operations,
-                construction_host_raster_preview,
-            );
-            // Fail-safe game call: a script error logs and the object
-            // spawns WITH the callback's pre-error effects — C4AulExec
-            // aborts the call but rolls nothing back
-            // (C4AulExec.cpp:1318-1342), so pre-error creations persist
-            // and their burned enumeration numbers stay consumed
-            // (C4Game.cpp:1119).
-            if let Some(error) = construction_error {
-                tolerate_script_error::<()>(Err(error))?;
-            }
-            self.rng = new_rng;
-            self.sync_next_object_id(next_object_id);
-            self.audio_registry = audio_state;
-            if let Some(go) = script_go {
-                self.scenario_script_go = go;
-            }
-            if let Some(counter) = script_counter {
-                self.scenario_script_counter = counter;
-            }
-            if trigger_game_over {
-                self.request_game_over()?;
-            }
-            if let Some(update) = environment {
-                self.apply_environment_delta(&update);
-            }
-            if let Some(delta) = physics {
-                self.apply_physics_delta(delta);
-            }
-            if !landscape_ops.is_empty() {
-                self.apply_landscape_operations(landscape_ops);
-            }
-            if !player_commands.is_empty() {
-                self.apply_player_commands(player_commands)?;
-            }
-            self.execution
-                .pending_object_order_commands
-                .extend(object_order_commands);
-            self.apply_next_mission_commands(next_mission_commands);
-            if destroy {
-                destroy_requested = true;
-            }
-            let change_def = delta.change_def.clone();
-            let callback_change_def_reinsert = delta.change_def_reinsert;
-            let host_container_change = delta.host_container_change;
-            let callback_action_library = if let Some(new_def) = change_def.as_deref() {
-                let definition = self
-                    .definitions
-                    .get(new_def)
-                    .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
-                let owner_color = self
-                    .players
-                    .get(&object.state.owner)
-                    .and_then(Player::color)
-                    .map(|color| {
-                        u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
-                    });
-                Self::apply_change_object_def_to_object(
-                    &mut object,
-                    new_def,
-                    definition,
-                    self.materials.len(),
-                    owner_color,
-                );
-                definition.action_library().clone()
-            } else {
-                self.definitions
-                    .get(&object.definition_id)
-                    .map(|definition| definition.action_library().clone())
-                    .unwrap_or_else(|| action_library.clone())
-            };
-            if change_def.is_some() {
-                change_def_reinsert = callback_change_def_reinsert;
-            }
-            let callbacks_dispatched = delta
-                .action
-                .as_ref()
-                .is_some_and(|action| action.callbacks_dispatched);
-            creation_action_callbacks_dispatched |= callbacks_dispatched;
-            let outcome = object.apply_delta(&delta, &callback_action_library);
-            if change_def.is_some() {
-                if let Some(current_definition) = self.definitions.get(&object.definition_id) {
-                    object.state.ocf = current_definition.compute_ocf(&object.state);
-                }
-            }
-            // A pending object is seeded into the callback world, so
-            // SetAction can run its Start/Abort calls synchronously just as
-            // it does after insertion. Only legacy/non-host action writes
-            // still need an engine-side deferred transition.
-            if let Some(change) = outcome.action_change {
-                if !callbacks_dispatched {
-                    object.record_action_event(
-                        change.previous,
-                        ActionTransitionKind::Forced,
-                        &callback_action_library,
+            let mut construction_resume = None;
+            loop {
+                let rng_state = self.rng.clone();
+                let (callback, construction_error) = {
+                    let world =
+                        self.host_world_context_for_pending_object(&object, initial_exec_position);
+                    // The publish channel is shared with every clone, so the
+                    // retained handle collects whatever the callback created
+                    // synchronously for the phases that follow it.
+                    let published = world.clone();
+                    let definition = self
+                        .definitions
+                        .get(&definition_id)
+                        .expect("definition must exist");
+                    let callback = definition.call_construction_with_continuation(
+                        &object.state,
+                        id,
+                        rng_state,
+                        &self.global_effects,
+                        self.physics,
+                        self.environment,
+                        self.frame,
+                        world,
+                        self.game_over_triggered,
+                        self.audio_registry.clone(),
+                        construction_resume.take(),
                     );
+                    creation_spawn_previews.extend(published.take_effect_spawn_previews());
+                    match callback {
+                        Ok(callback) => (callback, None),
+                        Err(error) => {
+                            let EngineError::Script {
+                                definition: script_definition,
+                                function,
+                                source,
+                                recovery: Some(recovery),
+                            } = error
+                            else {
+                                return Err(error);
+                            };
+                            let (batch, next_object_id) = definition.lifecycle_batch(
+                                "Construction",
+                                Value::Nil,
+                                recovery.outcome,
+                                false,
+                            )?;
+                            (
+                                LifecycleCallbackResult::Complete {
+                                    batch,
+                                    audio: recovery.audio,
+                                    rng: recovery.rng,
+                                    next_object_id,
+                                },
+                                Some(EngineError::Script {
+                                    definition: script_definition,
+                                    function,
+                                    source,
+                                    recovery: None,
+                                }),
+                            )
+                        }
+                    }
+                };
+                let (
+                    CommandBatch {
+                        delta,
+                        spawns,
+                        destroy,
+                        commands,
+                        command_ops,
+                        effects,
+                        other_objects,
+                        global_effects,
+                        environment,
+                        physics,
+                        landscape_ops,
+                        solid_mask_operations: construction_solid_mask_operations,
+                        host_raster_preview: construction_host_raster_preview,
+                        particles,
+                        transfer_zones,
+                        audio,
+                        messages,
+                        mut player_commands,
+                        object_order_commands,
+                        next_mission_commands,
+                        object_lists: construction_object_lists,
+                        trigger_game_over,
+                        script_go,
+                        script_counter,
+                    },
+                    audio_state,
+                    new_rng,
+                    next_object_id,
+                    construction_resume_next,
+                ) = match callback {
+                    LifecycleCallbackResult::Complete {
+                        batch,
+                        audio,
+                        rng,
+                        next_object_id,
+                    } => (batch, audio, rng, next_object_id, None),
+                    LifecycleCallbackResult::Suspended {
+                        batch,
+                        audio,
+                        rng,
+                        next_object_id,
+                        resume,
+                    } => {
+                        let Some(request) = resume
+                            .suspension
+                            .request::<compat::ScenarioSectionSwitchRequest>()
+                            .cloned()
+                        else {
+                            return Err(EngineError::invalid_script_output(
+                                definition_id.clone(),
+                                "Construction",
+                                "script yielded an unsupported host continuation".to_owned(),
+                            ));
+                        };
+                        (batch, audio, rng, next_object_id, Some((resume, request)))
+                    }
+                };
+                let mut construction_boundary =
+                    if let Some((continuation, request)) = construction_resume_next {
+                        let DefinitionScriptResume {
+                            suspension,
+                            cells,
+                            value,
+                            receiver_available,
+                        } = continuation;
+                        let boundary =
+                            self.begin_suspended_script_boundary(suspension, Some(cells.clone()))?;
+                        Some((cells, value, receiver_available, request, boundary))
+                    } else {
+                        None
+                    };
+                // The host records the request for replay, but this
+                // continuation driver performs the switch while the frame is
+                // suspended. Applying the carrier here would run the same
+                // section load a second time.
+                if let Some((_, _, _, request, _)) = construction_boundary.as_ref() {
+                    consume_section_switch_command(&mut player_commands, request);
                 }
-            }
-            if let Some(change) = outcome.container_change {
-                container_changes.push((change.0, change.1, host_container_change));
-            }
-            let mut applied = object.apply_effect_commands(&effects);
-            effect_events.append(&mut applied);
-            self.apply_particle_commands(particles);
-            // The object joins self.objects only after the callbacks, but
-            // C++ adds it to Game.Objects BEFORE Construction/Initialize
-            // fire (C4Game.cpp:1115-1131) — its own SetTransferZone must
-            // land, so the commands defer to right after the push.
-            deferred_transfer_zones.extend(transfer_zones);
-            if !global_effects.is_empty() {
-                self.apply_global_effect_commands(&global_effects);
-            }
-            object.clamp_velocity(&self.physics);
-            if !command_ops.is_empty() {
-                object.apply_command_operations(command_ops);
-            }
-            if !commands.is_empty() {
-                object.enqueue_commands(commands);
-            }
-            additional_spawns.extend(spawns);
-            // Only a phase that actually touched the list publishes one;
-            // a later silent phase must not erase an earlier snapshot.
-            if construction_object_lists.is_some() {
-                pending_effect_object_lists = construction_object_lists;
-            }
-            pending_nested_outcomes
-                .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
-            if !audio.is_empty() {
-                self.emit_audio_commands(audio);
-            }
-            if !messages.is_empty() {
-                for command in messages {
-                    self.messages.apply_command(command);
+                self.stage_host_solid_mask_operations(
+                    construction_solid_mask_operations,
+                    construction_host_raster_preview,
+                );
+                // Fail-safe game call: a script error logs and the object
+                // spawns WITH the callback's pre-error effects — C4AulExec
+                // aborts the call but rolls nothing back (C4AulExec.cpp:1318-1342).
+                if let Some(error) = construction_error {
+                    tolerate_script_error::<()>(Err(error))?;
                 }
+                self.rng = new_rng;
+                self.sync_next_object_id(next_object_id);
+                self.audio_registry = audio_state;
+                if let Some(go) = script_go {
+                    self.scenario_script_go = go;
+                }
+                if let Some(counter) = script_counter {
+                    self.scenario_script_counter = counter;
+                }
+                if trigger_game_over {
+                    self.request_game_over()?;
+                }
+                if let Some(update) = environment {
+                    self.apply_environment_delta(&update);
+                }
+                if let Some(delta) = physics {
+                    self.apply_physics_delta(delta);
+                }
+                if !landscape_ops.is_empty() {
+                    self.apply_landscape_operations(landscape_ops);
+                }
+                if !player_commands.is_empty() {
+                    self.apply_player_commands(player_commands)?;
+                }
+                self.execution
+                    .pending_object_order_commands
+                    .extend(object_order_commands);
+                self.apply_next_mission_commands(next_mission_commands);
+                if destroy {
+                    destroy_requested = true;
+                }
+                let change_def = delta.change_def.clone();
+                let callback_change_def_reinsert = delta.change_def_reinsert;
+                let host_container_change = delta.host_container_change;
+                let callback_action_library = if let Some(new_def) = change_def.as_deref() {
+                    let definition = self
+                        .definitions
+                        .get(new_def)
+                        .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
+                    let owner_color = self
+                        .players
+                        .get(&object.state.owner)
+                        .and_then(Player::color)
+                        .map(|color| {
+                            u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+                        });
+                    Self::apply_change_object_def_to_object(
+                        &mut object,
+                        new_def,
+                        definition,
+                        self.materials.len(),
+                        owner_color,
+                    );
+                    definition.action_library().clone()
+                } else {
+                    self.definitions
+                        .get(&object.definition_id)
+                        .map(|definition| definition.action_library().clone())
+                        .unwrap_or_else(|| action_library.clone())
+                };
+                if change_def.is_some() {
+                    change_def_reinsert = callback_change_def_reinsert;
+                }
+                let callbacks_dispatched = delta
+                    .action
+                    .as_ref()
+                    .is_some_and(|action| action.callbacks_dispatched);
+                creation_action_callbacks_dispatched |= callbacks_dispatched;
+                let outcome = object.apply_delta(&delta, &callback_action_library);
+                if change_def.is_some() {
+                    if let Some(current_definition) = self.definitions.get(&object.definition_id) {
+                        object.state.ocf = current_definition.compute_ocf(&object.state);
+                    }
+                }
+                // A pending object is seeded into the callback world, so
+                // SetAction can run its Start/Abort calls synchronously just as
+                // it does after insertion. Only legacy/non-host action writes
+                // still need an engine-side deferred transition.
+                if let Some(change) = outcome.action_change {
+                    if !callbacks_dispatched {
+                        object.record_action_event(
+                            change.previous,
+                            ActionTransitionKind::Forced,
+                            &callback_action_library,
+                        );
+                    }
+                }
+                if let Some(change) = outcome.container_change {
+                    container_changes.push((change.0, change.1, host_container_change));
+                }
+                let mut applied = object.apply_effect_commands(&effects);
+                effect_events.append(&mut applied);
+                self.apply_particle_commands(particles);
+                // The object joins self.objects before Construction/Initialize
+                // in C++ (C4Game.cpp:1115-1131); defer its transfer links until
+                // the materialized slot exists in this phase-local adapter.
+                deferred_transfer_zones.extend(transfer_zones);
+                if !global_effects.is_empty() {
+                    self.apply_global_effect_commands(&global_effects);
+                }
+                object.clamp_velocity(&self.physics);
+                if !command_ops.is_empty() {
+                    object.apply_command_operations(command_ops);
+                }
+                if !commands.is_empty() {
+                    object.enqueue_commands(commands);
+                }
+                additional_spawns.extend(spawns);
+                if construction_object_lists.is_some() {
+                    pending_effect_object_lists = construction_object_lists;
+                }
+                pending_nested_outcomes
+                    .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
+                if !audio.is_empty() {
+                    self.emit_audio_commands(audio);
+                }
+                if !messages.is_empty() {
+                    for command in messages {
+                        self.messages.apply_command(command);
+                    }
+                }
+                object_removed_during_switch |= self.flush_pending_spawn_callbacks(
+                    &mut object,
+                    initial_exec_position,
+                    &mut additional_spawns,
+                    &mut pending_nested_outcomes,
+                    &mut pending_effect_object_lists,
+                )?;
+                let Some((cells, _, _, request, boundary)) = construction_boundary.take() else {
+                    break;
+                };
+                // C4Game::NewObject links the object before Construction
+                // enters the VM. Keep that materialization inside the same
+                // owned boundary as the section switch so AssignRemoval can
+                // clear the suspended frame while the pending object is live.
+                let should_link_pending =
+                    !object_removed_during_switch && pending_instance_token.is_none();
+                let operation_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let linked_token = should_link_pending
+                            .then(|| {
+                                self.link_pending_spawn_object(&mut object, initial_exec_position)
+                            })
+                            .flatten();
+                        self.load_scenario_section(
+                            &request.name,
+                            request.flags,
+                            request.preserve_ids,
+                        )
+                        .map(|switched| (switched, linked_token))
+                    }));
+                let suspension = match boundary.finish() {
+                    Ok(suspension) => suspension,
+                    Err(error) => match operation_result {
+                        Ok(Err(previous)) => return Err(previous),
+                        Err(payload) => std::panic::resume_unwind(payload),
+                        Ok(Ok(_)) => return Err(error),
+                    },
+                };
+                let (switched, linked_token) = match operation_result {
+                    Ok(result) => result?,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                };
+                if should_link_pending {
+                    if let Some(token) = linked_token {
+                        pending_instance_token = Some(token);
+                    } else {
+                        object_removed_during_switch = true;
+                    }
+                }
+                let mut continuation = DefinitionScriptResume {
+                    suspension,
+                    cells,
+                    value: Value::Nil,
+                    receiver_available: false,
+                };
+                continuation.value = Value::Int(i32::from(switched));
+                // The pending caller was linked before the native switch. A
+                // successful switch removes every active object, and a
+                // destination load may reuse the same numeric ID. That ID is
+                // a new C4Object; never retarget the suspended caller's
+                // state to it (C4Game.cpp:4190-4208).
+                let receiver_available = pending_instance_token
+                    .is_some_and(|token| self.object_instance_token(id) == Some(token));
+                object_removed_during_switch |= !receiver_available;
+                continuation.receiver_available = receiver_available;
+                if receiver_available {
+                    if let Some(index) = self.find_object_index(id) {
+                        object = self.objects[index].clone();
+                    }
+                }
+                construction_resume = Some(continuation);
             }
         }
 
-        if !loaded && !initialized && !destroy_requested {
+        if !loaded && !initialized && !destroy_requested && !object_removed_during_switch {
             // NewObject's initial DoCon calls SetOCF after Objects.Add and
             // Construction, but before UpdateFace puts the completed mask
             // and before Completion/Initialize (C4Object.cpp:1428-1511).
@@ -972,6 +1236,7 @@ impl Engine {
         if !loaded
             && !initialized
             && !destroy_requested
+            && !object_removed_during_switch
             && self
                 .definitions
                 .get(&initialize_definition_id)
@@ -991,43 +1256,409 @@ impl Engine {
             } else {
                 self.next_random_i32()
             };
-            let rng_state = self.rng.clone();
-            let (
-                CommandBatch {
-                    delta,
-                    spawns,
-                    destroy,
-                    commands,
-                    command_ops,
-                    effects,
-                    other_objects,
-                    global_effects,
-                    environment,
-                    physics,
-                    landscape_ops,
-                    solid_mask_operations: initialize_solid_mask_operations,
-                    host_raster_preview: initialize_host_raster_preview,
-                    particles,
-                    transfer_zones,
-                    audio,
-                    messages,
-                    player_commands,
-                    object_order_commands,
-                    next_mission_commands,
-                    object_lists: initialize_object_lists,
-                    trigger_game_over,
-                    script_go,
-                    script_counter,
-                },
-                audio_state,
-                new_rng,
-                next_object_id,
-                initialize_error,
-            ) = {
-                // Keep the world snapshot phase-local: retaining its COW
-                // landscape while folding Construction would split dirty
-                // generations. Replay only the ordered zone overlay that
-                // C++ kept live between the two callbacks.
+            let mut initialize_resume = None;
+            loop {
+                let rng_state = self.rng.clone();
+                let (
+                    CommandBatch {
+                        delta,
+                        spawns,
+                        destroy,
+                        commands,
+                        command_ops,
+                        effects,
+                        other_objects,
+                        global_effects,
+                        environment,
+                        physics,
+                        landscape_ops,
+                        solid_mask_operations: initialize_solid_mask_operations,
+                        host_raster_preview: initialize_host_raster_preview,
+                        particles,
+                        transfer_zones,
+                        audio,
+                        messages,
+                        player_commands,
+                        object_order_commands,
+                        next_mission_commands,
+                        object_lists: initialize_object_lists,
+                        trigger_game_over,
+                        script_go,
+                        script_counter,
+                    },
+                    audio_state,
+                    new_rng,
+                    next_object_id,
+                    initialize_resume_next,
+                    initialize_error,
+                ) = {
+                    // Keep the world snapshot phase-local: retaining its COW
+                    // landscape while folding Construction would split dirty
+                    // generations. Replay only the ordered zone overlay that
+                    // C++ kept live between the two callbacks.
+                    let mut world =
+                        self.host_world_context_for_pending_object(&object, initial_exec_position);
+                    for command in &deferred_transfer_zones {
+                        world.preview_transfer_zone_command(command);
+                    }
+                    Self::seed_creation_phase_projections(
+                        &mut world,
+                        &creation_spawn_previews,
+                        pending_effect_object_lists.as_ref(),
+                    );
+                    let published = world.clone();
+                    let definition = self
+                        .definitions
+                        .get(&initialize_definition_id)
+                        .expect("definition must exist");
+                    let (outcome, initialize_error) = match definition
+                        .call_initialize_with_continuation(
+                            &object.state,
+                            id,
+                            random,
+                            rng_state,
+                            &self.global_effects,
+                            self.physics,
+                            self.environment,
+                            self.frame,
+                            world,
+                            self.game_over_triggered,
+                            self.audio_registry.clone(),
+                            initialize_resume.take(),
+                        ) {
+                        Ok(outcome) => (outcome, None),
+                        Err(error) => {
+                            let EngineError::Script {
+                                definition: script_definition,
+                                function,
+                                source,
+                                recovery: Some(recovery),
+                            } = error
+                            else {
+                                return Err(error);
+                            };
+                            let (batch, next_object_id) = definition.lifecycle_batch(
+                                "Initialize",
+                                Value::Nil,
+                                recovery.outcome,
+                                true,
+                            )?;
+                            (
+                                LifecycleCallbackResult::Complete {
+                                    batch,
+                                    audio: recovery.audio,
+                                    rng: recovery.rng,
+                                    next_object_id,
+                                },
+                                Some(EngineError::Script {
+                                    definition: script_definition,
+                                    function,
+                                    source,
+                                    recovery: None,
+                                }),
+                            )
+                        }
+                    };
+                    creation_spawn_previews.extend(published.take_effect_spawn_previews());
+                    match outcome {
+                        LifecycleCallbackResult::Complete {
+                            batch,
+                            audio,
+                            rng,
+                            next_object_id,
+                        } => (batch, audio, rng, next_object_id, None, initialize_error),
+                        LifecycleCallbackResult::Suspended {
+                            mut batch,
+                            audio,
+                            rng,
+                            next_object_id,
+                            resume,
+                        } => {
+                            let Some(request) = resume
+                                .suspension
+                                .request::<compat::ScenarioSectionSwitchRequest>()
+                                .cloned()
+                            else {
+                                return Err(EngineError::invalid_script_output(
+                                    initialize_definition_id.clone(),
+                                    "Initialize",
+                                    "script yielded an unsupported host continuation".to_owned(),
+                                ));
+                            };
+                            consume_section_switch_command(&mut batch.player_commands, &request);
+                            (
+                                batch,
+                                audio,
+                                rng,
+                                next_object_id,
+                                Some((resume, request)),
+                                initialize_error,
+                            )
+                        }
+                    }
+                };
+                let mut initialize_boundary =
+                    if let Some((continuation, request)) = initialize_resume_next {
+                        let DefinitionScriptResume {
+                            suspension,
+                            cells,
+                            value,
+                            receiver_available,
+                        } = continuation;
+                        let boundary =
+                            self.begin_suspended_script_boundary(suspension, Some(cells.clone()))?;
+                        Some((cells, value, receiver_available, request, boundary))
+                    } else {
+                        None
+                    };
+                let initialize_host_ocf_override = delta.ocf_override();
+                self.stage_host_solid_mask_operations(
+                    initialize_solid_mask_operations,
+                    initialize_host_raster_preview,
+                );
+                if let Some(error) = initialize_error {
+                    // C4AulExec aborts the callback after recording its error,
+                    // but NewObject still commits the writes made before that
+                    // point and continues the creation path
+                    // (C4AulExec.cpp:1318-1342).
+                    tolerate_script_error::<()>(Err(error))?;
+                }
+                // Fail-safe game call: a script error logs and the object
+                // spawns WITH the callback's pre-error effects — C4AulExec
+                // aborts the call but rolls nothing back
+                // (C4AulExec.cpp:1318-1342), so pre-error creations persist
+                // and their burned enumeration numbers stay consumed
+                // (C4Game.cpp:1119).
+                self.rng = new_rng;
+                self.sync_next_object_id(next_object_id);
+                self.audio_registry = audio_state;
+                if let Some(go) = script_go {
+                    self.scenario_script_go = go;
+                }
+                if let Some(counter) = script_counter {
+                    self.scenario_script_counter = counter;
+                }
+                if trigger_game_over {
+                    self.request_game_over()?;
+                }
+                if let Some(update) = environment {
+                    self.apply_environment_delta(&update);
+                }
+                if let Some(delta) = physics {
+                    self.apply_physics_delta(delta);
+                }
+                if !landscape_ops.is_empty() {
+                    self.apply_landscape_operations(landscape_ops);
+                }
+                if !player_commands.is_empty() {
+                    self.apply_player_commands(player_commands)?;
+                }
+                self.execution
+                    .pending_object_order_commands
+                    .extend(object_order_commands);
+                self.apply_next_mission_commands(next_mission_commands);
+                if destroy {
+                    destroy_requested = true;
+                }
+                let change_def = delta.change_def.clone();
+                let callback_change_def_reinsert = delta.change_def_reinsert;
+                let host_container_change = delta.host_container_change;
+                let callback_action_library = if let Some(new_def) = change_def.as_deref() {
+                    let definition = self
+                        .definitions
+                        .get(new_def)
+                        .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
+                    let owner_color = self
+                        .players
+                        .get(&object.state.owner)
+                        .and_then(Player::color)
+                        .map(|color| {
+                            u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+                        });
+                    Self::apply_change_object_def_to_object(
+                        &mut object,
+                        new_def,
+                        definition,
+                        self.materials.len(),
+                        owner_color,
+                    );
+                    definition.action_library().clone()
+                } else {
+                    self.definitions
+                        .get(&object.definition_id)
+                        .map(|definition| definition.action_library().clone())
+                        .unwrap_or_else(|| action_library.clone())
+                };
+                if change_def.is_some() {
+                    change_def_reinsert = callback_change_def_reinsert;
+                }
+                let callbacks_dispatched = delta
+                    .action
+                    .as_ref()
+                    .is_some_and(|action| action.callbacks_dispatched);
+                creation_action_callbacks_dispatched |= callbacks_dispatched;
+                let outcome = object.apply_delta(&delta, &callback_action_library);
+                if change_def.is_some() {
+                    if let Some(current_definition) = self.definitions.get(&object.definition_id) {
+                        object.state.ocf = current_definition.compute_ocf(&object.state);
+                    }
+                }
+                if let Some(ocf) = initialize_host_ocf_override {
+                    object.state.ocf = ocf;
+                }
+                initialize_ocf_override = Some(object.state.ocf);
+                // See the Construction fold above: callback-world SetAction has
+                // already completed its synchronous Start/Abort sequence.
+                if let Some(change) = outcome.action_change {
+                    if !callbacks_dispatched {
+                        object.record_action_event(
+                            change.previous,
+                            ActionTransitionKind::Forced,
+                            &callback_action_library,
+                        );
+                    }
+                }
+                if let Some(change) = outcome.container_change {
+                    container_changes.push((change.0, change.1, host_container_change));
+                }
+                let mut applied = object.apply_effect_commands(&effects);
+                effect_events.append(&mut applied);
+                self.apply_particle_commands(particles);
+                // The object joins self.objects only after the callbacks, but
+                // C++ adds it to Game.Objects BEFORE Construction/Initialize
+                // fire (C4Game.cpp:1115-1131) — its own SetTransferZone must
+                // land, so the commands defer to right after the push.
+                deferred_transfer_zones.extend(transfer_zones);
+                if !global_effects.is_empty() {
+                    self.apply_global_effect_commands(&global_effects);
+                }
+                object.clamp_velocity(&self.physics);
+                if !command_ops.is_empty() {
+                    object.apply_command_operations(command_ops);
+                }
+                if !commands.is_empty() {
+                    object.enqueue_commands(commands);
+                }
+                // C4Game::NewObject returns only after every phase's nested
+                // CreateObject has completed (C4Game.cpp:1100-1142), so an
+                // Initialize creation joins Construction's rather than
+                // replacing it — Basement72's Construction builds the
+                // basement that its structure's Initialize must not drop.
+                additional_spawns.extend(spawns);
+                if initialize_object_lists.is_some() {
+                    pending_effect_object_lists = initialize_object_lists;
+                }
+                pending_nested_outcomes
+                    .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
+                if !audio.is_empty() {
+                    self.emit_audio_commands(audio);
+                }
+                if !messages.is_empty() {
+                    for command in messages {
+                        self.messages.apply_command(command);
+                    }
+                }
+                object_removed_during_switch |= self.flush_pending_spawn_callbacks(
+                    &mut object,
+                    initial_exec_position,
+                    &mut additional_spawns,
+                    &mut pending_nested_outcomes,
+                    &mut pending_effect_object_lists,
+                )?;
+                let Some((cells, _, _, request, boundary)) = initialize_boundary.take() else {
+                    break;
+                };
+                // C4Game::NewObject links the object before Initialize enters the
+                // VM. Materialize a pending creation before committing a
+                // synchronous section switch so teardown and retention see the
+                // same authoritative object ID and status as native code.
+                let should_link_pending =
+                    !object_removed_during_switch && pending_instance_token.is_none();
+                let operation_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let linked_token = should_link_pending
+                            .then(|| {
+                                self.link_pending_spawn_object(&mut object, initial_exec_position)
+                            })
+                            .flatten();
+                        self.load_scenario_section(
+                            &request.name,
+                            request.flags,
+                            request.preserve_ids,
+                        )
+                        .map(|switched| (switched, linked_token))
+                    }));
+                let suspension = match boundary.finish() {
+                    Ok(suspension) => suspension,
+                    Err(error) => match operation_result {
+                        Ok(Err(previous)) => return Err(previous),
+                        Err(payload) => std::panic::resume_unwind(payload),
+                        Ok(Ok(_)) => return Err(error),
+                    },
+                };
+                let (switched, linked_token) = match operation_result {
+                    Ok(result) => result?,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                };
+                if should_link_pending {
+                    if let Some(token) = linked_token {
+                        pending_instance_token = Some(token);
+                    } else {
+                        object_removed_during_switch = true;
+                    }
+                }
+                let mut continuation = DefinitionScriptResume {
+                    suspension,
+                    cells,
+                    value: Value::Nil,
+                    receiver_available: false,
+                };
+                continuation.value = Value::Int(i32::from(switched));
+                let receiver_available = pending_instance_token
+                    .is_some_and(|token| self.object_instance_token(id) == Some(token));
+                if !receiver_available {
+                    // The destination may contain a replacement with `id`.
+                    // Keep the old pending object detached so its resumed
+                    // delta cannot overwrite that replacement.
+                    object_removed_during_switch = true;
+                }
+                continuation.receiver_available = receiver_available;
+                if receiver_available {
+                    if let Some(index) = self.find_object_index(id) {
+                        object = self.objects[index].clone();
+                    }
+                }
+                initialize_resume = Some(continuation);
+            }
+        }
+
+        if !destroy_requested && !effect_events.is_empty() {
+            // C4Game::NewObject links the object before every effect callback,
+            // including a callback reached after Initialize. Materialize the
+            // pending carrier before dispatch so a complete callback can load
+            // a section and a suspended callback can be resumed against the
+            // same allocation without retaining an Engine alias.
+            let effect_index = if let Some(index) = self.find_object_index(id) {
+                self.objects[index] = object.clone();
+                self.note_objects_changed();
+                index
+            } else {
+                self.objects.push(object.clone());
+                self.note_objects_changed();
+                self.insert_exec_link(
+                    initial_exec_position.min(self.execution.exec_list.len()),
+                    id,
+                );
+                self.objects.len() - 1
+            };
+            object.instance_token = self.objects[effect_index].instance_token;
+            let effect_instance_token = self
+                .object_instance_token(id)
+                .ok_or(EngineError::UnknownObject(id))?;
+            let effect_definition_id = object.definition_id.clone();
+            let mut effect_resume: Option<EffectEventContinuation> = None;
+            let mut pending_effect_nested_outcomes = None;
+            loop {
                 let mut world =
                     self.host_world_context_for_pending_object(&object, initial_exec_position);
                 for command in &deferred_transfer_zones {
@@ -1038,299 +1669,278 @@ impl Engine {
                     &creation_spawn_previews,
                     pending_effect_object_lists.as_ref(),
                 );
-                let published = world.clone();
-                let definition = self
-                    .definitions
-                    .get(&initialize_definition_id)
-                    .expect("definition must exist");
-                let outcome = definition.call_initialize(
-                    &object.state,
-                    id,
-                    random,
-                    rng_state,
-                    &self.global_effects,
-                    self.physics,
-                    self.environment,
-                    self.frame,
-                    world,
-                    self.game_over_triggered,
-                    self.audio_registry.clone(),
-                )?;
-                creation_spawn_previews.extend(published.take_effect_spawn_previews());
-                outcome
-            };
-            let initialize_host_ocf_override = delta.ocf_override();
-            self.stage_host_solid_mask_operations(
-                initialize_solid_mask_operations,
-                initialize_host_raster_preview,
-            );
-            // Fail-safe game call: a script error logs and the object
-            // spawns WITH the callback's pre-error effects — C4AulExec
-            // aborts the call but rolls nothing back
-            // (C4AulExec.cpp:1318-1342), so pre-error creations persist
-            // and their burned enumeration numbers stay consumed
-            // (C4Game.cpp:1119).
-            if let Some(error) = initialize_error {
-                tolerate_script_error::<()>(Err(error))?;
-            }
-            self.rng = new_rng;
-            self.sync_next_object_id(next_object_id);
-            self.audio_registry = audio_state;
-            if let Some(go) = script_go {
-                self.scenario_script_go = go;
-            }
-            if let Some(counter) = script_counter {
-                self.scenario_script_counter = counter;
-            }
-            if trigger_game_over {
-                self.request_game_over()?;
-            }
-            if let Some(update) = environment {
-                self.apply_environment_delta(&update);
-            }
-            if let Some(delta) = physics {
-                self.apply_physics_delta(delta);
-            }
-            if !landscape_ops.is_empty() {
-                self.apply_landscape_operations(landscape_ops);
-            }
-            if !player_commands.is_empty() {
-                self.apply_player_commands(player_commands)?;
-            }
-            self.execution
-                .pending_object_order_commands
-                .extend(object_order_commands);
-            self.apply_next_mission_commands(next_mission_commands);
-            if destroy {
-                destroy_requested = true;
-            }
-            let change_def = delta.change_def.clone();
-            let callback_change_def_reinsert = delta.change_def_reinsert;
-            let host_container_change = delta.host_container_change;
-            let callback_action_library = if let Some(new_def) = change_def.as_deref() {
-                let definition = self
-                    .definitions
-                    .get(new_def)
-                    .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
-                let owner_color = self
-                    .players
-                    .get(&object.state.owner)
-                    .and_then(Player::color)
-                    .map(|color| {
-                        u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
-                    });
-                Self::apply_change_object_def_to_object(
-                    &mut object,
-                    new_def,
-                    definition,
-                    self.materials.len(),
-                    owner_color,
-                );
-                definition.action_library().clone()
-            } else {
-                self.definitions
-                    .get(&object.definition_id)
-                    .map(|definition| definition.action_library().clone())
-                    .unwrap_or_else(|| action_library.clone())
-            };
-            if change_def.is_some() {
-                change_def_reinsert = callback_change_def_reinsert;
-            }
-            let callbacks_dispatched = delta
-                .action
-                .as_ref()
-                .is_some_and(|action| action.callbacks_dispatched);
-            creation_action_callbacks_dispatched |= callbacks_dispatched;
-            let outcome = object.apply_delta(&delta, &callback_action_library);
-            if change_def.is_some() {
-                if let Some(current_definition) = self.definitions.get(&object.definition_id) {
-                    object.state.ocf = current_definition.compute_ocf(&object.state);
-                }
-            }
-            if let Some(ocf) = initialize_host_ocf_override {
-                object.state.ocf = ocf;
-            }
-            initialize_ocf_override = Some(object.state.ocf);
-            // See the Construction fold above: callback-world SetAction has
-            // already completed its synchronous Start/Abort sequence.
-            if let Some(change) = outcome.action_change {
-                if !callbacks_dispatched {
-                    object.record_action_event(
-                        change.previous,
-                        ActionTransitionKind::Forced,
-                        &callback_action_library,
-                    );
-                }
-            }
-            if let Some(change) = outcome.container_change {
-                container_changes.push((change.0, change.1, host_container_change));
-            }
-            let mut applied = object.apply_effect_commands(&effects);
-            effect_events.append(&mut applied);
-            self.apply_particle_commands(particles);
-            // The object joins self.objects only after the callbacks, but
-            // C++ adds it to Game.Objects BEFORE Construction/Initialize
-            // fire (C4Game.cpp:1115-1131) — its own SetTransferZone must
-            // land, so the commands defer to right after the push.
-            deferred_transfer_zones.extend(transfer_zones);
-            if !global_effects.is_empty() {
-                self.apply_global_effect_commands(&global_effects);
-            }
-            object.clamp_velocity(&self.physics);
-            if !command_ops.is_empty() {
-                object.apply_command_operations(command_ops);
-            }
-            if !commands.is_empty() {
-                object.enqueue_commands(commands);
-            }
-            // C4Game::NewObject returns only after every phase's nested
-            // CreateObject has completed (C4Game.cpp:1100-1142), so an
-            // Initialize creation joins Construction's rather than
-            // replacing it — Basement72's Construction builds the
-            // basement that its structure's Initialize must not drop.
-            additional_spawns.extend(spawns);
-            if initialize_object_lists.is_some() {
-                pending_effect_object_lists = initialize_object_lists;
-            }
-            pending_nested_outcomes
-                .extend(self.apply_nested_object_outcomes_retaining_missing(other_objects)?);
-            if !audio.is_empty() {
-                self.emit_audio_commands(audio);
-            }
-            if !messages.is_empty() {
-                for command in messages {
-                    self.messages.apply_command(command);
-                }
-            }
-        }
-
-        if !destroy_requested && !effect_events.is_empty() {
-            let mut world =
-                self.host_world_context_for_pending_object(&object, initial_exec_position);
-            for command in &deferred_transfer_zones {
-                world.preview_transfer_zone_command(command);
-            }
-            Self::seed_creation_phase_projections(
-                &mut world,
-                &creation_spawn_previews,
-                pending_effect_object_lists.as_ref(),
-            );
-            let effect_definition_id = object.definition_id.clone();
-            let definition = self
-                .definitions
-                .get(&effect_definition_id)
-                .expect("definition must exist");
-            let definitions_ref = &self.definitions;
-            let global_view = self.global_effects.clone();
-            let previous_container = object.state.container;
-            let rng_state = self.rng.clone();
-            let (
-                global_cmds,
-                emitted_particles,
-                physics_delta,
-                audio_events,
-                event_messages,
-                player_commands,
-                object_order_commands,
-                next_mission_commands,
-                landscape_ops,
-                effect_transfer_zones,
-                effect_spawns,
-                effect_other_objects,
-                effect_object_lists,
-                effect_solid_mask_operations,
-                effect_host_raster_preview,
-                _effect_solid_mask_changed,
-                effect_action_callbacks_dispatched,
-                effect_change_def_reinsert,
-                effect_host_container_change,
-                effect_next_object_id,
-                triggered_game_over,
-                effect_script_go,
-                effect_script_counter,
-                audio_state,
-                new_rng,
-            ) = Self::run_effect_events_for_object(
-                definition,
-                definitions_ref,
-                self.game_over_triggered,
-                rng_state,
-                id,
-                &mut object,
-                effect_events,
-                global_view,
-                &mut self.environment,
-                self.physics,
-                self.frame,
-                world,
-                self.audio_registry.clone(),
-            )?;
-            self.stage_host_solid_mask_operations(
-                effect_solid_mask_operations,
-                effect_host_raster_preview,
-            );
-            self.rng = new_rng;
-            self.audio_registry = audio_state;
-            creation_action_callbacks_dispatched |= effect_action_callbacks_dispatched;
-            if let Some(marker) = effect_change_def_reinsert {
-                change_def_reinsert = marker;
-            }
-            self.sync_next_object_id(effect_next_object_id);
-            // Creation callbacks run with the new object already linked in
-            // C++, but Rust inserts it after this local effect batch. Keep
-            // all effect-produced zone commands ordered with the other
-            // creation commands and fold them immediately after insertion.
-            deferred_transfer_zones.extend(effect_transfer_zones);
-            additional_spawns.extend(effect_spawns);
-            pending_nested_outcomes
-                .extend(self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?);
-            if effect_object_lists.is_some() {
-                pending_effect_object_lists = effect_object_lists;
-            }
-            if !player_commands.is_empty() {
-                self.apply_player_commands(player_commands)?;
-            }
-            self.execution
-                .pending_object_order_commands
-                .extend(object_order_commands);
-            self.apply_next_mission_commands(next_mission_commands);
-            if !landscape_ops.is_empty() {
-                self.apply_landscape_operations(landscape_ops);
-            }
-            if !audio_events.is_empty() {
-                self.emit_audio_commands(audio_events);
-            }
-            if !event_messages.is_empty() {
-                for command in event_messages {
-                    self.messages.apply_command(command);
-                }
-            }
-            if let Some(go) = effect_script_go {
-                self.scenario_script_go = go;
-            }
-            if let Some(counter) = effect_script_counter {
-                self.scenario_script_counter = counter;
-            }
-            if triggered_game_over {
-                self.request_game_over()?;
-            }
-            if !physics_delta.is_empty() {
-                self.apply_physics_delta(physics_delta);
-            }
-            if !global_cmds.is_empty() {
-                self.apply_global_effect_commands(&global_cmds);
-            }
-            self.apply_particle_commands(emitted_particles);
-            if previous_container != object.state.container {
-                container_changes.push((
-                    previous_container,
-                    object.state.container,
+                let rng_state = self.rng.clone();
+                let continuation = effect_resume.take();
+                let result = {
+                    let definition =
+                        self.definitions.get(&effect_definition_id).ok_or_else(|| {
+                            EngineError::UnknownDefinition(effect_definition_id.clone())
+                        })?;
+                    Self::run_effect_events_for_object_with_continuation(
+                        definition,
+                        &self.definitions,
+                        self.game_over_triggered,
+                        rng_state,
+                        id,
+                        &mut object,
+                        std::mem::take(&mut effect_events),
+                        self.global_effects.clone(),
+                        &mut self.environment,
+                        self.physics,
+                        self.frame,
+                        world,
+                        self.audio_registry.clone(),
+                        continuation,
+                    )?
+                };
+                let (output, mut resume_request) = match result {
+                    EffectEventRunResult::Complete(output) => (output, None),
+                    EffectEventRunResult::Suspended {
+                        output,
+                        continuation,
+                    } => {
+                        let request = continuation
+                            .resume
+                            .suspension
+                            .request::<compat::ScenarioSectionSwitchRequest>()
+                            .cloned()
+                            .ok_or_else(|| {
+                                EngineError::invalid_script_output(
+                                    effect_definition_id.clone(),
+                                    "EffectCallback",
+                                    "script yielded an unsupported host continuation".to_owned(),
+                                )
+                            })?;
+                        (output, Some((continuation, request)))
+                    }
+                };
+                let (
+                    global_cmds,
+                    emitted_particles,
+                    physics_delta,
+                    audio_events,
+                    event_messages,
+                    mut player_commands,
+                    object_order_commands,
+                    next_mission_commands,
+                    landscape_ops,
+                    effect_transfer_zones,
+                    effect_spawns,
+                    effect_other_objects,
+                    effect_object_lists,
+                    effect_solid_mask_operations,
+                    effect_host_raster_preview,
+                    effect_solid_mask_changed,
+                    effect_action_callbacks_dispatched,
+                    effect_change_def_reinsert,
                     effect_host_container_change,
-                ));
+                    effect_next_object_id,
+                    triggered_game_over,
+                    effect_script_go,
+                    effect_script_counter,
+                    audio_state,
+                    new_rng,
+                ) = output;
+                if let Some((_, request)) = resume_request.as_ref() {
+                    consume_section_switch_command(&mut player_commands, request);
+                }
+                if self.object_instance_token(id) == Some(effect_instance_token) {
+                    if let Some(index) = self.find_object_index(id) {
+                        self.objects[index] = object.clone();
+                    }
+                }
+                let previous_container = object.state.container;
+                let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
+                let outermost = self.stage_host_solid_mask_operations(
+                    effect_solid_mask_operations,
+                    effect_host_raster_preview,
+                );
+                let fold_result = (|| -> Result<(), EngineError> {
+                    self.rng = new_rng;
+                    self.audio_registry = audio_state;
+                    creation_action_callbacks_dispatched |= effect_action_callbacks_dispatched;
+                    if let Some(marker) = effect_change_def_reinsert {
+                        change_def_reinsert = marker;
+                    }
+                    self.sync_next_object_id(effect_next_object_id);
+                    // NewObject is synchronous in the native engine. The
+                    // outer spawn queue still owns these requests so the
+                    // pending carrier's materialization order remains stable.
+                    deferred_transfer_zones.extend(effect_transfer_zones);
+                    additional_spawns.extend(effect_spawns);
+                    if resume_request.is_some() {
+                        pending_effect_nested_outcomes = Some(effect_other_objects);
+                    } else {
+                        pending_nested_outcomes.extend(
+                            self.apply_nested_object_outcomes_retaining_missing(
+                                effect_other_objects,
+                            )?,
+                        );
+                    }
+                    if effect_object_lists.is_some() {
+                        pending_effect_object_lists = effect_object_lists;
+                    }
+                    if resume_request.is_none() {
+                        object_removed_during_switch |= self.flush_pending_spawn_callbacks(
+                            &mut object,
+                            initial_exec_position,
+                            &mut additional_spawns,
+                            &mut pending_nested_outcomes,
+                            &mut pending_effect_object_lists,
+                        )?;
+                    }
+                    if !player_commands.is_empty() {
+                        self.apply_player_commands(player_commands)?;
+                    }
+                    self.execution
+                        .pending_object_order_commands
+                        .extend(object_order_commands);
+                    self.apply_next_mission_commands(next_mission_commands);
+                    if !landscape_ops.is_empty() {
+                        self.apply_landscape_operations(landscape_ops);
+                    }
+                    if !audio_events.is_empty() {
+                        self.emit_audio_commands(audio_events);
+                    }
+                    if !event_messages.is_empty() {
+                        for command in event_messages {
+                            self.messages.apply_command(command);
+                        }
+                    }
+                    if let Some(go) = effect_script_go {
+                        self.scenario_script_go = go;
+                    }
+                    if let Some(counter) = effect_script_counter {
+                        self.scenario_script_counter = counter;
+                    }
+                    if triggered_game_over {
+                        self.request_game_over()?;
+                    }
+                    if !physics_delta.is_empty() {
+                        self.apply_physics_delta(physics_delta);
+                    }
+                    if !global_cmds.is_empty() {
+                        self.apply_global_effect_commands(&global_cmds);
+                    }
+                    self.apply_particle_commands(emitted_particles);
+                    if effect_solid_mask_changed {
+                        if let Some(index) = self.find_object_index(id).filter(|_| {
+                            self.object_instance_token(id) == Some(effect_instance_token)
+                        }) {
+                            self.update_solid_mask(index);
+                        }
+                    }
+                    if let Some(index) = self
+                        .find_object_index(id)
+                        .filter(|_| self.object_instance_token(id) == Some(effect_instance_token))
+                    {
+                        let new_container = self.objects[index].state.container;
+                        if previous_container != new_container {
+                            container_changes.push((
+                                previous_container,
+                                new_container,
+                                effect_host_container_change,
+                            ));
+                        }
+                    }
+                    Ok(())
+                })();
+                self.finish_host_solid_mask_operations(
+                    outermost
+                        || (!was_deferred && self.solid_mask_staging.defer_solid_mask_updates),
+                    fold_result,
+                )?;
+                if self.object_instance_token(id) == Some(effect_instance_token) {
+                    if let Some(index) = self.find_object_index(id) {
+                        object = self.objects[index].clone();
+                    }
+                } else {
+                    // A complete callback may have issued a synchronous
+                    // section load (or removed the carrier directly). Its
+                    // local continuation must never be inserted over a
+                    // destination object that reused the same number.
+                    object_removed_during_switch = true;
+                }
+                let Some((mut continuation, request)) = resume_request.take() else {
+                    break;
+                };
+                // The carrier must be linked before the native section load;
+                // this is the pending-object materialization boundary that
+                // lets ClearPointers see its locals, stack and aliases.
+                self.capture_effect_script_context_identity(&mut continuation.resume);
+                let should_link_pending = !object_removed_during_switch;
+                let (suspension, (switched, linked_token)) = self.with_suspended_script_boundary(
+                    continuation.resume.suspension,
+                    Some(continuation.resume.cells.clone()),
+                    |engine| {
+                        let linked_token = should_link_pending
+                            .then(|| {
+                                engine.link_pending_spawn_object(&mut object, initial_exec_position)
+                            })
+                            .flatten();
+                        if let Some(other_objects) = pending_effect_nested_outcomes.take() {
+                            pending_nested_outcomes.extend(
+                                engine.apply_nested_object_outcomes_retaining_missing(
+                                    other_objects,
+                                )?,
+                            );
+                        }
+                        object_removed_during_switch |= engine.flush_pending_spawn_callbacks(
+                            &mut object,
+                            initial_exec_position,
+                            &mut additional_spawns,
+                            &mut pending_nested_outcomes,
+                            &mut pending_effect_object_lists,
+                        )?;
+                        engine
+                            .load_scenario_section(
+                                &request.name,
+                                request.flags,
+                                request.preserve_ids,
+                            )
+                            .map(|switched| (switched, linked_token))
+                    },
+                )?;
+                continuation.resume.suspension = suspension;
+                if should_link_pending && linked_token.is_none() {
+                    object_removed_during_switch = true;
+                }
+                continuation.resume.value = Value::Int(i32::from(switched));
+                if self.object_instance_token(id) != Some(effect_instance_token) {
+                    object_removed_during_switch = true;
+                }
+                continuation.resume.receiver_available =
+                    self.object_instance_token(id) == Some(effect_instance_token);
+                if continuation.resume.receiver_available {
+                    if let Some(index) = self.find_object_index(id) {
+                        object = self.objects[index].clone();
+                    }
+                }
+                self.refresh_effect_script_context_identity(&mut continuation.resume);
+                effect_resume = Some(continuation);
+            }
+            if self.object_instance_token(id) == Some(effect_instance_token) {
+                if let Some(index) = self.find_object_index(id) {
+                    object = self.objects[index].clone();
+                }
             }
             if initialize_ocf_override.is_some() {
                 initialize_ocf_override = Some(object.state.ocf);
             }
+        }
+
+        // A synchronous section switch can remove the object whose
+        // Construction/Initialize frame is still running. The frame's
+        // already-produced global, nested and effect side effects remain
+        // ordered above, but its local Object must never be inserted after
+        // teardown or replace a destination object that reused the same ID.
+        if object_removed_during_switch {
+            return Ok((
+                id,
+                additional_spawns,
+                pending_nested_outcomes,
+                pending_effect_object_lists,
+            ));
         }
 
         // No spawn-time landscape resolution AT ALL: C4Game::NewObject
@@ -1341,12 +1951,22 @@ impl Engine {
         // above the road) FLOATS at first; snapping it to the surface
         // displaced it and its 30+ contents (the (0,-20) live class).
         let new_id = object.id;
-        self.objects.push(object);
-        self.note_objects_changed();
-        self.insert_exec_link(
-            initial_exec_position.min(self.execution.exec_list.len()),
-            new_id,
-        );
+        let index = if let Some(index) = self.find_object_index(new_id) {
+            // A pending Initialize that crossed a section switch was
+            // materialized before the switch. Replace that same slot with
+            // the resumed creation state instead of minting a duplicate ID.
+            self.objects[index] = object;
+            self.note_objects_changed();
+            index
+        } else {
+            self.objects.push(object);
+            self.note_objects_changed();
+            self.insert_exec_link(
+                initial_exec_position.min(self.execution.exec_list.len()),
+                new_id,
+            );
+            self.objects.len() - 1
+        };
         if self
             .find_object_index(new_id)
             .is_some_and(|index| self.objects[index].state.status == ObjectStatus::Inactive)
@@ -1381,7 +2001,6 @@ impl Engine {
         if !deferred_transfer_zones.is_empty() {
             self.apply_transfer_zone_commands(deferred_transfer_zones)?;
         }
-        let index = self.objects.len() - 1;
         self.update_sector_for_index(index);
         // C4GameObjects::Load moves Status=Inactive rows out of the main
         // object list before its UpdateFaces pass, so those loaded objects

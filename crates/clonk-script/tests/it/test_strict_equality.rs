@@ -10,7 +10,10 @@
 // by content at STRICT2, and with matching outer types at STRICT3.
 
 use crate::support::eval;
-use clonk_script::{C4VType, Engine, Value, ValueMap};
+use clonk_script::{C4VType, Engine, RuntimeError, ScriptCallOutcome, Value, ValueMap};
+
+#[derive(Debug)]
+struct PauseRequest;
 
 fn eval_with_format(source: &str) -> Value {
     let mut engine = Engine::new();
@@ -526,6 +529,43 @@ fn strict_three_zero_c4id_remains_typed_for_equality() {
             .expect("external C4AulParSet copy precedes conversion"),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn yielded_global_reference_result_is_materialized_once_before_map_keying() {
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("Pause", 0, |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    engine.register_host_function_with_arity("ToId", 1, |args| Ok(args[0].clone()));
+    assert!(engine.set_host_function_parameter_types("ToId", [C4VType::C4Id]));
+    engine
+        .load_script(
+            r#"#strict 3
+               global func &GlobalZero() { return ToId(0); }
+               global func &GlobalZeroYield() { Pause(); return ToId(0); }
+               func SyncMap() { return { [global->GlobalZero()] = 1 }; }
+               func YieldMap() { return { [global->GlobalZeroYield()] = 1 }; }
+               "#,
+        )
+        .expect("yielding global result script loads");
+
+    let expected = engine.call("SyncMap", &[]).expect("synchronous map builds");
+    let suspension = match engine
+        .call_with_continuation("YieldMap", &[])
+        .expect("global callee yields")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("yielding global callee completed early"),
+    };
+    let yielded = match engine
+        .resume_script_continuation(suspension)
+        .expect("global callee resumes")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("global callee yielded twice"),
+    };
+    assert_eq!(yielded, expected);
 }
 
 eval_test! { same_type_equality_holds_at_all_levels {

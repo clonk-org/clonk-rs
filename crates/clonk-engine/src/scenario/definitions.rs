@@ -147,6 +147,46 @@ where
     })
 }
 
+// Scenario definition loading returns `ScenarioError`, whose `EngineError`
+// variant can carry a live script continuation. That error is intentionally
+// not `Send`: moving a suspended VM frame to a worker would make its ownership
+// boundary implicit. Preserve the typed error and native child order by using
+// this serial fold for the recursive loader; the generic parallel helper
+// remains available for payloads that are safe to move between workers.
+fn ordered_map_until<T, R, F, S, C>(
+    items: &[T],
+    map: F,
+    is_terminal: S,
+    mut on_ordered: C,
+) -> Vec<OrderedParallelOutcome<R>>
+where
+    T: Sync,
+    F: Fn(&T) -> R,
+    S: Fn(&R) -> bool,
+    C: FnMut(usize, &mut R),
+{
+    let mut terminal = false;
+    items
+        .iter()
+        .enumerate()
+        .map_while(|(index, item)| {
+            if terminal {
+                return None;
+            }
+            let mut outcome =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| map(item))) {
+                    Ok(result) => OrderedParallelOutcome::Completed(result),
+                    Err(payload) => return Some(OrderedParallelOutcome::Panicked(payload)),
+                };
+            if let OrderedParallelOutcome::Completed(result) = &mut outcome {
+                terminal = is_terminal(result);
+                on_ordered(index, result);
+            }
+            Some(outcome)
+        })
+        .collect()
+}
+
 fn emit_definition_event(
     buffered: &mut Vec<DefinitionLoadEvent>,
     live: &mut Option<&mut dyn FnMut(DefinitionLoadEvent)>,
@@ -343,7 +383,7 @@ fn collect_definitions_from_group_inner<S: AsRef<str> + Sync>(
     completion_line: &'static str,
     buffered_events: &mut Vec<DefinitionLoadEvent>,
     live_events: &mut Option<&mut dyn FnMut(DefinitionLoadEvent)>,
-    parallel_children: bool,
+    _parallel_children: bool,
 ) -> Result<(), ScenarioError> {
     let indexed_group = group.is_directory().then(|| group.indexed()).transpose()?;
     let group = indexed_group.as_ref().unwrap_or(group);
@@ -475,21 +515,10 @@ fn collect_definitions_from_group_inner<S: AsRef<str> + Sync>(
         .into_iter()
         .filter(|entry| legacy_group_wildcard_match(b"*.c4d", &entry.name_bytes))
         .collect::<Vec<_>>();
-    let workers = if parallel_children {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            // Bound simultaneous group images, file descriptors and
-            // decoder scratch space independently of host CPU count.
-            .min(4)
-    } else {
-        1
-    };
     let mut event_failed = false;
     let mut successful_child_index = 0;
-    let child_results = ordered_parallel_map_until(
+    let child_results = ordered_map_until(
         &child_entries,
-        workers,
         |entry| {
             // Open inside the bounded worker set so all candidates are not
             // preopened serially. Loaded group images remain retained by the

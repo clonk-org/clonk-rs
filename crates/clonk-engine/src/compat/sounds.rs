@@ -224,32 +224,56 @@ pub(crate) fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
 
 pub(crate) fn enter_audio_context(audio: AudioRegistry) -> AudioContextGuard {
     AUDIO_CONTEXT.with(|cell| {
-        assert!(
-            cell.borrow().is_none(),
-            "nested audio contexts are not supported"
-        );
-        *cell.borrow_mut() = Some(audio);
-    });
-    AudioContextGuard { consumed: false }
+        let previous = cell.replace(Some(audio));
+        AudioContextGuard {
+            previous,
+            consumed: false,
+        }
+    })
 }
 
 pub(crate) struct AudioContextGuard {
+    previous: Option<AudioRegistry>,
     consumed: bool,
 }
 
 impl AudioContextGuard {
     pub fn finish(mut self) -> AudioRegistry {
         self.consumed = true;
-        AUDIO_CONTEXT
-            .with(|cell| cell.borrow_mut().take())
-            .unwrap_or_default()
+        AUDIO_CONTEXT.with(|cell| {
+            let current = cell.replace(self.previous.take()).unwrap_or_default();
+            let mut borrow = cell.borrow_mut();
+            let Some(previous) = borrow.as_mut() else {
+                return current;
+            };
+            let inherited_events = current.events.len() >= previous.events.len()
+                && current.events[..previous.events.len()] == previous.events[..];
+            if inherited_events {
+                previous.events = current.events;
+            } else {
+                previous.events.extend(current.events);
+            }
+            previous.attached_targets.extend(current.attached_targets);
+            previous.next_speech_fallback_id = previous
+                .next_speech_fallback_id
+                .max(current.next_speech_fallback_id);
+            previous.synchronous_host_configured = current.synchronous_host_configured;
+            previous.synchronous_host = current.synchronous_host;
+            previous.available_samples = current.available_samples;
+            previous.available_music = current.available_music;
+            previous.music_playlist = current.music_playlist;
+            previous.music_level = current.music_level;
+            previous.clone()
+        })
     }
 }
 
 impl Drop for AudioContextGuard {
     fn drop(&mut self) {
         if !self.consumed {
-            let _ = AUDIO_CONTEXT.with(|cell| cell.borrow_mut().take());
+            AUDIO_CONTEXT.with(|cell| {
+                cell.replace(self.previous.take());
+            });
         }
     }
 }

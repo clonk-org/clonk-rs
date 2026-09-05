@@ -328,41 +328,25 @@ impl Engine {
             .position(|object| object.id == crew_id)
             .ok_or(EngineError::UnknownObject(crew_id))?;
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = Rc::new(self.objects[index].script_state_snapshot());
+        let state = self.objects[index].state.clone();
         let definition = self
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let definitions_ref = &self.definitions;
-        let action_library = definition.action_library().clone();
-        let rng_state = self.rng.clone();
-        let global_view = self.global_effects.clone();
-        let world =
-            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
-        let (handled, outcome, audio_state, new_rng) = definition.call_menu_command(
-            state_snapshot.as_ref(),
-            crew_id,
-            kind,
-            &selection,
-            rng_state,
-            &global_view,
-            self.physics,
-            self.environment,
-            self.frame,
-            world,
-            self.game_over_triggered,
-            self.audio_registry.clone(),
-        )?;
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        self.apply_action_callback_outcome(
+        let args = vec![
+            build_state_value(&definition_id, crew_id, &state, definition.action_library()),
+            Value::String(kind.as_str().to_string().into()),
+            build_menu_selection_value(&selection),
+        ];
+        let value = self.call_object_callback_with_status_gate(
             index,
-            outcome,
-            &action_library,
-            crew_id,
-            &definition_id,
+            None,
+            &ScriptCallbackTarget::unlinked("MenuCommand"),
+            args,
+            true,
+            true,
         )?;
-        Ok(handled)
+        Ok(compat::value_raw_truthy(&value))
     }
 
     pub fn execute_context_menu(
@@ -398,35 +382,21 @@ impl Engine {
             )?;
             return Ok(compat::value_raw_truthy(&value));
         }
-        let definitions_ref = &self.definitions;
-        let action_library = definition.action_library().clone();
-        let rng_state = self.rng.clone();
-        let global_view = self.global_effects.clone();
-        let world =
-            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
-        let (handled, outcome, audio_state, new_rng) = definition.call_menu_callback(
-            state_snapshot.as_ref(),
-            object_id,
-            function,
-            rng_state,
-            &global_view,
-            self.physics,
-            self.environment,
-            self.frame,
-            world,
-            self.game_over_triggered,
-            self.audio_registry.clone(),
-        )?;
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        self.apply_action_callback_outcome(
-            index,
-            outcome,
-            &action_library,
-            object_id,
+        let args = vec![build_state_value(
             &definition_id,
+            object_id,
+            state_snapshot.as_ref(),
+            definition.action_library(),
+        )];
+        let value = self.call_object_callback_with_status_gate(
+            index,
+            None,
+            &ScriptCallbackTarget::unlinked(function),
+            args,
+            true,
+            true,
         )?;
-        Ok(handled)
+        Ok(compat::value_raw_truthy(&value))
     }
 
     #[doc(hidden)]
@@ -445,7 +415,7 @@ impl Engine {
         callback: &ScriptCallbackTarget,
         args: Vec<Value>,
     ) -> Result<Value, EngineError> {
-        self.call_object_callback_with_status_gate(index, None, callback, args, true)
+        self.call_object_callback_with_status_gate(index, None, callback, args, true, true)
     }
 
     /// Execute an already resolved definition script function with the raw
@@ -457,7 +427,7 @@ impl Engine {
         callback: &ScriptCallbackTarget,
         args: Vec<Value>,
     ) -> Result<Value, EngineError> {
-        self.call_object_callback_with_status_gate(index, None, callback, args, false)
+        self.call_object_callback_with_status_gate(index, None, callback, args, false, true)
     }
 
     /// Direct `C4AulFunc::Exec` with independently retained function owner
@@ -477,6 +447,7 @@ impl Engine {
             callback,
             args,
             false,
+            true,
         )
     }
 
@@ -537,6 +508,7 @@ impl Engine {
         callback: &ScriptCallbackTarget,
         args: Vec<Value>,
         require_nonzero_status: bool,
+        clamp_velocity: bool,
     ) -> Result<Value, EngineError> {
         let (object_id, definition_id) = {
             let object = self
@@ -554,16 +526,22 @@ impl Engine {
             }
             (object.id, object.definition_id.clone())
         };
+        let object_instance_token = self
+            .object_instance_token(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
         let object_definition = self
             .definitions
             .get(&definition_id)
+            .cloned()
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let callback_definition = match callback_definition_id {
-            Some(callback_definition_id) => self
-                .definitions
-                .get(callback_definition_id)
-                .ok_or_else(|| EngineError::UnknownDefinition(callback_definition_id.clone()))?,
-            None => object_definition,
+            Some(callback_definition_id) => {
+                self.definitions
+                    .get(callback_definition_id)
+                    .cloned()
+                    .ok_or_else(|| EngineError::UnknownDefinition(callback_definition_id.clone()))?
+            }
+            None => object_definition.clone(),
         };
         // `C4Object::Call` resolves the function before it does anything else
         // and returns C4VNull when the definition does not declare it
@@ -581,56 +559,197 @@ impl Engine {
         {
             return Ok(Value::Nil);
         }
-        let state_snapshot = Rc::new(
+        let initial_state_snapshot = Rc::new(
             self.objects
                 .get(index)
                 .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
                 .script_state_snapshot(),
         );
         let action_library = object_definition.action_library().clone();
-        let rng_state = self.rng.clone();
-        let global_view = self.global_effects.clone();
-        let world =
-            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
-        let call = callback_definition.call_object_callback(
-            object_definition,
-            state_snapshot.as_ref(),
-            object_id,
-            callback,
-            &args,
-            rng_state,
-            &global_view,
-            self.physics,
-            self.environment,
-            self.frame,
-            world,
-            self.game_over_triggered,
-            self.audio_registry.clone(),
-        );
-        let (value, outcome, audio_state, new_rng) = match call {
-            Ok(ok) => ok,
-            // Pre-error mutations persist (C++ mutated the live objects).
-            Err(error) => {
-                return Err(self.apply_script_error_recovery(
-                    error,
-                    index,
-                    &action_library,
-                    object_id,
-                    &definition_id,
-                    true,
-                ));
+        let mut resume: Option<DefinitionScriptResume> = None;
+        loop {
+            let receiver_available = resume
+                .as_ref()
+                .is_none_or(|resume| resume.receiver_available)
+                && self.object_instance_token(object_id) == Some(object_instance_token);
+            // Resolve the receiver again after every host commit. A section
+            // switch may remove or replace the original storage slot; using
+            // the old index would apply the resumed suffix to an unrelated
+            // object (or alias a moved `&mut Object`).
+            let live_index = self.find_object_index(object_id).unwrap_or(index);
+            let state_snapshot = if resume.is_none() {
+                Rc::clone(&initial_state_snapshot)
+            } else if receiver_available {
+                Rc::new(
+                    self.objects
+                        .get(live_index)
+                        .filter(|object| object.id == object_id)
+                        .map(Object::script_state_snapshot)
+                        .unwrap_or_else(|| initial_state_snapshot.as_ref().clone()),
+                )
+            } else {
+                Rc::clone(&initial_state_snapshot)
+            };
+            let live_definition_id = receiver_available
+                .then(|| {
+                    self.objects
+                        .get(live_index)
+                        .filter(|object| object.id == object_id)
+                        .map(|object| object.definition_id.clone())
+                })
+                .flatten()
+                .unwrap_or_else(|| definition_id.clone());
+            let live_object_definition = self
+                .definitions
+                .get(&live_definition_id)
+                .cloned()
+                .unwrap_or_else(|| object_definition.clone());
+            let live_callback_definition = callback_definition.clone();
+            let live_action_library = live_object_definition.action_library().clone();
+            let world = if receiver_available
+                && self
+                    .objects
+                    .get(live_index)
+                    .is_some_and(|object| object.id == object_id)
+            {
+                self.host_world_context_for_object_with_snapshot(
+                    live_index,
+                    Rc::clone(&state_snapshot),
+                )
+            } else {
+                self.host_world_context()
+            };
+            let call = live_callback_definition.call_object_callback_with_continuation(
+                &live_object_definition,
+                state_snapshot.as_ref(),
+                object_id,
+                callback,
+                &args,
+                self.rng.clone(),
+                &self.global_effects,
+                self.physics,
+                self.environment,
+                self.frame,
+                world,
+                self.game_over_triggered,
+                self.audio_registry.clone(),
+                resume.take(),
+            );
+            let call = match call {
+                Ok(call) => call,
+                // Pre-error mutations persist (C++ mutated the live objects).
+                Err(error) => {
+                    return if receiver_available {
+                        Err(self.apply_script_error_recovery(
+                            error,
+                            live_index,
+                            &live_action_library,
+                            object_id,
+                            &live_definition_id,
+                            clamp_velocity,
+                        ))
+                    } else {
+                        Err(error)
+                    };
+                }
+            };
+            match call {
+                DefinitionCallbackResult::Complete {
+                    value,
+                    outcome,
+                    audio,
+                    rng,
+                } => {
+                    self.rng = rng;
+                    self.audio_registry = audio;
+                    if receiver_available
+                        && self.object_instance_token(object_id) == Some(object_instance_token)
+                        && self
+                            .objects
+                            .get(live_index)
+                            .is_some_and(|object| object.id == object_id)
+                    {
+                        self.apply_callback_outcome(
+                            live_index,
+                            outcome,
+                            &live_action_library,
+                            object_id,
+                            &live_definition_id,
+                            clamp_velocity,
+                        )?;
+                    } else {
+                        self.apply_detached_callback_outcome(outcome)?;
+                    }
+                    return Ok(value);
+                }
+                DefinitionCallbackResult::Suspended {
+                    suspension,
+                    cells,
+                    mut outcome,
+                    audio,
+                    rng,
+                } => {
+                    let Some(request) = suspension
+                        .request::<compat::ScenarioSectionSwitchRequest>()
+                        .cloned()
+                    else {
+                        return Err(EngineError::invalid_script_output(
+                            live_definition_id,
+                            callback.function_name().to_owned(),
+                            "script yielded an unsupported host continuation".to_owned(),
+                        ));
+                    };
+                    let (suspended, switched) = self.with_suspended_script_boundary(
+                        suspension,
+                        Some(cells.clone()),
+                        |engine| {
+                            // The host records the request for compatibility,
+                            // while this boundary performs it exactly once.
+                            consume_section_switch_command(&mut outcome.player_commands, &request);
+                            engine.rng = rng;
+                            engine.audio_registry = audio;
+                            let receiver_is_live = receiver_available
+                                && engine.object_instance_token(object_id)
+                                    == Some(object_instance_token)
+                                && engine.find_object_index(object_id).is_some();
+                            if receiver_is_live {
+                                let live_index = engine
+                                    .find_object_index(object_id)
+                                    .ok_or(EngineError::UnknownObject(object_id))?;
+                                engine.apply_callback_outcome(
+                                    live_index,
+                                    outcome,
+                                    &live_action_library,
+                                    object_id,
+                                    &live_definition_id,
+                                    clamp_velocity,
+                                )?;
+                            } else {
+                                engine.apply_detached_callback_outcome(outcome)?;
+                            }
+                            engine.load_scenario_section(
+                                &request.name,
+                                request.flags,
+                                request.preserve_ids,
+                            )
+                        },
+                    )?;
+                    let receiver_still_live =
+                        self.object_instance_token(object_id) == Some(object_instance_token);
+                    resume = Some(DefinitionScriptResume {
+                        suspension: suspended,
+                        cells,
+                        value: Value::Int(i32::from(switched)),
+                        // A successful switch removes active objects, but a
+                        // caller that deactivated itself before the request
+                        // remains the same allocation in InactiveObjects.
+                        // Preserve `this` only for that token; a replacement
+                        // with the same numeric ID is a different receiver.
+                        receiver_available: receiver_available && receiver_still_live,
+                    });
+                }
             }
-        };
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        self.apply_action_callback_outcome(
-            index,
-            outcome,
-            &action_library,
-            object_id,
-            &definition_id,
-        )?;
-        Ok(value)
+        }
     }
 
     /// C4Object::MenuCommand (C4Object.cpp:3756-3760): DirectExec `source`
@@ -663,7 +782,7 @@ impl Engine {
         label: &str,
         strict_level: Option<Option<u8>>,
     ) -> Result<Value, EngineError> {
-        let (object_id, definition_id, state_snapshot) = {
+        let (object_id, definition_id, initial_state_snapshot) = {
             let object = self
                 .objects
                 .get(index)
@@ -674,70 +793,172 @@ impl Engine {
                 Rc::new(object.script_state_snapshot()),
             )
         };
-        let definition = self
+        let object_instance_token = self
+            .object_instance_token(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+        let action_library = self
             .definitions
             .get(&definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let action_library = definition.action_library().clone();
-        let rng_state = self.rng.clone();
-        let global_view = self.global_effects.clone();
-        let world =
-            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
-        let call = match strict_level {
-            Some(strict_level) => definition.direct_exec_object_expression_at_strict(
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
+            .action_library()
+            .clone();
+        let mut resume = None;
+        loop {
+            let receiver_available = resume
+                .as_ref()
+                .is_none_or(|resume: &DefinitionScriptResume| resume.receiver_available)
+                && self.object_instance_token(object_id) == Some(object_instance_token);
+            let live_index = self.find_object_index(object_id).unwrap_or(index);
+            let state_snapshot = if receiver_available {
+                Rc::new(
+                    self.objects
+                        .get(live_index)
+                        .filter(|object| object.id == object_id)
+                        .map(Object::script_state_snapshot)
+                        .unwrap_or_else(|| initial_state_snapshot.as_ref().clone()),
+                )
+            } else {
+                Rc::clone(&initial_state_snapshot)
+            };
+            let world = if receiver_available
+                && self
+                    .objects
+                    .get(live_index)
+                    .is_some_and(|object| object.id == object_id)
+            {
+                self.host_world_context_for_object_with_snapshot(
+                    live_index,
+                    Rc::clone(&state_snapshot),
+                )
+            } else {
+                self.host_world_context()
+            };
+            let definition = self
+                .definitions
+                .get(&definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            let call = definition.direct_exec_object_expression_with_continuation(
                 state_snapshot.as_ref(),
                 object_id,
                 source,
                 label,
                 strict_level,
-                rng_state,
-                &global_view,
+                self.rng.clone(),
+                &self.global_effects,
                 self.physics,
                 self.environment,
                 self.frame,
                 world,
                 self.game_over_triggered,
                 self.audio_registry.clone(),
-            ),
-            None => definition.direct_exec_object_expression(
-                state_snapshot.as_ref(),
-                object_id,
-                source,
-                label,
-                rng_state,
-                &global_view,
-                self.physics,
-                self.environment,
-                self.frame,
-                world,
-                self.game_over_triggered,
-                self.audio_registry.clone(),
-            ),
-        };
-        let (value, outcome, audio_state, new_rng) = match call {
-            Ok(ok) => ok,
-            // Pre-error mutations persist (C++ mutated the live objects).
-            Err(error) => {
-                return Err(self.apply_script_error_recovery(
-                    error,
-                    index,
-                    &action_library,
-                    object_id,
-                    &definition_id,
-                    true,
-                ));
+                resume.take(),
+            );
+            let call = match call {
+                Ok(call) => call,
+                // Pre-error mutations persist (C++ mutated the live objects).
+                Err(error) => {
+                    return if receiver_available {
+                        Err(self.apply_script_error_recovery(
+                            error,
+                            live_index,
+                            &action_library,
+                            object_id,
+                            &definition_id,
+                            true,
+                        ))
+                    } else {
+                        Err(error)
+                    };
+                }
+            };
+            match call {
+                DefinitionCallbackResult::Complete {
+                    value,
+                    outcome,
+                    audio,
+                    rng,
+                } => {
+                    self.rng = rng;
+                    self.audio_registry = audio;
+                    let receiver_is_live = receiver_available
+                        && self.object_instance_token(object_id) == Some(object_instance_token)
+                        && self
+                            .objects
+                            .get(live_index)
+                            .is_some_and(|object| object.id == object_id);
+                    if receiver_is_live {
+                        self.apply_action_callback_outcome(
+                            live_index,
+                            outcome,
+                            &action_library,
+                            object_id,
+                            &definition_id,
+                        )?;
+                    } else {
+                        self.apply_detached_callback_outcome(outcome)?;
+                    }
+                    return Ok(value);
+                }
+                DefinitionCallbackResult::Suspended {
+                    suspension,
+                    cells,
+                    mut outcome,
+                    audio,
+                    rng,
+                } => {
+                    let Some(request) = suspension
+                        .request::<compat::ScenarioSectionSwitchRequest>()
+                        .cloned()
+                    else {
+                        return Err(EngineError::invalid_script_output(
+                            definition_id.clone(),
+                            label.to_owned(),
+                            "script yielded an unsupported host continuation".to_owned(),
+                        ));
+                    };
+                    let (suspended, switched) = self.with_suspended_script_boundary(
+                        suspension,
+                        Some(cells.clone()),
+                        |engine| {
+                            consume_section_switch_command(&mut outcome.player_commands, &request);
+                            engine.rng = rng;
+                            engine.audio_registry = audio;
+                            let receiver_is_live = receiver_available
+                                && engine.object_instance_token(object_id)
+                                    == Some(object_instance_token)
+                                && engine.find_object_index(object_id).is_some();
+                            if receiver_is_live {
+                                let live_index = engine
+                                    .find_object_index(object_id)
+                                    .ok_or(EngineError::UnknownObject(object_id))?;
+                                engine.apply_action_callback_outcome(
+                                    live_index,
+                                    outcome,
+                                    &action_library,
+                                    object_id,
+                                    &definition_id,
+                                )?;
+                            } else {
+                                engine.apply_detached_callback_outcome(outcome)?;
+                            }
+                            engine.load_scenario_section(
+                                &request.name,
+                                request.flags,
+                                request.preserve_ids,
+                            )
+                        },
+                    )?;
+                    let receiver_still_live =
+                        self.object_instance_token(object_id) == Some(object_instance_token);
+                    resume = Some(DefinitionScriptResume {
+                        suspension: suspended,
+                        cells,
+                        value: Value::Int(i32::from(switched)),
+                        receiver_available: receiver_available && receiver_still_live,
+                    });
+                }
             }
-        };
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        self.apply_action_callback_outcome(
-            index,
-            outcome,
-            &action_library,
-            object_id,
-            &definition_id,
-        )?;
-        Ok(value)
+        }
     }
 
     /// The sim-observable core of a user Enter on the object's SCRIPT menu
@@ -855,64 +1076,22 @@ impl Engine {
         index: usize,
         function: &str,
         args: &[Value],
-        action_library: &ActionLibrary,
-        object_id: ObjectId,
-        definition_id: &str,
+        _action_library: &ActionLibrary,
+        _object_id: ObjectId,
+        _definition_id: &str,
     ) -> Result<Value, EngineError> {
-        let state_snapshot = Rc::new(
-            self.objects
-                .get(index)
-                .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
-                .script_state_snapshot(),
-        );
-        let definition = self
-            .definitions
-            .get(definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
-        let definitions_ref = &self.definitions;
-        let rng_state = self.rng.clone();
-        let global_view = self.global_effects.clone();
-        let world =
-            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
-        let call = definition.call_object_function(
-            state_snapshot.as_ref(),
-            object_id,
-            function,
-            args,
-            rng_state,
-            &global_view,
-            self.physics,
-            self.environment,
-            self.frame,
-            world,
-            self.game_over_triggered,
-            self.audio_registry.clone(),
-        );
-        let (value, outcome, audio_state, new_rng) = match call {
-            Ok(ok) => ok,
-            // Pre-error mutations persist (C++ mutated the live objects).
-            Err(error) => {
-                return Err(self.apply_script_error_recovery(
-                    error,
-                    index,
-                    action_library,
-                    object_id,
-                    definition_id,
-                    false,
-                ));
-            }
-        };
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        self.apply_callback_outcome(
+        // Movement callbacks use the same owned continuation driver as
+        // lifecycle/action callbacks. In particular, a section switch may
+        // remove this object while Hit/Hit2/Hit3 is suspended; resuming with
+        // the stale vector index would alias the replacement object.
+        self.call_object_callback_with_status_gate(
             index,
-            outcome,
-            action_library,
-            object_id,
-            definition_id,
+            None,
+            &ScriptCallbackTarget::unlinked(function),
+            args.to_vec(),
+            true,
             false,
-        )?;
-        Ok(value)
+        )
     }
 
     pub(crate) fn invoke_movement_hit_callbacks(
@@ -992,55 +1171,20 @@ impl Engine {
             }
         }
 
-        let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = Rc::new(self.objects[index].script_state_snapshot());
-        let definition = self
-            .definitions
-            .get(&definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let definitions_ref = &self.definitions;
-        let action_library = definition.action_library().clone();
-        let rng_state = self.rng.clone();
-        let global_view = self.global_effects.clone();
-        let world =
-            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
-        let call = definition.call_control(
-            state_snapshot.as_ref(),
-            cursor,
-            &function_name,
-            rng_state,
-            &global_view,
-            self.physics,
-            self.environment,
-            self.frame,
-            world,
-            self.game_over_triggered,
-            self.audio_registry.clone(),
-        );
-        let (handled, outcome, audio_state, new_rng) = match call {
-            Ok(ok) => ok,
-            // Pre-error mutations persist (C++ mutated the live objects).
-            Err(error) => {
-                return Err(self.apply_script_error_recovery(
-                    error,
-                    index,
-                    &action_library,
-                    cursor,
-                    &definition_id,
-                    true,
-                ));
-            }
-        };
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        self.apply_action_callback_outcome(
+        // Control callbacks are synchronous C4Object::CallControl entries,
+        // just like movement and lifecycle callbacks. Route them through the
+        // owned continuation driver so LoadScenarioSection can commit its
+        // prefix and resume with the actual bool result instead of leaving a
+        // delayed PlayerCommand behind (C4Object.cpp:3300-3304).
+        let value = self.call_object_callback_with_status_gate(
             index,
-            outcome,
-            &action_library,
-            cursor,
-            &definition_id,
+            None,
+            &ScriptCallbackTarget::unlinked(&function_name),
+            Vec::new(),
+            true,
+            true,
         )?;
-        Ok(handled)
+        Ok(compat::value_raw_truthy(&value))
     }
 
     /// C4Object::ContainedControl script dispatch (C4Object.cpp:3208-3306):

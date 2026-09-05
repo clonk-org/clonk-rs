@@ -6,6 +6,253 @@
 use super::*;
 
 impl Engine {
+    /// Fold the engine/global portions of a callback outcome when a section
+    /// switch removed the callback's receiver before its owned frame resumed.
+    /// Object-local writes have no live destination in that case, while C++
+    /// still commits global effects, spawns, player commands and other-object
+    /// mutations produced by the resumed suffix.
+    pub(crate) fn apply_detached_callback_outcome(
+        &mut self,
+        mut outcome: compat::EffectContextOutcome,
+    ) -> Result<(), EngineError> {
+        let solid_mask_operations = std::mem::take(&mut outcome.solid_mask_operations);
+        let host_raster_preview = outcome.host_raster_preview.take();
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
+        let mut outermost =
+            self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
+        let compat::EffectContextOutcome {
+            global: global_effects,
+            environment,
+            physics,
+            spawns,
+            landscape: landscape_ops,
+            particles,
+            transfer_zones,
+            messages,
+            player_commands,
+            object_order_commands,
+            next_mission_commands,
+            audio,
+            trigger_game_over,
+            script_go,
+            script_counter,
+            next_object_id,
+            other_objects,
+            command_events,
+            menu_requests,
+            ..
+        } = outcome;
+        let fold_result = (|| -> Result<(), EngineError> {
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
+            }
+            for event in command_events {
+                self.apply_command_event(event)?;
+            }
+            self.apply_player_commands(player_commands)?;
+            self.execution
+                .pending_object_order_commands
+                .extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
+            if let Some(environment) = environment {
+                self.apply_environment_delta(&environment);
+            }
+            if let Some(physics) = physics {
+                self.apply_physics_delta(physics);
+            }
+            self.sync_next_object_id(next_object_id);
+            if !spawns.is_empty() {
+                self.process_spawn_queue(spawns)?;
+            }
+            self.apply_particle_commands(particles);
+            if !transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(transfer_zones)?;
+            }
+
+            if !global_effects.is_empty() {
+                self.apply_global_effect_commands(&global_effects);
+            }
+            if !audio.events.is_empty() {
+                self.emit_audio_commands(audio.events);
+            }
+            for message in messages {
+                self.messages.apply_command(message);
+            }
+            if !other_objects.is_empty() {
+                self.apply_nested_object_outcomes(other_objects)?;
+            }
+            for request in menu_requests {
+                self.pending_menu_requests.push(request);
+            }
+            if let Some(go) = script_go {
+                self.scenario_script_go = go;
+            }
+            if let Some(counter) = script_counter {
+                self.scenario_script_counter = counter;
+            }
+            if trigger_game_over {
+                self.request_game_over()?;
+            }
+            Ok(())
+        })();
+        outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, fold_result)
+    }
+
+    /// Apply the engine/global portions of a synthetic Step batch after its
+    /// C4Object receiver was removed by a synchronous section switch. The VM
+    /// suffix still runs, so side effects after the load retain their native
+    /// order while the old object's delta has no live destination.
+    fn apply_detached_step_batch(
+        &mut self,
+        batch: CommandBatch,
+    ) -> Result<Vec<SpawnConfig>, EngineError> {
+        let CommandBatch {
+            delta: _,
+            spawns,
+            destroy: _,
+            commands: _,
+            command_ops: _,
+            effects: _,
+            other_objects,
+            global_effects,
+            environment,
+            physics,
+            landscape_ops,
+            solid_mask_operations,
+            host_raster_preview,
+            particles,
+            transfer_zones,
+            audio,
+            messages,
+            player_commands,
+            object_order_commands,
+            next_mission_commands,
+            object_lists: _,
+            trigger_game_over,
+            script_go,
+            script_counter,
+        } = batch;
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
+        let mut outermost =
+            self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
+        let result = (|| -> Result<(), EngineError> {
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
+            self.execution
+                .pending_object_order_commands
+                .extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
+            }
+            if let Some(environment) = environment {
+                self.apply_environment_delta(&environment);
+            }
+            if let Some(physics) = physics {
+                self.apply_physics_delta(physics);
+            }
+            if !transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(transfer_zones)?;
+            }
+            self.apply_particle_commands(particles);
+            self.apply_global_effect_commands(&global_effects);
+            self.emit_audio_commands(audio);
+            for message in messages {
+                self.messages.apply_command(message);
+            }
+            if !other_objects.is_empty() {
+                self.apply_nested_object_outcomes(other_objects)?;
+            }
+            if let Some(go) = script_go {
+                self.scenario_script_go = go;
+            }
+            if let Some(counter) = script_counter {
+                self.scenario_script_counter = counter;
+            }
+            if trigger_game_over {
+                self.request_game_over()?;
+            }
+            Ok(())
+        })();
+        outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, result)?;
+        Ok(spawns)
+    }
+
+    /// Run a scenario or Game.ScriptEngine DirectExec expression while
+    /// keeping `LoadScenarioSection` synchronous.  Each suspended slice
+    /// commits its prefix under the owned VM boundary, switches the section,
+    /// and resumes with the native boolean result.
+    pub(crate) fn run_direct_exec_script_control(
+        &mut self,
+        script_name: &str,
+        script: &ScriptEngine,
+        source: &str,
+        function_label: &str,
+        strict_level: Option<u8>,
+    ) -> Result<Value, EngineError> {
+        let mut resume = None;
+        loop {
+            let result = ScenarioScript::direct_exec_continuation_for_script(
+                script_name,
+                script,
+                source,
+                function_label,
+                strict_level,
+                self.host_world_context(),
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+                resume.take(),
+            )?;
+            let ScenarioDirectExecResult {
+                value,
+                mut batch,
+                audio,
+                rng,
+                script_error,
+                continuation,
+            } = result;
+            self.rng = rng;
+            self.audio_registry = audio;
+            if let Some(continuation) = continuation.as_ref() {
+                // The host records the request for compatibility, while this
+                // driver performs the switch before resuming the VM.
+                consume_section_switch_command(&mut batch.player_commands, &continuation.request);
+            }
+            let Some(continuation) = continuation else {
+                self.apply_scenario_batch(batch)?;
+                if let Some(error) = script_error {
+                    // Preserve the value-only host's fail-safe behavior:
+                    // ordinary script errors become nil after their staged
+                    // effects are committed, while fatal engine errors rise.
+                    if !matches!(error, EngineError::Script { .. }) {
+                        return Err(error);
+                    }
+                }
+                return Ok(value.unwrap_or(Value::Nil));
+            };
+
+            let request = continuation.request;
+            let cells = continuation.cells;
+            let (suspension, switched) = self.with_suspended_script_boundary(
+                continuation.suspension,
+                Some(cells.clone()),
+                |engine| {
+                    engine.apply_scenario_batch(batch)?;
+                    engine.load_scenario_section(&request.name, request.flags, request.preserve_ids)
+                },
+            )?;
+            resume = Some((suspension, cells, Value::Int(i32::from(switched))));
+        }
+    }
+
     pub(crate) fn advance_tick(&mut self) -> Result<(), EngineError> {
         // The previous frame's C4Landscape::Draw ran DoRelights before its
         // blit. Start the new simulation frame after that presentation
@@ -37,50 +284,81 @@ impl Engine {
             .map(|script| !script.c4_args)
             .unwrap_or(false);
         if fixture_scenario_step {
-            let snapshot = self.snapshot();
-            let world = self.host_world_context();
             let random = self.next_random_i32();
-            let rng_state = self.rng.clone();
-            let environment = self.environment;
-            let global_effects = self.global_effects.clone();
-            let particle_defs = self.particle_system.def_names();
-            let definition_metadata_table = self.definition_metadata_table();
-            let definition_order = Rc::clone(&self.definition_order.runtime_order);
-            let network_game = self.network_game;
-            let engine_next_object_id = self.next_object_id;
-            let scenario_script_counter = self.scenario_script_counter;
-            let scoreboard = Rc::clone(&self.scoreboard);
-            let materials = self.materials_shared();
-            let (batch, audio_state, new_rng) = {
-                let definition_scripts = self.definition_script_table();
-                let script = self
-                    .scenario_script
-                    .as_mut()
-                    .expect("scenario script must be present");
-                script.step(
-                    &snapshot,
-                    world,
-                    scoreboard,
-                    materials,
-                    rng_state,
-                    random,
-                    frame,
-                    &global_effects,
-                    self.physics,
-                    environment,
-                    self.audio_registry.clone(),
-                    particle_defs,
-                    definition_scripts,
-                    definition_metadata_table.clone(),
-                    definition_order,
-                    network_game,
-                    engine_next_object_id,
-                    scenario_script_counter,
-                )?
-            };
-            self.rng = new_rng;
-            self.audio_registry = audio_state;
-            self.apply_scenario_batch(batch)?;
+            let mut resume = None;
+            loop {
+                // A section switch replaces the world while the script frame
+                // is suspended.  Rebuild every callback projection from the
+                // switched engine before resuming so suffix host calls see
+                // the new section's objects and allocation cursor.
+                let snapshot = self.snapshot();
+                let world = self.host_world_context();
+                let environment = self.environment;
+                let global_effects = self.global_effects.clone();
+                let particle_defs = self.particle_system.def_names();
+                let definition_metadata_table = self.definition_metadata_table();
+                let definition_order = Rc::clone(&self.definition_order.runtime_order);
+                let network_game = self.network_game;
+                let scoreboard = Rc::clone(&self.scoreboard);
+                let materials = self.materials_shared();
+                let result = {
+                    let definition_scripts = self.definition_script_table();
+                    let script = self
+                        .scenario_script
+                        .as_mut()
+                        .expect("scenario script must be present");
+                    script.step(
+                        &snapshot,
+                        world.clone(),
+                        Rc::clone(&scoreboard),
+                        Rc::clone(&materials),
+                        self.rng.clone(),
+                        random,
+                        frame,
+                        &global_effects,
+                        self.physics,
+                        environment,
+                        self.audio_registry.clone(),
+                        particle_defs.clone(),
+                        definition_scripts,
+                        definition_metadata_table.clone(),
+                        definition_order.clone(),
+                        network_game,
+                        self.next_object_id,
+                        self.scenario_script_counter,
+                        resume.take(),
+                    )?
+                };
+                self.rng = result.rng;
+                self.audio_registry = result.audio;
+                let mut batch = result.batch;
+                if let Some(continuation) = result.continuation.as_ref() {
+                    let request = &continuation.request;
+                    // The host records the request for compatibility, while
+                    // this driver performs the switch before resuming the
+                    // suspended VM. Do not replay the carrier afterwards.
+                    consume_section_switch_command(&mut batch.player_commands, request);
+                }
+                let Some(continuation) = result.continuation else {
+                    self.apply_scenario_batch(batch)?;
+                    break;
+                };
+                let request = continuation.request;
+                let (suspension, switched) =
+                    self.with_suspended_script_boundary(continuation.suspension, None, |engine| {
+                        // Keep the suspended frame registered while all
+                        // callback-produced objects and nested outcomes are
+                        // materialized. Native NewObject inserts these before
+                        // LoadScenarioSection tears down the old world.
+                        engine.apply_scenario_batch(batch)?;
+                        engine.load_scenario_section(
+                            &request.name,
+                            request.flags,
+                            request.preserve_ids,
+                        )
+                    })?;
+                resume = Some((suspension, Value::Int(i32::from(switched))));
+            }
         }
         let mut spawn_requests = Vec::new();
         let duplicate_object_ids = !self.object_ids_are_unique();
@@ -417,7 +695,7 @@ impl Engine {
         }
         self.execution.cursor = Some(0);
         let mut previous_exec_object = None;
-        while self
+        'execute: while self
             .execution
             .cursor
             .is_some_and(|cursor| cursor < self.execution.exec_list.len())
@@ -715,148 +993,7 @@ impl Engine {
 
                 if !queue_events.is_empty() {
                     let object_id = self.objects[idx].id;
-                    let previous_container = self.objects[idx].state.container;
-                    let global_view = self.global_effects.clone();
-                    let rng_state = self.rng.clone();
-                    let world = self.host_world_context_for_object(idx);
-                    let (
-                        global_cmds,
-                        emitted_particles,
-                        physics_delta,
-                        audio_events,
-                        event_messages,
-                        player_commands,
-                        object_order_commands,
-                        next_mission_commands,
-                        landscape_ops,
-                        effect_transfer_zones,
-                        effect_spawns,
-                        effect_other_objects,
-                        effect_object_lists,
-                        effect_solid_mask_operations,
-                        effect_host_raster_preview,
-                        effect_solid_mask_changed,
-                        _effect_action_callbacks_dispatched,
-                        effect_change_def_reinsert,
-                        effect_host_container_change,
-                        effect_next_object_id,
-                        triggered_game_over,
-                        effect_script_go,
-                        effect_script_counter,
-                        audio_state,
-                        new_rng,
-                    ) = {
-                        let definition = self
-                            .definitions
-                            .get(&definition_id)
-                            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                        let definitions_ref = &self.definitions;
-                        let object = &mut self.objects[idx];
-                        Self::run_effect_events_for_object(
-                            definition,
-                            definitions_ref,
-                            self.game_over_triggered,
-                            rng_state,
-                            object_id,
-                            object,
-                            queue_events,
-                            global_view,
-                            &mut self.environment,
-                            self.physics,
-                            self.frame,
-                            world.clone(),
-                            self.audio_registry.clone(),
-                        )?
-                    };
-                    let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
-                    let mut outermost = self.stage_host_solid_mask_operations(
-                        effect_solid_mask_operations,
-                        effect_host_raster_preview,
-                    );
-                    let fold_result = (|| -> Result<(), EngineError> {
-                        self.rng = new_rng;
-                        self.audio_registry = audio_state;
-                        if effect_solid_mask_changed {
-                            self.update_solid_mask(idx);
-                        }
-                        self.sync_next_object_id(effect_next_object_id);
-                        if !effect_spawns.is_empty() {
-                            self.process_spawn_queue(effect_spawns)?;
-                        }
-                        if !effect_transfer_zones.is_empty() {
-                            self.apply_transfer_zone_commands(effect_transfer_zones)?;
-                        }
-                        if !effect_other_objects.is_empty() {
-                            self.apply_nested_object_outcomes(effect_other_objects)?;
-                        }
-                        if let Some(preview) = effect_object_lists {
-                            self.install_effect_object_lists(preview);
-                        }
-                        if !landscape_ops.is_empty() {
-                            self.apply_landscape_operations(landscape_ops);
-                        }
-                        if !player_commands.is_empty() {
-                            self.apply_player_commands(player_commands)?;
-                        }
-                        self.execution
-                            .pending_object_order_commands
-                            .extend(object_order_commands);
-                        self.apply_next_mission_commands(next_mission_commands);
-                        if !audio_events.is_empty() {
-                            self.emit_audio_commands(audio_events);
-                        }
-                        if !event_messages.is_empty() {
-                            for command in event_messages {
-                                self.messages.apply_command(command);
-                            }
-                        }
-                        if let Some(go) = effect_script_go {
-                            self.scenario_script_go = go;
-                        }
-                        if let Some(counter) = effect_script_counter {
-                            self.scenario_script_counter = counter;
-                        }
-                        if triggered_game_over {
-                            self.request_game_over()?;
-                        }
-                        if !physics_delta.is_empty() {
-                            self.apply_physics_delta(physics_delta);
-                        }
-                        if !global_cmds.is_empty() {
-                            self.apply_global_effect_commands(&global_cmds);
-                        }
-                        self.apply_particle_commands(emitted_particles);
-                        // `apply_player_commands` above may have run
-                        // `LoadScenarioSection`, rebuilding the object list
-                        // (C4Game.cpp:4194-4208); an object that departed with
-                        // its section has no container change to reconcile.
-                        let Some(idx) = self.find_object_index(object_id) else {
-                            return Ok(());
-                        };
-                        let new_container = self.objects[idx].state.container;
-                        if previous_container != new_container {
-                            if effect_host_container_change {
-                                self.apply_host_container_link_change(
-                                    object_id,
-                                    previous_container,
-                                    new_container,
-                                )?;
-                            } else {
-                                self.apply_container_change(
-                                    object_id,
-                                    previous_container,
-                                    new_container,
-                                    false,
-                                )?;
-                            }
-                        }
-                        if effect_change_def_reinsert.unwrap_or(false) {
-                            self.reinsert_change_def_contents_link(object_id)?;
-                        }
-                        Ok(())
-                    })();
-                    outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
-                    self.finish_host_solid_mask_operations(outermost, fold_result)?;
+                    self.dispatch_object_effect_events(idx, &definition_id, queue_events)?;
                 }
 
                 self.finish_object_command_execution(object_id)?;
@@ -985,7 +1122,7 @@ impl Engine {
                         state_snapshot.action.name = event.live_action;
                         state_snapshot.action.act_map_index = event.live_act_map_index;
                         state_snapshot.action.phase = event.phase;
-                        self.invoke_action_callback(
+                        let receiver_is_live = self.invoke_action_callback(
                             idx,
                             ActionCallbackKind::Phase,
                             &event.action,
@@ -995,18 +1132,15 @@ impl Engine {
                             None,
                             Some(&exec_action_definition_id),
                         )?;
+                        if !receiver_is_live {
+                            continue;
+                        }
+                        let Some(live_idx) = self.find_object_index(current_id) else {
+                            continue;
+                        };
+                        idx = live_idx;
                     }
                 }
-
-                // A PhaseCall is an ordinary script frame and may have run
-                // `LoadScenarioSection`, which rebuilds the object list
-                // (C4Game.cpp:4194-4208). Resolve the slot again before
-                // reading the live action; an object that departed with its
-                // section has no `SetAction(NextAction)` left to make.
-                let Some(current) = self.find_object_index(current_id) else {
-                    continue;
-                };
-                idx = current;
 
                 // Only after PhaseCall returns does C++ compare the LIVE
                 // phase against the stale pAction Length and call ordinary
@@ -1196,12 +1330,15 @@ impl Engine {
             // not pre-advance or snapshot the suffix: callbacks may kill a
             // later node or insert a new upper node that must execute in
             // this same frame (C4Effect.cpp:319-363).
+            let effect_instance_token = self.object_instance_token(current_id);
             let mut effect_cursor = None;
-            // A timer callback may have run `LoadScenarioSection`, which
-            // rebuilds the object list (C4Game.cpp:4194-4208). Re-resolve this
-            // object's slot on every pass before reading it again; if the
-            // switch removed it, C++ has no object left to walk either.
-            while let Some(current) = self.find_object_index(current_id) {
+            while let Some(current) = self
+                .find_object_index(current_id)
+                .filter(|_| self.object_instance_token(current_id) == effect_instance_token)
+            {
+                // A callback may have loaded a section or removed the
+                // carrier. Never index the old execution slot or run a
+                // destination object as the departing effect list.
                 idx = current;
                 if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
                     break;
@@ -1244,6 +1381,13 @@ impl Engine {
                     }
                 }
                 let stop_events = self.exec_object_fire(idx, frame, entry.number);
+                let Some(current) = self
+                    .find_object_index(current_id)
+                    .filter(|_| self.object_instance_token(current_id) == effect_instance_token)
+                else {
+                    break;
+                };
+                idx = current;
                 definition_id = self.objects[idx].definition_id.clone();
                 if !stop_events.is_empty()
                     && !self.objects[idx].destroyed
@@ -1252,11 +1396,13 @@ impl Engine {
                     self.dispatch_object_effect_events(idx, &definition_id, stop_events)?;
                 }
             }
-            // The same walk may have switched section, so resolve the slot
-            // again rather than trusting the one the loop entered with.
-            let Some(mut idx) = self.find_object_index(current_id) else {
+            let Some(current) = self
+                .find_object_index(current_id)
+                .filter(|_| self.object_instance_token(current_id) == effect_instance_token)
+            else {
                 continue;
             };
+            idx = current;
             if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
                 // pEffects->Execute may remove the object; C++ returns
                 // before ExecLife/ExecBase/Timer (C4Object.cpp:1087-1090).
@@ -1302,11 +1448,12 @@ impl Engine {
                 if let Some(callback) = timer_call {
                     tolerate_script_error(self.call_object_callback(idx, &callback, Vec::new()))?;
                 }
-                // `Def->TimerCall` is an ordinary script frame and may have run
-                // `LoadScenarioSection`, which rebuilds the object list
-                // (C4Game.cpp:4194-4208). Resolve the slot again before
-                // reading it; a caller that departed with its section has no
-                // remaining `C4Object::Execute` tail.
+                // `Def->TimerCall` is an ordinary script frame and may
+                // have run `LoadScenarioSection`, which rebuilds the
+                // object list (C4Game.cpp:4194-4208). Resolve the slot
+                // again before reading it; a caller that departed with
+                // its section has no remaining `C4Object::Execute`
+                // tail.
                 let Some(current) = self.find_object_index(current_id) else {
                     continue;
                 };
@@ -1347,414 +1494,422 @@ impl Engine {
                 .get(&definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
                 .has_step;
-            let command = if definition_has_step {
-                let state_snapshot = Rc::new(self.objects[idx].script_state_snapshot());
-                let random = self.next_random_i32();
-
-                let rng_state = self.rng.clone();
-                let (command, audio_state, new_rng, next_object_id) = {
-                    let definition = self
-                        .definitions
-                        .get(&definition_id)
-                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let world = self.host_world_context_for_object_with_snapshot(
-                        idx,
-                        Rc::clone(&state_snapshot),
-                    );
-                    definition.call_step(
-                        state_snapshot.as_ref(),
-                        object_id,
-                        frame,
-                        random,
-                        rng_state,
-                        &self.global_effects,
-                        self.physics,
-                        self.environment,
-                        world,
-                        self.game_over_triggered,
-                        self.audio_registry.clone(),
-                    )?
-                };
-                self.rng = new_rng;
-                self.sync_next_object_id(next_object_id);
-                self.audio_registry = audio_state;
-                Some(command)
-            } else {
-                None
-            };
-
-            if let Some(command) = command {
-                let CommandBatch {
-                    delta,
-                    spawns,
-                    destroy,
-                    commands,
-                    command_ops,
-                    effects,
-                    other_objects,
-                    global_effects,
-                    environment,
-                    physics,
-                    landscape_ops,
-                    solid_mask_operations,
-                    host_raster_preview: command_host_raster_preview,
-                    particles,
-                    transfer_zones,
-                    audio,
-                    messages,
-                    player_commands,
-                    object_order_commands,
-                    next_mission_commands,
-                    // Step is not a creation phase: its generic context
-                    // publishes no list snapshot.
-                    object_lists: _,
-                    trigger_game_over,
-                    script_go,
-                    script_counter,
-                } = command;
-                #[cfg(test)]
-                SYNTHETIC_COMMAND_FOLDS.with(|count| count.set(count.get().saturating_add(1)));
-
-                let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
-                let mut outermost = self.stage_host_solid_mask_operations(
-                    solid_mask_operations,
-                    command_host_raster_preview,
-                );
-                let command_fold_result = (|| -> Result<(), EngineError> {
-                    let change_def = delta.change_def.clone();
-                    let change_def_reinsert = delta.change_def_reinsert;
-                    let host_container_change = delta.host_container_change;
-
-                    let action_library = change_def
-                        .as_deref()
-                        .and_then(|new_def| {
-                            self.apply_change_object_def(idx, new_def);
-                            self.shared_action_library_for(&self.objects[idx].definition_id)
-                        })
-                        .unwrap_or_else(|| action_library.clone());
-
-                    if let Some(go) = script_go {
-                        self.scenario_script_go = go;
-                    }
-                    if let Some(counter) = script_counter {
-                        self.scenario_script_counter = counter;
-                    }
-                    if trigger_game_over {
-                        self.request_game_over()?;
-                    }
-
-                    if !player_commands.is_empty() {
-                        self.apply_player_commands(player_commands)?;
-                    }
-                    self.execution
-                        .pending_object_order_commands
-                        .extend(object_order_commands);
-                    self.apply_next_mission_commands(next_mission_commands);
-
-                    if !landscape_ops.is_empty() {
-                        self.apply_landscape_operations(landscape_ops);
-                    }
-
-                    if let Some(update) = environment {
-                        self.apply_environment_delta(&update);
-                    }
-                    if let Some(delta) = physics {
-                        self.apply_physics_delta(delta);
-                    }
-
-                    let mut effect_events = Vec::new();
-                    if !messages.is_empty() {
-                        for command in messages {
-                            self.messages.apply_command(command);
-                        }
-                    }
-                    let (
-                        object_id,
-                        previous_owner,
-                        previous_crew,
-                        previous_status,
-                        container_change,
-                    ) = {
-                        let object = &mut self.objects[idx];
-                        let previous_owner = object.state.owner;
-                        let previous_crew = object.state.crew_member;
-                        let previous_status = object.state.status;
-                        let mut container_change = None;
-                        let callbacks_dispatched = delta
-                            .action
-                            .as_ref()
-                            .map(|action| action.callbacks_dispatched)
-                            .unwrap_or(false);
-                        let delta_outcome = object.apply_delta(&delta, &action_library);
-                        if let Some(change) = delta_outcome.action_change {
-                            if !callbacks_dispatched {
-                                object.record_action_event(
-                                    change.previous,
-                                    ActionTransitionKind::Forced,
-                                    &action_library,
-                                );
-                            }
-                        }
-                        if let Some(change) = delta_outcome.container_change {
-                            container_change = Some(change);
-                        }
-                        let mut applied = object.apply_effect_commands(&effects);
-                        effect_events.append(&mut applied);
-                        (
-                            object.id,
-                            previous_owner,
-                            previous_crew,
-                            previous_status,
-                            container_change,
-                        )
+            let step_instance_token = self.object_instance_token(object_id);
+            let mut step_resume = None;
+            let step_random = definition_has_step.then(|| self.next_random_i32());
+            let mut step_state_snapshot = Rc::new(self.objects[idx].script_state_snapshot());
+            loop {
+                let mut step_resume_boundary = None;
+                let mut step_boundary_spawns = Vec::new();
+                // `step_resume.take()` below consumes the envelope before the
+                // returned prefix is folded. Keep this decision separately so
+                // a removed/replaced receiver cannot receive the resumed
+                // suffix through the stale `idx` (C4Game.cpp:4194-4208).
+                let step_receiver_available = step_resume
+                    .as_ref()
+                    .is_none_or(|resume: &DefinitionScriptResume| resume.receiver_available)
+                    && step_instance_token
+                        .is_some_and(|token| self.object_instance_token(object_id) == Some(token));
+                let command = if definition_has_step {
+                    let rng_state = self.rng.clone();
+                    let random = step_random.unwrap_or_default();
+                    let result = {
+                        let definition = self
+                            .definitions
+                            .get(&definition_id)
+                            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                        let world = if step_receiver_available {
+                            self.find_object_index(object_id)
+                                .map(|index| {
+                                    self.host_world_context_for_object_with_snapshot(
+                                        index,
+                                        Rc::clone(&step_state_snapshot),
+                                    )
+                                })
+                                .unwrap_or_else(|| self.host_world_context())
+                        } else {
+                            self.host_world_context()
+                        };
+                        definition.call_step_with_continuation(
+                            step_state_snapshot.as_ref(),
+                            object_id,
+                            frame,
+                            random,
+                            rng_state,
+                            &self.global_effects,
+                            self.physics,
+                            self.environment,
+                            world,
+                            self.game_over_triggered,
+                            self.audio_registry.clone(),
+                            step_resume.take(),
+                        )?
                     };
-                    self.dispatch_pending_action_sounds(idx, false);
+                    let (command, audio_state, new_rng, next_object_id, resume) = match result {
+                        LifecycleCallbackResult::Complete {
+                            batch,
+                            audio,
+                            rng,
+                            next_object_id,
+                        } => (batch, audio, rng, next_object_id, None),
+                        LifecycleCallbackResult::Suspended {
+                            mut batch,
+                            audio,
+                            rng,
+                            next_object_id,
+                            resume,
+                        } => {
+                            let request = resume
+                                .suspension
+                                .request::<compat::ScenarioSectionSwitchRequest>()
+                                .cloned()
+                                .ok_or_else(|| {
+                                    EngineError::invalid_script_output(
+                                        definition_id.clone(),
+                                        "Step",
+                                        "script yielded an unsupported host continuation"
+                                            .to_owned(),
+                                    )
+                                })?;
+                            consume_section_switch_command(&mut batch.player_commands, &request);
+                            let DefinitionScriptResume {
+                                suspension,
+                                cells,
+                                value,
+                                receiver_available,
+                            } = resume;
+                            let boundary = self
+                                .begin_suspended_script_boundary(suspension, Some(cells.clone()))?;
+                            step_resume_boundary =
+                                Some((cells, value, receiver_available, request, boundary));
+                            (batch, audio, rng, next_object_id, Some(()))
+                        }
+                    };
+                    self.rng = new_rng;
+                    self.sync_next_object_id(next_object_id);
+                    self.audio_registry = audio_state;
+                    Some(command)
+                } else {
+                    None
+                };
+
+                if let Some(command) = command {
+                    if !step_receiver_available {
+                        spawn_requests.extend(self.apply_detached_step_batch(command)?);
+                    } else {
+                        let CommandBatch {
+                            delta,
+                            spawns,
+                            destroy,
+                            commands,
+                            command_ops,
+                            effects,
+                            other_objects,
+                            global_effects,
+                            environment,
+                            physics,
+                            landscape_ops,
+                            solid_mask_operations,
+                            host_raster_preview: command_host_raster_preview,
+                            particles,
+                            transfer_zones,
+                            audio,
+                            messages,
+                            player_commands,
+                            object_order_commands,
+                            next_mission_commands,
+                            // Step is not a creation phase: its generic context
+                            // publishes no list snapshot.
+                            object_lists: _,
+                            trigger_game_over,
+                            script_go,
+                            script_counter,
+                        } = command;
+                        #[cfg(test)]
+                        SYNTHETIC_COMMAND_FOLDS
+                            .with(|count| count.set(count.get().saturating_add(1)));
+
+                        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
+                        let mut outermost = self.stage_host_solid_mask_operations(
+                            solid_mask_operations,
+                            command_host_raster_preview,
+                        );
+                        let command_fold_result = (|| -> Result<(), EngineError> {
+                            let change_def = delta.change_def.clone();
+                            let change_def_reinsert = delta.change_def_reinsert;
+                            let host_container_change = delta.host_container_change;
+
+                            let action_library = change_def
+                                .as_deref()
+                                .and_then(|new_def| {
+                                    self.apply_change_object_def(idx, new_def);
+                                    self.shared_action_library_for(&self.objects[idx].definition_id)
+                                })
+                                .unwrap_or_else(|| action_library.clone());
+
+                            if let Some(go) = script_go {
+                                self.scenario_script_go = go;
+                            }
+                            if let Some(counter) = script_counter {
+                                self.scenario_script_counter = counter;
+                            }
+                            if trigger_game_over {
+                                self.request_game_over()?;
+                            }
+
+                            if !player_commands.is_empty() {
+                                self.apply_player_commands(player_commands)?;
+                            }
+                            self.execution
+                                .pending_object_order_commands
+                                .extend(object_order_commands);
+                            self.apply_next_mission_commands(next_mission_commands);
+
+                            if !landscape_ops.is_empty() {
+                                self.apply_landscape_operations(landscape_ops);
+                            }
+
+                            if let Some(update) = environment {
+                                self.apply_environment_delta(&update);
+                            }
+                            if let Some(delta) = physics {
+                                self.apply_physics_delta(delta);
+                            }
+
+                            let mut effect_events = Vec::new();
+                            if !messages.is_empty() {
+                                for command in messages {
+                                    self.messages.apply_command(command);
+                                }
+                            }
+                            let (
+                                object_id,
+                                previous_owner,
+                                previous_crew,
+                                previous_status,
+                                container_change,
+                            ) = {
+                                let object = &mut self.objects[idx];
+                                let previous_owner = object.state.owner;
+                                let previous_crew = object.state.crew_member;
+                                let previous_status = object.state.status;
+                                let mut container_change = None;
+                                let callbacks_dispatched = delta
+                                    .action
+                                    .as_ref()
+                                    .map(|action| action.callbacks_dispatched)
+                                    .unwrap_or(false);
+                                let delta_outcome = object.apply_delta(&delta, &action_library);
+                                if let Some(change) = delta_outcome.action_change {
+                                    if !callbacks_dispatched {
+                                        object.record_action_event(
+                                            change.previous,
+                                            ActionTransitionKind::Forced,
+                                            &action_library,
+                                        );
+                                    }
+                                }
+                                if let Some(change) = delta_outcome.container_change {
+                                    container_change = Some(change);
+                                }
+                                let mut applied = object.apply_effect_commands(&effects);
+                                effect_events.append(&mut applied);
+                                (
+                                    object.id,
+                                    previous_owner,
+                                    previous_crew,
+                                    previous_status,
+                                    container_change,
+                                )
+                            };
+                            self.dispatch_pending_action_sounds(idx, false);
+                            let native_float_bounds = self.uses_native_float_bounds(
+                                idx,
+                                self.object_physical_without_fair_fill(idx).float,
+                            );
+                            let (new_owner, new_crew, new_status) = {
+                                let object = &mut self.objects[idx];
+                                let procedure = action_library.procedure_for_entry(
+                                    &object.state.action.name,
+                                    object.state.action.act_map_index,
+                                );
+                                let native_float = matches!(procedure, ActionProcedure::Float)
+                                    && native_float_bounds;
+                                if !matches!(procedure, ActionProcedure::Flight) && !native_float {
+                                    object.clamp_velocity(&self.physics);
+                                }
+                                if destroy {
+                                    effect_events.extend(object.mark_destroyed());
+                                }
+                                if !command_ops.is_empty() {
+                                    object.apply_command_operations(command_ops);
+                                }
+                                if !commands.is_empty() {
+                                    object.enqueue_commands(commands);
+                                }
+                                (
+                                    object.state.owner,
+                                    object.state.crew_member,
+                                    object.state.status,
+                                )
+                            };
+                            self.update_inactive_list_for_status_change(
+                                object_id,
+                                previous_status,
+                                new_status,
+                            );
+                            self.update_sector_for_index(idx);
+                            if !audio.is_empty() {
+                                self.emit_audio_commands(audio);
+                            }
+                            self.update_selection_for_state_change(
+                                object_id,
+                                previous_owner,
+                                previous_crew,
+                                new_owner,
+                                new_crew,
+                            );
+                            if let Some((previous_container, new_container)) = container_change {
+                                if host_container_change {
+                                    self.apply_host_container_link_change(
+                                        object_id,
+                                        previous_container,
+                                        new_container,
+                                    )?;
+                                } else {
+                                    self.apply_container_change(
+                                        object_id,
+                                        previous_container,
+                                        new_container,
+                                        false,
+                                    )?;
+                                }
+                            }
+                            if change_def_reinsert {
+                                self.reinsert_change_def_contents_link(object_id)?;
+                            }
+                            if change_def.is_some() {
+                                self.update_solid_mask(idx);
+                                self.refresh_object_ocf(idx);
+                            }
+
+                            self.apply_particle_commands(particles);
+                            if !transfer_zones.is_empty() {
+                                self.apply_transfer_zone_commands(transfer_zones)?;
+                            }
+
+                            if !global_effects.is_empty() {
+                                self.apply_global_effect_commands(&global_effects);
+                            }
+
+                            if !effect_events.is_empty() {
+                                self.dispatch_object_effect_events(
+                                    idx,
+                                    &definition_id,
+                                    effect_events,
+                                )?;
+                                let Some(current) = self.find_object_index(object_id) else {
+                                    return Ok(());
+                                };
+                                idx = current;
+                            }
+                            self.update_sector_for_index(idx);
+
+                            self.apply_nested_object_outcomes(other_objects)?;
+
+                            Ok(())
+                        })();
+                        outermost |=
+                            !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
+                        self.finish_host_solid_mask_operations(outermost, command_fold_result)?;
+                        if step_resume_boundary.is_some() {
+                            // A suspended Step has not returned to its caller
+                            // yet. Materialize its CreateObject results while
+                            // the retained frame is registered, before the
+                            // synchronous section switch below.
+                            step_boundary_spawns.extend(spawns);
+                        } else {
+                            spawn_requests.extend(spawns);
+                        }
+                    }
+                } else {
+                    // Real C4Script mutates state synchronously through host
+                    // calls. Only the synthetic snapshot-fixture Step callback
+                    // returns a CommandBatch, so do not manufacture and fold an
+                    // empty one for every real-content object. Preserve the
+                    // velocity clamp that used to ride in that fold.
                     let native_float_bounds = self.uses_native_float_bounds(
                         idx,
                         self.object_physical_without_fair_fill(idx).float,
                     );
-                    let (new_owner, new_crew, new_status) = {
-                        let object = &mut self.objects[idx];
-                        let procedure = action_library.procedure_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        );
-                        let native_float =
-                            matches!(procedure, ActionProcedure::Float) && native_float_bounds;
-                        if !matches!(procedure, ActionProcedure::Flight) && !native_float {
-                            object.clamp_velocity(&self.physics);
-                        }
-                        if destroy {
-                            effect_events.extend(object.mark_destroyed());
-                        }
-                        if !command_ops.is_empty() {
-                            object.apply_command_operations(command_ops);
-                        }
-                        if !commands.is_empty() {
-                            object.enqueue_commands(commands);
-                        }
-                        (
-                            object.state.owner,
-                            object.state.crew_member,
-                            object.state.status,
-                        )
-                    };
-                    self.update_inactive_list_for_status_change(
-                        object_id,
-                        previous_status,
-                        new_status,
+                    let object = &mut self.objects[idx];
+                    let procedure = action_library.procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
                     );
-                    self.update_sector_for_index(idx);
-                    if !audio.is_empty() {
-                        self.emit_audio_commands(audio);
+                    let native_float =
+                        matches!(procedure, ActionProcedure::Float) && native_float_bounds;
+                    if !matches!(procedure, ActionProcedure::Flight) && !native_float {
+                        object.clamp_velocity(&self.physics);
                     }
-                    self.update_selection_for_state_change(
-                        object_id,
-                        previous_owner,
-                        previous_crew,
-                        new_owner,
-                        new_crew,
-                    );
-                    if let Some((previous_container, new_container)) = container_change {
-                        if host_container_change {
-                            self.apply_host_container_link_change(
-                                object_id,
-                                previous_container,
-                                new_container,
-                            )?;
-                        } else {
-                            self.apply_container_change(
-                                object_id,
-                                previous_container,
-                                new_container,
-                                false,
-                            )?;
-                        }
-                    }
-                    if change_def_reinsert {
-                        self.reinsert_change_def_contents_link(object_id)?;
-                    }
-                    if change_def.is_some() {
-                        self.update_solid_mask(idx);
-                        self.refresh_object_ocf(idx);
-                    }
-
-                    self.apply_particle_commands(particles);
-                    if !transfer_zones.is_empty() {
-                        self.apply_transfer_zone_commands(transfer_zones)?;
-                    }
-
-                    if !global_effects.is_empty() {
-                        self.apply_global_effect_commands(&global_effects);
-                    }
-
-                    if !effect_events.is_empty() {
-                        let previous_container = self.objects[idx].state.container;
-                        let world = self.host_world_context_for_object(idx);
-                        let (
-                            global_cmds,
-                            emitted_particles,
-                            physics_delta,
-                            audio_events,
-                            event_messages,
-                            player_commands,
-                            object_order_commands,
-                            next_mission_commands,
-                            landscape_ops,
-                            effect_transfer_zones,
-                            effect_spawns,
-                            effect_other_objects,
-                            effect_object_lists,
-                            effect_solid_mask_operations,
-                            effect_host_raster_preview,
-                            effect_solid_mask_changed,
-                            _effect_action_callbacks_dispatched,
-                            effect_change_def_reinsert,
-                            effect_host_container_change,
-                            effect_next_object_id,
-                            triggered_game_over,
-                            effect_script_go,
-                            effect_script_counter,
-                            audio_state,
-                            new_rng,
-                        ) = {
-                            let definition =
-                                self.definitions.get(&definition_id).ok_or_else(|| {
-                                    EngineError::UnknownDefinition(definition_id.clone())
-                                })?;
-                            let definitions_ref = &self.definitions;
-                            let global_view = self.global_effects.clone();
-                            let rng_state = self.rng.clone();
-                            let object = &mut self.objects[idx];
-                            Self::run_effect_events_for_object(
-                                definition,
-                                definitions_ref,
-                                self.game_over_triggered,
-                                rng_state,
-                                object_id,
-                                object,
-                                effect_events,
-                                global_view,
-                                &mut self.environment,
-                                self.physics,
-                                self.frame,
-                                world.clone(),
-                                self.audio_registry.clone(),
-                            )?
-                        };
-                        self.stage_host_solid_mask_operations(
-                            effect_solid_mask_operations,
-                            effect_host_raster_preview,
-                        );
-                        self.rng = new_rng;
-                        self.audio_registry = audio_state;
-                        if effect_solid_mask_changed {
-                            self.update_solid_mask(idx);
-                        }
-                        self.sync_next_object_id(effect_next_object_id);
-                        if !effect_spawns.is_empty() {
-                            self.process_spawn_queue(effect_spawns)?;
-                        }
-                        if !effect_transfer_zones.is_empty() {
-                            self.apply_transfer_zone_commands(effect_transfer_zones)?;
-                        }
-                        if !effect_other_objects.is_empty() {
-                            self.apply_nested_object_outcomes(effect_other_objects)?;
-                        }
-                        if let Some(preview) = effect_object_lists {
-                            self.install_effect_object_lists(preview);
-                        }
-                        if !player_commands.is_empty() {
-                            self.apply_player_commands(player_commands)?;
-                        }
-                        self.execution
-                            .pending_object_order_commands
-                            .extend(object_order_commands);
-                        self.apply_next_mission_commands(next_mission_commands);
-                        if !landscape_ops.is_empty() {
-                            self.apply_landscape_operations(landscape_ops);
-                        }
-                        if !audio_events.is_empty() {
-                            self.emit_audio_commands(audio_events);
-                        }
-                        if !event_messages.is_empty() {
-                            for command in event_messages {
-                                self.messages.apply_command(command);
-                            }
-                        }
-                        if let Some(go) = effect_script_go {
-                            self.scenario_script_go = go;
-                        }
-                        if let Some(counter) = effect_script_counter {
-                            self.scenario_script_counter = counter;
-                        }
-                        if triggered_game_over {
-                            self.request_game_over()?;
-                        }
-                        if !physics_delta.is_empty() {
-                            self.apply_physics_delta(physics_delta);
-                        }
-                        // `apply_player_commands` above may have run
-                        // `LoadScenarioSection`, rebuilding the object list
-                        // (C4Game.cpp:4194-4208); an object that departed with
-                        // its section has no container change to reconcile.
-                        let Some(idx) = self.find_object_index(object_id) else {
-                            return Ok(());
-                        };
-                        let new_container = self.objects[idx].state.container;
-                        if !global_cmds.is_empty() {
-                            self.apply_global_effect_commands(&global_cmds);
-                        }
-                        self.apply_particle_commands(emitted_particles);
-                        if previous_container != new_container {
-                            if effect_host_container_change {
-                                self.apply_host_container_link_change(
-                                    object_id,
-                                    previous_container,
-                                    new_container,
-                                )?;
-                            } else {
-                                self.apply_container_change(
-                                    object_id,
-                                    previous_container,
-                                    new_container,
-                                    false,
-                                )?;
-                            }
-                        }
-                        if effect_change_def_reinsert.unwrap_or(false) {
-                            self.reinsert_change_def_contents_link(object_id)?;
-                        }
-                    }
-                    self.update_sector_for_index(idx);
-
-                    self.apply_nested_object_outcomes(other_objects)?;
-
-                    Ok(())
-                })();
-                outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
-                self.finish_host_solid_mask_operations(outermost, command_fold_result)?;
-                spawn_requests.extend(spawns);
-            } else {
-                // Real C4Script mutates state synchronously through host
-                // calls. Only the synthetic snapshot-fixture Step callback
-                // returns a CommandBatch, so do not manufacture and fold an
-                // empty one for every real-content object. Preserve the
-                // velocity clamp that used to ride in that fold.
-                let native_float_bounds = self.uses_native_float_bounds(
-                    idx,
-                    self.object_physical_without_fair_fill(idx).float,
-                );
-                let object = &mut self.objects[idx];
-                let procedure = action_library.procedure_for_entry(
-                    &object.state.action.name,
-                    object.state.action.act_map_index,
-                );
-                let native_float =
-                    matches!(procedure, ActionProcedure::Float) && native_float_bounds;
-                if !matches!(procedure, ActionProcedure::Flight) && !native_float {
-                    object.clamp_velocity(&self.physics);
                 }
+
+                let Some((cells, _, _, request, boundary)) = step_resume_boundary.take() else {
+                    break;
+                };
+                let boundary_spawns = std::mem::take(&mut step_boundary_spawns);
+                // Keep the suspended frame registered through the complete
+                // command-batch prefix. Nested removals can clear its locals,
+                // stack operands and aliases before this native section load.
+                let operation_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if !boundary_spawns.is_empty() {
+                            self.process_spawn_queue(boundary_spawns)?;
+                        }
+                        self.load_scenario_section(
+                            &request.name,
+                            request.flags,
+                            request.preserve_ids,
+                        )
+                    }));
+                let suspension = match boundary.finish() {
+                    Ok(suspension) => suspension,
+                    Err(error) => match operation_result {
+                        Ok(Err(previous)) => return Err(previous),
+                        Err(payload) => std::panic::resume_unwind(payload),
+                        Ok(Ok(_)) => return Err(error),
+                    },
+                };
+                let switched = match operation_result {
+                    Ok(result) => result?,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                };
+                let receiver_available = step_instance_token
+                    .is_some_and(|token| self.object_instance_token(object_id) == Some(token));
+                let continuation = DefinitionScriptResume {
+                    suspension,
+                    cells,
+                    value: Value::Int(i32::from(switched)),
+                    receiver_available,
+                };
+                if receiver_available {
+                    if let Some(live_idx) = self.find_object_index(object_id) {
+                        idx = live_idx;
+                        step_state_snapshot =
+                            Rc::new(self.objects[live_idx].script_state_snapshot());
+                    }
+                }
+                // The execution list may have been replaced by the section
+                // load. Continue the retained VM frame, then let the outer
+                // frame loop stop rather than indexing the old cursor.
+                self.execution.cursor = None;
+                step_resume = Some(continuation);
+            }
+
+            if step_instance_token.is_some()
+                && self.object_instance_token(object_id) != step_instance_token
+            {
+                continue 'execute;
             }
 
             if !self.objects[idx].pending_action_events.is_empty() {
@@ -2787,7 +2942,7 @@ impl Engine {
 
     fn trigger_action_callbacks_impl(
         &mut self,
-        index: usize,
+        mut index: usize,
         previous_action: Option<String>,
         allow_deleted_initial_start: bool,
     ) -> Result<(), EngineError> {
@@ -2799,6 +2954,7 @@ impl Engine {
         self.dispatch_pending_action_sounds(index, allow_deleted_initial_start);
         self.initialize_action_sound(index, allow_deleted_initial_start);
 
+        let object_id = self.objects[index].id;
         let mut needs_start = previous_action.is_none();
 
         // C++ has NO deferred callback queue (SetAction runs its calls
@@ -2817,7 +2973,7 @@ impl Engine {
             }
             let current_action = self.objects[index].state.action.clone();
             let callback_definition = self.objects[index].definition_id.clone();
-            self.invoke_action_callback(
+            let receiver_is_live = self.invoke_action_callback(
                 index,
                 ActionCallbackKind::Start,
                 &current_action.name,
@@ -2827,6 +2983,13 @@ impl Engine {
                 None,
                 None,
             )?;
+            let Some(live_index) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            index = live_index;
+            if !receiver_is_live {
+                return Ok(());
+            }
             if self.objects[index].destroyed
                 || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
                 || self.objects[index].definition_id != callback_definition
@@ -2839,7 +3002,7 @@ impl Engine {
                 ActionTransitionKind::Natural => ActionCallbackKind::End,
                 ActionTransitionKind::Forced => ActionCallbackKind::Abort,
             };
-            self.invoke_action_callback(
+            let receiver_is_live = self.invoke_action_callback(
                 index,
                 callback_kind,
                 &event.previous_action.name,
@@ -2850,6 +3013,13 @@ impl Engine {
                     .then_some(event.previous_action.phase),
                 None,
             )?;
+            let Some(live_index) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            index = live_index;
+            if !receiver_is_live {
+                return Ok(());
+            }
             if self.objects[index].destroyed
                 || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
                 || self.objects[index].definition_id != callback_definition
@@ -2863,7 +3033,7 @@ impl Engine {
 
         if needs_start {
             let current_action = self.objects[index].state.action.clone();
-            self.invoke_action_callback(
+            let receiver_is_live = self.invoke_action_callback(
                 index,
                 ActionCallbackKind::Start,
                 &current_action.name,
@@ -2873,6 +3043,9 @@ impl Engine {
                 None,
                 None,
             )?;
+            if !receiver_is_live {
+                return Ok(());
+            }
         }
 
         Ok(())
@@ -2888,19 +3061,22 @@ impl Engine {
         state_override: Option<ObjectState>,
         abort_phase: Option<i32>,
         callback_definition_override: Option<&str>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
+        let object_id = self.objects[index].id;
+        let object_instance_token = self
+            .object_instance_token(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
         let callback_definition_id = callback_definition_override.unwrap_or(&definition_id);
         let object_definition = self
             .definitions
             .get(&definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let action_library = self
-            .shared_action_library_for(&definition_id)
+            .cloned()
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let callback_definition = self
             .definitions
             .get(callback_definition_id)
+            .cloned()
             .ok_or_else(|| EngineError::UnknownDefinition(callback_definition_id.to_string()))?;
 
         let callback = match callback_override {
@@ -2922,7 +3098,7 @@ impl Engine {
         };
 
         let Some(callback) = callback else {
-            return Ok(());
+            return Ok(true);
         };
         let function = callback.function_name();
 
@@ -2935,68 +3111,201 @@ impl Engine {
             object = self.objects[index].id.as_u64(),
             "action callback"
         );
-        let object_id = self.objects[index].id;
-        let (state_snapshot, world) = match state_override {
-            Some(state) => (
-                Rc::new(state),
-                // An explicit action-state override can intentionally differ
-                // from the object's current live state. Preserve the existing
-                // host-world view in that case.
-                self.host_world_context_for_object(index),
-            ),
-            None => {
-                let state = Rc::new(self.objects[index].script_state_snapshot());
-                let world =
-                    self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state));
-                (state, world)
-            }
+        let has_state_override = state_override.is_some();
+        let initial_state_snapshot = match state_override {
+            Some(state) => Rc::new(state),
+            None => Rc::new(self.objects[index].script_state_snapshot()),
         };
-        let definitions_ref = &self.definitions;
-        let rng_state = self.rng.clone();
-        let global_view = self.global_effects.clone();
-        let callback = callback_definition.call_action_callback(
-            object_definition,
-            &callback,
-            kind,
-            state_snapshot.as_ref(),
-            object_id,
-            action_name,
-            abort_phase,
-            rng_state,
-            &global_view,
-            self.physics,
-            self.environment,
-            self.frame,
-            world,
-            self.game_over_triggered,
-            self.audio_registry.clone(),
-        );
-        let callback = callback.map_err(|error| {
-            self.apply_script_error_recovery(
-                error,
-                index,
-                &action_library,
+        let mut resume: Option<DefinitionScriptResume> = None;
+        loop {
+            let receiver_available = resume
+                .as_ref()
+                .is_none_or(|resume| resume.receiver_available)
+                && self.object_instance_token(object_id) == Some(object_instance_token);
+            let live_index = self.find_object_index(object_id).unwrap_or(index);
+            let state_snapshot = if resume.is_none() {
+                Rc::clone(&initial_state_snapshot)
+            } else if receiver_available {
+                Rc::new(
+                    self.objects
+                        .get(live_index)
+                        .filter(|object| object.id == object_id)
+                        .map(Object::script_state_snapshot)
+                        .unwrap_or_else(|| initial_state_snapshot.as_ref().clone()),
+                )
+            } else {
+                Rc::clone(&initial_state_snapshot)
+            };
+            let live_definition_id = receiver_available
+                .then(|| {
+                    self.objects
+                        .get(live_index)
+                        .filter(|object| object.id == object_id)
+                        .map(|object| object.definition_id.clone())
+                })
+                .flatten()
+                .unwrap_or_else(|| definition_id.clone());
+            let live_object_definition = self
+                .definitions
+                .get(&live_definition_id)
+                .cloned()
+                .unwrap_or_else(|| object_definition.clone());
+            let live_callback_definition = callback_definition.clone();
+            let live_action_library = live_object_definition.action_library().clone();
+            let world = if receiver_available
+                && self
+                    .objects
+                    .get(live_index)
+                    .is_some_and(|object| object.id == object_id)
+            {
+                if has_state_override && resume.is_none() {
+                    self.host_world_context_for_object(live_index)
+                } else {
+                    self.host_world_context_for_object_with_snapshot(
+                        live_index,
+                        Rc::clone(&state_snapshot),
+                    )
+                }
+            } else {
+                self.host_world_context()
+            };
+            let callback_result = live_callback_definition.call_action_callback_with_continuation(
+                &live_object_definition,
+                &callback,
+                kind,
+                state_snapshot.as_ref(),
                 object_id,
-                &definition_id,
-                true,
-            )
-        });
-        // StartCall/EndCall/PhaseCall/AbortCall are engine-initiated game
-        // calls: a script error logs and the action proceeds (C++ fail-safe
-        // exec, C4AulExec.cpp:1318-1342).
-        let Some((outcome, audio_state, new_rng)) = tolerate_script_error(callback)? else {
-            return Ok(());
-        };
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-
-        self.apply_action_callback_outcome(
-            index,
-            outcome,
-            &action_library,
-            object_id,
-            &definition_id,
-        )
+                action_name,
+                abort_phase,
+                self.rng.clone(),
+                &self.global_effects,
+                self.physics,
+                self.environment,
+                self.frame,
+                world,
+                self.game_over_triggered,
+                self.audio_registry.clone(),
+                resume.take(),
+            );
+            let callback_result = match callback_result {
+                Ok(result) => result,
+                // Engine-initiated action callbacks retain their prefix and
+                // log ordinary script errors (C4AulExec.cpp:1318-1342).
+                Err(error) => {
+                    let error = if receiver_available {
+                        self.apply_script_error_recovery(
+                            error,
+                            live_index,
+                            &live_action_library,
+                            object_id,
+                            &live_definition_id,
+                            true,
+                        )
+                    } else {
+                        error
+                    };
+                    return tolerate_script_error::<()>(Err(error)).map(|_| {
+                        receiver_available
+                            && self.object_instance_token(object_id) == Some(object_instance_token)
+                    });
+                }
+            };
+            match callback_result {
+                DefinitionCallbackResult::Complete {
+                    value: _,
+                    outcome,
+                    audio,
+                    rng,
+                } => {
+                    self.rng = rng;
+                    self.audio_registry = audio;
+                    let receiver_is_live = receiver_available
+                        && self.object_instance_token(object_id) == Some(object_instance_token)
+                        && self
+                            .objects
+                            .get(live_index)
+                            .is_some_and(|object| object.id == object_id);
+                    if receiver_is_live {
+                        self.apply_action_callback_outcome(
+                            live_index,
+                            outcome,
+                            &live_action_library,
+                            object_id,
+                            &live_definition_id,
+                        )?;
+                    } else {
+                        self.apply_detached_callback_outcome(outcome)?;
+                    }
+                    return Ok(receiver_is_live);
+                }
+                DefinitionCallbackResult::Suspended {
+                    suspension,
+                    cells,
+                    mut outcome,
+                    audio,
+                    rng,
+                } => {
+                    let Some(request) = suspension
+                        .request::<compat::ScenarioSectionSwitchRequest>()
+                        .cloned()
+                    else {
+                        return Err(EngineError::invalid_script_output(
+                            live_definition_id,
+                            callback.function_name().to_owned(),
+                            "script yielded an unsupported host continuation".to_owned(),
+                        ));
+                    };
+                    let (suspended, switched) = self.with_suspended_script_boundary(
+                        suspension,
+                        Some(cells.clone()),
+                        |engine| {
+                            // The host records the request for compatibility;
+                            // this boundary performs the switch once, after
+                            // folding every prefix mutation.
+                            consume_section_switch_command(&mut outcome.player_commands, &request);
+                            engine.rng = rng;
+                            engine.audio_registry = audio;
+                            let receiver_is_live = receiver_available
+                                && engine.object_instance_token(object_id)
+                                    == Some(object_instance_token)
+                                && engine.find_object_index(object_id).is_some();
+                            if receiver_is_live {
+                                let live_index = engine
+                                    .find_object_index(object_id)
+                                    .ok_or(EngineError::UnknownObject(object_id))?;
+                                engine.apply_action_callback_outcome(
+                                    live_index,
+                                    outcome,
+                                    &live_action_library,
+                                    object_id,
+                                    &live_definition_id,
+                                )?;
+                            } else {
+                                engine.apply_detached_callback_outcome(outcome)?;
+                            }
+                            engine.load_scenario_section(
+                                &request.name,
+                                request.flags,
+                                request.preserve_ids,
+                            )
+                        },
+                    )?;
+                    let receiver_still_live =
+                        self.object_instance_token(object_id) == Some(object_instance_token);
+                    resume = Some(DefinitionScriptResume {
+                        suspension: suspended,
+                        cells,
+                        value: Value::Int(i32::from(switched)),
+                        // A callback can deactivate its receiver before the
+                        // request. Native keeps that same allocation in the
+                        // inactive list, even though the section load itself
+                        // succeeds; the allocation token is the authoritative
+                        // receiver identity across the switch.
+                        receiver_available: receiver_available && receiver_still_live,
+                    });
+                }
+            }
+        }
     }
 
     /// Apply the pre-error mutations a failed outer call carried before
@@ -3104,6 +3413,7 @@ impl Engine {
         definition_id: &str,
         clamp_velocity: bool,
     ) -> Result<(), EngineError> {
+        let callback_instance_token = self.object_instance_token(object_id);
         let compat::EffectContextOutcome {
             object: object_effects,
             global: global_effects,
@@ -3299,24 +3609,29 @@ impl Engine {
             self.request_game_over()?;
         }
 
+        // Nested spawn/player work above can synchronously switch sections.
+        // Once that happens this callback's object-local tail belongs to the
+        // retired C4Object, even if a destination object reuses its number.
+        // Keep global and nested-object channels, then stop before touching
+        // the old vector slot (C4Object.cpp:1069-1103).
+        if callback_instance_token.is_none()
+            || self.object_instance_token(object_id) != callback_instance_token
+        {
+            if !global_effects.is_empty() {
+                self.apply_global_effect_commands(&global_effects);
+            }
+            self.apply_nested_object_outcomes(other_objects)?;
+            return Ok(());
+        }
+        let index = self
+            .find_object_index(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+
         let mut effect_events = Vec::new();
         let mut energy_died = false;
         let mut container_changes = Vec::new();
 
         let mut command_operations = command_operations;
-
-        // `apply_player_commands` above can rebuild the object list wholesale:
-        // `LoadScenarioSection` removes every active object and installs the
-        // target section's own (C4Game.cpp:4194-4208). The slot captured before
-        // that call therefore no longer identifies this object — it may hold a
-        // different one, or nothing. Re-resolve it, and when the switch removed
-        // the caller, apply only the world-scoped remainder.
-        let Some(mut index) = self.find_object_index(object_id) else {
-            if !global_effects.is_empty() {
-                self.apply_global_effect_commands(&global_effects);
-            }
-            return Ok(());
-        };
 
         let (previous_owner, previous_crew_member, previous_base_graphics, previous_status) = {
             let object = &self.objects[index];
@@ -3347,7 +3662,7 @@ impl Engine {
                     || update.status.is_some()
                     || update.base_graphics.is_some()
             });
-        let mut change_def_reinsert = object_update
+        let change_def_reinsert = object_update
             .as_ref()
             .is_some_and(|update| update.change_def_reinsert);
 
@@ -3447,8 +3762,28 @@ impl Engine {
             // energy reaches 0
             // (oracle-src-pinned src/C4Object.cpp:1372-1393).
             self.assign_death(index, false)?;
+            if self.object_instance_token(object_id) != callback_instance_token {
+                if !global_effects.is_empty() {
+                    self.apply_global_effect_commands(&global_effects);
+                }
+                self.apply_nested_object_outcomes(other_objects)?;
+                return Ok(());
+            }
+            if self.find_object_index(object_id).is_none() {
+                if !global_effects.is_empty() {
+                    self.apply_global_effect_commands(&global_effects);
+                }
+                self.apply_nested_object_outcomes(other_objects)?;
+                return Ok(());
+            }
+            // AssignDeath may run a Death callback that removes or replaces
+            // the object. All subsequent owner/status reads must use the
+            // surviving allocation's index.
         }
 
+        let index = self
+            .find_object_index(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
         let (new_owner, new_crew_member) = {
             let object = &self.objects[index];
             (object.state.owner, object.state.crew_member)
@@ -3480,7 +3815,6 @@ impl Engine {
             self.apply_global_effect_commands(&global_effects);
         }
 
-        let mut effect_solid_mask_changed = false;
         let sector_state_before_effects = (!effect_events.is_empty()).then(|| {
             let object = &self.objects[index];
             (
@@ -3490,133 +3824,27 @@ impl Engine {
             )
         });
         if sector_state_before_effects.is_some() {
-            let previous_container = self.objects[index].state.container;
-            let definition = self
-                .definitions
-                .get(definition_id)
-                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
-            let definitions_ref = &self.definitions;
-            let global_view = self.global_effects.clone();
-            let rng_state = self.rng.clone();
-            let world = self.host_world_context_for_object(index);
-            let object = &mut self.objects[index];
-            let (
-                global_cmds,
-                emitted_particles,
-                physics_delta,
-                audio_events,
-                event_messages,
-                player_commands,
-                object_order_commands,
-                next_mission_commands,
-                landscape_ops,
-                effect_transfer_zones,
-                effect_spawns,
-                effect_other_objects,
-                effect_object_lists,
-                nested_effect_solid_mask_operations,
-                nested_effect_host_raster_preview,
-                nested_effect_solid_mask_changed,
-                _nested_effect_action_callbacks_dispatched,
-                nested_effect_change_def_reinsert,
-                effect_host_container_change,
-                effect_next_object_id,
-                triggered_game_over,
-                effect_script_go,
-                effect_script_counter,
-                audio_state,
-                new_rng,
-            ) = Self::run_effect_events_for_object(
-                definition,
-                definitions_ref,
-                self.game_over_triggered,
-                rng_state,
-                object_id,
-                object,
-                effect_events,
-                global_view,
-                &mut self.environment,
-                self.physics,
-                self.frame,
-                world.clone(),
-                self.audio_registry.clone(),
-            )?;
-            self.stage_host_solid_mask_operations(
-                nested_effect_solid_mask_operations,
-                nested_effect_host_raster_preview,
-            );
-            self.rng = new_rng;
-            self.audio_registry = audio_state;
-            effect_solid_mask_changed |= nested_effect_solid_mask_changed;
-            if let Some(marker) = nested_effect_change_def_reinsert {
-                change_def_reinsert = marker;
+            self.dispatch_object_effect_events(index, &definition_id.to_string(), effect_events)?;
+            // Effect callbacks can request a synchronous section switch. The
+            // continuation driver has already resolved the carrier identity;
+            // discard only this callback's local tail if that allocation left
+            // the object list (C4Game.cpp:4194-4208).
+            if self.object_instance_token(object_id) != callback_instance_token {
+                self.apply_nested_object_outcomes(other_objects)?;
+                return Ok(());
             }
-            self.sync_next_object_id(effect_next_object_id);
-            if !effect_spawns.is_empty() {
-                self.process_spawn_queue(effect_spawns)?;
-            }
-            if !effect_transfer_zones.is_empty() {
-                self.apply_transfer_zone_commands(effect_transfer_zones)?;
-            }
-            if !effect_other_objects.is_empty() {
-                self.apply_nested_object_outcomes(effect_other_objects)?;
-            }
-            if let Some(preview) = effect_object_lists {
-                self.install_effect_object_lists(preview);
-            }
-            if !landscape_ops.is_empty() {
-                self.apply_landscape_operations(landscape_ops);
-            }
-            if !player_commands.is_empty() {
-                self.apply_player_commands(player_commands)?;
-            }
-            self.execution
-                .pending_object_order_commands
-                .extend(object_order_commands);
-            self.apply_next_mission_commands(next_mission_commands);
-            if !audio_events.is_empty() {
-                self.emit_audio_commands(audio_events);
-            }
-            if !event_messages.is_empty() {
-                for command in event_messages {
-                    self.messages.apply_command(command);
-                }
-            }
-            if let Some(go) = effect_script_go {
-                self.scenario_script_go = go;
-            }
-            if let Some(counter) = effect_script_counter {
-                self.scenario_script_counter = counter;
-            }
-            if triggered_game_over {
-                self.request_game_over()?;
-            }
-            if !physics_delta.is_empty() {
-                self.apply_physics_delta(physics_delta);
-            }
-            if !global_cmds.is_empty() {
-                self.apply_global_effect_commands(&global_cmds);
-            }
-            self.apply_particle_commands(emitted_particles);
-            // A nested effect callback may have switched section, rebuilding
-            // the object list (C4Game.cpp:4194-4208). Resolve the slot again
-            // before reading it; a departed object has no container change to
-            // record.
-            if let Some(current) = self.find_object_index(object_id) {
-                index = current;
-                let new_container = self.objects[index].state.container;
-                if previous_container != new_container {
-                    container_changes.push((
-                        previous_container,
-                        new_container,
-                        effect_host_container_change,
-                    ));
-                }
+            if self.find_object_index(object_id).is_none() {
+                self.apply_nested_object_outcomes(other_objects)?;
+                return Ok(());
             }
         }
-        let Some(index) = self.find_object_index(object_id) else {
+        if self.object_instance_token(object_id) != callback_instance_token {
+            self.apply_nested_object_outcomes(other_objects)?;
             return Ok(());
-        };
+        }
+        let index = self
+            .find_object_index(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
         if sector_state_before_effects.is_some_and(|previous| {
             let object = &self.objects[index];
             previous
@@ -3642,10 +3870,7 @@ impl Engine {
             self.reinsert_change_def_contents_link(object_id)?;
         }
 
-        if solid_mask_changed
-            || effect_solid_mask_changed
-            || self.objects[index].state.base_graphics != previous_base_graphics
-        {
+        if solid_mask_changed || self.objects[index].state.base_graphics != previous_base_graphics {
             // SetSolidMask and SetGraphics both remove, recreate and re-put
             // the active solid mask immediately (C4Object.cpp:3809-3818,
             // :381-402).
@@ -3653,6 +3878,13 @@ impl Engine {
         }
 
         self.apply_nested_object_outcomes(other_objects)?;
+
+        if self.object_instance_token(object_id) != callback_instance_token {
+            return Ok(());
+        }
+        let index = self
+            .find_object_index(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
 
         // Only the matching C++ host operations refresh OCF. In particular,
         // a no-op Contact callback must preserve Execute's pre-movement
@@ -3748,6 +3980,10 @@ impl Engine {
                 continue;
             };
             let object_id = outcome.object_id;
+            let Some(object_instance_token) = self.object_instance_token(object_id) else {
+                retained.push(outcome);
+                continue;
+            };
             let definition_id = self.objects[index].definition_id.clone();
             let action_library = self
                 .shared_action_library_for(&definition_id)
@@ -3771,7 +4007,7 @@ impl Engine {
                     || update.rotation.is_some()
                     || update.construction.is_some()
             });
-            let mut change_def_reinsert = outcome
+            let change_def_reinsert = outcome
                 .update
                 .as_ref()
                 .is_some_and(|update| update.change_def_reinsert);
@@ -3889,6 +4125,13 @@ impl Engine {
                 // energy reaches 0 (C4Object.cpp:1363) — foreign writes
                 // (Punch, DoEnergy on a named target) included.
                 self.assign_death(index, false)?;
+                if self.object_instance_token(object_id) != Some(object_instance_token) {
+                    continue;
+                }
+                let Some(live_index) = self.find_object_index(object_id) else {
+                    continue;
+                };
+                index = live_index;
             }
 
             let (new_owner, new_crew_member) = {
@@ -3917,133 +4160,18 @@ impl Engine {
                 self.remove_object_from_fow_view_lists(object_id);
             }
 
-            let mut effect_solid_mask_changed = false;
             if !effect_events.is_empty() {
-                let previous_container = self.objects[index].state.container;
-                let definition = self
-                    .definitions
-                    .get(&definition_id)
-                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                let definitions_ref = &self.definitions;
-                let global_view = self.global_effects.clone();
-                let rng_state = self.rng.clone();
-                let world = self.host_world_context_for_object(index);
-                let object = &mut self.objects[index];
-                let (
-                    global_cmds,
-                    emitted_particles,
-                    physics_delta,
-                    audio_events,
-                    event_messages,
-                    player_commands,
-                    object_order_commands,
-                    next_mission_commands,
-                    landscape_ops,
-                    effect_transfer_zones,
-                    effect_spawns,
-                    effect_other_objects,
-                    effect_object_lists,
-                    nested_effect_solid_mask_operations,
-                    nested_effect_host_raster_preview,
-                    nested_effect_solid_mask_changed,
-                    _nested_effect_action_callbacks_dispatched,
-                    nested_effect_change_def_reinsert,
-                    effect_host_container_change,
-                    effect_next_object_id,
-                    triggered_game_over,
-                    effect_script_go,
-                    effect_script_counter,
-                    audio_state,
-                    new_rng,
-                ) = Self::run_effect_events_for_object(
-                    definition,
-                    definitions_ref,
-                    self.game_over_triggered,
-                    rng_state,
-                    object_id,
-                    object,
+                retained.extend(self.dispatch_object_effect_events_retaining_missing(
+                    index,
+                    &definition_id,
                     effect_events,
-                    global_view,
-                    &mut self.environment,
-                    self.physics,
-                    self.frame,
-                    world.clone(),
-                    self.audio_registry.clone(),
-                )?;
-                self.stage_host_solid_mask_operations(
-                    nested_effect_solid_mask_operations,
-                    nested_effect_host_raster_preview,
-                );
-                self.rng = new_rng;
-                self.audio_registry = audio_state;
-                effect_solid_mask_changed |= nested_effect_solid_mask_changed;
-                if let Some(marker) = nested_effect_change_def_reinsert {
-                    change_def_reinsert = marker;
+                )?);
+                if self.object_instance_token(object_id) != Some(object_instance_token) {
+                    continue;
                 }
-                self.sync_next_object_id(effect_next_object_id);
-                if !effect_spawns.is_empty() {
-                    self.process_spawn_queue(effect_spawns)?;
-                }
-                if !effect_transfer_zones.is_empty() {
-                    self.apply_transfer_zone_commands(effect_transfer_zones)?;
-                }
-                if !effect_other_objects.is_empty() {
-                    retained.extend(
-                        self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?,
-                    );
-                }
-                if let Some(preview) = effect_object_lists {
-                    self.install_effect_object_lists(preview);
-                }
-                if !landscape_ops.is_empty() {
-                    self.apply_landscape_operations(landscape_ops);
-                }
-                if !player_commands.is_empty() {
-                    self.apply_player_commands(player_commands)?;
-                }
-                self.execution
-                    .pending_object_order_commands
-                    .extend(object_order_commands);
-                self.apply_next_mission_commands(next_mission_commands);
-                if !audio_events.is_empty() {
-                    self.emit_audio_commands(audio_events);
-                }
-                if !event_messages.is_empty() {
-                    for command in event_messages {
-                        self.messages.apply_command(command);
-                    }
-                }
-                if let Some(go) = effect_script_go {
-                    self.scenario_script_go = go;
-                }
-                if let Some(counter) = effect_script_counter {
-                    self.scenario_script_counter = counter;
-                }
-                if triggered_game_over {
-                    self.request_game_over()?;
-                }
-                if !physics_delta.is_empty() {
-                    self.apply_physics_delta(physics_delta);
-                }
-                if !global_cmds.is_empty() {
-                    self.apply_global_effect_commands(&global_cmds);
-                }
-                self.apply_particle_commands(emitted_particles);
-                // A nested effect callback may have switched section, rebuilding
-                // the object list (C4Game.cpp:4194-4208). Resolve the slot again
-                // before reading it; a departed object has no container change
-                // to record.
-                if let Some(current) = self.find_object_index(outcome.object_id) {
-                    index = current;
-                    let new_container = self.objects[index].state.container;
-                    if previous_container != new_container {
-                        container_changes.push((
-                            previous_container,
-                            new_container,
-                            effect_host_container_change,
-                        ));
-                    }
-                }
+            }
+            if self.object_instance_token(object_id) != Some(object_instance_token) {
+                continue;
             }
             let Some(index) = self.find_object_index(outcome.object_id) else {
                 continue;
@@ -4082,15 +4210,19 @@ impl Engine {
                 self.update_sector_for_index(index);
             }
             if solid_mask_changed
-                || effect_solid_mask_changed
                 || self.objects[index].state.base_graphics != previous_base_graphics
             {
                 self.update_solid_mask(index);
             }
             if let Some(forced) = requested_death {
-                if let Some(death_index) = self.find_object_index(object_id) {
-                    self.assign_death(death_index, forced)?;
+                if self.object_instance_token(object_id) == Some(object_instance_token) {
+                    if let Some(death_index) = self.find_object_index(object_id) {
+                        self.assign_death(death_index, forced)?;
+                    }
                 }
+            }
+            if self.object_instance_token(object_id) != Some(object_instance_token) {
+                continue;
             }
             if refresh_ocf || energy_died {
                 if let Some(refresh_index) = self.find_object_index(object_id) {

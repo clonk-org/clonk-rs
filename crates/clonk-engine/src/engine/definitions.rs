@@ -1812,32 +1812,60 @@ impl Engine {
         config.position_adjusted = true;
 
         let object_id = self.spawn_object(config)?;
-        let Some(index) = self.find_object_index(object_id) else {
+        let Some(object_instance_token) = self.object_instance_token(object_id) else {
             return Ok(None);
+        };
+        let survives_creation = |engine: &Self| {
+            engine.object_instance_token(object_id) == Some(object_instance_token)
+                && engine
+                    .find_object_index(object_id)
+                    .is_some_and(|index| engine.object_survives_creation(index))
         };
         let creator = creator
             .map(|id| Value::Object(id.as_u64()))
             .unwrap_or(Value::Nil);
-        let construction = self.call_object_function(index, "Construction", vec![creator]);
+        let Some(construction_index) = self.find_object_index(object_id) else {
+            return Ok(None);
+        };
+        let construction =
+            self.call_object_function(construction_index, "Construction", vec![creator]);
         tolerate_script_error(construction)?;
-        if !self.object_survives_creation(index) {
+        if !survives_creation(self) {
             return Ok(None);
         }
 
+        let Some(index) = self
+            .find_object_index(object_id)
+            .filter(|_| self.object_instance_token(object_id) == Some(object_instance_token))
+        else {
+            return Ok(None);
+        };
         let crossed_full_con = self.do_initial_con(index, initial_construction);
-        if !self.object_survives_creation(index) {
+        if !survives_creation(self) {
             return Ok(None);
         }
         if crossed_full_con {
-            let completion = self.call_object_function(index, "Completion", Vec::new());
+            let Some(completion_index) = self
+                .find_object_index(object_id)
+                .filter(|_| self.object_instance_token(object_id) == Some(object_instance_token))
+            else {
+                return Ok(None);
+            };
+            let completion = self.call_object_function(completion_index, "Completion", Vec::new());
             tolerate_script_error(completion)?;
-            if self.object_survives_creation(index) {
-                let initialize = self.call_object_function(index, "Initialize", Vec::new());
+            if survives_creation(self) {
+                let Some(initialize_index) = self.find_object_index(object_id).filter(|_| {
+                    self.object_instance_token(object_id) == Some(object_instance_token)
+                }) else {
+                    return Ok(None);
+                };
+                let initialize =
+                    self.call_object_function(initialize_index, "Initialize", Vec::new());
                 tolerate_script_error(initialize)?;
             }
         }
 
-        Ok(self.object_survives_creation(index).then_some(object_id))
+        Ok(survives_creation(self).then_some(object_id))
     }
 
     /// Shared `CreateLine` helper (C4ObjectCom.cpp:364-377). Object creation

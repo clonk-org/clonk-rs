@@ -1857,6 +1857,11 @@ impl Engine {
         &mut self,
         target: ObjectId,
     ) -> Result<(), EngineError> {
+        // Suspended VM frames live outside the callback TLS context after a
+        // host yield. Visit them at the same AssignRemoval tail as ordinary
+        // C4Value holders, before this object is detached or its number can
+        // be reused by a section load.
+        self.clear_suspended_script_references_for_removal(target)?;
         if let Some(position) = self
             .find_object_index(target)
             .map(|index| self.objects[index].state.position)

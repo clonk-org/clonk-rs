@@ -4,6 +4,100 @@
 
 use super::*;
 
+/// One engine-owned script frame that yielded at a synchronous host boundary.
+/// The VM owns the continuation itself; the local-cell handle keeps the live
+/// C4Object variable storage available to the resumed callback.
+pub(crate) struct DefinitionScriptResume {
+    pub(crate) suspension: ScriptSuspension,
+    pub(crate) cells: clonk_script::LocalCells,
+    pub(crate) value: Value,
+    /// Whether the original C4Object still exists when the engine resumes the
+    /// frame. A section switch may recreate the same numeric ID; that object
+    /// is a new receiver and must not receive the old callback's suffix.
+    pub(crate) receiver_available: bool,
+}
+
+/// State needed to resume one scripted `Fx*` callback after the engine has
+/// performed a synchronous host operation.  The VM owns the suspended frame
+/// and its operand stack; this envelope owns the callback selection and the
+/// object-context facts needed to rebuild a fresh host world after a section
+/// switch.  It deliberately contains no `HostWorldContext` or engine
+/// reference, since those can carry a lazy raw provider across the switch.
+pub(crate) struct EffectScriptResume {
+    pub(crate) suspension: ScriptSuspension,
+    pub(crate) cells: clonk_script::LocalCells,
+    pub(crate) value: Value,
+    /// The object identity that backed the callback's `cthr->Obj` before the
+    /// host section operation. Numeric object ids are reusable, so a resumed
+    /// frame must compare this token before rebuilding that context.
+    pub(crate) context_instance_token: Option<u64>,
+    /// Whether the callback's command-target context still denotes the same
+    /// object allocation. This is independent of `receiver_available`: an
+    /// effect carrier may disappear while its foreign command target remains
+    /// a valid `this` object.
+    pub(crate) context_available: bool,
+    pub(crate) receiver_available: bool,
+    pub(crate) callback: EffectScriptCallback,
+    pub(crate) callback_name: String,
+    pub(crate) event: &'static str,
+    pub(crate) function_label: &'static str,
+    pub(crate) effect_name: String,
+    pub(crate) context_object: Option<ObjectId>,
+    pub(crate) context_is_self: bool,
+}
+
+pub(crate) enum EffectCallbackResult {
+    Complete {
+        value: Option<Value>,
+        outcome: compat::EffectContextOutcome,
+        audio: AudioRegistry,
+        rng: LcgRng,
+    },
+    Suspended {
+        resume: EffectScriptResume,
+        outcome: compat::EffectContextOutcome,
+        audio: AudioRegistry,
+        rng: LcgRng,
+    },
+}
+
+pub(crate) enum EffectScriptCallResult {
+    Complete(Option<(Value, HashMap<String, Value>)>),
+    Suspended(ScriptSuspension),
+}
+
+pub(crate) enum DefinitionCallbackResult {
+    Complete {
+        value: Value,
+        outcome: compat::EffectContextOutcome,
+        audio: AudioRegistry,
+        rng: LcgRng,
+    },
+    Suspended {
+        suspension: ScriptSuspension,
+        cells: clonk_script::LocalCells,
+        outcome: compat::EffectContextOutcome,
+        audio: AudioRegistry,
+        rng: LcgRng,
+    },
+}
+
+pub(crate) enum LifecycleCallbackResult {
+    Complete {
+        batch: CommandBatch,
+        audio: AudioRegistry,
+        rng: LcgRng,
+        next_object_id: u64,
+    },
+    Suspended {
+        batch: CommandBatch,
+        audio: AudioRegistry,
+        rng: LcgRng,
+        next_object_id: u64,
+        resume: DefinitionScriptResume,
+    },
+}
+
 #[derive(Clone)]
 pub struct DefinitionSpriteImage {
     #[doc(hidden)]
@@ -3038,6 +3132,67 @@ impl Definition {
         Ok((batch, audio_state, rng, next_object_id))
     }
 
+    /// Continuation-aware fixture `Step` entry.  The command-DSL callback
+    /// shares the same C4Object frame boundary as Initialize: host effects
+    /// before LoadScenarioSection are returned to the engine, and the owned
+    /// VM frame resumes with the actual switch result after the new section is
+    /// installed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_step_with_continuation(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        frame: u64,
+        random: i32,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<DefinitionScriptResume>,
+    ) -> Result<LifecycleCallbackResult, EngineError> {
+        if !self.has_step {
+            return Ok(LifecycleCallbackResult::Complete {
+                batch: CommandBatch::default(),
+                audio,
+                rng,
+                next_object_id: world.next_object_id(),
+            });
+        }
+        let frame_value = if frame > i32::MAX as u64 {
+            i32::MAX
+        } else {
+            frame as i32
+        };
+        // Step is the synthetic command-DSL callback; its state/frame/random
+        // arguments are independent of native C4 callback conventions.
+        let args = vec![
+            build_state_value(&self.id, object_id, state, &self.action_library),
+            Value::Int(frame_value),
+            Value::Int(random),
+        ];
+        let callback = ScriptCallbackTarget::unlinked("Step");
+        let result = self.call_object_callback_with_continuation(
+            self,
+            state,
+            object_id,
+            &callback,
+            &args,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            resume,
+        )?;
+        self.lifecycle_callback_result("Step", result, true)
+    }
+
     pub(crate) fn call_action_callback(
         &self,
         object_definition: &Definition,
@@ -3135,6 +3290,66 @@ impl Definition {
             host_effects.object_update = Some(update);
         }
         Ok((host_effects, audio_state, rng))
+    }
+
+    /// Continuation-aware action callback entry. Action callbacks ignore their
+    /// return value, but their host effects and owned VM frame still cross the
+    /// same synchronous section-switch boundary as lifecycle callbacks.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_action_callback_with_continuation(
+        &self,
+        object_definition: &Definition,
+        callback: &ScriptCallbackTarget,
+        kind: ActionCallbackKind,
+        state: &ObjectState,
+        object_id: ObjectId,
+        action_name: &str,
+        abort_phase: Option<i32>,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<DefinitionScriptResume>,
+    ) -> Result<DefinitionCallbackResult, EngineError> {
+        let args = if self.c4_callback_args {
+            match kind {
+                ActionCallbackKind::Abort => {
+                    vec![Value::Int(abort_phase.unwrap_or(state.action.phase))]
+                }
+                _ => Vec::new(),
+            }
+        } else {
+            vec![
+                build_state_value(
+                    &object_definition.id,
+                    object_id,
+                    state,
+                    &object_definition.action_library,
+                ),
+                Value::String(action_name.to_string().into()),
+            ]
+        };
+        let result = self.call_object_callback_with_continuation(
+            object_definition,
+            state,
+            object_id,
+            callback,
+            &args,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            resume,
+        )?;
+        Ok(result)
     }
 
     pub(crate) fn call_menu_entries(
@@ -3474,6 +3689,383 @@ impl Definition {
                 None => script.call_with_cells_and_this(function, &arg_values, cells, this),
             },
         )
+    }
+
+    /// Continuation-aware C4Object::Call entry.  The regular adapter above is
+    /// retained for callers whose callback is fail-safe and cannot cross a
+    /// section switch; engine-driven callbacks use this result so the
+    /// partial outcome is committed before the host resumes the owned frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_object_callback_with_continuation(
+        &self,
+        object_definition: &Definition,
+        state: &ObjectState,
+        object_id: ObjectId,
+        callback: &ScriptCallbackTarget,
+        args: &[Value],
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<DefinitionScriptResume>,
+    ) -> Result<DefinitionCallbackResult, EngineError> {
+        self.call_object_callback_with_continuation_mode(
+            object_definition,
+            state,
+            object_id,
+            callback,
+            args,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            resume,
+            false,
+        )
+    }
+
+    /// Lifecycle callbacks publish pending creations into the phase-local
+    /// world before their next statement runs (C4Game.cpp:1100-1142). Other
+    /// callback paths retain the ordinary deferred outcome behavior above.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_object_callback_with_continuation_and_spawn_previews(
+        &self,
+        object_definition: &Definition,
+        state: &ObjectState,
+        object_id: ObjectId,
+        callback: &ScriptCallbackTarget,
+        args: &[Value],
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<DefinitionScriptResume>,
+    ) -> Result<DefinitionCallbackResult, EngineError> {
+        self.call_object_callback_with_continuation_mode(
+            object_definition,
+            state,
+            object_id,
+            callback,
+            args,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            resume,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_object_callback_with_continuation_mode(
+        &self,
+        object_definition: &Definition,
+        state: &ObjectState,
+        object_id: ObjectId,
+        callback: &ScriptCallbackTarget,
+        args: &[Value],
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<DefinitionScriptResume>,
+        publish_spawn_previews: bool,
+    ) -> Result<DefinitionCallbackResult, EngineError> {
+        if callback.resolution().is_none() && !self.script.has_function(callback.function_name()) {
+            let next_object_id = world.next_object_id();
+            return Ok(DefinitionCallbackResult::Complete {
+                value: Value::Nil,
+                outcome: compat::EffectContextOutcome::empty(next_object_id, audio.clone()),
+                audio,
+                rng,
+            });
+        }
+
+        let arg_values = args.to_vec();
+        let function = callback.function_name().to_owned();
+        self.exec_in_object_context_for_definition_with_continuation(
+            object_definition,
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            function.clone().as_str(),
+            resume,
+            publish_spawn_previews,
+            move |script, cells, this, resume| match (callback.resolution(), resume) {
+                (Some(_), Some((suspension, value))) => {
+                    script.resume_script_continuation_with_value_and_this(suspension, value, this)
+                }
+                (Some(resolution), None) => script
+                    .call_resolved_with_cells_and_this_with_continuation(
+                        resolution,
+                        resolution.scope == clonk_script::ScriptFunctionScope::Global,
+                        &arg_values,
+                        cells,
+                        this,
+                    ),
+                (None, Some((suspension, value))) => {
+                    script.resume_script_continuation_with_value_and_this(suspension, value, this)
+                }
+                (None, None) => script.call_with_cells_and_this_with_continuation(
+                    &function,
+                    &arg_values,
+                    cells,
+                    this,
+                ),
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_initialize_with_continuation(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        random: i32,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<DefinitionScriptResume>,
+    ) -> Result<LifecycleCallbackResult, EngineError> {
+        if !self.has_initialize {
+            return Ok(LifecycleCallbackResult::Complete {
+                batch: CommandBatch::default(),
+                audio,
+                rng,
+                next_object_id: world.next_object_id(),
+            });
+        }
+        let args = if self.c4_callback_args {
+            Vec::new()
+        } else {
+            vec![
+                build_state_value(&self.id, object_id, state, &self.action_library),
+                Value::Int(random),
+            ]
+        };
+        let callback = ScriptCallbackTarget::unlinked("Initialize");
+        let result = self.call_object_callback_with_continuation_and_spawn_previews(
+            self,
+            state,
+            object_id,
+            &callback,
+            &args,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            resume,
+        )?;
+        self.lifecycle_callback_result("Initialize", result, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_construction_with_continuation(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<DefinitionScriptResume>,
+    ) -> Result<LifecycleCallbackResult, EngineError> {
+        if !self.has_construction {
+            return Ok(LifecycleCallbackResult::Complete {
+                batch: CommandBatch::default(),
+                audio,
+                rng,
+                next_object_id: world.next_object_id(),
+            });
+        }
+        let callback = ScriptCallbackTarget::unlinked("Construction");
+        let result = self.call_object_callback_with_continuation_and_spawn_previews(
+            self,
+            state,
+            object_id,
+            &callback,
+            &[],
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            resume,
+        )?;
+        self.lifecycle_callback_result("Construction", result, false)
+    }
+
+    fn lifecycle_callback_result(
+        &self,
+        function: &str,
+        result: DefinitionCallbackResult,
+        parse_return: bool,
+    ) -> Result<LifecycleCallbackResult, EngineError> {
+        match result {
+            DefinitionCallbackResult::Complete {
+                value,
+                outcome,
+                audio,
+                rng,
+            } => {
+                let (batch, next_object_id) =
+                    self.lifecycle_batch(function, value, outcome, parse_return)?;
+                Ok(LifecycleCallbackResult::Complete {
+                    batch,
+                    next_object_id,
+                    audio,
+                    rng,
+                })
+            }
+            DefinitionCallbackResult::Suspended {
+                suspension,
+                cells,
+                outcome,
+                audio,
+                rng,
+            } => {
+                let (batch, next_object_id) =
+                    self.lifecycle_batch(function, Value::Nil, outcome, parse_return)?;
+                Ok(LifecycleCallbackResult::Suspended {
+                    batch,
+                    next_object_id,
+                    audio,
+                    rng,
+                    resume: DefinitionScriptResume {
+                        suspension,
+                        cells,
+                        value: Value::Nil,
+                        receiver_available: true,
+                    },
+                })
+            }
+        }
+    }
+
+    pub(crate) fn lifecycle_batch(
+        &self,
+        function: &str,
+        value: Value,
+        outcome: compat::EffectContextOutcome,
+        parse_return: bool,
+    ) -> Result<(CommandBatch, u64), EngineError> {
+        let mut batch = if parse_return {
+            parse_command(&self.id, function, value)?
+        } else {
+            CommandBatch::default()
+        };
+        let compat::EffectContextOutcome {
+            object,
+            global,
+            object_update,
+            object_commands,
+            command_operations,
+            command_events: _,
+            destroy_object,
+            environment,
+            physics,
+            spawns,
+            landscape,
+            solid_mask_operations,
+            host_raster_preview,
+            particles,
+            transfer_zones,
+            messages,
+            player_commands,
+            object_order_commands,
+            object_lists,
+            next_mission_commands,
+            audio,
+            trigger_game_over,
+            script_go,
+            script_counter,
+            next_object_id,
+            other_objects,
+            context_locals: _,
+            menu_requests: _,
+        } = outcome;
+        if let Some(update) = object_update {
+            // `ObjectDelta::merge_update` deliberately excludes local_vars
+            // because a host update must not replace a live VM cell table.
+            // Lifecycle callbacks carry that table in this channel, so keep
+            // its snapshot when folding the remaining fields.
+            let local_vars = update.local_vars.clone();
+            batch.delta.merge_update(update);
+            if let Some(local_vars) = local_vars {
+                batch.delta.local_vars = Some(local_vars);
+            }
+        }
+        batch.effects.extend(object);
+        batch.global_effects.extend(global);
+        batch.commands.extend(object_commands);
+        batch.command_ops.extend(command_operations);
+        batch.destroy |= destroy_object;
+        batch.environment = environment;
+        batch.physics = physics;
+        batch.spawns.extend(spawns);
+        batch.landscape_ops.extend(landscape);
+        batch.solid_mask_operations.extend(solid_mask_operations);
+        batch.host_raster_preview = host_raster_preview;
+        batch.particles.extend(particles);
+        batch.transfer_zones.extend(transfer_zones);
+        batch.messages.extend(messages);
+        batch.player_commands.extend(player_commands);
+        batch.object_order_commands.extend(object_order_commands);
+        batch.object_lists = object_lists;
+        batch.next_mission_commands.extend(next_mission_commands);
+        batch.audio.extend(audio.events);
+        batch.trigger_game_over |= trigger_game_over;
+        if script_go.is_some() {
+            batch.script_go = script_go;
+        }
+        if script_counter.is_some() {
+            batch.script_counter = script_counter;
+        }
+        batch.other_objects.extend(other_objects);
+        Ok((batch, next_object_id))
     }
 
     /// Run C4Object::Incinerate inside the carrier's live host context so its
@@ -3836,6 +4428,145 @@ impl Definition {
         Ok((value, host_effects, audio_state, rng))
     }
 
+    /// Continuation-aware sibling of `exec_in_object_context_for_definition`.
+    /// All guards are scoped to one active run.  A suspension returns after
+    /// those guards restore their prior state, carrying only owned VM state,
+    /// local cells, and the partial host outcome to the engine driver.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_in_object_context_for_definition_with_continuation<F>(
+        &self,
+        object_definition: &Definition,
+        state: &ObjectState,
+        object_id: ObjectId,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        label: &str,
+        resume: Option<DefinitionScriptResume>,
+        publish_spawn_previews: bool,
+        invoke: F,
+    ) -> Result<DefinitionCallbackResult, EngineError>
+    where
+        F: FnOnce(
+            &clonk_script::Engine,
+            &clonk_script::LocalCells,
+            Value,
+            Option<(ScriptSuspension, Value)>,
+        ) -> Result<ScriptCallOutcome, clonk_script::ScriptError>,
+    {
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let object_context = object_definition.host_object_context(state, object_id, &world);
+        let receiver_available = resume
+            .as_ref()
+            .is_none_or(|resume| resume.receiver_available);
+        let (cells, resume_call) = match resume {
+            Some(DefinitionScriptResume {
+                suspension,
+                cells,
+                value,
+                receiver_available: _,
+            }) => (cells, Some((suspension, value))),
+            None => (
+                clonk_script::LocalCells::from_local_vars(&state.local_vars),
+                None,
+            ),
+        };
+        let run = || {
+            compat::with_synchronous_script_boundary(|| {
+                // A removed/replaced receiver keeps the suspended frame's
+                // cells, but those cells no longer belong to the numeric
+                // object id. Registering them would let a destination
+                // object that reuses the id borrow the old receiver's
+                // locals on a nested call.
+                if receiver_available {
+                    compat::register_session_local_cells(object_id, cells.clone());
+                }
+                invoke(
+                    &self.script,
+                    &cells,
+                    if receiver_available {
+                        compat::object_reference_value(object_id)
+                    } else {
+                        Value::Nil
+                    },
+                    resume_call,
+                )
+            })
+        };
+        let (result, mut host_effects) = if publish_spawn_previews {
+            compat::with_effect_context_with_state_and_spawn_previews(
+                receiver_available.then_some(object_context),
+                global_effects,
+                world,
+                next_object_id,
+                game_over_triggered,
+                run,
+            )
+        } else {
+            compat::with_effect_context_with_state(
+                receiver_available.then_some(object_context),
+                global_effects,
+                world,
+                next_object_id,
+                game_over_triggered,
+                run,
+            )
+        };
+        let rng = guard.finish();
+        let physics_delta = physics_guard.finish();
+        let environment_delta = env_guard.finish();
+        if let Some(object_update) = &mut host_effects.object_update {
+            object_update.local_vars = Some(cells.snapshot());
+        } else {
+            let mut update = ObjectUpdate::default();
+            update.local_vars = Some(cells.snapshot());
+            host_effects.object_update = Some(update);
+        }
+        if !environment_delta.is_empty() {
+            host_effects.environment = Some(environment_delta);
+        }
+        if !physics_delta.is_empty() {
+            host_effects.physics = Some(physics_delta);
+        }
+        let audio_state = audio_guard.finish();
+        match result {
+            Ok(ScriptCallOutcome::Complete(value)) => Ok(DefinitionCallbackResult::Complete {
+                value,
+                outcome: host_effects,
+                audio: audio_state,
+                rng,
+            }),
+            Ok(ScriptCallOutcome::Suspended(suspension)) => {
+                Ok(DefinitionCallbackResult::Suspended {
+                    suspension,
+                    cells,
+                    outcome: host_effects,
+                    audio: audio_state,
+                    rng,
+                })
+            }
+            Err(source) => Err(script_execution_error(
+                self.id.clone(),
+                label.to_owned(),
+                source,
+                Some(Box::new(ScriptCallRecovery {
+                    outcome: host_effects,
+                    audio: audio_state,
+                    rng,
+                })),
+            )),
+        }
+    }
+
     /// `C4Object::GetInfoString`'s effect walk, executed in the target's
     /// live object context so `Fx*Info` callbacks retain their normal side
     /// effects, RNG, audio, local-variable, and nested-object semantics.
@@ -3978,6 +4709,60 @@ impl Definition {
                     label,
                     is_cpp_direct_exec_context(label),
                 )
+            },
+        )
+    }
+
+    /// Continuation-aware DirectExec in an object's context. Menu/control
+    /// expressions can call synchronous host functions just like ordinary
+    /// callbacks; the VM-owned expression frame must therefore cross the
+    /// engine boundary with its cells and retained operands intact.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn direct_exec_object_expression_with_continuation(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        source: &str,
+        label: &str,
+        strict_level: Option<Option<u8>>,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<DefinitionScriptResume>,
+    ) -> Result<DefinitionCallbackResult, EngineError> {
+        let strict_level = strict_level.unwrap_or_else(|| self.base_script.strict_level());
+        self.exec_in_object_context_for_definition_with_continuation(
+            self,
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            label,
+            resume,
+            false,
+            move |script, cells, this, resume| match resume {
+                Some((suspension, value)) => script
+                    .resume_script_continuation_with_value_and_this(suspension, value, this),
+                None => script
+                    .direct_exec_with_cells_and_this_at_strict_in_context_diagnostics_with_continuation(
+                        source,
+                        cells,
+                        this,
+                        strict_level,
+                        label,
+                        is_cpp_direct_exec_context(label),
+                    ),
             },
         )
     }
@@ -4268,6 +5053,45 @@ impl Definition {
         )
     }
 
+    /// Continuation-aware `Fx<Name>Damage` dispatch. Damage is a callback
+    /// result rather than an effect event, but it crosses the same host
+    /// section boundary and therefore must retain its VM frame and cells.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_effect_damage_with_continuation(
+        &self,
+        carrier: Option<(&ObjectState, ObjectId)>,
+        effect: &EffectState,
+        change: i32,
+        cause: i32,
+        caused_by: i32,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<EffectScriptResume>,
+    ) -> Result<EffectCallbackResult, EngineError> {
+        self.call_effect_event_with_continuation(
+            carrier,
+            effect,
+            "Damage",
+            "FxDamage",
+            vec![Value::Int(change), Value::Int(cause), Value::Int(caused_by)],
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            resume,
+        )
+    }
+
     /// `Fx<Name>Effect` check call (C4Effect.cpp:280-282): the checker
     /// effect is asked about a pending new effect — the callback receives
     /// the new name plus the AddEffect rVal1-4 (C++ passes them at
@@ -4426,6 +5250,46 @@ impl Definition {
         )
     }
 
+    /// Continuation-aware common entry for one effect callback. The event
+    /// runner supplies the C++ callback-specific extra arguments and owns the
+    /// returned continuation until the host request has been committed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_effect_event_with_continuation(
+        &self,
+        carrier: Option<(&ObjectState, ObjectId)>,
+        effect: &EffectState,
+        event: &'static str,
+        function_label: &'static str,
+        extras: Vec<Value>,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        resume: Option<EffectScriptResume>,
+    ) -> Result<EffectCallbackResult, EngineError> {
+        self.dispatch_effect_callback_with_parameter_conversion_policy_and_continuation(
+            carrier,
+            effect,
+            event,
+            function_label,
+            extras,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3,
+            resume,
+        )
+    }
+
     fn dispatch_effect_callback(
         &self,
         carrier: Option<(&ObjectState, ObjectId)>,
@@ -4467,7 +5331,7 @@ impl Definition {
         effect: &EffectState,
         event: &'static str,
         function_label: &'static str,
-        mut extras: Vec<Value>,
+        extras: Vec<Value>,
         rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
@@ -4478,31 +5342,95 @@ impl Definition {
         audio: AudioRegistry,
         parameter_conversion: compat::EffectCallbackParameterConversionPolicy,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        let result = self
+            .dispatch_effect_callback_with_parameter_conversion_policy_and_continuation(
+                carrier,
+                effect,
+                event,
+                function_label,
+                extras,
+                rng,
+                global_effects,
+                physics,
+                environment,
+                frame,
+                world,
+                game_over_triggered,
+                audio,
+                parameter_conversion,
+                None,
+            )?;
+        match result {
+            EffectCallbackResult::Complete {
+                value,
+                outcome,
+                audio,
+                rng,
+            } => Ok((outcome, audio, rng, value)),
+            EffectCallbackResult::Suspended { .. } => Err(EngineError::invalid_script_output(
+                self.id.clone(),
+                function_label.to_owned(),
+                "effect callback yielded outside its continuation driver".to_owned(),
+            )),
+        }
+    }
+
+    /// Dispatch one `Fx*` callback while retaining a host continuation when
+    /// `LoadScenarioSection` yields. The returned outcome contains every
+    /// mutation made before the yield; the caller folds that prefix, performs
+    /// the requested switch, and invokes this method again with the owned
+    /// [`EffectScriptResume`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_effect_callback_with_parameter_conversion_policy_and_continuation(
+        &self,
+        carrier: Option<(&ObjectState, ObjectId)>,
+        effect: &EffectState,
+        event: &'static str,
+        function_label: &'static str,
+        mut extras: Vec<Value>,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        parameter_conversion: compat::EffectCallbackParameterConversionPolicy,
+        resume: Option<EffectScriptResume>,
+    ) -> Result<EffectCallbackResult, EngineError> {
         let next_object_id = world.next_object_id();
         // The name is materialized only when a callback exists. The miss is
         // the common case — most effects implement few of the events — and it
         // now costs no allocation at all. `native_fire_start` below is the one
         // miss that still proceeds, and it never reads the name.
-        let resolved = crate::with_effect_callback_name(&effect.name, event, |callback_name| {
-            resolve_effect_script_callback(effect, callback_name, &world)
-                .map(|callback| (callback, callback_name.to_owned()))
-        });
-        let (callback, callback_name) = match resolved {
-            Some((callback, name)) => (Some(callback), name),
-            None => (None, String::new()),
+        let (callback, callback_name) = match resume.as_ref() {
+            Some(resume) => (Some(resume.callback.clone()), resume.callback_name.clone()),
+            None => {
+                let resolved =
+                    crate::with_effect_callback_name(&effect.name, event, |callback_name| {
+                        resolve_effect_script_callback(effect, callback_name, &world)
+                            .map(|callback| (callback, callback_name.to_owned()))
+                    });
+                match resolved {
+                    Some((callback, name)) => (Some(callback), name),
+                    None => (None, String::new()),
+                }
+            }
         };
         // AddFunc registers the engine's FxFireStart below script functions.
         // C4Effect therefore calls the native body only when script lookup did
         // not find an override; inherited() from an override already reaches
         // the registered host through the ordinary VM path.
-        let native_fire_start = callback.is_none() && effect.name == C4FX_FIRE && event == "Start";
+        let native_fire_start =
+            resume.is_none() && callback.is_none() && effect.name == C4FX_FIRE && event == "Start";
         if callback.is_none() && !native_fire_start {
-            return Ok((
-                EffectContextOutcome::empty(next_object_id, audio.clone()),
+            return Ok(EffectCallbackResult::Complete {
+                value: None,
+                outcome: EffectContextOutcome::empty(next_object_id, audio.clone()),
                 audio,
                 rng,
-                None,
-            ));
+            });
         }
         // The affected object is a real C4Object that C4Effect passes as
         // pForObj. Its ActMap, physicals, OCF metadata and definition id
@@ -4550,21 +5478,31 @@ impl Definition {
         // The affected carrier and command target may be different objects,
         // so copy locals from the command target's world snapshot unless it
         // is the carrier whose threaded event snapshot is newer.
-        let context_object = callback
+        let context_object = match resume.as_ref() {
+            Some(resume) if resume.context_available => resume.context_object,
+            // A suspended frame keeps its original command-target identity;
+            // never rediscover it by numeric id after the section switch.
+            Some(_) => None,
+            None => callback
+                .as_ref()
+                .and_then(|callback| callback.command_object)
+                .or_else(|| {
+                    native_fire_start
+                        .then(|| {
+                            effect
+                                .command_target
+                                .map(|target| ObjectId::new(target as u64))
+                        })
+                        .flatten()
+                        .filter(|target| world.get(*target).is_some())
+                }),
+        };
+        let context_is_self = resume
             .as_ref()
-            .and_then(|callback| callback.command_object)
-            .or_else(|| {
-                native_fire_start
-                    .then(|| {
-                        effect
-                            .command_target
-                            .map(|target| ObjectId::new(target as u64))
-                    })
-                    .flatten()
-                    .filter(|target| world.get(*target).is_some())
+            .map(|resume| resume.context_is_self)
+            .unwrap_or_else(|| {
+                carrier.is_some_and(|(_, object_id)| context_object == Some(object_id))
             });
-        let context_is_self =
-            carrier.is_some_and(|(_, object_id)| context_object == Some(object_id));
         // `cthr->Obj` is that same command target: C4AulScriptFunc::Exec makes
         // the object it is handed the calling object (C4AulExec.cpp:1638-1648),
         // so every native that falls back to the ambient object reads and
@@ -4576,12 +5514,22 @@ impl Definition {
             .flatten()
             .and_then(|object_id| world.get(object_id))
             .and_then(|object| object.full_state().cloned());
+        let context_available = resume.as_ref().map_or(context_object.is_some(), |resume| {
+            resume.context_available && context_object.is_some()
+        });
+        let receiver_available = resume
+            .as_ref()
+            .is_none_or(|resume| resume.receiver_available);
         // The engine's own FxFireStart is not script: FnFxFireStart mutates
         // the explicit pObj parameter it is handed (C4Effect.cpp:557-570), so
         // nothing on that path can observe `cthr->Obj`. Keep the carrier as
         // its scope rather than re-materializing the same object foreign.
-        let ambient = if native_fire_start {
+        let ambient = if !context_available {
+            None
+        } else if native_fire_start {
             carrier
+        } else if !receiver_available && context_is_self {
+            None
         } else {
             match (context_object, carrier) {
                 (Some(object_id), Some((state, carrier_id))) if object_id == carrier_id => {
@@ -4600,23 +5548,32 @@ impl Definition {
             .as_deref()
             .and_then(|id| world.definition_metadata(id))
             .cloned();
-        let context_this = context_object
-            .map(compat::object_reference_value)
-            .unwrap_or(Value::Nil);
-        let context_locals = if context_is_self {
+        let context_this = if context_available {
+            context_object
+                .map(compat::object_reference_value)
+                .unwrap_or(Value::Nil)
+        } else {
+            Value::Nil
+        };
+        let context_locals = if let Some(resume) = resume.as_ref() {
+            resume.cells.snapshot()
+        } else if context_is_self {
             carrier
-                .map(|(state, _)| state.local_vars.clone())
+                .map(|(state, _)| state.local_vars.snapshot())
                 .unwrap_or_default()
         } else {
             context_object
                 .and_then(|object_id| world.get(object_id))
-                .and_then(|object| object.full_state().map(|state| state.local_vars.clone()))
+                .and_then(|object| object.full_state().map(|state| state.local_vars.snapshot()))
                 .unwrap_or_default()
         };
         // The callback's LIVE local cells: registered as the object's
         // session so nested calls / cross-object references back onto it
         // share the storage (C++ mutates the one live C4Object).
-        let context_cells = clonk_script::LocalCells::from_local_vars(&context_locals);
+        let context_cells = resume
+            .as_ref()
+            .map(|resume| resume.cells.clone())
+            .unwrap_or_else(|| clonk_script::LocalCells::from_local_vars(&context_locals));
 
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
@@ -4734,104 +5691,104 @@ impl Definition {
                 next_object_id,
                 game_over_triggered,
                 || {
-                    if let Some(session_id) = context_object {
-                        compat::register_session_local_cells(session_id, context_cells.clone());
-                    }
-                    if native_fire_start {
-                        return compat::fx_fire_start(&args)
-                            .map(|value| Some((value, context_cells.snapshot())))
-                            .map_err(ScriptError::from);
-                    }
-                    let callback = callback
-                        .as_ref()
-                        .expect("script callback exists when native fallback is inactive");
-                    if callback.engine_global_entry {
-                        if context_object.is_some() {
+                    compat::with_synchronous_script_boundary(|| {
+                        if let Some(session_id) = context_object {
+                            compat::register_session_local_cells(session_id, context_cells.clone());
+                        }
+                        if let Some(resume) = resume {
+                            let result = resume
+                                .callback
+                                .script
+                                .resume_effect_callback_continuation_with_value_and_this(
+                                    resume.suspension,
+                                    resume.value,
+                                    context_this,
+                                );
+                            return result.map(|result| match result {
+                                ScriptCallOutcome::Complete(value) => {
+                                    EffectScriptCallResult::Complete(Some((
+                                        value,
+                                        context_cells.snapshot(),
+                                    )))
+                                }
+                                ScriptCallOutcome::Suspended(suspension) => {
+                                    EffectScriptCallResult::Suspended(suspension)
+                                }
+                            });
+                        }
+                        if native_fire_start {
+                            return compat::fx_fire_start(&args)
+                                .map(|value| Some((value, context_cells.snapshot())))
+                                .map(EffectScriptCallResult::Complete)
+                                .map_err(ScriptError::from);
+                        }
+                        let callback = callback
+                            .as_ref()
+                            .expect("script callback exists when native fallback is inactive");
+                        if callback.engine_global_entry {
                             let call = if parameter_conversion
+                                == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+                            {
+                                callback
+                                    .script
+                                    .call_resolved_with_cells_and_this_with_continuation_for_effect_callback(
+                                        &callback.resolution,
+                                        true,
+                                        &args,
+                                        &context_cells,
+                                        context_this,
+                                    )
+                            } else {
+                                callback
+                                    .script
+                                    .call_resolved_with_cells_and_this_with_continuation(
+                                        &callback.resolution,
+                                        true,
+                                        &args,
+                                        &context_cells,
+                                        context_this,
+                                    )
+                            };
+                            return call.map(|result| match result {
+                                ScriptCallOutcome::Complete(value) => {
+                                    EffectScriptCallResult::Complete(Some((
+                                        value,
+                                        context_cells.snapshot(),
+                                    )))
+                                }
+                                ScriptCallOutcome::Suspended(suspension) => {
+                                    EffectScriptCallResult::Suspended(suspension)
+                                }
+                            });
+                        }
+                        let call = if parameter_conversion
                             == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
                         {
                             callback
                                 .script
-                                .call_resolved_with_cells_and_this_for_effect_callback(
-                                    &callback.resolution,
-                                    true,
-                                    &args,
-                                    &context_cells,
-                                    context_this,
-                                )
-                        } else {
-                            callback.script.call_resolved_with_cells_and_this(
-                                &callback.resolution,
-                                true,
-                                &args,
-                                &context_cells,
-                                context_this,
-                            )
-                        };
-                            return call.map(|value| Some((value, context_cells.snapshot())));
-                        }
-                        if parameter_conversion
-                            == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
-                        {
-                            let cells = clonk_script::LocalCells::from_local_vars(&HashMap::new());
-                            return callback
-                                .script
-                                .call_resolved_with_cells_and_this_for_effect_callback(
-                                    &callback.resolution,
-                                    true,
-                                    &args,
-                                    &cells,
-                                    Value::Nil,
-                                )
-                                .map(|value| Some((value, HashMap::new())));
-                        }
-                        return callback
-                            .script
-                            .call_resolved_with_ref_args(&callback.resolution, true, &args)
-                            .map(|(value, _)| Some((value, HashMap::new())));
-                    }
-                    if context_object.is_some() {
-                        if parameter_conversion
-                            == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
-                        {
-                            return callback
-                                .script
-                                .call_effect_callback_with_cells_and_this(
+                                .call_with_cells_and_this_with_continuation_for_effect_callback(
                                     &callback_name,
                                     &args,
                                     &context_cells,
                                     context_this,
                                 )
-                                .map(|value| Some((value, context_cells.snapshot())));
-                        }
-                        return callback.script.call_effect_callback_in_context_with_cells(
-                            &effect.name,
-                            event,
-                            &args,
-                            &context_cells,
-                            context_this,
-                        );
-                    }
-                    if parameter_conversion
-                        == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
-                    {
-                        return callback
-                            .script
-                            .call_effect_callback_with_locals_and_this(
+                        } else {
+                            callback.script.call_with_cells_and_this_with_continuation(
                                 &callback_name,
                                 &args,
-                                &context_locals,
+                                &context_cells,
                                 context_this,
                             )
-                            .map(Some);
-                    }
-                    callback.script.call_effect_callback_in_context(
-                        &effect.name,
-                        event,
-                        &args,
-                        &context_locals,
-                        context_this,
-                    )
+                        };
+                        call.map(|result| match result {
+                            ScriptCallOutcome::Complete(value) => EffectScriptCallResult::Complete(
+                                Some((value, context_cells.snapshot())),
+                            ),
+                            ScriptCallOutcome::Suspended(suspension) => {
+                                EffectScriptCallResult::Suspended(suspension)
+                            }
+                        })
+                    })
                 },
             );
         let rng = guard.finish();
@@ -4839,11 +5796,25 @@ impl Definition {
         let environment_delta = env_guard.finish();
         let audio_state = audio_guard.finish();
 
-        let callback_result = recover_effect_callback_error(
-            result,
-            &context_cells,
-            format!("{}::{}::{}", self.id, effect.name, function_label),
-        )?;
+        let (callback_result, suspended) = match result {
+            Ok(EffectScriptCallResult::Complete(result)) => (
+                recover_effect_callback_error(
+                    Ok(result),
+                    &context_cells,
+                    format!("{}::{}::{}", self.id, effect.name, function_label),
+                )?,
+                None,
+            ),
+            Ok(EffectScriptCallResult::Suspended(suspension)) => (None, Some(suspension)),
+            Err(source) => (
+                recover_effect_callback_error(
+                    Err(source),
+                    &context_cells,
+                    format!("{}::{}::{}", self.id, effect.name, function_label),
+                )?,
+                None,
+            ),
+        };
         if !environment_delta.is_empty() {
             commands.environment = Some(environment_delta);
         }
@@ -4866,14 +5837,47 @@ impl Definition {
                 adopt_carrier_effect_writes_from_nested(&mut commands, carrier_id);
             }
         }
-        let callback_result = callback_result.map(|(value, updated_locals)| {
-            if context_is_self {
-                commands.context_locals = Some(updated_locals);
-            } else if let Some(context_object) = context_object {
-                append_effect_command_target_locals(&mut commands, context_object, updated_locals);
-            }
-            value
-        });
-        Ok((commands, audio_state, rng, callback_result))
+        if let Some(suspension) = suspended {
+            let callback = callback
+                .expect("a suspended effect callback always has a script target")
+                .clone();
+            return Ok(EffectCallbackResult::Suspended {
+                resume: EffectScriptResume {
+                    suspension,
+                    cells: context_cells,
+                    value: Value::Nil,
+                    context_instance_token: None,
+                    context_available: context_object.is_some(),
+                    receiver_available,
+                    callback,
+                    callback_name,
+                    event,
+                    function_label,
+                    effect_name: effect.name.clone(),
+                    context_object,
+                    context_is_self,
+                },
+                outcome: commands,
+                audio: audio_state,
+                rng,
+            });
+        }
+        Ok(EffectCallbackResult::Complete {
+            value: callback_result.map(|(value, updated_locals)| {
+                if context_is_self {
+                    commands.context_locals = Some(updated_locals);
+                } else if let Some(context_object) = context_object {
+                    append_effect_command_target_locals(
+                        &mut commands,
+                        context_object,
+                        updated_locals,
+                    );
+                }
+                value
+            }),
+            outcome: commands,
+            audio: audio_state,
+            rng,
+        })
     }
 }

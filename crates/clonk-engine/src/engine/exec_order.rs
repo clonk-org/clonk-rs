@@ -1600,6 +1600,66 @@ impl Engine {
         cache.1.get(&id).copied()
     }
 
+    /// Return the runtime identity of the currently live object with `id`.
+    /// C4Object numbers are serialized/reused, while a native pointer remains
+    /// tied to one allocation. This token supplies that allocation boundary
+    /// without retaining an alias into the mutable object vector.
+    pub(crate) fn object_instance_token(&self, id: ObjectId) -> Option<u64> {
+        let index = self.find_object_index(id)?;
+        let token = self.objects[index].instance_token;
+        if token != 0 {
+            return Some(token);
+        }
+        // Legacy/programmatic fixtures may predate the transient field. Pay
+        // the compatibility scan only for that zero-token object; production
+        // objects are tagged by `note_objects_changed` at insertion time.
+        self.ensure_object_instance_tokens();
+        self.object_instance_tokens.borrow().get(&id).copied()
+    }
+
+    /// Reserve one transient allocation identity for a callback-created
+    /// object before it enters the authoritative object vector. The counter
+    /// is interior mutable because host contexts are built from `&self`, and
+    /// the token is runtime metadata only; it never enters synchronized state.
+    pub(crate) fn allocate_object_instance_token(&self) -> u64 {
+        let token = self.next_object_instance_token.get().max(1);
+        self.next_object_instance_token.set(
+            token
+                .checked_add(1)
+                .expect("object instance token overflow"),
+        );
+        token
+    }
+
+    fn ensure_object_instance_tokens(&self) {
+        let mut tokens = self.object_instance_tokens.borrow_mut();
+        let live_ids = self
+            .objects
+            .iter()
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        tokens.retain(|id, _| live_ids.contains(id));
+        let mut next = self.next_object_instance_token.get();
+        for object in &self.objects {
+            let id = object.id;
+            if object.instance_token != 0 {
+                tokens.insert(id, object.instance_token);
+                continue;
+            }
+            if tokens.contains_key(&id) {
+                continue;
+            }
+            // Zero is reserved for an uninitialized external fixture; avoid
+            // wrapping back to it when a long-running engine exhausts u64.
+            if next == 0 {
+                next = 1;
+            }
+            tokens.insert(id, next);
+            next = next.wrapping_add(1);
+        }
+        self.next_object_instance_token.set(next);
+    }
+
     pub(crate) fn object_ids_are_unique(&self) -> bool {
         let Some(first) = self.objects.first() else {
             return true;
@@ -1611,9 +1671,33 @@ impl Engine {
         self.object_index_cache.borrow().1.len() == self.objects.len()
     }
 
-    pub(crate) fn note_objects_changed(&self) {
+    pub(crate) fn note_objects_changed(&mut self) {
         self.objects_generation
             .set(self.objects_generation.get().wrapping_add(1));
+        // Tag each newly materialized Object at the mutation boundary so
+        // replacing an ID cannot inherit its predecessor token. The field is
+        // transient and does not participate in snapshots or savegame state.
+        let mut tokens = self.object_instance_tokens.borrow_mut();
+        let mut next = self.next_object_instance_token.get();
+        let live_ids = self
+            .objects
+            .iter()
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        tokens.retain(|id, _| live_ids.contains(id));
+        for object in &mut self.objects {
+            if object.instance_token != 0 {
+                tokens.insert(object.id, object.instance_token);
+                continue;
+            }
+            if next == 0 {
+                next = 1;
+            }
+            object.instance_token = next;
+            tokens.insert(object.id, next);
+            next = next.wrapping_add(1);
+        }
+        self.next_object_instance_token.set(next);
         self.note_solid_mask_host_state_changed();
     }
 

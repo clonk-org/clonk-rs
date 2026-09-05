@@ -819,12 +819,11 @@ fn load_scenario_section_defaults_flags_to_zero() {
 }
 
 #[test]
-fn load_scenario_section_refuses_a_request_from_the_running_switch_own_callbacks() {
-    // Native reaches the switch's AssignRemoval and global ClearAll callbacks
-    // from inside FnLoadScenarioSection, so a section-switching pack's own
-    // re-entry guard is still set when they run. Here the switch is a deferred
-    // player command, so the guard is already clear and each callback would
-    // queue another switch (clonk-org/clonk-rs#1388).
+fn load_scenario_section_keeps_a_request_when_a_switch_is_in_flight() {
+    // The in-flight marker belongs to the engine's callback driver. It must
+    // not turn a native FnLoadScenarioSection call into a fabricated false
+    // result: the request still crosses the same ordered command channel and
+    // the driver decides when to perform it (C4Script.cpp:5401-5408).
     let world = HostWorldContext::default()
         .with_scenario_sections(["Main", "Mountains"])
         .with_scenario_section_switch_in_flight(true);
@@ -833,10 +832,14 @@ fn load_scenario_section_refuses_a_request_from_the_running_switch_own_callbacks
     });
 
     assert_eq!(
-        result.expect("a refused section request is not a script error"),
-        Value::Int(0)
+        result.expect("an in-flight section request is accepted"),
+        Value::Int(1)
     );
-    assert!(outcome.player_commands.is_empty());
+    assert!(matches!(
+        outcome.player_commands.as_slice(),
+        [PlayerCommand::LoadScenarioSection { name, flags, .. }]
+            if name == "Mountains" && *flags == 3
+    ));
 }
 
 #[test]

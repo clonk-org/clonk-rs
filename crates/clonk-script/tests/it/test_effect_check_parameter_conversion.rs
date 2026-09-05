@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use clonk_script::{Engine, LocalCells, Script, ScriptError, Value};
+use clonk_script::{
+    Engine, LocalCells, RuntimeError, Script, ScriptCallOutcome, ScriptError, Value,
+};
 
 fn runtime_message(error: ScriptError) -> String {
     match error {
@@ -162,4 +164,113 @@ fn exact_global_effect_check_passes_values_to_strict3_reference_parameters() {
         ),
         r#"call to "FxStrictEffect" parameter 1: got "string", but expected "&"!"#
     );
+}
+
+#[derive(Debug)]
+struct PauseRequest;
+
+#[test]
+fn effect_continuation_keeps_legacy_parameter_conversion_for_entry() {
+    // C4Effect::Execute enters the retained callback through C4AulScriptFunc::Exec
+    // (src/C4Effect.cpp:271-287), so a pre-STRICT3 conversion warning must not
+    // abort the callback before its yielding native body is reached.
+    let mut engine = Engine::new();
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict 2
+        func FxResearchEffect(id definition) {
+            return Pause();
+        }
+    "#,
+    );
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let args = [Value::String("Door".into())];
+    let cells = LocalCells::from_local_vars(&HashMap::new());
+
+    let ordinary = engine.call_with_cells_and_this_with_continuation(
+        "FxResearchEffect",
+        &args,
+        &cells,
+        Value::Nil,
+    );
+    assert!(
+        ordinary.is_err(),
+        "ordinary calls keep conversion failures fatal"
+    );
+
+    let suspension = match engine
+        .call_with_cells_and_this_with_continuation_for_effect_callback(
+            "FxResearchEffect",
+            &args,
+            &cells,
+            Value::Nil,
+        )
+        .expect("the warning-only entry must reach Pause")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("effect callback completed before Pause"),
+    };
+    let resumed = engine
+        .resume_effect_callback_continuation_with_value_and_this(
+            suspension,
+            Value::Int(5),
+            Value::Nil,
+        )
+        .expect("the effect continuation must resume");
+    match resumed {
+        ScriptCallOutcome::Complete(value) => assert_eq!(value, Value::Int(5)),
+        ScriptCallOutcome::Suspended(_) => panic!("effect callback suspended twice"),
+    }
+}
+
+#[test]
+fn resolved_global_effect_continuation_keeps_legacy_parameter_conversion() {
+    // The callback pointer is retained by the engine-global effect link, while
+    // the exact LinkedTo host still supplies its body (src/C4Aul.cpp:281-301).
+    let globals = Script::compile(
+        r#"
+        #strict 2
+        global func FxGlobalEffect(id definition) {
+            return Pause();
+        }
+    "#,
+    )
+    .expect("global effect callback compiles");
+    let mut engine = Engine::new();
+    engine.set_global_functions(Some(Arc::new(globals.functions().clone())));
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation(PauseRequest, Value::Nil))
+    });
+    let resolution = engine
+        .resolve_global_function("FxGlobalEffect")
+        .expect("global callback resolves");
+    let cells = LocalCells::from_local_vars(&HashMap::new());
+
+    let suspension = match engine
+        .call_resolved_with_cells_and_this_with_continuation_for_effect_callback(
+            &resolution,
+            true,
+            &[Value::String("Door".into())],
+            &cells,
+            Value::Nil,
+        )
+        .expect("the warning-only global entry must reach Pause")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(_) => panic!("global effect completed before Pause"),
+    };
+    let resumed = engine
+        .resume_effect_callback_continuation_with_value_and_this(
+            suspension,
+            Value::Int(7),
+            Value::Nil,
+        )
+        .expect("the global effect continuation must resume");
+    match resumed {
+        ScriptCallOutcome::Complete(value) => assert_eq!(value, Value::Int(7)),
+        ScriptCallOutcome::Suspended(_) => panic!("global effect suspended twice"),
+    }
 }

@@ -1474,6 +1474,293 @@ fn parity_scenario_section_spec(name: &str) -> crate::scenario::ScenarioSectionS
     }
 }
 
+fn parity_script_bool(value: ScriptValue, field: &str) -> bool {
+    match value {
+        ScriptValue::Bool(value) => value,
+        ScriptValue::RawBool(value) => value != 0,
+        ScriptValue::Int(value) => value != 0,
+        other => panic!("scenario-section parity `{field}` returned {other:?}"),
+    }
+}
+
+/// Drive the real Rust C4Script host for the bounded C++
+/// `FnLoadScenarioSection` rows. The C++ half extracts only the host boundary
+/// and a callback-shaped prefix/suffix; this driver executes an actual
+/// `Initialize` callback, so the continuation result is observed through the
+/// VM's global state rather than manufactured in the comparator.
+fn parity_scenario_section_host_case(case: &Value, case_index: usize) {
+    const SECTION: &str = "scenario_section_host_lifecycle";
+    let name = case["case"].as_str().unwrap_or("?");
+    let target = match name {
+        "success_prefix_suffix" => "next",
+        "failure_prefix_suffix" => "missing",
+        "empty_name" => "",
+        other => panic!("{SECTION} has unknown host case `{other}`"),
+    };
+    let configured = if name == "success_prefix_suffix" {
+        vec![
+            parity_scenario_section_spec("main"),
+            parity_scenario_section_spec("next"),
+        ]
+    } else {
+        vec![parity_scenario_section_spec("main")]
+    };
+
+    let observer = r#"#strict 3
+static trace, switch_result;
+
+global func ResetScenarioHostTrace()
+{
+  trace = switch_result = 0;
+  return true;
+}
+
+global func RecordTrace(int value)
+{
+  trace = trace * 10 + value;
+  return true;
+}
+
+global func RecordSwitchResult(bool value)
+{
+  switch_result = !!value;
+  trace = trace * 10 + switch_result;
+  return true;
+}
+
+global func ReadScenarioHostTrace() { return trace; }
+global func ReadScenarioHostResult() { return switch_result; }
+"#;
+    let callback = format!(
+        "#strict 3\nfunc Initialize() {{\n  RecordTrace(1);\n  var switched = LoadScenarioSection(\"{target}\");\n  RecordSwitchResult(switched);\n  RecordTrace(3);\n  return 0;\n}}\n"
+    );
+
+    let mut engine = Engine::new();
+    engine.configure_scenario_sections(&configured);
+    assert_eq!(
+        engine
+            .install_global_scripts(&[
+                ("System.c4g/ScenarioHostParity.c".into(), observer.into(),)
+            ]),
+        1,
+        "{SECTION} row {case_index} installs the observer"
+    );
+    crate::TestValueExt::test_value(
+        engine.call_engine_global_function("ResetScenarioHostTrace", &[]),
+    );
+
+    let mut definition = Definition::from_script("HOST", "Scenario host callback", &callback)
+        .unwrap_or_else(|error| panic!("HOST fixture compiles: {error}"));
+    definition.set_c4_callback_convention(true);
+    engine
+        .register_definition(definition)
+        .unwrap_or_else(|error| panic!("{SECTION} row {case_index} registers callback: {error}"));
+    crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("HOST").with_id(ObjectId::new(1))),
+    );
+
+    let trace = match crate::TestValueExt::test_value(
+        engine.call_engine_global_function("ReadScenarioHostTrace", &[]),
+    ) {
+        ScriptValue::Int(value) => value,
+        ScriptValue::Bool(value) => i32::from(value),
+        ScriptValue::RawBool(value) => i32::from(value != 0),
+        other => panic!("{SECTION} row {case_index} trace is {other:?}"),
+    };
+    let switch_result = parity_script_bool(
+        crate::TestValueExt::test_value(
+            engine.call_engine_global_function("ReadScenarioHostResult", &[]),
+        ),
+        "switch result",
+    );
+    let rust = serde_json::json!({
+        "case": name,
+        "return": switch_result,
+        "trace": [(trace / 100) % 10, (trace / 10) % 10, trace % 10],
+    });
+    expect_json_eq(SECTION, case_index, "row", case.clone(), rust);
+}
+
+/// Exercise real Engine object creation, the script SetObjectStatus host, and
+/// the section loader's active/inactive lists. The C++ row compares only the
+/// source-backed Construction count and final list membership. Native
+/// C4Object::Init has no honest Rust counter-equivalent, and the extracted
+/// DoCon call intentionally remains an abstract C++ stub, so neither is
+/// represented as a cross-language golden field. Rust still observes its real
+/// Initialize callbacks and asserts that both newly-created objects run them
+/// exactly once.
+fn parity_scenario_section_lifecycle_case(case: &Value, case_index: usize) {
+    const SECTION: &str = "scenario_section_host_lifecycle";
+    let observer = r#"#strict 3
+static initialize_count, construction_count;
+
+global func ResetLifecycleCounts()
+{
+  initialize_count = 0;
+  construction_count = 0;
+  return true;
+}
+
+global func RecordInitialize()
+{
+  initialize_count += 1;
+  return true;
+}
+
+global func RecordConstruction()
+{
+  construction_count += 1;
+  return true;
+}
+
+global func ReadInitializeCount() { return initialize_count; }
+global func ReadConstructionCount() { return construction_count; }
+"#;
+    let mut inactive_definition = Definition::from_script(
+        "INAC",
+        "Inactive lifecycle object",
+        r#"#strict 3
+func Construction()
+{
+  RecordConstruction();
+  return 0;
+}
+
+func Initialize()
+{
+  RecordInitialize();
+  return 0;
+}
+
+public func DeactivateForSection()
+{
+  return SetObjectStatus(C4OS_INACTIVE, this());
+}
+"#,
+    )
+    .unwrap_or_else(|error| panic!("INAC fixture compiles: {error}"));
+    inactive_definition.set_c4_callback_convention(true);
+    let mut active_definition = Definition::from_script(
+        "ACTV",
+        "Active lifecycle object",
+        r#"#strict 3
+func Construction()
+{
+  RecordConstruction();
+  return 0;
+}
+
+func Initialize()
+{
+  RecordInitialize();
+  return 0;
+}
+"#,
+    )
+    .unwrap_or_else(|error| panic!("ACTV fixture compiles: {error}"));
+    active_definition.set_c4_callback_convention(true);
+
+    let mut engine = Engine::new();
+    engine.configure_scenario_sections(&[
+        parity_scenario_section_spec("main"),
+        parity_scenario_section_spec("next"),
+    ]);
+    assert_eq!(
+        engine.install_global_scripts(&[(
+            "System.c4g/ScenarioLifecycleParity.c".into(),
+            observer.into(),
+        )]),
+        1,
+        "{SECTION} lifecycle row {case_index} installs the observer"
+    );
+    crate::TestValueExt::test_value(
+        engine.call_engine_global_function("ResetLifecycleCounts", &[]),
+    );
+    engine
+        .register_definition(inactive_definition)
+        .unwrap_or_else(|error| panic!("{SECTION} lifecycle registers INAC: {error}"));
+    engine
+        .register_definition(active_definition)
+        .unwrap_or_else(|error| panic!("{SECTION} lifecycle registers ACTV: {error}"));
+
+    let inactive = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("INAC").with_id(ObjectId::new(1))),
+    );
+    let inactive_index = engine
+        .find_object_index(inactive)
+        .unwrap_or_else(|| panic!("{SECTION} lifecycle inactive object exists"));
+    let deactivated = parity_script_bool(
+        crate::TestValueExt::test_value(engine.call_object_function(
+            inactive_index,
+            "DeactivateForSection",
+            Vec::new(),
+        )),
+        "deactivate",
+    );
+    let active = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("ACTV").with_id(ObjectId::new(2))),
+    );
+    let active_before = engine
+        .objects
+        .iter()
+        .filter(|object| !object.destroyed && object.state.status == ObjectStatus::Normal)
+        .map(|object| object.id.as_u64() as i64)
+        .collect::<Vec<_>>();
+    let loaded =
+        crate::TestValueExt::test_value(engine.load_scenario_section("next", 0, Vec::new()));
+    let initialize_count = match crate::TestValueExt::test_value(
+        engine.call_engine_global_function("ReadInitializeCount", &[]),
+    ) {
+        ScriptValue::Int(value) => value,
+        other => panic!("{SECTION} lifecycle initialize count is {other:?}"),
+    };
+    let construction_count = match crate::TestValueExt::test_value(
+        engine.call_engine_global_function("ReadConstructionCount", &[]),
+    ) {
+        ScriptValue::Int(value) => value,
+        other => panic!("{SECTION} lifecycle construction count is {other:?}"),
+    };
+    assert_eq!(
+        initialize_count, 2,
+        "{SECTION} lifecycle initializes each created object exactly once"
+    );
+    let live = |status: ObjectStatus| {
+        engine
+            .objects
+            .iter()
+            .filter(|object| !object.destroyed && object.state.status == status)
+            .map(|object| object.id.as_u64() as i64)
+            .collect::<Vec<_>>()
+    };
+    let inactive_numbers = live(ObjectStatus::Inactive);
+    let active_numbers = live(ObjectStatus::Normal);
+    let removed_numbers = active_before
+        .iter()
+        .copied()
+        .filter(|id| {
+            !engine
+                .objects
+                .iter()
+                .any(|object| !object.destroyed && object.id.as_u64() as i64 == *id)
+        })
+        .collect::<Vec<_>>();
+    let rust = serde_json::json!({
+        "case": case["case"].as_str().unwrap_or("?"),
+        "deactivated": deactivated,
+        "loaded": loaded,
+        "construction_count": construction_count,
+        "inactive_numbers": inactive_numbers,
+        "active_numbers": active_numbers,
+        "removed_numbers": removed_numbers,
+    });
+    expect_json_eq(SECTION, case_index, "row", case.clone(), rust);
+
+    // Keep the explicit active handle in the setup: this makes it clear the
+    // second object was created before the synchronous switch, while all
+    // observations above come from Engine state after the switch.
+    let _ = active;
+}
+
 /// Stand-in for the temporary group `C4ScenarioSection::EnsureTempStore`
 /// leaves behind, which is what C++ hands to `C4Group::Add`. Only the entry
 /// name is compared, so the payload just has to be a loadable image.
@@ -14611,6 +14898,25 @@ protected func ContactBottom()
             );
         }
     }
+
+    // C4Script.cpp:5401-5408 and C4Game.cpp:1102-1173,5987-6009,4190-4201.
+    // The C++ oracle intentionally bounds this extension to the real host
+    // bool boundary, NewObject/CreateObject ordering, StatusDeactivate list
+    // movement, and the active-object teardown block. Exercise the matching
+    // continuation and lifecycle through the real Engine VM and consume every
+    // row so this extension cannot silently become an unreferenced fixture.
+    let host_lifecycle_cases = golden["scenario_section_host_lifecycle"]
+        .as_array()
+        .expect("scenario_section_host_lifecycle is a C++ oracle array");
+    assert_eq!(
+        host_lifecycle_cases.len(),
+        4,
+        "scenario_section_host_lifecycle must retain all bounded host/lifecycle rows"
+    );
+    for (case_index, case) in host_lifecycle_cases.iter().take(3).enumerate() {
+        parity_scenario_section_host_case(case, case_index);
+    }
+    parity_scenario_section_lifecycle_case(&host_lifecycle_cases[3], 3);
 
     // 16i. c4value_type_tags: `GetC4VID` / `GetC4VFromID` (C4Value.cpp:368-420)
     //      and the substitution `C4Value::CompileFunc` applies over them

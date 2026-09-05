@@ -18,12 +18,15 @@ pub use crate::engine::{
     register_c4_referenced_string, register_c4_string, register_c4_value_strings,
     register_global_declarations, register_global_declarations_with_strings,
     register_loaded_c4_string, resolve_c4_string, save_current_c4_string_enumeration,
-    DirectCallFunctionProbe, Engine, GlobalSlots, GlobalVariables, HostRegistrationSnapshot,
-    MethodRefArgsDispatch, MethodReferenceDispatch, ObjectTargetAvailabilityProbe,
-    ReferenceParameterProbe, Script, ScriptFunctionResolution, ScriptFunctionScope,
-    StaticConstLinkError, StringRegistrationLedger, StringRegistrations, UnresolvedInherited,
+    DirectCallFunctionProbe, Engine, EvalDirectExecContinuationHook, GlobalSlots, GlobalVariables,
+    HostRegistrationSnapshot, MethodRefArgsDispatch, MethodReferenceDispatch,
+    ObjectTargetAvailabilityProbe, ReferenceParameterProbe, Script, ScriptFunctionResolution,
+    ScriptFunctionScope, StaticConstLinkError, StringRegistrationLedger, StringRegistrations,
+    UnresolvedInherited,
 };
-pub use crate::error::{ParseError, RuntimeCallFrame, RuntimeError, ScriptError};
+pub use crate::error::{
+    ParseError, RuntimeCallFrame, RuntimeError, ScriptError, ScriptErrorDiagnostic,
+};
 pub use crate::value::{
     c4_hash_combine, c4_id_from_raw, c4_id_parse, c4_id_raw, c4_id_serde, c4_id_text,
     c4_optional_id_serde, c4_optional_string_serde, c4_string_byte, c4_string_byte_len,
@@ -33,10 +36,12 @@ pub use crate::value::{
 pub use crate::vm::{
     active_direct_exec_diagnostic_frames, caller_host_identity, caller_is_temporary_script,
     caller_origin_strictness, caller_strictness, caller_uses_engine_scope, caller_var_slots,
-    clear_active_object_references, data_string, set_value_cell, start_call_trace,
-    start_script_profiler, stop_script_profiler, value_cell, with_diagnostic_object_formatter,
-    CallerVarSlots, HostCallArg, HostCallerStrictness, LocalCells, ObjectReferenceSweep,
-    ScriptHostIdentity, ScriptProfileEntry, ValueCell, ValueReference,
+    clear_active_object_references, data_string, lift_native_continuation, set_value_cell,
+    start_call_trace, start_script_profiler, stop_script_profiler, value_cell,
+    with_diagnostic_object_formatter, CallerVarSlots, HostCallArg, HostCallerStrictness,
+    LocalCells, NativeCallOutcome, NativeContinuation, ObjectReferenceSweep, ScriptCallOutcome,
+    ScriptHostIdentity, ScriptProfileEntry, ScriptSuspension, ScriptValueStackContext, ValueCell,
+    ValueReference,
 };
 
 mod value;

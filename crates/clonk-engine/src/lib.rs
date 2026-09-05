@@ -372,7 +372,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::ops::AddAssign;
 use std::path::Path;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
@@ -426,9 +426,11 @@ use clonk_resources::{
     ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
     RankNameTable, ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
 };
-pub use clonk_script::ScriptError;
+pub use clonk_script::{ScriptError, ScriptErrorDiagnostic};
 
-use clonk_script::{DebuggerHooks, Engine as ScriptEngine, Value, ValueMap};
+use clonk_script::{
+    DebuggerHooks, Engine as ScriptEngine, ScriptCallOutcome, ScriptSuspension, Value, ValueMap,
+};
 use mass_mover::MassMoverSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sky::{SkyAdjustment, SkyState};
@@ -436,6 +438,32 @@ use thiserror::Error;
 use transfer::{TransferZoneCommand, TransferZoneRect, TransferZoneState, TransferZoneTable};
 
 pub type DefinitionId = String;
+
+/// Consume the one compatibility command emitted by a suspended
+/// `LoadScenarioSection` host call. The request is appended after any commands
+/// produced earlier in the same callback, so remove only the last matching
+/// entry; removing every equal request could discard an earlier native command
+/// whose ordering must remain visible after the resumed frame.
+fn consume_section_switch_command(
+    commands: &mut Vec<PlayerCommand>,
+    request: &compat::ScenarioSectionSwitchRequest,
+) {
+    let Some(index) = commands.iter().rposition(|command| {
+        matches!(
+            command,
+            PlayerCommand::LoadScenarioSection {
+                name,
+                flags,
+                preserve_ids,
+            } if name == &request.name
+                && *flags == request.flags
+                && preserve_ids == &request.preserve_ids
+        )
+    }) else {
+        return;
+    };
+    commands.remove(index);
+}
 
 pub const OWNER_NONE: i32 = -1;
 /// Product default: C++ parameterless `SetGameSpeed`'s integer `1000 / 38 = 26`
@@ -6532,6 +6560,38 @@ struct ScenarioScript {
     has_step: bool,
 }
 
+struct ScenarioScriptContinuation {
+    request: compat::ScenarioSectionSwitchRequest,
+    suspension: ScriptSuspension,
+}
+
+/// A DirectExec frame that is suspended while `LoadScenarioSection` replaces
+/// the live scenario.  DirectExec owns a temporary local-cell set just like
+/// an object callback owns its object locals; retaining it with the VM frame
+/// keeps nested calls and the resumed suffix on the same cells.
+struct ScenarioDirectExecContinuation {
+    request: compat::ScenarioSectionSwitchRequest,
+    suspension: ScriptSuspension,
+    cells: clonk_script::LocalCells,
+}
+
+struct ScenarioCallResult {
+    batch: ScenarioBatch,
+    audio: AudioRegistry,
+    rng: LcgRng,
+    script_error: Option<EngineError>,
+    continuation: Option<ScenarioScriptContinuation>,
+}
+
+struct ScenarioDirectExecResult {
+    value: Option<Value>,
+    batch: ScenarioBatch,
+    audio: AudioRegistry,
+    rng: LcgRng,
+    script_error: Option<EngineError>,
+    continuation: Option<ScenarioDirectExecContinuation>,
+}
+
 impl ScenarioScript {
     fn from_source(name: impl Into<String>, source: &str) -> Result<Self, EngineError> {
         let name = name.into();
@@ -6542,7 +6602,7 @@ impl ScenarioScript {
             EngineError::Script {
                 definition: name.clone(),
                 function: "load".to_string(),
-                source: ScriptError::from(source),
+                source: ScriptErrorDiagnostic::from(source),
                 recovery: None,
             }
         })?;
@@ -6632,9 +6692,16 @@ impl ScenarioScript {
         network_game: bool,
         engine_next_object_id: u64,
         scenario_script_counter: i32,
-    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
+        resume: Option<(ScriptSuspension, Value)>,
+    ) -> Result<ScenarioCallResult, EngineError> {
         if !self.has_initialize {
-            return Ok((ScenarioBatch::default(), audio, rng, None));
+            return Ok(ScenarioCallResult {
+                batch: ScenarioBatch::default(),
+                audio,
+                rng,
+                script_error: None,
+                continuation: None,
+            });
         }
         // C++: Game.Script.Call(PSF_Initialize) has NO parameters; the
         // state/random pair is the JSON-fixture convention.
@@ -6663,6 +6730,7 @@ impl ScenarioScript {
             network_game,
             engine_next_object_id,
             scenario_script_counter,
+            resume,
         )
     }
 
@@ -6687,9 +6755,16 @@ impl ScenarioScript {
         network_game: bool,
         engine_next_object_id: u64,
         scenario_script_counter: i32,
-    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
+        resume: Option<(ScriptSuspension, Value)>,
+    ) -> Result<ScenarioCallResult, EngineError> {
         if !self.has_step {
-            return Ok((ScenarioBatch::default(), audio, rng));
+            return Ok(ScenarioCallResult {
+                batch: ScenarioBatch::default(),
+                audio,
+                rng,
+                script_error: None,
+                continuation: None,
+            });
         }
         let mut args = Vec::with_capacity(3);
         args.push(build_scenario_state_value(snapshot));
@@ -6720,11 +6795,14 @@ impl ScenarioScript {
             network_game,
             engine_next_object_id,
             scenario_script_counter,
+            resume,
         ) {
-            Ok((batch, audio, rng, None)) => Ok((batch, audio, rng)),
+            Ok(result) if result.script_error.is_none() => Ok(result),
             // Strict wrappers surface the script error (fixtures assert
             // on it); the partial batch is dropped like before.
-            Ok((_, _, _, Some(error))) => Err(error),
+            Ok(result) => Err(result
+                .script_error
+                .expect("script error is present when Step result is not clean")),
             Err(error) => Err(error),
         }
     }
@@ -6755,7 +6833,8 @@ impl ScenarioScript {
         network_game: bool,
         engine_next_object_id: u64,
         scenario_script_counter: i32,
-    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
+        resume: Option<(ScriptSuspension, Value)>,
+    ) -> Result<ScenarioCallResult, EngineError> {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
@@ -6788,7 +6867,14 @@ impl ScenarioScript {
             world,
             next_object_id,
             snapshot.game_over,
-            || self.script.call(function, &args),
+            || {
+                compat::with_synchronous_script_boundary(|| match resume {
+                    Some((suspension, value)) => self
+                        .script
+                        .resume_script_continuation_with_value(suspension, value),
+                    None => self.script.call_with_continuation(function, &args),
+                })
+            },
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
@@ -6797,8 +6883,28 @@ impl ScenarioScript {
         // the CONTINUATION — everything staged before it stands
         // (C4AulExec fail-safe). The host-side batch folds regardless;
         // the error rides along for the caller to log/propagate.
-        let (result, script_error) = match result {
-            Ok(value) => (value, None),
+        let (result, script_error, continuation) = match result {
+            Ok(ScriptCallOutcome::Complete(value)) => (value, None, None),
+            Ok(ScriptCallOutcome::Suspended(suspension)) => {
+                let Some(request) = suspension
+                    .request::<compat::ScenarioSectionSwitchRequest>()
+                    .cloned()
+                else {
+                    return Err(EngineError::invalid_script_output(
+                        self.name.clone(),
+                        function.to_string(),
+                        "script yielded an unsupported host continuation".into(),
+                    ));
+                };
+                (
+                    Value::Nil,
+                    None,
+                    Some(ScenarioScriptContinuation {
+                        request,
+                        suspension,
+                    }),
+                )
+            }
             Err(source) => (
                 Value::Nil,
                 Some(script_execution_error(
@@ -6807,6 +6913,7 @@ impl ScenarioScript {
                     source,
                     None,
                 )),
+                None,
             ),
         };
 
@@ -6912,7 +7019,21 @@ impl ScenarioScript {
             batch.script_counter = host_script_counter;
         }
         let audio_state = audio_guard.finish();
-        Ok((batch, audio_state, rng, script_error))
+        if continuation.is_some() {
+            // The host records a legacy command for compatibility snapshots,
+            // while the continuation driver consumes the same request now.
+            // Do not apply that command twice when the prefix is folded.
+            if let Some(continuation) = continuation.as_ref() {
+                consume_section_switch_command(&mut batch.player_commands, &continuation.request);
+            }
+        }
+        Ok(ScenarioCallResult {
+            batch,
+            audio: audio_state,
+            rng,
+            script_error,
+            continuation,
+        })
     }
 
     /// Raw-value, no-object-context call used by definition initialization
@@ -7012,6 +7133,199 @@ impl ScenarioScript {
             },
         );
         (value, batch, audio, rng, error)
+    }
+
+    /// Continuation-capable DirectExec used by the scenario and
+    /// Game.ScriptEngine hosts.  `LoadScenarioSection` is synchronous in
+    /// C++, so the temporary DirectExec frame must remain live while the
+    /// engine applies the prefix and performs the section replacement.
+    #[allow(clippy::too_many_arguments)]
+    fn direct_exec_continuation_for_script(
+        script_name: &str,
+        script: &ScriptEngine,
+        source: &str,
+        function_label: &str,
+        strict_level: Option<u8>,
+        world: HostWorldContext,
+        rng: LcgRng,
+        env_frame: u64,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        audio: AudioRegistry,
+        game_over_triggered: bool,
+        resume: Option<(ScriptSuspension, clonk_script::LocalCells, Value)>,
+    ) -> Result<ScenarioDirectExecResult, EngineError> {
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, env_frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let (result, host_effects) = compat::with_effect_context_with_state(
+            None,
+            global_effects,
+            world,
+            next_object_id,
+            game_over_triggered,
+            || match resume {
+                Some((suspension, cells, value)) => {
+                    compat::with_synchronous_script_boundary(|| {
+                        script
+                            .resume_script_continuation_with_value(suspension, value)
+                            .map(|outcome| (outcome, cells))
+                    })
+                }
+                None => {
+                    let local_vars = HashMap::new();
+                    compat::with_synchronous_script_boundary(|| {
+                        script
+                            .direct_exec_with_locals_and_this_at_strict_in_context_diagnostics_with_continuation(
+                                source,
+                                &local_vars,
+                                Value::Nil,
+                                strict_level,
+                                function_label,
+                                is_cpp_direct_exec_context(function_label),
+                            )
+                    })
+                }
+            },
+        );
+        let rng = guard.finish();
+        let mut physics_delta = physics_guard.finish();
+        let mut environment_delta = env_guard.finish();
+        let (value, script_error, continuation) = match result {
+            Ok((ScriptCallOutcome::Complete(value), _cells)) => (Some(value), None, None),
+            Ok((ScriptCallOutcome::Suspended(suspension), cells)) => {
+                let Some(request) = suspension
+                    .request::<compat::ScenarioSectionSwitchRequest>()
+                    .cloned()
+                else {
+                    return Err(EngineError::invalid_script_output(
+                        script_name,
+                        function_label,
+                        "script yielded an unsupported host continuation".into(),
+                    ));
+                };
+                (
+                    None,
+                    None,
+                    Some(ScenarioDirectExecContinuation {
+                        request,
+                        suspension,
+                        cells,
+                    }),
+                )
+            }
+            Err(source) => {
+                let error = script_execution_error(
+                    script_name.to_string(),
+                    function_label.to_string(),
+                    source,
+                    None,
+                );
+                if let EngineError::Script { source, .. } = &error {
+                    tracing::error!(
+                        script = %script_name,
+                        function = function_label,
+                        %source,
+                        "script callback error (continuing like C++ fail-safe exec)"
+                    );
+                    log_runtime_call_frames(script_name, source.call_frames());
+                }
+                (None, Some(error), None)
+            }
+        };
+
+        let compat::EffectContextOutcome {
+            object: _,
+            global: host_global_effects,
+            object_update: _,
+            object_commands: _,
+            command_operations: _,
+            command_events: _,
+            destroy_object: _,
+            environment: environment_from_host,
+            physics: physics_from_host,
+            spawns: host_spawns,
+            landscape: host_landscape_ops,
+            solid_mask_operations: host_solid_mask_operations,
+            host_raster_preview,
+            particles: host_particles,
+            transfer_zones: host_transfer_zones,
+            messages: host_messages,
+            player_commands: host_player_commands,
+            object_order_commands: host_object_order_commands,
+            object_lists: _,
+            next_mission_commands: host_next_mission_commands,
+            audio: host_audio,
+            trigger_game_over: host_trigger_game_over,
+            script_go: host_script_go,
+            script_counter: host_script_counter,
+            next_object_id: _,
+            other_objects,
+            context_locals: _,
+            menu_requests: _,
+        } = host_effects;
+
+        let mut batch = ScenarioBatch {
+            other_objects,
+            ..ScenarioBatch::default()
+        };
+        batch.player_commands.extend(host_player_commands);
+        batch
+            .object_order_commands
+            .extend(host_object_order_commands);
+        batch
+            .next_mission_commands
+            .extend(host_next_mission_commands);
+        batch.global_effects.extend(host_global_effects);
+        batch.landscape_ops.extend(host_landscape_ops);
+        batch
+            .solid_mask_operations
+            .extend(host_solid_mask_operations);
+        batch.host_raster_preview.0 = host_raster_preview;
+        if let Some(delta) = environment_from_host {
+            merge_environment_delta(&mut environment_delta, &delta);
+        }
+        if !environment_delta.is_empty() {
+            batch.environment = Some(environment_delta);
+        }
+        if let Some(delta) = physics_from_host {
+            merge_physics_delta(&mut physics_delta, &delta);
+        }
+        if !physics_delta.is_empty() {
+            batch.physics = Some(physics_delta);
+        }
+        batch.spawns.extend(host_spawns);
+        batch.particles.extend(host_particles);
+        batch.transfer_zones.extend(host_transfer_zones);
+        batch.messages.extend(host_messages);
+        batch.audio.extend(host_audio.events);
+        if host_trigger_game_over {
+            batch.trigger_game_over = true;
+        }
+        if host_script_go.is_some() {
+            batch.script_go = host_script_go;
+        }
+        if host_script_counter.is_some() {
+            batch.script_counter = host_script_counter;
+        }
+        let audio = audio_guard.finish();
+        if let Some(continuation) = continuation.as_ref() {
+            // The host records the request for the compatibility command
+            // stream. The top-level driver consumes it before applying the
+            // prefix, then performs the actual section switch itself.
+            consume_section_switch_command(&mut batch.player_commands, &continuation.request);
+        }
+        Ok(ScenarioDirectExecResult {
+            value,
+            batch,
+            audio,
+            rng,
+            script_error,
+            continuation,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7486,6 +7800,17 @@ pub(crate) struct ScenarioSectionState {
     /// command this port uses arrives after that guard has been cleared, and
     /// the marker is what lets the host function tell the two apart.
     pub(crate) switch_in_flight: bool,
+}
+
+/// A suspended VM frame remains owned by its continuation driver after the
+/// active host context has unwound.  Keep a weak registry entry while the
+/// engine performs the synchronous operation requested by that frame so the
+/// real `AssignRemoval` tail can clear its references before the object is
+/// detached.  The continuation itself owns the strong handle; the registry
+/// never prolongs a frame that its driver has abandoned.
+pub(crate) struct SuspendedScriptRegistration {
+    pub(crate) suspension: Weak<RefCell<ScriptSuspension>>,
+    pub(crate) cells: Option<clonk_script::LocalCells>,
 }
 
 #[derive(Clone)]
@@ -8209,6 +8534,12 @@ pub struct Engine {
     /// Generation-stamped id->index map: CrossCheck resolves object ids per
     /// candidate pair and the former linear scan dominated tick time.
     object_index_cache: std::cell::RefCell<(u64, rustc_hash::FxHashMap<ObjectId, usize>)>,
+    /// Runtime identity tokens for live object instances. Object numbers may
+    /// be reused by a scenario-section load; callbacks retain the token they
+    /// entered with so a resumed suffix cannot target the replacement merely
+    /// because it has the same C4Object number.
+    object_instance_tokens: std::cell::RefCell<rustc_hash::FxHashMap<ObjectId, u64>>,
+    next_object_instance_token: std::cell::Cell<u64>,
     #[doc(hidden)]
     pub materials: MaterialSet,
     /// Shared view of `materials` for host contexts (FnMaterial);
@@ -8449,6 +8780,11 @@ pub struct Engine {
     scenario_values: Rc<scenario::ScenarioValueStore>,
     /// `Game.pScenarioSections` and everything that materializes it.
     scenario_section_state: ScenarioSectionState,
+    /// Suspensions currently crossing an engine-owned synchronous boundary.
+    /// Entries are weak so panic/error paths cannot leave the engine retaining
+    /// a VM frame, while actual removal can still walk the live frame before
+    /// it is detached from the object world.
+    pub(crate) suspended_script_registrations: Rc<RefCell<Vec<SuspendedScriptRegistration>>>,
     /// Per-player crew info lists (C4Player::CrewInfoList): the roster
     /// GetIdle/New recruit from at join.
     crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
@@ -10549,6 +10885,8 @@ impl Engine {
             reloaded_global_definitions: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, rustc_hash::FxHashMap::default())),
+            object_instance_tokens: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            next_object_instance_token: std::cell::Cell::new(1),
             materials: MaterialSet::default(),
             materials_shared: std::cell::RefCell::new(None),
             objects: Vec::new(),
@@ -10669,6 +11007,7 @@ impl Engine {
                 current: "main".to_string(),
                 ..ScenarioSectionState::default()
             },
+            suspended_script_registrations: Rc::new(RefCell::new(Vec::new())),
             crew_rosters: HashMap::new(),
             add_new_crew_portraits: true,
             crew_info_order: HashMap::new(),
@@ -11979,10 +12318,30 @@ struct GlobalEffectRunOutcome {
     rng: LcgRng,
 }
 
+/// The global-effect equivalent of the object effect cursor. A global
+/// callback still executes on the C4Aul stack while `LoadScenarioSection`
+/// tears down the live world, so the suspended event and its remaining queue
+/// have to stay owned by the engine until the switch has committed.
+struct GlobalEffectEventContinuation {
+    event: EffectEvent,
+    resume: EffectScriptResume,
+    queue: VecDeque<EffectEvent>,
+    temp_wrapped_stopped: HashSet<i32>,
+}
+
+enum GlobalEffectRunResult {
+    Complete(GlobalEffectRunOutcome),
+    Suspended {
+        output: GlobalEffectRunOutcome,
+        continuation: GlobalEffectEventContinuation,
+    },
+}
+
 /// One exact `C4Effect::GetCallbackScript` / `GetFuncRecursive` result.
 /// Keeping source selection and function resolution together prevents an
 /// arbitrary affected-object or fallback definition from shadowing the
 /// engine-global table (C4Effect.cpp:31-56,439-456).
+#[derive(Clone)]
 struct EffectScriptCallback {
     script: Arc<ScriptEngine>,
     resolution: clonk_script::ScriptFunctionResolution,
@@ -12218,7 +12577,7 @@ fn dispatch_global_effect_callback(
     effect: &EffectState,
     event: &'static str,
     function_label: &'static str,
-    mut extras: Vec<Value>,
+    extras: Vec<Value>,
     rng: LcgRng,
     global_effects: &[EffectState],
     physics: PhysicsSettings,
@@ -12228,22 +12587,80 @@ fn dispatch_global_effect_callback(
     game_over_triggered: bool,
     audio: AudioRegistry,
 ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+    match dispatch_global_effect_callback_with_continuation(
+        effect,
+        event,
+        function_label,
+        extras,
+        rng,
+        global_effects,
+        physics,
+        environment,
+        frame,
+        world,
+        game_over_triggered,
+        audio,
+        None,
+    )? {
+        EffectCallbackResult::Complete {
+            value,
+            outcome,
+            audio,
+            rng,
+        } => Ok((outcome, audio, rng, value)),
+        EffectCallbackResult::Suspended { .. } => Err(EngineError::invalid_script_output(
+            effect
+                .command_id
+                .clone()
+                .unwrap_or_else(|| effect.name.clone()),
+            function_label,
+            "global effect callback yielded outside its continuation driver".to_owned(),
+        )),
+    }
+}
+
+/// Dispatch one `Game.pGlobalEffects` callback while retaining the VM frame
+/// when it requests a synchronous section switch. This mirrors the object
+/// effect adapter but has no affected carrier (`C4Effect::Execute` passes
+/// `nullptr` to `Exec`; C4Effect.cpp:342-345).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_global_effect_callback_with_continuation(
+    effect: &EffectState,
+    event: &'static str,
+    function_label: &'static str,
+    mut extras: Vec<Value>,
+    rng: LcgRng,
+    global_effects: &[EffectState],
+    physics: PhysicsSettings,
+    environment: EnvironmentSettings,
+    frame: u64,
+    world: HostWorldContext,
+    game_over_triggered: bool,
+    audio: AudioRegistry,
+    resume: Option<EffectScriptResume>,
+) -> Result<EffectCallbackResult, EngineError> {
     let next_object_id = world.next_object_id();
     // The name is only materialized when a callback actually exists. The miss
     // is the common case — most effects implement few of the events — and it
     // now costs no allocation at all.
-    let Some((callback, callback_name)) =
-        with_effect_callback_name(&effect.name, event, |callback_name| {
-            resolve_effect_script_callback(effect, callback_name, &world)
-                .map(|callback| (callback, callback_name.to_owned()))
-        })
-    else {
-        return Ok((
-            EffectContextOutcome::empty(next_object_id, audio.clone()),
-            audio,
-            rng,
-            None,
-        ));
+    let (callback, callback_name) = match resume.as_ref() {
+        Some(resume) => (resume.callback.clone(), resume.callback_name.clone()),
+        None => {
+            let Some((callback, callback_name)) =
+                with_effect_callback_name(&effect.name, event, |callback_name| {
+                    resolve_effect_script_callback(effect, callback_name, &world)
+                        .map(|callback| (callback, callback_name.to_owned()))
+                })
+            else {
+                return Ok(EffectCallbackResult::Complete {
+                    value: None,
+                    outcome: EffectContextOutcome::empty(next_object_id, audio.clone()),
+                    audio,
+                    rng,
+                });
+            };
+            (callback, callback_name)
+        }
     };
 
     let mut args = Vec::with_capacity(2 + extras.len());
@@ -12251,10 +12668,29 @@ fn dispatch_global_effect_callback(
     args.push(build_effect_value(effect));
     args.append(&mut extras);
 
-    let context_object = callback.command_object;
-    let context_this = context_object
-        .map(compat::object_reference_value)
-        .unwrap_or(Value::Nil);
+    let context_object = resume
+        .as_ref()
+        .map(|resume| {
+            resume
+                .context_available
+                .then_some(resume.context_object)
+                .flatten()
+        })
+        .unwrap_or(callback.command_object);
+    let context_available = resume.as_ref().map_or(context_object.is_some(), |resume| {
+        resume.context_available && context_object.is_some()
+    });
+    let context_is_self = resume
+        .as_ref()
+        .map(|resume| resume.context_is_self)
+        .unwrap_or(false);
+    let context_this = if context_available {
+        context_object
+            .map(compat::object_reference_value)
+            .unwrap_or(Value::Nil)
+    } else {
+        Value::Nil
+    };
     // A global effect's affected object stays nil, but Exec still installs
     // pCommandTarget as `cthr->Obj`; implicit-object natives therefore mutate
     // and attach to that live object (C4Effect.cpp:345, C4AulExec.cpp:1638-1648).
@@ -12284,11 +12720,19 @@ fn dispatch_global_effect_callback(
         .and_then(|state| usize::try_from(state.shape_attach.vtx).ok())
         .and_then(|vtx| ambient_metadata.and_then(|metadata| metadata.vertices.get(vtx)))
         .map_or(0, |vertex| vertex.x);
-    let context_locals = ambient_state
-        .as_deref()
-        .map(|state| state.local_vars.clone())
-        .unwrap_or_default();
-    let context_cells = clonk_script::LocalCells::from_local_vars(&context_locals);
+    let context_locals = resume
+        .as_ref()
+        .map(|resume| resume.cells.snapshot())
+        .unwrap_or_else(|| {
+            ambient_state
+                .as_deref()
+                .map(|state| state.local_vars.snapshot())
+                .unwrap_or_default()
+        });
+    let context_cells = resume
+        .as_ref()
+        .map(|resume| resume.cells.clone())
+        .unwrap_or_else(|| clonk_script::LocalCells::from_local_vars(&context_locals));
 
     let physics_guard = enter_physics_context(physics);
     let env_guard = enter_environment_context(environment, frame);
@@ -12364,41 +12808,70 @@ fn dispatch_global_effect_callback(
             next_object_id,
             game_over_triggered,
             || {
-                if let Some(session_id) = context_object {
-                    compat::register_session_local_cells(session_id, context_cells.clone());
-                }
-                if callback.engine_global_entry {
-                    return callback
+                compat::with_synchronous_script_boundary(|| {
+                    if let Some(session_id) = context_object {
+                        compat::register_session_local_cells(session_id, context_cells.clone());
+                    }
+                    if let Some(resume) = resume {
+                        return resume
+                            .callback
+                            .script
+                            .resume_script_continuation_with_value_and_this(
+                                resume.suspension,
+                                resume.value,
+                                context_this,
+                            )
+                            .map(|result| match result {
+                                ScriptCallOutcome::Complete(value) => {
+                                    EffectScriptCallResult::Complete(Some((
+                                        value,
+                                        context_cells.snapshot(),
+                                    )))
+                                }
+                                ScriptCallOutcome::Suspended(suspension) => {
+                                    EffectScriptCallResult::Suspended(suspension)
+                                }
+                            });
+                    }
+                    if callback.engine_global_entry {
+                        return callback
+                            .script
+                            .call_resolved_with_cells_and_this_with_continuation_for_effect_callback(
+                                &callback.resolution,
+                                true,
+                                &args,
+                                &context_cells,
+                                context_this,
+                            )
+                            .map(|result| match result {
+                                ScriptCallOutcome::Complete(value) => {
+                                    EffectScriptCallResult::Complete(Some((
+                                        value,
+                                        context_cells.snapshot(),
+                                    )))
+                                }
+                                ScriptCallOutcome::Suspended(suspension) => {
+                                    EffectScriptCallResult::Suspended(suspension)
+                                }
+                            });
+                    }
+                    callback
                         .script
-                        .call_resolved_with_cells_and_this_for_effect_callback(
-                            &callback.resolution,
-                            true,
-                            &args,
-                            &context_cells,
-                            context_this,
-                        )
-                        .map(|value| Some((value, context_cells.snapshot())));
-                }
-                if context_object.is_some() {
-                    return callback
-                        .script
-                        .call_effect_callback_with_cells_and_this(
+                        .call_with_cells_and_this_with_continuation_for_effect_callback(
                             &callback_name,
                             &args,
                             &context_cells,
                             context_this,
                         )
-                        .map(|value| Some((value, context_cells.snapshot())));
-                }
-                callback
-                    .script
-                    .call_effect_callback_with_locals_and_this(
-                        &callback_name,
-                        &args,
-                        &context_locals,
-                        context_this,
-                    )
-                    .map(Some)
+                        .map(|result| match result {
+                            ScriptCallOutcome::Complete(value) => EffectScriptCallResult::Complete(
+                                Some((value, context_cells.snapshot())),
+                            ),
+                            ScriptCallOutcome::Suspended(suspension) => {
+                                EffectScriptCallResult::Suspended(suspension)
+                            }
+                        })
+                })
             },
         );
     let rng = guard.finish();
@@ -12406,11 +12879,25 @@ fn dispatch_global_effect_callback(
     let environment_delta = env_guard.finish();
     let audio_state = audio_guard.finish();
 
-    let callback_result = recover_effect_callback_error(
-        result,
-        &context_cells,
-        format!("Game.ScriptEngine::{}::{}", effect.name, function_label),
-    )?;
+    let (callback_result, suspended) = match result {
+        Ok(EffectScriptCallResult::Complete(result)) => (
+            recover_effect_callback_error(
+                Ok(result),
+                &context_cells,
+                format!("Game.ScriptEngine::{}::{}", effect.name, function_label),
+            )?,
+            None,
+        ),
+        Ok(EffectScriptCallResult::Suspended(suspension)) => (None, Some(suspension)),
+        Err(source) => (
+            recover_effect_callback_error(
+                Err(source),
+                &context_cells,
+                format!("Game.ScriptEngine::{}::{}", effect.name, function_label),
+            )?,
+            None,
+        ),
+    };
     if !environment_delta.is_empty() {
         commands.environment = Some(environment_delta);
     }
@@ -12426,7 +12913,34 @@ fn dispatch_global_effect_callback(
         }
         value
     });
-    Ok((commands, audio_state, rng, callback_result))
+    if let Some(suspension) = suspended {
+        return Ok(EffectCallbackResult::Suspended {
+            resume: EffectScriptResume {
+                suspension,
+                cells: context_cells,
+                value: Value::Nil,
+                context_instance_token: None,
+                context_available,
+                receiver_available: true,
+                callback,
+                callback_name,
+                event,
+                function_label,
+                effect_name: effect.name.clone(),
+                context_object,
+                context_is_self,
+            },
+            outcome: commands,
+            audio: audio_state,
+            rng,
+        });
+    }
+    Ok(EffectCallbackResult::Complete {
+        value: callback_result,
+        outcome: commands,
+        audio: audio_state,
+        rng,
+    })
 }
 
 /// Selects the [`Definition`] receiver that supplies carrier metadata and
@@ -14179,6 +14693,18 @@ mod solid_mask_state_regression;
 mod scenario_section_random_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/scenario_section_callback_outcome_regression.rs"]
+mod scenario_section_callback_outcome_regression;
+
+#[cfg(test)]
+#[path = "lib_tests/scenario_direct_exec_continuation.rs"]
+mod scenario_direct_exec_continuation;
+
+#[cfg(test)]
+#[path = "lib_tests/scenario_section_nested_initialize_regression.rs"]
+mod scenario_section_nested_initialize_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/pathfinder_host_state_regression.rs"]
 mod pathfinder_host_state_regression;
 
@@ -14209,10 +14735,6 @@ mod issue_62_scheduled_global_effect_callbacks;
 #[cfg(test)]
 #[path = "lib_tests/duplicate_object_id_identity_regression.rs"]
 mod duplicate_object_id_identity_regression;
-
-#[cfg(test)]
-#[path = "lib_tests/scenario_section_callback_outcome_regression.rs"]
-mod scenario_section_callback_outcome_regression;
 
 pub use definition::*;
 pub use object::*;

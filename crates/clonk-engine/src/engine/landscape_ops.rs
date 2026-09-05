@@ -2369,27 +2369,79 @@ impl Engine {
         &mut self,
         events: Vec<EffectEvent>,
     ) -> Result<(), EngineError> {
-        let world = self.host_world_context();
-        let rng_state = self.rng.clone();
-        let mut global_effects = std::mem::take(&mut self.global_effects);
-        let outcome = Self::run_effect_events_for_global(
-            self.game_over_triggered,
-            rng_state,
-            events,
-            &mut global_effects,
-            &mut self.environment,
-            self.physics,
-            self.frame,
-            world,
-            self.audio_registry.clone(),
-        );
-        self.global_effects = global_effects;
+        let mut continuation = None;
+        loop {
+            let world = self.host_world_context();
+            let rng_state = self.rng.clone();
+            let mut global_effects = std::mem::take(&mut self.global_effects);
+            let pending_continuation = continuation.take();
+            let result = Self::run_effect_events_for_global(
+                self.game_over_triggered,
+                rng_state,
+                events.clone(),
+                &mut global_effects,
+                &mut self.environment,
+                self.physics,
+                self.frame,
+                world,
+                self.audio_registry.clone(),
+                pending_continuation,
+            );
+            self.global_effects = global_effects;
+            let result = result?;
+            match result {
+                GlobalEffectRunResult::Complete(output) => {
+                    return self.fold_global_effect_run_output(output, None);
+                }
+                GlobalEffectRunResult::Suspended {
+                    output,
+                    continuation: mut suspended,
+                } => {
+                    let request = suspended
+                        .resume
+                        .suspension
+                        .request::<compat::ScenarioSectionSwitchRequest>()
+                        .cloned()
+                        .ok_or_else(|| {
+                            EngineError::invalid_script_output(
+                                suspended.resume.effect_name.clone(),
+                                suspended.resume.function_label,
+                                "script yielded an unsupported host continuation".to_owned(),
+                            )
+                        })?;
+                    self.capture_effect_script_context_identity(&mut suspended.resume);
+                    let (suspension, switched) = self.with_suspended_script_boundary(
+                        suspended.resume.suspension,
+                        Some(suspended.resume.cells.clone()),
+                        |engine| {
+                            engine.fold_global_effect_run_output(output, Some(&request))?;
+                            engine.load_scenario_section(
+                                &request.name,
+                                request.flags,
+                                request.preserve_ids,
+                            )
+                        },
+                    )?;
+                    suspended.resume.suspension = suspension;
+                    suspended.resume.value = Value::Int(i32::from(switched));
+                    self.refresh_effect_script_context_identity(&mut suspended.resume);
+                    continuation = Some(suspended);
+                }
+            }
+        }
+    }
+
+    fn fold_global_effect_run_output(
+        &mut self,
+        output: GlobalEffectRunOutcome,
+        section_request: Option<&compat::ScenarioSectionSwitchRequest>,
+    ) -> Result<(), EngineError> {
         let GlobalEffectRunOutcome {
             particles,
             physics_delta,
             audio_events,
             messages,
-            player_commands,
+            mut player_commands,
             object_order_commands,
             next_mission_commands,
             landscape_ops,
@@ -2405,7 +2457,10 @@ impl Engine {
             script_counter,
             audio_state,
             rng,
-        } = outcome?;
+        } = output;
+        if let Some(request) = section_request {
+            consume_section_switch_command(&mut player_commands, request);
+        }
         let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
         let mut outermost =
             self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
@@ -2495,10 +2550,21 @@ impl Engine {
         frame: u64,
         world: HostWorldContext,
         audio: AudioRegistry,
-    ) -> Result<GlobalEffectRunOutcome, EngineError> {
+        continuation: Option<GlobalEffectEventContinuation>,
+    ) -> Result<GlobalEffectRunResult, EngineError> {
         let mut world = world;
         let mut pending_spawns: Vec<SpawnConfig> = Vec::new();
-        let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
+        let carried_temp_wrapped_stopped = continuation
+            .as_ref()
+            .map(|continuation| continuation.temp_wrapped_stopped.clone());
+        let (mut queue, mut callback_resume, mut resume_event) = continuation.map_or_else(
+            || (VecDeque::from(events), None, None),
+            |continuation| {
+                let mut queue = continuation.queue;
+                queue.push_front(continuation.event.clone());
+                (queue, Some(continuation.resume), Some(continuation.event))
+            },
+        );
         let mut current_environment = *environment;
         let mut current_physics = physics;
         let mut accumulated_physics = PhysicsDelta::default();
@@ -2520,10 +2586,18 @@ impl Engine {
         // Anchors whose temp remove/readd bracket was already queued (a
         // re-popped anchor event must not expand again); see the object
         // runner's temp_wrapped_stopped.
-        let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
+        let mut temp_wrapped_stopped: HashSet<i32> =
+            carried_temp_wrapped_stopped.unwrap_or_default();
 
         while let Some(mut event) = queue.pop_front() {
-            if matches!(event.kind, EffectEventKind::Timer)
+            let resuming_callback = resume_event
+                .as_ref()
+                .is_some_and(|suspended| suspended == &event);
+            if resuming_callback {
+                resume_event = None;
+            }
+            if !resuming_callback
+                && matches!(event.kind, EffectEventKind::Timer)
                 && !global_effects
                     .iter()
                     .any(|effect| effect.number == event.effect.number && effect.priority != 0)
@@ -2535,10 +2609,12 @@ impl Engine {
             // (C4Effect.cpp:370-374) and reactivating them after the Stop
             // (C4Effect.cpp:404); priority-1 victims skip the bracket
             // (C4Effect.cpp:477).
-            if matches!(
-                event.kind,
-                EffectEventKind::Stopped(EffectStopReason::Removed)
-            ) && event.effect.priority != 1
+            if !resuming_callback
+                && matches!(
+                    event.kind,
+                    EffectEventKind::Stopped(EffectStopReason::Removed)
+                )
+                && event.effect.priority != 1
                 && !temp_wrapped_stopped.contains(&event.effect.number)
             {
                 let uppers = upper_effects_of(global_effects, &event.effect);
@@ -2558,41 +2634,43 @@ impl Engine {
                     continue;
                 }
             }
-            match event.kind {
-                EffectEventKind::TempRemoved => {
-                    let Some(effect) = global_effects
-                        .iter_mut()
-                        .find(|effect| effect.number == event.effect.number)
-                    else {
-                        continue;
-                    };
-                    // This recursive TempRemoveUpperEffects frame was entered
-                    // while the node was active. A higher Stop callback may
-                    // kill it before the frame resumes, but C++ still applies
-                    // FlipActive (zero remains zero) and dispatches FxStop
-                    // (C4Effect.cpp:480-490).
-                    effect.priority = -effect.priority;
-                    event.effect = effect.clone();
-                    if event.effect.priority == 1 {
-                        continue;
+            if !resuming_callback {
+                match event.kind {
+                    EffectEventKind::TempRemoved => {
+                        let Some(effect) = global_effects
+                            .iter_mut()
+                            .find(|effect| effect.number == event.effect.number)
+                        else {
+                            continue;
+                        };
+                        // This recursive TempRemoveUpperEffects frame was entered
+                        // while the node was active. A higher Stop callback may
+                        // kill it before the frame resumes, but C++ still applies
+                        // FlipActive (zero remains zero) and dispatches FxStop
+                        // (C4Effect.cpp:480-490).
+                        effect.priority = -effect.priority;
+                        event.effect = effect.clone();
+                        if event.effect.priority == 1 {
+                            continue;
+                        }
                     }
+                    EffectEventKind::TempReadded => {
+                        let Some(effect) = global_effects.iter_mut().find(|effect| {
+                            effect.number == event.effect.number && effect.priority < 0
+                        }) else {
+                            continue;
+                        };
+                        effect.priority = -effect.priority;
+                        event.effect = effect.clone();
+                    }
+                    _ => {}
                 }
-                EffectEventKind::TempReadded => {
-                    let Some(effect) = global_effects
-                        .iter_mut()
-                        .find(|effect| effect.number == event.effect.number && effect.priority < 0)
-                    else {
-                        continue;
-                    };
-                    effect.priority = -effect.priority;
-                    event.effect = effect.clone();
-                }
-                _ => {}
             }
-            let clear_all_stop = matches!(
-                event.kind,
-                EffectEventKind::Stopped(EffectStopReason::Cleared)
-            );
+            let clear_all_stop = !resuming_callback
+                && matches!(
+                    event.kind,
+                    EffectEventKind::Stopped(EffectStopReason::Cleared)
+                );
             if clear_all_stop {
                 // ClearAll reaches this node only after recursively processing
                 // its original successor. Re-read it now: an upper Stop may
@@ -2612,10 +2690,11 @@ impl Engine {
             // error path like the object runner.
             let rng_backup = rng.clone();
             let audio_backup = current_audio.clone();
+            let callback_resume = resuming_callback.then(|| callback_resume.take()).flatten();
             let mut timer_kill = false;
             let mut stop_denied = false;
             let call_result = match event.kind {
-                EffectEventKind::Timer => dispatch_global_effect_callback(
+                EffectEventKind::Timer => dispatch_global_effect_callback_with_continuation(
                     &event.effect,
                     "Timer",
                     "FxTimer",
@@ -2628,88 +2707,105 @@ impl Engine {
                     world.clone(),
                     game_over_triggered,
                     current_audio,
+                    callback_resume,
                 )
-                .map(|(outcome, audio_state, new_rng, timer_result)| {
+                .inspect(|result| {
                     // C4Effect::Execute (C4Effect.cpp:342-357): Fx*Timer
                     // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
                     // kills the effect; an elapsed interval with NO
                     // timer function kills too (:355-357).
-                    timer_kill = timer_result
-                        .as_ref()
-                        .is_none_or(|value| compat::value_as_i32(value) == -1);
-                    (outcome, audio_state, new_rng)
+                    if let EffectCallbackResult::Complete { value, .. } = &result {
+                        timer_kill = value
+                            .as_ref()
+                            .is_none_or(|value| compat::value_as_i32(value) == -1);
+                    }
                 }),
-                EffectEventKind::Stopped(reason) => dispatch_global_effect_callback(
-                    &event.effect,
-                    "Stop",
-                    "FxStop",
-                    effect_stop_reason_value(reason).map_or_else(Vec::new, |value| vec![value]),
-                    rng,
-                    global_effects,
-                    current_physics,
-                    current_environment,
-                    frame,
-                    world.clone(),
-                    game_over_triggered,
-                    current_audio,
-                )
-                .map(|(outcome, audio_state, new_rng, stop_result)| {
-                    // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
-                    // refuses its removal and recovers
-                    // (C4Effect.cpp:389-396).
-                    stop_denied = matches!(
-                        reason,
-                        EffectStopReason::Removed | EffectStopReason::Cleared
-                    ) && stop_result
-                        .as_ref()
-                        .is_some_and(|value| compat::value_as_i32(value) == -1);
-                    (outcome, audio_state, new_rng)
-                }),
-                EffectEventKind::TempRemoved => dispatch_global_effect_callback(
-                    &event.effect,
-                    "Stop",
-                    "FxStop",
-                    vec![Value::Int(1), Value::Bool(true)],
-                    rng,
-                    global_effects,
-                    current_physics,
-                    current_environment,
-                    frame,
-                    world.clone(),
-                    game_over_triggered,
-                    current_audio,
-                )
-                .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                EffectEventKind::Stopped(reason) => {
+                    dispatch_global_effect_callback_with_continuation(
+                        &event.effect,
+                        "Stop",
+                        "FxStop",
+                        effect_stop_reason_value(reason).map_or_else(Vec::new, |value| vec![value]),
+                        rng,
+                        global_effects,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                        callback_resume,
+                    )
+                    .inspect(|result| {
+                        // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
+                        // refuses its removal and recovers
+                        // (C4Effect.cpp:389-396).
+                        if let EffectCallbackResult::Complete { value, .. } = &result {
+                            stop_denied = matches!(
+                                reason,
+                                EffectStopReason::Removed | EffectStopReason::Cleared
+                            ) && value
+                                .as_ref()
+                                .is_some_and(|value| compat::value_as_i32(value) == -1);
+                        }
+                    })
+                }
+                EffectEventKind::TempRemoved => {
                     // The temp stop's result is ignored
                     // (C4Effect.cpp:489 does not check it).
-                    (outcome, audio_state, new_rng)
-                }),
-                EffectEventKind::TempReadded => dispatch_global_effect_callback(
-                    &event.effect,
-                    "Start",
-                    "FxStart",
-                    vec![Value::Int(1)],
-                    rng,
-                    global_effects,
-                    current_physics,
-                    current_environment,
-                    frame,
-                    world.clone(),
-                    game_over_triggered,
-                    current_audio,
-                )
-                .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                    dispatch_global_effect_callback_with_continuation(
+                        &event.effect,
+                        "Stop",
+                        "FxStop",
+                        vec![Value::Int(1), Value::Bool(true)],
+                        rng,
+                        global_effects,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                        callback_resume,
+                    )
+                }
+                EffectEventKind::TempReadded => {
                     // The temp readd's result is ignored
                     // (C4Effect.cpp:505 does not check it).
-                    (outcome, audio_state, new_rng)
-                }),
+                    dispatch_global_effect_callback_with_continuation(
+                        &event.effect,
+                        "Start",
+                        "FxStart",
+                        vec![Value::Int(1)],
+                        rng,
+                        global_effects,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                        callback_resume,
+                    )
+                }
                 // Started runs synchronously inside FnAddEffect for global
                 // effects; Check/AddTo (the priority check chain) are not
                 // generated for the global list (documented residual).
                 _ => continue,
             };
-            let (event_outcome, audio_state, new_rng) = match call_result {
-                Ok(value) => value,
+            let (event_outcome, audio_state, new_rng, suspended_resume) = match call_result {
+                Ok(EffectCallbackResult::Complete {
+                    outcome,
+                    audio,
+                    rng,
+                    ..
+                }) => (outcome, audio, rng, None),
+                Ok(EffectCallbackResult::Suspended {
+                    resume,
+                    outcome,
+                    audio,
+                    rng,
+                }) => (outcome, audio, rng, Some(resume)),
                 Err(EngineError::Script {
                     definition,
                     function,
@@ -2861,13 +2957,49 @@ impl Engine {
                     queue.push_front(EffectEvent::stopped(stopped, EffectStopReason::Removed));
                 }
             }
+            if let Some(resume) = suspended_resume {
+                *environment = current_environment;
+                let next_object_id = world.next_object_id();
+                let host_raster_preview = (!pending_solid_mask_operations.is_empty())
+                    .then(|| world.host_raster_preview());
+                return Ok(GlobalEffectRunResult::Suspended {
+                    output: GlobalEffectRunOutcome {
+                        particles: pending_particles,
+                        physics_delta: accumulated_physics,
+                        audio_events: pending_audio,
+                        messages: pending_messages,
+                        player_commands: pending_player_commands,
+                        object_order_commands: pending_object_order_commands,
+                        next_mission_commands: pending_next_mission_commands,
+                        landscape_ops: pending_landscape_ops,
+                        solid_mask_operations: pending_solid_mask_operations,
+                        host_raster_preview,
+                        transfer_zones: pending_transfer_zones,
+                        spawns: pending_spawns,
+                        other_objects: pending_other_objects,
+                        object_lists: pending_object_lists,
+                        next_object_id,
+                        game_over: game_over_requested,
+                        script_go: script_go_requested,
+                        script_counter: script_counter_requested,
+                        audio_state: current_audio,
+                        rng,
+                    },
+                    continuation: GlobalEffectEventContinuation {
+                        event,
+                        resume,
+                        queue,
+                        temp_wrapped_stopped,
+                    },
+                });
+            }
         }
 
         *environment = current_environment;
         let next_object_id = world.next_object_id();
         let host_raster_preview =
             (!pending_solid_mask_operations.is_empty()).then(|| world.host_raster_preview());
-        Ok(GlobalEffectRunOutcome {
+        Ok(GlobalEffectRunResult::Complete(GlobalEffectRunOutcome {
             particles: pending_particles,
             physics_delta: accumulated_physics,
             audio_events: pending_audio,
@@ -2888,7 +3020,7 @@ impl Engine {
             script_counter: script_counter_requested,
             audio_state: current_audio,
             rng,
-        })
+        }))
     }
 }
 

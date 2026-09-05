@@ -890,6 +890,24 @@
     }
 
     #[test]
+    fn synchronous_script_boundary_restores_marker_after_nested_panic() {
+        assert!(!synchronous_script_boundary_active());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_synchronous_script_boundary(|| {
+                assert!(synchronous_script_boundary_active());
+                with_synchronous_script_boundary(|| {
+                    assert!(synchronous_script_boundary_active());
+                    panic!("synchronous continuation boundary panic probe");
+                });
+            });
+        }));
+
+        assert!(panic.is_err());
+        assert!(!synchronous_script_boundary_active());
+    }
+
+    #[test]
     fn game_over_respects_existing_state() {
         let (result, outcome) =
             with_effect_context_with_state(None, &[], HostWorldContext::default(), 1, true, || {
