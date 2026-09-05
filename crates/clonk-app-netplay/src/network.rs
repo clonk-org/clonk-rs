@@ -4552,10 +4552,10 @@ impl NetworkManager {
     /// follow the host into the new lobby instead of reading the imminent
     /// disconnect as a dead host.
     ///
-    /// Deliberately does not wait for the notice to reach the wire: the app
-    /// tears the manager down immediately afterwards, and `Drop` queues
-    /// `Shutdown` behind this on the same channel. The worker's own await of
-    /// the session broadcast is what orders the bytes ahead of the teardown.
+    /// The app queues the notice and may tear the manager down immediately
+    /// afterwards. The worker awaits the session broadcast's per-route write
+    /// barriers before handling the `Shutdown` queued behind it; a barrier
+    /// orders local writes and does not acknowledge remote delivery.
     pub fn broadcast_host_restarting(&self, rejoin_seconds: u16) -> Result<()> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(
@@ -7785,9 +7785,9 @@ async fn run_host_worker_with_voice_enabled(
                             .map_err(|error| anyhow!("host lobby-countdown submission failed: {error}"))?;
                     }
                     // Awaited, not fired and forgotten: the app queues Shutdown
-                    // directly behind this, and only the resolved broadcast
-                    // guarantees the notice is on every route before the host
-                    // loop is torn down.
+                    // directly behind this, so accepted routes get their
+                    // ordered write barrier and a failed route can try its
+                    // independent fallback before the host loop is torn down.
                     NetworkCommand::BroadcastHostRestarting { rejoin_seconds } => {
                         host.broadcast_host_restarting(rejoin_seconds)
                             .await

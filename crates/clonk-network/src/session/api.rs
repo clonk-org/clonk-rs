@@ -926,6 +926,13 @@ pub enum HostCommand {
         completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
     },
     #[cfg(test)]
+    WaitForPeerCapability {
+        client_id: ClientId,
+        capability: u32,
+        completion: oneshot::Sender<()>,
+        registered: Option<oneshot::Sender<()>>,
+    },
+    #[cfg(test)]
     InspectConnectedClients {
         completion: oneshot::Sender<Vec<ClientId>>,
     },
@@ -1034,7 +1041,7 @@ impl HostHandle {
 
     /// Tells every connected client that this session is closing to restart
     /// the round, not because the host died. Resolves only once the notice has
-    /// been queued on each route, so the caller may tear the host down
+    /// been flushed through each route, so the caller may tear the host down
     /// immediately afterwards. See [`crate::host_restart`].
     pub async fn broadcast_host_restarting(&self, rejoin_seconds: u16) -> Result<(), HostError> {
         let (completion, broadcast) = oneshot::channel();
@@ -1485,6 +1492,46 @@ impl HostHandle {
         routes
             .await
             .expect("test host loop completes a route-change barrier")
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_peer_capability(&self, client_id: ClientId, capability: u32) {
+        let (completion, ready) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::WaitForPeerCapability {
+                client_id,
+                capability,
+                completion,
+                registered: None,
+            })
+            .await
+            .expect("test host loop accepts a peer-capability barrier");
+        ready
+            .await
+            .expect("test host loop completes a peer-capability barrier");
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn arm_peer_capability_waiter(
+        &self,
+        client_id: ClientId,
+        capability: u32,
+    ) -> oneshot::Receiver<()> {
+        let (completion, ready) = oneshot::channel();
+        let (registered, registration_complete) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::WaitForPeerCapability {
+                client_id,
+                capability,
+                completion,
+                registered: Some(registered),
+            })
+            .await
+            .expect("test host loop accepts a peer-capability waiter");
+        registration_complete
+            .await
+            .expect("test host loop registers a peer-capability waiter");
+        ready
     }
 
     #[cfg(test)]

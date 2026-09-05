@@ -467,6 +467,7 @@ mod tests {
                 local_connection_id: 3,
                 remote_connection_id: 5,
                 client_id,
+                peer_addr: "127.0.0.1:11110".parse().test_value(),
                 transport: crate::ControlTransport::new(stream),
                 outbound_rx,
                 retire_rx,
@@ -1183,6 +1184,7 @@ mod tests {
                 },
             )]),
             accepted_route_waiters: Vec::new(),
+            peer_capability_waiters: Vec::new(),
             control_send_time_epoch: 0,
             closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
             pending_sync: Vec::new(),
@@ -1715,6 +1717,205 @@ mod tests {
             second_tcp_rx.try_recv(),
             Ok(HostOutboundMessage::Message(observed)) if observed == message
         ));
+    }
+
+    #[test]
+    fn host_restart_broadcast_flushes_the_route_that_accepted_a_fallback() {
+        let client_id = 7;
+        let (failed, failed_rx) = HostOutboundSender::channel();
+        drop(failed_rx);
+        let mut state = host_state_with_test_route(client_id, failed);
+        state.accepted_routes.get_mut(&1).test_value().protocol = crate::NetworkProtocol::Udp;
+
+        let (fallback, mut fallback_rx) = HostOutboundSender::channel();
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id,
+                remote_connection_id: 13,
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: fallback.clone(),
+                voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
+            },
+        );
+        let message = ControlMessage::HostRestarting { rejoin_seconds: 30 };
+
+        let routes = broadcast_host_message_with_routes(
+            &state,
+            ConnectionTrafficClass::Message,
+            message.clone(),
+            None,
+        );
+
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].1.same_channel(&fallback));
+        assert!(matches!(
+            fallback_rx.try_recv(),
+            Ok(HostOutboundMessage::Message(observed)) if observed == message
+        ));
+    }
+
+    #[tokio::test]
+    async fn host_restart_retries_an_alternate_route_after_an_accepted_tcp_flush_fails() {
+        let client_id = 7;
+        let (primary, mut primary_rx) = HostOutboundSender::channel();
+        let (fallback, mut fallback_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, primary);
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id,
+                remote_connection_id: 13,
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: fallback,
+                voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
+            },
+        );
+
+        let (primary_accepted, primary_accepted_rx) = oneshot::channel();
+        let (drop_flush, drop_flush_rx) = oneshot::channel();
+        let primary_task = tokio::spawn(async move {
+            assert!(matches!(
+                primary_rx.recv().await,
+                Some(HostOutboundMessage::Message(
+                    ControlMessage::HostRestarting { .. }
+                ))
+            ));
+            primary_accepted.send(()).test_value();
+            drop_flush_rx.await.test_value();
+            assert!(matches!(
+                primary_rx.recv().await,
+                Some(HostOutboundMessage::Flush(_))
+            ));
+            // The route accepted the notice, but its writer failed before
+            // completing the barrier. A retry must not enqueue it here again.
+            assert!(timeout(Duration::from_millis(100), primary_rx.recv())
+                .await
+                .is_err());
+        });
+        let (fallback_message, fallback_message_rx) = oneshot::channel();
+        let mut fallback_message = Some(fallback_message);
+        let fallback_task = tokio::spawn(async move {
+            while let Some(command) = fallback_rx.recv().await {
+                match command {
+                    HostOutboundMessage::Message(message) => {
+                        fallback_message
+                            .take()
+                            .test_value()
+                            .send(message)
+                            .test_value();
+                    }
+                    HostOutboundMessage::Flush(completion) => {
+                        completion.send(()).test_value();
+                        break;
+                    }
+                    HostOutboundMessage::Raw(_) => {
+                        panic!("restart fallback queued a raw packet")
+                    }
+                }
+            }
+        });
+
+        let mut broadcast = Box::pin(broadcast_host_restarting(30, &mut state));
+        let accepted = poll_fn(|context| match broadcast.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(()) => Poll::Ready(false),
+        })
+        .await;
+        assert!(
+            accepted,
+            "TCP notice did not reach its pending flush barrier"
+        );
+        timeout(EVENT_WAIT, primary_accepted_rx)
+            .await
+            .test_value()
+            .test_value();
+        drop_flush.send(()).test_value();
+        broadcast.await;
+
+        assert_eq!(
+            timeout(EVENT_WAIT, fallback_message_rx)
+                .await
+                .test_value()
+                .test_value(),
+            ControlMessage::HostRestarting { rejoin_seconds: 30 }
+        );
+        primary_task.await.test_value();
+        fallback_task.await.test_value();
+    }
+
+    #[tokio::test]
+    async fn host_restart_retries_an_alternate_route_after_an_accepted_udp_flush_fails() {
+        let client_id = 7;
+        let udp = crate::udp_session::ReliableUdpRouteSender::test_sender();
+        let primary = HostOutboundSender::from_udp(udp.clone());
+        let (fallback, mut fallback_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, primary);
+        state.accepted_routes.get_mut(&1).test_value().protocol = crate::NetworkProtocol::Udp;
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id,
+                remote_connection_id: 13,
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: fallback,
+                voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
+            },
+        );
+
+        let (fallback_message, fallback_message_rx) = oneshot::channel();
+        let mut fallback_message = Some(fallback_message);
+        let fallback_task = tokio::spawn(async move {
+            while let Some(command) = fallback_rx.recv().await {
+                match command {
+                    HostOutboundMessage::Message(message) => {
+                        fallback_message
+                            .take()
+                            .test_value()
+                            .send(message)
+                            .test_value();
+                    }
+                    HostOutboundMessage::Flush(completion) => {
+                        completion.send(()).test_value();
+                        break;
+                    }
+                    HostOutboundMessage::Raw(_) => {
+                        panic!("restart fallback queued a raw packet")
+                    }
+                }
+            }
+        });
+
+        let mut broadcast = Box::pin(broadcast_host_restarting(30, &mut state));
+        let accepted = poll_fn(|context| match broadcast.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(()) => Poll::Ready(false),
+        })
+        .await;
+        assert!(
+            accepted,
+            "UDP notice did not reach its pending flush barrier"
+        );
+        udp.test_fail();
+        broadcast.await;
+
+        assert_eq!(
+            timeout(EVENT_WAIT, fallback_message_rx)
+                .await
+                .test_value()
+                .test_value(),
+            ControlMessage::HostRestarting { rejoin_seconds: 30 }
+        );
+        fallback_task.await.test_value();
     }
 
     #[tokio::test]
@@ -2856,6 +3057,7 @@ mod tests {
         let mut host_events = host.take_event_receiver();
         let mut client = connect_test_player(address, "Alice").await;
         let client_id = client.client_id();
+        wait_for_host_round_restart_capability(&host, client_id).await;
         let before_routes = host
             .runtime_connections()
             .await
@@ -2924,8 +3126,36 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_rejects_a_second_round_restart_until_the_first_is_acknowledged() {
+        let client_name = b"Readiness fence";
+        // A flushed client route only proves that the announcement left the
+        // client's writer; register the readiness waiter first, then pause its
+        // host dispatch so the registry write remains pending.
+        let (capability_reached, capability_resume, _capability_pause) =
+            pause_host_capability_dispatch(client_name);
         let (address, host) = start_test_host(HostConfig::default()).await;
-        let mut client = connect_test_player(address, "Alice").await;
+        let readiness = host
+            .arm_peer_capability_waiter(1, crate::PortCapabilities::ROUND_RESTART_V2)
+            .await;
+        let mut client = connect_test_player(address, "Readiness fence").await;
+        assert_eq!(client.client_id(), 1);
+        timeout(EVENT_WAIT, capability_reached)
+            .await
+            .test_value()
+            .test_value();
+        {
+            tokio::pin!(readiness);
+            assert!(
+                timeout(Duration::from_millis(50), &mut readiness)
+                    .await
+                    .is_err(),
+                "host capability readiness completed while dispatch was paused"
+            );
+            capability_resume.send(()).test_value();
+            timeout(EVENT_WAIT, readiness)
+                .await
+                .test_value()
+                .test_value();
+        }
         let mut events = client.take_event_receiver();
         let mut first = HostConfig::default();
         first
@@ -3043,6 +3273,7 @@ mod tests {
         .await
         .test_value();
         wait_for_client_host_protocols(&client, route_wait).await;
+        wait_for_host_round_restart_capability(&host, client_id).await;
         while host_events.try_recv().is_ok() {}
 
         let mut events = client.take_event_receiver();
@@ -3092,6 +3323,7 @@ mod tests {
         let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let mut modern = connect_test_player(address, "Alice").await;
+        wait_for_host_round_restart_capability(&host, modern.client_id()).await;
         let mut modern_events = modern.take_event_receiver();
         let (mut stock, _) = raw_client_transport(address, b"Legacy Bob").await;
         drain_raw_client(&mut stock).await;
@@ -3212,6 +3444,7 @@ mod tests {
         )
         .await
         .test_value();
+        wait_for_host_round_restart_capability(&host, client.client_id()).await;
         loop {
             match timeout(EVENT_WAIT, client.events().recv())
                 .await
@@ -3341,12 +3574,30 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_restart_notice_outruns_the_host_shutdown_behind_it() {
         let (address, host) = start_test_host(HostConfig::default()).await;
-        let (mut alice, _) = raw_client_transport(address, b"Alice").await;
+        let (mut alice, _alice_id, alice_addr) =
+            raw_client_transport_with_local_addr(address, b"Alice").await;
         let (mut bob, _) = raw_client_transport(address, b"Bob").await;
         drain_raw_client(&mut alice).await;
         drain_raw_client(&mut bob).await;
 
-        host.broadcast_host_restarting(30).await.test_value();
+        let (writer_paused, resume_writer, _writer_pause_guard) =
+            pause_host_route_writer(alice_addr);
+        let mut broadcast = Box::pin(host.broadcast_host_restarting(30));
+        let mut writer_paused = Box::pin(writer_paused);
+        tokio::select! {
+            result = &mut broadcast => panic!(
+                "host restart notice broadcast completed before the route flushed: {result:?}"
+            ),
+            _ = &mut writer_paused => {}
+        }
+        assert!(
+            timeout(Duration::from_millis(50), &mut broadcast)
+                .await
+                .is_err(),
+            "host restart notice broadcast completed while its route writer was paused"
+        );
+        resume_writer.send(()).test_value();
+        broadcast.await.test_value();
         host.shutdown().await.test_value();
 
         let expected = ControlMessage::HostRestarting { rejoin_seconds: 30 };
@@ -4438,6 +4689,8 @@ mod tests {
         let removing_id = removing.client_id();
         let mut retained = connect_test_player(address, "Bob").await;
         let retained_id = retained.client_id();
+        wait_for_host_round_restart_capability(&host, removing_id).await;
+        wait_for_host_round_restart_capability(&host, retained_id).await;
         let mut removing_events = removing.take_event_receiver();
         let mut retained_events = retained.take_event_receiver();
         while host_events.try_recv().is_ok() {}
@@ -6732,6 +6985,15 @@ mod tests {
         })
         .await
         .expect("client did not install both accepted host routes");
+    }
+
+    async fn wait_for_host_round_restart_capability(host: &HostHandle, client_id: ClientId) {
+        timeout(
+            EVENT_WAIT,
+            host.wait_for_peer_capability(client_id, crate::PortCapabilities::ROUND_RESTART_V2),
+        )
+        .await
+        .expect("host did not observe the client's round-restart capability");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13643,6 +13905,7 @@ mod tests {
                 local_connection_id: 3,
                 remote_connection_id: 5,
                 client_id: 7,
+                peer_addr: "127.0.0.1:11111".parse().test_value(),
                 transport: crate::ControlTransport::new(host_stream),
                 outbound_rx,
                 retire_rx,
@@ -17731,6 +17994,7 @@ mod tests {
                 local_connection_id: 3,
                 remote_connection_id: 5,
                 client_id: 7,
+                peer_addr: "127.0.0.1:11112".parse().test_value(),
                 transport: crate::ControlTransport::new(host_stream),
                 outbound_rx,
                 retire_rx,
@@ -17798,6 +18062,7 @@ mod tests {
                 local_connection_id: 1,
                 remote_connection_id: 11,
                 client_id,
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
                 transport: crate::ControlTransport::new(FailingWriteStream),
                 outbound_rx: failed_rx,
                 retire_rx,
@@ -17877,6 +18142,7 @@ mod tests {
                             .test_value(),
                     );
                 }
+                HostOutboundMessage::Flush(_) => unreachable!("post-mortem cannot contain flushes"),
             }
         }
         assert_eq!(
@@ -19088,7 +19354,16 @@ mod tests {
         address: SocketAddr,
         name: &[u8],
     ) -> (crate::ControlTransport<TcpStream>, ClientId) {
+        let (transport, client_id, _) = raw_client_transport_with_local_addr(address, name).await;
+        (transport, client_id)
+    }
+
+    async fn raw_client_transport_with_local_addr(
+        address: SocketAddr,
+        name: &[u8],
+    ) -> (crate::ControlTransport<TcpStream>, ClientId, SocketAddr) {
         let stream = TcpStream::connect(address).await.test_value();
+        let local_addr = stream.local_addr().test_value();
         let mut transport = crate::ControlTransport::new(stream);
         let name = c4(name);
         let request = test_connection_request(test_client_core(-1, name, false), 0, false);
@@ -19096,7 +19371,7 @@ mod tests {
             .await
             .test_value();
         let client_id = ClientId::try_from(handshake.join_data.client_id).test_value();
-        (transport, client_id)
+        (transport, client_id, local_addr)
     }
 
     async fn raw_existing_client_transport(

@@ -7,6 +7,90 @@ use super::*;
 
 const HOST_ROUTE_CLOSE_WRITE_GRACE: Duration = Duration::from_millis(25);
 
+#[cfg(test)]
+struct HostRouteWriterPause {
+    token: Arc<()>,
+    reached: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+fn host_route_writer_pauses() -> &'static Mutex<BTreeMap<SocketAddr, HostRouteWriterPause>> {
+    static PAUSES: std::sync::OnceLock<Mutex<BTreeMap<SocketAddr, HostRouteWriterPause>>> =
+        std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) struct HostRouteWriterPauseGuard {
+    peer_addr: SocketAddr,
+    token: Arc<()>,
+}
+
+#[cfg(test)]
+pub(crate) fn pause_host_route_writer(
+    peer_addr: SocketAddr,
+) -> (
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    HostRouteWriterPauseGuard,
+) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let token = Arc::new(());
+    let replaced = host_route_writer_pauses()
+        .lock()
+        .expect("host route writer pause lock poisoned")
+        .insert(
+            peer_addr,
+            HostRouteWriterPause {
+                token: Arc::clone(&token),
+                reached: reached_tx,
+                resume: resume_rx,
+            },
+        );
+    assert!(
+        replaced.is_none(),
+        "host route writer pause already installed for this client"
+    );
+    (
+        reached_rx,
+        resume_tx,
+        HostRouteWriterPauseGuard { peer_addr, token },
+    )
+}
+
+#[cfg(test)]
+impl Drop for HostRouteWriterPauseGuard {
+    fn drop(&mut self) {
+        let mut pauses = host_route_writer_pauses()
+            .lock()
+            .expect("host route writer pause lock poisoned");
+        if pauses
+            .get(&self.peer_addr)
+            .is_some_and(|pause| Arc::ptr_eq(&pause.token, &self.token))
+        {
+            pauses.remove(&self.peer_addr);
+        }
+    }
+}
+
+#[cfg(test)]
+async fn wait_at_host_route_writer_pause(peer_addr: SocketAddr) {
+    let pause = host_route_writer_pauses()
+        .lock()
+        .expect("host route writer pause lock poisoned")
+        .remove(&peer_addr);
+    let Some(HostRouteWriterPause {
+        reached, resume, ..
+    }) = pause
+    else {
+        return;
+    };
+    let _ = reached.send(());
+    let _ = resume.await;
+}
+
 enum HostRouteWriterExit {
     Cancelled,
     OutboundClosed,
@@ -39,6 +123,7 @@ async fn run_host_route_writer<W>(
     mut outbound_rx: mpsc::UnboundedReceiver<HostOutboundMessage>,
     mut close_rx: watch::Receiver<Option<crate::ConnectionReply>>,
     mut cancel_rx: watch::Receiver<bool>,
+    peer_addr: SocketAddr,
 ) -> HostRouteWriterExit
 where
     W: AsyncWrite + Unpin,
@@ -80,6 +165,19 @@ where
             break HostRouteWriterExit::ClosedByHost;
         }
 
+        if let Next::Outbound(HostOutboundMessage::Flush(completion)) = next {
+            let _ = completion.send(());
+            continue;
+        }
+
+        #[cfg(test)]
+        let pause_before_send = matches!(
+            &next,
+            Next::Outbound(HostOutboundMessage::Message(
+                ControlMessage::HostRestarting { .. }
+            ))
+        );
+
         let frame = match next {
             Next::Outbound(HostOutboundMessage::Message(message)) => {
                 transport.prepare_message_frame(message)
@@ -87,12 +185,21 @@ where
             Next::Outbound(HostOutboundMessage::Raw(packet)) => {
                 transport.prepare_complete_packet_frame(&packet)
             }
+            Next::Outbound(HostOutboundMessage::Flush(_)) => {
+                unreachable!("host route flush handled before frame preparation")
+            }
             Next::Close(_) => unreachable!("close handled before frame preparation"),
         };
         let frame = match frame {
             Ok(frame) => frame,
             Err(error) => break HostRouteWriterExit::Failed(format!("send failed: {error}")),
         };
+        #[cfg(test)]
+        if pause_before_send {
+            wait_at_host_route_writer_pause(peer_addr).await;
+        }
+        #[cfg(not(test))]
+        let _ = peer_addr;
         let result = tokio::select! {
             biased;
             _reply = wait_for_host_route_close(&mut close_rx) => {
@@ -114,6 +221,7 @@ where
             let _ = match message {
                 HostOutboundMessage::Message(message) => transport.retain_unsent_message(message),
                 HostOutboundMessage::Raw(packet) => transport.retain_unsent_complete_packet(packet),
+                HostOutboundMessage::Flush(_) => Ok(()),
             };
         }
     }
@@ -142,6 +250,7 @@ pub(crate) struct ClientTask<S> {
     pub(crate) local_connection_id: u32,
     pub(crate) remote_connection_id: u32,
     pub(crate) client_id: ClientId,
+    pub(crate) peer_addr: SocketAddr,
     pub(crate) transport: crate::ControlTransport<S>,
     pub(crate) outbound_rx: HostOutboundReceiver,
     pub(crate) retire_rx: watch::Receiver<bool>,
@@ -158,6 +267,7 @@ where
             local_connection_id,
             remote_connection_id,
             client_id,
+            peer_addr,
             transport,
             outbound_rx,
             mut retire_rx,
@@ -172,6 +282,7 @@ where
             outbound_rx,
             close_rx,
             cancel_rx,
+            peer_addr,
         ));
         let mut writer_finished = false;
         let mut disconnect_reason = None;

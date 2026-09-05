@@ -444,6 +444,8 @@ pub(crate) async fn run_host(
         accepted_routes: BTreeMap::new(),
         #[cfg(test)]
         accepted_route_waiters: Vec::new(),
+        #[cfg(test)]
+        peer_capability_waiters: Vec::new(),
         control_send_time_epoch: 0,
         closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
         pending_sync: Vec::new(),
@@ -1052,6 +1054,29 @@ pub(crate) async fn run_host(
                         }
                     }
                     #[cfg(test)]
+                    HostCommand::WaitForPeerCapability {
+                        client_id,
+                        capability,
+                        completion,
+                        registered,
+                    } => {
+                        if state
+                            .peer_capabilities
+                            .peer_supports(client_id as i32, capability)
+                        {
+                            let _ = completion.send(());
+                        } else {
+                            state.peer_capability_waiters.push(PeerCapabilityWaiter {
+                                client_id,
+                                capability,
+                                completion,
+                            });
+                        }
+                        if let Some(registered) = registered {
+                            let _ = registered.send(());
+                        }
+                    }
+                    #[cfg(test)]
                     HostCommand::InspectConnectedClients { completion } => {
                         let _ = completion.send(state.clients.keys().copied().collect());
                     }
@@ -1256,6 +1281,7 @@ pub(crate) fn spawn_host_transport<S>(
                 local_connection_id: connection_id,
                 remote_connection_id,
                 client_id,
+                peer_addr: addr,
                 transport,
                 outbound_rx,
                 retire_rx,
