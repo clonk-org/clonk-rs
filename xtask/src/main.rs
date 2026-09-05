@@ -123,7 +123,7 @@ fn main() -> Result<()> {
         }
         Some("presentation") => {
             let tail: Vec<String> = args.collect();
-            compat_profile::presentation_command(&tail)
+            xtask::presentation::command(&tail)
         }
         Some("update-manifest") => {
             let tail: Vec<String> = args.collect();
