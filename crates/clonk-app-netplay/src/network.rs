@@ -4297,10 +4297,9 @@ impl NetworkManager {
     /// follow the host into the new lobby instead of reading the imminent
     /// disconnect as a dead host.
     ///
-    /// Deliberately does not wait for the notice to reach the wire: the app
-    /// tears the manager down immediately afterwards, and `Drop` queues
-    /// `Shutdown` behind this on the same channel. The worker's own await of
-    /// the session broadcast is what orders the bytes ahead of the teardown.
+    /// The app queues the notice and may tear the manager down immediately
+    /// afterwards. The worker awaits the session broadcast's per-route flush
+    /// before handling the `Shutdown` queued behind it.
     pub fn broadcast_host_restarting(&self, rejoin_seconds: u16) -> Result<()> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(

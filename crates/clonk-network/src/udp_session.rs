@@ -140,6 +140,10 @@ enum UdpOutboxWork {
         routes: VecDeque<UdpOutboxRouteId>,
         payload: UdpPreparedPayload,
     },
+    Flush {
+        route: UdpOutboxRouteId,
+        completion: oneshot::Sender<()>,
+    },
     Retire {
         route: UdpOutboxRouteId,
     },
@@ -161,6 +165,9 @@ enum UdpOutboxAction {
         peer: SocketAddr,
         generation: u64,
         error: Arc<str>,
+    },
+    Flush {
+        completion: oneshot::Sender<()>,
     },
     Retired {
         route: UdpOutboxRouteId,
@@ -274,6 +281,18 @@ impl UdpLogicalOutbox {
         Ok(())
     }
 
+    fn enqueue_flush(
+        &mut self,
+        route: UdpOutboxRouteId,
+        completion: oneshot::Sender<()>,
+    ) -> Result<(), oneshot::Sender<()>> {
+        if !self.routes.get(&route).is_some_and(|state| state.accepting) {
+            return Err(completion);
+        }
+        self.push(UdpOutboxWork::Flush { route, completion });
+        Ok(())
+    }
+
     #[cfg(test)]
     fn enqueue_many(
         &mut self,
@@ -338,6 +357,9 @@ impl UdpLogicalOutbox {
                         retained.push_back(UdpOutboxWork::Many { routes, payload });
                     }
                 }
+                UdpOutboxWork::Flush {
+                    route: work_route, ..
+                } if work_route == route => {}
                 UdpOutboxWork::Retire { route: work_route } if work_route == route => {}
                 UdpOutboxWork::Close {
                     route: work_route, ..
@@ -375,6 +397,11 @@ impl UdpLogicalOutbox {
                     }
                     if let Some(action) = self.prepare_action(route, payload) {
                         return Some(action);
+                    }
+                }
+                UdpOutboxWork::Flush { route, completion } => {
+                    if self.route_identity(route).is_some() {
+                        return Some(UdpOutboxAction::Flush { completion });
                     }
                 }
                 UdpOutboxWork::Retire { route } => {
@@ -421,6 +448,9 @@ impl UdpLogicalOutbox {
         while let Some(work) = self.queue.pop_front() {
             match work {
                 UdpOutboxWork::Single {
+                    route: work_route, ..
+                }
+                | UdpOutboxWork::Flush {
                     route: work_route, ..
                 }
                 | UdpOutboxWork::Retire { route: work_route }
@@ -565,6 +595,21 @@ impl UdpSharedOutbox {
         let mut state = self.state.lock().expect("UDP outbox poisoned");
         let was_empty = state.queue.is_empty();
         let result = state.enqueue_prepared(route, payload);
+        drop(state);
+        if was_empty && result.is_ok() {
+            self.ready.notify_one();
+        }
+        result
+    }
+
+    fn enqueue_flush(
+        &self,
+        route: UdpOutboxRouteId,
+        completion: oneshot::Sender<()>,
+    ) -> Result<(), oneshot::Sender<()>> {
+        let mut state = self.state.lock().expect("UDP outbox poisoned");
+        let was_empty = state.queue.is_empty();
+        let result = state.enqueue_flush(route, completion);
         drop(state);
         if was_empty && result.is_ok() {
             self.ready.notify_one();
@@ -769,6 +814,15 @@ impl ReliableUdpRouteSender {
             .outbox
             .enqueue(self.lease.route, prepared)
             .map_err(|_| message)
+    }
+
+    pub(crate) async fn flush(&self) -> Result<(), ()> {
+        let (completion, completed) = oneshot::channel();
+        self.lease
+            .outbox
+            .enqueue_flush(self.lease.route, completion)
+            .map_err(|_| ())?;
+        completed.await.map_err(|_| ())
     }
 
     pub(crate) fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie) {
@@ -2105,6 +2159,11 @@ async fn run_hub(
                             let _ = driver.close_peer(peer).await;
                         }
                     }
+                    UdpOutboxAction::Flush {
+                        completion, ..
+                    } => {
+                        let _ = completion.send(());
+                    }
                     UdpOutboxAction::Retired {
                         route,
                         peer,
@@ -2887,6 +2946,7 @@ mod tests {
                 UdpOutboxAction::Send { route, payload, .. } => {
                     trace.push(("send", route, payload[1]));
                 }
+                UdpOutboxAction::Flush { .. } => unreachable!("test has no flush barrier"),
                 UdpOutboxAction::Retired { route, .. } => trace.push(("retire", route, 0)),
                 UdpOutboxAction::Failed { .. } => unreachable!("test queues valid packets"),
                 UdpOutboxAction::Close { .. } => unreachable!("test does not close a route"),
@@ -2969,6 +3029,7 @@ mod tests {
                     remaining.push((route, payload[1]));
                 }
                 UdpOutboxAction::Failed { .. }
+                | UdpOutboxAction::Flush { .. }
                 | UdpOutboxAction::Retired { .. }
                 | UdpOutboxAction::Close { .. } => {}
             }

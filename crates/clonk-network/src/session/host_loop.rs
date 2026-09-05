@@ -1281,6 +1281,7 @@ pub(crate) fn spawn_host_transport<S>(
                 local_connection_id: connection_id,
                 remote_connection_id,
                 client_id,
+                peer_addr: addr,
                 transport,
                 outbound_rx,
                 retire_rx,

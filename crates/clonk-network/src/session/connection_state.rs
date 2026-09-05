@@ -65,6 +65,7 @@ impl<T> PostFailureBuffer<T> {
 pub(crate) enum HostOutboundMessage {
     Message(ControlMessage),
     Raw(Vec<u8>),
+    Flush(oneshot::Sender<()>),
 }
 
 pub(crate) struct HostOutboundReceiver {
@@ -189,6 +190,56 @@ impl HostOutboundSender {
         self.send_or_retain(HostOutboundMessage::Message(message))
     }
 
+    pub(crate) fn try_send_live(&self, message: ControlMessage) -> Result<(), ControlMessage> {
+        let message = if let Some(udp) = &self.udp {
+            match udp.try_send(message) {
+                Ok(()) => return Ok(()),
+                Err(message) => message,
+            }
+        } else {
+            match self.sender.send(HostOutboundMessage::Message(message)) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::SendError(HostOutboundMessage::Message(message))) => message,
+                Err(mpsc::error::SendError(HostOutboundMessage::Raw(_))) => {
+                    unreachable!("live logical send cannot queue a raw packet")
+                }
+                Err(mpsc::error::SendError(HostOutboundMessage::Flush(_))) => {
+                    unreachable!("live logical send cannot queue a route flush")
+                }
+            }
+        };
+        let _ = self
+            .post_failure
+            .retain(HostOutboundMessage::Message(message.clone()));
+        Err(message)
+    }
+
+    pub(crate) async fn flush(&self) -> Result<(), ()> {
+        if let Some(udp) = &self.udp {
+            return match tokio::time::timeout(CLIENT_ROUTE_RETRY_INTERVAL, udp.flush()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    udp.retire();
+                    Err(())
+                }
+            };
+        }
+        if self.sender.is_closed() {
+            return Err(());
+        }
+        let (completion, completed) = oneshot::channel();
+        self.sender
+            .send(HostOutboundMessage::Flush(completion))
+            .map_err(|_| ())?;
+        match tokio::time::timeout(CLIENT_ROUTE_RETRY_INTERVAL, completed).await {
+            Ok(result) => result.map_err(|_| ()),
+            Err(_) => {
+                self.retire();
+                Err(())
+            }
+        }
+    }
+
     pub(crate) fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie) {
         if let Some(udp) = &self.udp {
             udp.set_voice_receive_cookie(cookie);
@@ -209,6 +260,9 @@ impl HostOutboundSender {
                     Ok(()) => return Ok(()),
                     Err(packet) => HostOutboundMessage::Raw(packet),
                 },
+                HostOutboundMessage::Flush(_) => {
+                    unreachable!("route flushes bypass the UDP message queue")
+                }
             };
             return self
                 .post_failure

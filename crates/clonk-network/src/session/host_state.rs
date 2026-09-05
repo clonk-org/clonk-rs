@@ -841,6 +841,35 @@ fn preferred_host_outbound(
     preferred_host_send_route(state, client_id, traffic).map(|route| route.outbound.clone())
 }
 
+fn preferred_host_outbound_excluding(
+    state: &HostState,
+    client_id: ClientId,
+    traffic: ConnectionTrafficClass,
+    excluded: &[HostOutboundSender],
+) -> Option<HostOutboundSender> {
+    state
+        .accepted_routes
+        .iter()
+        .filter(|(_, route)| {
+            route.client_id == client_id
+                && route.outbound.accepts_post_failure_fifo()
+                && !excluded
+                    .iter()
+                    .any(|previous| previous.same_channel(&route.outbound))
+        })
+        .min_by_key(|(connection_id, route)| {
+            let protocol_rank = match (traffic, route.protocol) {
+                (ConnectionTrafficClass::Message, crate::NetworkProtocol::Udp)
+                | (ConnectionTrafficClass::Data, crate::NetworkProtocol::Tcp) => 0_u8,
+                (ConnectionTrafficClass::Message, crate::NetworkProtocol::Tcp)
+                | (ConnectionTrafficClass::Data, crate::NetworkProtocol::Udp) => 1,
+                _ => 2,
+            };
+            (protocol_rank, **connection_id)
+        })
+        .map(|(_, route)| route.outbound.clone())
+}
+
 pub(crate) fn host_runtime_connections(state: &HostState) -> Vec<RuntimeNetworkConnection> {
     let now = Instant::now();
     state
@@ -967,7 +996,52 @@ pub(crate) async fn send_host_raw(
                 packet = match closed {
                     HostOutboundMessage::Raw(packet) => packet,
                     HostOutboundMessage::Message(_) => unreachable!("sent a raw packet"),
+                    HostOutboundMessage::Flush(_) => {
+                        unreachable!("raw sends cannot queue a route flush")
+                    }
                 };
+            }
+        }
+    }
+}
+
+fn try_send_host_message_with_route(
+    state: &HostState,
+    client_id: ClientId,
+    traffic: ConnectionTrafficClass,
+    mut message: ControlMessage,
+) -> Option<HostOutboundSender> {
+    loop {
+        let outbound = preferred_host_outbound(state, client_id, traffic)?;
+        match outbound.try_send(message) {
+            Ok(()) => return Some(outbound),
+            Err(mpsc::error::SendError(closed)) => {
+                message = match closed {
+                    HostOutboundMessage::Message(message) => message,
+                    HostOutboundMessage::Raw(_) => unreachable!("sent a logical message"),
+                    HostOutboundMessage::Flush(_) => {
+                        unreachable!("logical send cannot queue a route flush")
+                    }
+                };
+            }
+        }
+    }
+}
+
+fn try_send_host_message_with_route_excluding(
+    state: &HostState,
+    client_id: ClientId,
+    traffic: ConnectionTrafficClass,
+    mut message: ControlMessage,
+    excluded: &mut Vec<HostOutboundSender>,
+) -> Option<HostOutboundSender> {
+    loop {
+        let outbound = preferred_host_outbound_excluding(state, client_id, traffic, excluded)?;
+        match outbound.try_send_live(message) {
+            Ok(()) => return Some(outbound),
+            Err(next_message) => {
+                excluded.push(outbound);
+                message = next_message;
             }
         }
     }
@@ -977,22 +1051,9 @@ pub(crate) fn try_send_host_message(
     state: &HostState,
     client_id: ClientId,
     traffic: ConnectionTrafficClass,
-    mut message: ControlMessage,
+    message: ControlMessage,
 ) -> bool {
-    loop {
-        let Some(outbound) = preferred_host_outbound(state, client_id, traffic) else {
-            return false;
-        };
-        match outbound.try_send(message) {
-            Ok(()) => return true,
-            Err(mpsc::error::SendError(closed)) => {
-                message = match closed {
-                    HostOutboundMessage::Message(message) => message,
-                    HostOutboundMessage::Raw(_) => unreachable!("sent a logical message"),
-                };
-            }
-        }
-    }
+    try_send_host_message_with_route(state, client_id, traffic, message).is_some()
 }
 
 /// Queues one logical message on each target client's preferred route.
@@ -1002,11 +1063,13 @@ pub(crate) fn try_send_host_message(
 /// Resolve the equivalent Rust routes in one pass as well. Re-running
 /// `preferred_host_send_route` for every client would scan the full route
 /// registry once per peer.
-pub(crate) fn broadcast_host_message(
+fn broadcast_host_message_inner(
     state: &HostState,
     traffic: ConnectionTrafficClass,
     message: ControlMessage,
     except_client_id: Option<ClientId>,
+    mut on_sent: impl FnMut(ClientId, HostOutboundSender),
+    capture_routes: bool,
 ) -> Vec<ClientId> {
     let mut preferred = BTreeMap::<ClientId, (u8, u32, HostOutboundSender)>::new();
     for (connection_id, route) in &state.accepted_routes {
@@ -1039,6 +1102,31 @@ pub(crate) fn broadcast_host_message(
         .into_iter()
         .map(|(client_id, (_, _, outbound))| (client_id, outbound))
         .collect::<Vec<_>>();
+    if capture_routes {
+        let mut sent = Vec::with_capacity(selected.len());
+        for (client_id, outbound) in selected {
+            match outbound.try_send_live(message.clone()) {
+                Ok(()) => {
+                    on_sent(client_id, outbound);
+                    sent.push(client_id);
+                }
+                Err(message) => {
+                    let mut excluded = vec![outbound];
+                    if let Some(outbound) = try_send_host_message_with_route_excluding(
+                        state,
+                        client_id,
+                        traffic,
+                        message,
+                        &mut excluded,
+                    ) {
+                        on_sent(client_id, outbound);
+                        sent.push(client_id);
+                    }
+                }
+            }
+        }
+        return sent;
+    }
     if let Some(results) = HostOutboundSender::try_send_many(
         &selected
             .iter()
@@ -1047,8 +1135,14 @@ pub(crate) fn broadcast_host_message(
         message.clone(),
     ) {
         let mut sent = Vec::with_capacity(selected.len());
-        for ((client_id, _), accepted) in selected.into_iter().zip(results) {
-            if accepted || try_send_host_message(state, client_id, traffic, message.clone()) {
+        for ((client_id, outbound), accepted) in selected.into_iter().zip(results) {
+            if accepted {
+                on_sent(client_id, outbound);
+                sent.push(client_id);
+            } else if let Some(outbound) =
+                try_send_host_message_with_route(state, client_id, traffic, message.clone())
+            {
+                on_sent(client_id, outbound);
                 sent.push(client_id);
             }
         }
@@ -1058,18 +1152,54 @@ pub(crate) fn broadcast_host_message(
     let mut sent = Vec::with_capacity(selected.len());
     for (client_id, outbound) in selected {
         match outbound.try_send(message.clone()) {
-            Ok(()) => sent.push(client_id),
+            Ok(()) => {
+                on_sent(client_id, outbound);
+                sent.push(client_id);
+            }
             Err(mpsc::error::SendError(HostOutboundMessage::Message(message))) => {
-                if try_send_host_message(state, client_id, traffic, message) {
+                if let Some(outbound) =
+                    try_send_host_message_with_route(state, client_id, traffic, message)
+                {
+                    on_sent(client_id, outbound);
                     sent.push(client_id);
                 }
             }
             Err(mpsc::error::SendError(HostOutboundMessage::Raw(_))) => {
                 unreachable!("logical broadcast only queues logical messages")
             }
+            Err(mpsc::error::SendError(HostOutboundMessage::Flush(_))) => {
+                unreachable!("logical broadcast only queues logical messages")
+            }
         }
     }
     sent
+}
+
+pub(crate) fn broadcast_host_message(
+    state: &HostState,
+    traffic: ConnectionTrafficClass,
+    message: ControlMessage,
+    except_client_id: Option<ClientId>,
+) -> Vec<ClientId> {
+    broadcast_host_message_inner(state, traffic, message, except_client_id, |_, _| {}, false)
+}
+
+pub(crate) fn broadcast_host_message_with_routes(
+    state: &HostState,
+    traffic: ConnectionTrafficClass,
+    message: ControlMessage,
+    except_client_id: Option<ClientId>,
+) -> Vec<(ClientId, HostOutboundSender)> {
+    let mut routes = Vec::new();
+    broadcast_host_message_inner(
+        state,
+        traffic,
+        message,
+        except_client_id,
+        |client_id, outbound| routes.push((client_id, outbound)),
+        true,
+    );
+    routes
 }
 
 pub(crate) fn resource_traffic_class(packet: &ResourcePacket) -> ConnectionTrafficClass {

@@ -820,6 +820,7 @@ pub(crate) async fn handle_client_disconnected(
                     crate::transport::encode_complete_message(message).ok()
                 }
                 HostOutboundMessage::Raw(packet) => Some(packet),
+                HostOutboundMessage::Flush(_) => None,
             };
             if let Some(packet) = packet {
                 crate::post_mortem::retain_post_failure_packet(
@@ -2021,12 +2022,15 @@ pub(crate) async fn broadcast_league_round_results(
 }
 
 pub(crate) async fn broadcast_host_restarting(rejoin_seconds: u16, state: &mut HostState) {
-    let _ = broadcast_host_message(
+    let routes = broadcast_host_message_with_routes(
         state,
         ConnectionTrafficClass::Message,
         ControlMessage::HostRestarting { rejoin_seconds },
         None,
     );
+    for (_, outbound) in routes {
+        let _ = outbound.flush().await;
+    }
 }
 
 pub(crate) fn queue_host_restart_lobby(
