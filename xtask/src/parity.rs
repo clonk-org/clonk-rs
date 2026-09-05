@@ -39,13 +39,17 @@ pub fn command(args: &[String]) -> Result<()> {
                 bail!("`parity verify` does not take additional arguments");
             }
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let status = Command::new(cargo)
-                .current_dir(&workspace_dir)
-                .args(verify_nextest_args())
-                .status()
-                .context("failed to run cargo nextest for parity verify")?;
-            if !status.success() {
-                bail!("parity differential check failed ({status})");
+            for package in PARITY_PACKAGES {
+                let status = Command::new(&cargo)
+                    .current_dir(&workspace_dir)
+                    .args(verify_nextest_args(package))
+                    .status()
+                    .with_context(|| {
+                        format!("failed to run cargo nextest for parity verify ({package})")
+                    })?;
+                if !status.success() {
+                    bail!("parity differential check failed for {package} ({status})");
+                }
             }
             Ok(())
         }
@@ -69,24 +73,29 @@ pub fn command(args: &[String]) -> Result<()> {
 /// Adding an app-layer comparator is now a one-line change here. The test
 /// target is deliberately no longer pinned: a package is free to host its
 /// comparator in whichever target suits it, and the name filter is what selects
-/// the test.
+/// the test. Each package is invoked independently with `--no-tests=fail`, so
+/// removing one comparator cannot be hidden by a match in another package.
 const PARITY_PACKAGES: &[&str] = &[
     "clonk-app",
     "clonk-engine-unit-tests",
     "clonk-frontend-unit-tests",
 ];
 
-/// The comparator's test name, matched across every [`PARITY_PACKAGES`] entry.
-const PARITY_TEST_FILTER: &str = "test(parity_differential_matches_cpp_golden)";
+/// The comparator's test name, matched at the end of each fully-qualified test
+/// name. The module path differs between the three host crates.
+const PARITY_TEST_FILTER: &str = "test(/(^|::)parity_differential_matches_cpp_golden$/)";
 
-fn verify_nextest_args() -> Vec<String> {
+fn verify_nextest_args(package: &str) -> Vec<String> {
     let mut args = vec!["nextest".to_string(), "run".to_string()];
-    for package in PARITY_PACKAGES {
+    for listed_package in PARITY_PACKAGES {
         args.push("-p".to_string());
-        args.push((*package).to_string());
+        args.push((*listed_package).to_string());
     }
-    args.push("-E".to_string());
-    args.push(PARITY_TEST_FILTER.to_string());
+    args.extend([
+        "--no-tests=fail".to_string(),
+        "-E".to_string(),
+        format!("package({package}) and {PARITY_TEST_FILTER}"),
+    ]);
     args
 }
 
@@ -116,30 +125,37 @@ mod tests {
     /// comparator outside `clonk-engine` becomes reachable by adding an entry
     /// here, without touching the command construction.
     #[test]
-    fn verify_runs_the_comparator_across_every_listed_package() {
-        let args = verify_nextest_args();
-
-        assert_eq!(&args[..2], &["nextest".to_string(), "run".to_string()]);
-        for package in PARITY_PACKAGES {
-            let position = args
-                .iter()
-                .position(|arg| arg == package)
-                .unwrap_or_else(|| panic!("{package} is passed to nextest"));
-            assert_eq!(args[position - 1], "-p", "each package gets its own -p");
-        }
+    fn verify_requires_each_listed_package_independently() {
         assert_eq!(
-            args.iter().filter(|arg| *arg == "-p").count(),
-            PARITY_PACKAGES.len(),
-            "one -p per listed package and no more"
+            PARITY_PACKAGES,
+            &[
+                "clonk-app",
+                "clonk-engine-unit-tests",
+                "clonk-frontend-unit-tests",
+            ],
+            "the standalone inventory must retain every current comparator package"
         );
-        assert_eq!(args.last().map(String::as_str), Some(PARITY_TEST_FILTER));
+        for package in PARITY_PACKAGES {
+            let args = verify_nextest_args(package);
 
-        // The test target is deliberately unpinned so a package can host its
-        // comparator wherever it likes; only the name selects it.
-        assert!(
-            !args.iter().any(|arg| arg == "--test"),
-            "pinning a test target would re-impose the single-crate limit"
-        );
+            assert_eq!(
+                args,
+                vec![
+                    "nextest".to_string(),
+                    "run".to_string(),
+                    "-p".to_string(),
+                    "clonk-app".to_string(),
+                    "-p".to_string(),
+                    "clonk-engine-unit-tests".to_string(),
+                    "-p".to_string(),
+                    "clonk-frontend-unit-tests".to_string(),
+                    "--no-tests=fail".to_string(),
+                    "-E".to_string(),
+                    format!("package({package}) and {PARITY_TEST_FILTER}"),
+                ],
+                "each comparator must share the complete compile graph and remain independently fail-closed"
+            );
+        }
     }
 
     #[test]

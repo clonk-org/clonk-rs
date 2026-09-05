@@ -286,7 +286,15 @@ jobs:
             command: cargo nextest run -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
           - name: app 4+9/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
+            command: |
+              failed=0
+              cargo nextest run -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked || failed=1
+              # Keep the app comparator required in the same feature-shaped
+              # test target as this shard. The explicit no-tests failure policy
+              # turns a renamed or missing comparator into a failed landing
+              # check.
+              cargo nextest run -p clonk-app --features app-test-shard-4,app-test-shard-9 --locked --no-tests=fail -E 'test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
+              exit "$failed"
           - name: app 5/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
@@ -310,7 +318,12 @@ jobs:
             command: |
               failed=0
               cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked --features clonk-engine-unit-tests/ffi || failed=1
-              cargo xtask parity verify || failed=1
+              # These comparators already belong to this required unit row.
+              # Run each package separately so the no-tests failure policy detects an
+              # absent or renamed comparator instead of succeeding on the
+              # other package's match.
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --locked --features clonk-engine-unit-tests/ffi --no-tests=fail -E 'package(clonk-engine-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --locked --features clonk-engine-unit-tests/ffi --no-tests=fail -E 'package(clonk-frontend-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
               exit "$failed"
           - name: remaining workspace 1/2
             command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked

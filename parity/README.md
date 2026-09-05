@@ -345,11 +345,12 @@ C++ source and regenerate.
 ## Usage
 
 ```sh
-# Verify:
-cargo nextest run -p clonk-engine-unit-tests --test engine_inline \
-  -E 'test(parity_differential_matches_cpp_golden)'
-#   or, via the xtask wrapper:
+# Verify every registered comparator (the wrapper runs each package separately
+# and fails if any package has no matching test):
 cargo xtask parity verify
+# For a focused engine-only run:
+cargo nextest run -p clonk-engine-unit-tests --test engine_inline \
+  --no-tests=fail -E 'test(/(^|::)parity_differential_matches_cpp_golden$/)'
 
 # Regenerate the golden after changing the C++ primitives or oracle coverage
 # (requires a C++23 compiler; honours $CXX, defaults to clang++):
