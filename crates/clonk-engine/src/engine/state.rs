@@ -3060,6 +3060,35 @@ impl Engine {
         Ok(())
     }
 
+    /// The deletion both scenario-section sweeps end with: drop every object
+    /// the departing section owned and prune it out of the object lists and
+    /// the sector index. `C4Game::LoadScenarioSection` and
+    /// `C4GameObjects::Clear(false)` differ only in what they run *before*
+    /// this (C4Game.cpp:4194-4201; C4GameObjects.cpp:313-331).
+    fn delete_non_inactive_objects_for_scenario_section(&mut self) {
+        let removed = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Inactive)
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        self.objects.retain(|object| !removed.contains(&object.id));
+        self.execution
+            .exec_list
+            .retain(|object| !removed.contains(object));
+        self.execution
+            .inactive
+            .retain(|object| !removed.contains(object));
+        if let Some(sectors) = self.sectors.as_mut() {
+            for object in &removed {
+                sectors.remove(*object);
+            }
+        }
+        if !removed.is_empty() {
+            self.note_objects_changed();
+        }
+    }
+
     /// `LoadScenarioSection`'s active-list teardown before global effect
     /// cleanup (C4Game.cpp:4190-4201). Objects already in the inactive list
     /// survive; objects created during a departing object's destruction are
@@ -3120,27 +3149,7 @@ impl Engine {
             }
         }
 
-        let removed = self
-            .objects
-            .iter()
-            .filter(|object| object.state.status != ObjectStatus::Inactive)
-            .map(|object| object.id)
-            .collect::<HashSet<_>>();
-        self.objects.retain(|object| !removed.contains(&object.id));
-        self.execution
-            .exec_list
-            .retain(|object| !removed.contains(object));
-        self.execution
-            .inactive
-            .retain(|object| !removed.contains(object));
-        if let Some(sectors) = self.sectors.as_mut() {
-            for object in &removed {
-                sectors.remove(*object);
-            }
-        }
-        if !removed.is_empty() {
-            self.note_objects_changed();
-        }
+        self.delete_non_inactive_objects_for_scenario_section();
         Ok(())
     }
 
@@ -3167,27 +3176,7 @@ impl Engine {
             }
         }
 
-        let removed = self
-            .objects
-            .iter()
-            .filter(|object| object.state.status != ObjectStatus::Inactive)
-            .map(|object| object.id)
-            .collect::<HashSet<_>>();
-        self.objects.retain(|object| !removed.contains(&object.id));
-        self.execution
-            .exec_list
-            .retain(|object| !removed.contains(object));
-        self.execution
-            .inactive
-            .retain(|object| !removed.contains(object));
-        if let Some(sectors) = self.sectors.as_mut() {
-            for object in &removed {
-                sectors.remove(*object);
-            }
-        }
-        if !removed.is_empty() {
-            self.note_objects_changed();
-        }
+        self.delete_non_inactive_objects_for_scenario_section();
         Ok(())
     }
 
