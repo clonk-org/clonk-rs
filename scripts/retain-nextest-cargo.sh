@@ -2,7 +2,35 @@
 
 set -euo pipefail
 
-real_cargo=${LC_REAL_CARGO:?LC_REAL_CARGO must name the real Cargo executable}
+wrapper_path=$(realpath "$0")
+
+find_real_cargo() {
+    local path_entry candidate candidate_path
+    local -a path_entries
+    IFS=: read -r -a path_entries <<< "${PATH:-}"
+    for path_entry in "${path_entries[@]}"; do
+        [[ -n "$path_entry" ]] || path_entry=.
+        candidate="$path_entry/cargo"
+        [[ -x "$candidate" ]] || continue
+        candidate_path=$(realpath "$candidate" 2>/dev/null) || continue
+        [[ "$candidate_path" == "$wrapper_path" ]] && continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+real_cargo=${LC_REAL_CARGO:-${CARGO:-}}
+resolved_cargo=
+if [[ -n "$real_cargo" ]]; then
+    resolved_cargo=$(realpath "$real_cargo" 2>/dev/null) || true
+fi
+if [[ -z "$real_cargo" || -z "$resolved_cargo" || "$resolved_cargo" == "$wrapper_path" ]]; then
+    real_cargo=$(find_real_cargo) || {
+        echo "LC_REAL_CARGO must name the real Cargo executable" >&2
+        exit 127
+    }
+fi
 helper=${LC_NEXTEST_JUNIT_HELPER:-scripts/retain-nextest-junit.sh}
 source_path=${LC_NEXTEST_JUNIT_SOURCE:-${CARGO_TARGET_DIR:-target}/nextest/default/junit.xml}
 

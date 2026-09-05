@@ -194,6 +194,70 @@ printf "%s %s\\n" "$first" "$second" > "$STATUS_FILE"
                 {"<native-failure/>\n", "<native-success/>\n"},
             )
 
+    def test_native_cargo_wrapper_finds_real_cargo_when_nested_environment_drops_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "junit.xml"
+            retained = root / "retained"
+            real_bin = root / "real-bin"
+            wrapper_bin = root / "wrapper-bin"
+            real_bin.mkdir()
+            wrapper_bin.mkdir()
+            fake_cargo = real_bin / "cargo"
+            fake_cargo.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+case "$2" in
+    fail) printf '<nested-failure/>\\n' > "$LC_NEXTEST_JUNIT_SOURCE"; exit 31 ;;
+    pass) printf '<nested-success/>\\n' > "$LC_NEXTEST_JUNIT_SOURCE" ;;
+    *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_cargo.chmod(0o755)
+            wrapper = wrapper_bin / "cargo"
+            wrapper.write_bytes(RETAIN_CARGO.read_bytes())
+            wrapper.chmod(0o755)
+            environment = os.environ.copy()
+            environment.pop("LC_REAL_CARGO", None)
+            environment.update(
+                {
+                    "CARGO": str(wrapper),
+                    "PATH": f"{wrapper_bin}:{real_bin}:{environment['PATH']}",
+                    "LC_NEXTEST_JUNIT_SOURCE": str(source),
+                    "LC_NEXTEST_JUNIT_DIR": str(retained),
+                    "LC_NEXTEST_JUNIT_HELPER": str(RETAIN_JUNIT),
+                    "STATUS_FILE": str(root / "status"),
+                }
+            )
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-euo",
+                    "pipefail",
+                    "-c",
+                    """first=0
+second=0
+"$CARGO" nextest fail || first=$?
+"$CARGO" nextest pass
+printf "%s\\n" "$first" > "$STATUS_FILE"
+""",
+                ],
+                cwd=REPOSITORY,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual((root / "status").read_text(encoding="utf-8"), "31\n")
+            reports = sorted(retained.glob("junit-*.xml"))
+            self.assertEqual(len(reports), 2)
+            self.assertEqual(
+                {path.read_text(encoding="utf-8") for path in reports},
+                {"<nested-failure/>\n", "<nested-success/>\n"},
+            )
+
     def test_parity_keeps_the_wrapper_after_cargo_rewrites_its_environment(self):
         source = PARITY.read_text(encoding="utf-8")
         self.assertIn('std::env::var_os("LC_CARGO_WRAPPER")', source)
