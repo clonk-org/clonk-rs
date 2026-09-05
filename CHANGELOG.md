@@ -4,6 +4,48 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-09-05
+
+### Bug fixes
+
+- Flush host restart notice before shutdown (#1513)
+- Bound particle layer cache to live emitters (#1512)
+- Preserve edge scroll presentation requests (#1510)
+- Draw selection marks from current object shapes (#1504)
+- Re-resolve object slots in the remaining section-switch folds (#1507)
+- Re-resolve object slots across every scenario-section switch entry path (#1505)
+- Stop a section switch corrupting its calling callback's outcome (#1502)
+- Stop section teardown conflating duplicate object ids (#1501)
+- Retain network lobby state across restart (#1482)
+- Use published standalone for network player joins (#1483)
+- Serialize FluidSynth backend lifecycle (#1480)
+- Flush port capability before client bootstrap failure (#1481)
+- Recursively pack child groups (#1474)
+- Build license corpus from shipped binary graphs (#1473)
+- Ignore a scenario section switch its own callbacks request (#1461)
+- Enumerate folder groups in their packed sort order (#1463)
+
+### Continuous integration
+
+- Retain shard failure diagnostics (#1508)
+- Reuse parity comparator shard builds (#1499)
+
+### Features
+
+- Package the content packs packs.toml lists (#1464)
+
+### Performance
+
+- Refresh player camera without full snapshot (#1514)
+- Read network diagnostics without blocking the game loop (#1511)
+- Remove quadratic object resolution from mouse picking (#1509)
+- Dispatch presentation verification through lightweight xtask (#1500)
+- Share presentation capture test boot fixture (#1476)
+
+### Testing
+
+- Measure host publication before first frame (#1484)
+
 ## [0.21.6] - 2026-09-02
 
 ### Bug fixes
