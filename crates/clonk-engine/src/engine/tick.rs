@@ -3262,6 +3262,19 @@ impl Engine {
 
         let mut command_operations = command_operations;
 
+        // `apply_player_commands` above can rebuild the object list wholesale:
+        // `LoadScenarioSection` removes every active object and installs the
+        // target section's own (C4Game.cpp:4194-4208). The slot captured before
+        // that call therefore no longer identifies this object — it may hold a
+        // different one, or nothing. Re-resolve it, and when the switch removed
+        // the caller, apply only the world-scoped remainder.
+        let Some(index) = self.find_object_index(object_id) else {
+            if !global_effects.is_empty() {
+                self.apply_global_effect_commands(&global_effects);
+            }
+            return Ok(());
+        };
+
         let (previous_owner, previous_crew_member, previous_base_graphics, previous_status) = {
             let object = &self.objects[index];
             (
