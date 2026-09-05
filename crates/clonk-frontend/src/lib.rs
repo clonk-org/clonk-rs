@@ -15984,6 +15984,63 @@ mod tests {
     }
 
     #[test]
+    fn select_marks_keep_a_live_shape_when_the_sprite_is_unavailable() {
+        // C4Object::DrawSelectMark only consumes Shape; an unavailable
+        // presentation sprite cannot erase an authoritative SetShape value
+        // (src/C4Object.cpp:3853-3870).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].owner = 1;
+        snapshot.objects[0].current_shape = Some(DefinitionRect::new(-14, -8, 28, 16));
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(snapshot.objects[0].id),
+            control: clonk_engine::PlayerControlState {
+                select_flash: 30,
+                ..Default::default()
+            },
+            ..PlayerState::default()
+        });
+
+        let mark = Color::opaque(200, 10, 10);
+        let hud = hud_graphics_fixture(|hud| {
+            hud.select_mark = Some(ImageData::new(
+                20,
+                5,
+                (0..100).flat_map(|_| [200, 10, 10, 255]).collect(),
+            ))
+        });
+        let mut graphics =
+            test_graphics_with_hud((80, 60, 60), "Live shape fallback", Arc::new(hud));
+        let focus = &snapshot.objects[0];
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let sx = snapshot.objects[0].position.x - viewport_x;
+        let sy = snapshot.objects[0].position.y - viewport_y;
+        let shape = snapshot.objects[0].current_shape.test_value();
+        let corners = [
+            (sx + shape.x - 2, sy + shape.y - 2),
+            (sx + shape.x + shape.width - 2, sy + shape.y - 2),
+            (sx + shape.x - 2, sy + shape.y + shape.height - 2),
+            (
+                sx + shape.x + shape.width - 2,
+                sy + shape.y + shape.height - 2,
+            ),
+        ];
+        for (x, y) in corners {
+            front_assert_eq! {graphics.surface().get_pixel(x as u32, y as u32) => Some(mark), "normal corner at ({x}, {y})"};
+        }
+
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        front_assert! {graphics.draw_mouse_selection_marks(&snapshot, 1, &[snapshot.objects[0].id], None,), "mouse selection has an active viewport"};
+        for (x, y) in corners {
+            front_assert_eq! {graphics.surface().get_pixel(x as u32, y as u32) => Some(mark), "mouse corner at ({x}, {y})"};
+        }
+    }
+
+    #[test]
     fn select_marks_follow_construction_scaled_and_rotated_shapes() {
         // C4Object::DrawSelectMark consumes the Shape built by UpdateShape,
         // including construction scaling and rotation bounds

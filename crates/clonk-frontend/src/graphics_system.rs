@@ -2720,10 +2720,13 @@ impl GraphicsSystem {
                 continue;
             }
 
-            let shape = self
-                .object_sprites
-                .get(object.definition_id.as_str())
-                .map(|sprite| self.live_object_shape(sprite, object))
+            let shape = object
+                .current_shape
+                .or_else(|| {
+                    self.object_sprites
+                        .get(object.definition_id.as_str())
+                        .map(|sprite| self.live_object_shape(sprite, object))
+                })
                 .filter(|shape| shape.width > 0 && shape.height > 0)
                 .unwrap_or_else(|| DefinitionRect::new(-6, -6, 12, 12));
             let cox = screen_x + shape.x as f32 * viewport.zoom - 2.0;
@@ -4506,10 +4509,13 @@ impl GraphicsSystem {
                 continue;
             }
 
-            let shape = self
-                .object_sprites
-                .get(object.definition_id.as_str())
-                .map(|sprite| self.live_object_shape(sprite, object))
+            let shape = object
+                .current_shape
+                .or_else(|| {
+                    self.object_sprites
+                        .get(object.definition_id.as_str())
+                        .map(|sprite| self.live_object_shape(sprite, object))
+                })
                 .filter(|shape| shape.width > 0 && shape.height > 0)
                 .unwrap_or_else(|| DefinitionRect::new(-6, -6, 12, 12));
             // cox/coy = x + Shape.x - 2 (src/C4Object.cpp:3850-3856).
