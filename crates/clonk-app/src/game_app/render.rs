@@ -59,18 +59,21 @@ impl GameApp {
             ),
         ];
         if let Some(clock) = self.network_control_clock {
-            // `runtime_connections` needs a live worker, so a session without
-            // one reports no route rather than an invented zero.
-            let route = self
+            let route_snapshot = self
                 .network
                 .as_ref()
-                .and_then(|network| network.runtime_connections().ok())
-                .unwrap_or_default()
+                .map(NetworkManager::runtime_connections_snapshot)
+                .unwrap_or_default();
+            let route = route_snapshot
+                .connections
                 .into_iter()
                 .map(|connection| (connection.ping_ms, connection.packet_loss))
                 .reduce(|worst, route| (worst.0.max(route.0), worst.1.max(route.1)));
             if let Some((ping_ms, packet_loss)) = route {
                 lines.push(format!("Ping {ping_ms} ms, loss {packet_loss}"));
+            }
+            if route_snapshot.status != network::RuntimeNetworkTelemetryStatus::Fresh {
+                lines.push(format!("Network routes {}", route_snapshot.status.label()));
             }
             let behind = self.network_control_pacing().behind;
             let lateness = clock
