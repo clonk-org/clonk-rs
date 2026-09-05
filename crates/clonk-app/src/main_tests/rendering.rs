@@ -4239,6 +4239,59 @@ fn focusless_scrolling_player_uses_anchor_free_owned_viewport() {
 }
 
 #[test]
+fn edge_scroll_preserves_fallback_viewport_without_live_viewports() {
+    // C4Player::ScrollView mutates the player camera even when no local
+    // C4Viewport list exists (C4Player.cpp:1863-1869). Engine::snapshot()
+    // supplies a renderable fallback for that restored-player state, so the
+    // presentation refresh must retain it instead of making the next render
+    // fail with LocalViewportUnavailable.
+    let mut app = new_running_sandbox_app();
+    let owner = app.players.local_owner;
+    app.display_flags.show_commands = false;
+    app.engine
+        .replace_player_viewports(owner, Vec::new())
+        .test_value();
+    app.snapshot = app.engine.snapshot();
+    let before_center = app.engine.player(owner).test_value().view_center();
+
+    let mut frame = vec![0_u8; 320 * 200 * 4];
+    app.test_render(&mut frame);
+    let rect = app.graphics.viewport_rect(owner).test_value();
+    let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
+    main_assert_eq!(
+        app.snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .test_value()
+            .viewports
+            .len() =>
+        1,
+        "the normal snapshot fallback supplies one renderable viewport"
+    );
+
+    app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
+
+    main_assert_eq!(
+        app.engine.player(owner).test_value().view_center() =>
+        Vector2::new(before_center.x - 10, before_center.y),
+        "the live player camera still scrolls without a process-local viewport"
+    );
+    main_assert_eq!(
+        app.snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .test_value()
+            .viewports
+            .len() =>
+        1,
+        "edge refresh must retain the snapshot fallback viewport"
+    );
+    app.test_render(&mut frame);
+}
+
+#[test]
 fn automatic_retirement_closes_viewport_and_releases_local_control() {
     // C4Player::Execute decrements RetireDelay for 60 frames, then
     // C4PlayerList::Retire takes the same viewport-close path as an
