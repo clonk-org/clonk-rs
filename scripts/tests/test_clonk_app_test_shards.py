@@ -46,6 +46,9 @@ EXPECTED_SHARED = [
         "main_tests/scenario_routes_common.rs",
     )
 ]
+# Opt-in probes are included directly by the test harness and intentionally
+# stay out of the default compile-time shard union.
+OPT_IN_FRAGMENTS = {"presentation_profile.rs": "presentation-profile"}
 
 
 def feature_closure(features, roots):
@@ -81,6 +84,8 @@ class ClonkAppTestShardTests(unittest.TestCase):
 
         self.assertIn(SENTINEL, features)
         self.assertEqual(features[SENTINEL], [])
+        for feature in OPT_IN_FRAGMENTS.values():
+            self.assertIn(feature, features)
         self.assertEqual(selectors, set(EXPECTED_SHARDS))
         for selector in selectors:
             with self.subTest(selector=selector):
@@ -110,7 +115,11 @@ class ClonkAppTestShardTests(unittest.TestCase):
             paths.append(path)
 
         self.assertEqual(dict(assigned), EXPECTED_SHARDS)
-        discovered = [path.resolve() for path in FRAGMENTS.glob("*.rs")]
+        discovered = [
+            path.resolve()
+            for path in FRAGMENTS.glob("*.rs")
+            if path.name not in OPT_IN_FRAGMENTS
+        ]
         self.assertEqual(Counter(paths), Counter(discovered))
         called_selectors = {selector for selector, _ in calls}
         called_selectors.update(
@@ -120,11 +129,21 @@ class ClonkAppTestShardTests(unittest.TestCase):
         self.assertEqual(source.count("macro_rules! include_main_test_fragment"), 1)
         self.assertEqual(source.count("macro_rules! include_shared_main_test_fragment"), 1)
         self.assertNotIn("include_split_main_test_fragment", source)
-        self.assertEqual(
-            re.findall(r'include!\(\s*"main_tests/[^"]+"\s*\)', source),
-            [],
-            "every fragment must pass through the single shard gate",
+        direct_includes = re.findall(
+            r'include!\(\s*"main_tests/([^"]+)"\s*\)', source
         )
+        self.assertEqual(
+            direct_includes,
+            sorted(OPT_IN_FRAGMENTS),
+            "only registered opt-in probes may bypass the shard gate",
+        )
+        for fragment, feature in OPT_IN_FRAGMENTS.items():
+            self.assertRegex(
+                source,
+                rf'#\[cfg\(all\(test,\s*feature = "{re.escape(feature)}"\)\)\]'
+                rf'\s*include!\(\s*"main_tests/{re.escape(fragment)}"\s*\);',
+                f"{fragment} must be gated by its opt-in feature",
+            )
 
         compact = normalized_rust(source)
         self.assertIn(
